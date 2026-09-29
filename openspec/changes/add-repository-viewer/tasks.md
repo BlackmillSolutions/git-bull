@@ -16,7 +16,7 @@ after each stage.
 
 - [ ] 2.1 Implement locating Git: configured path, search path, default folders of Git for Windows, and treating the macOS shim without developer tools as missing; verify unit tests cover each rule
 - [ ] 2.2 Implement parsing of `git --version` and the check against 2.34; verify tests cover plain, Apple and Windows version strings and a version below the minimum
-- [ ] 2.3 Implement the single invocation function that applies the rules of ADR 0009, maps failures to the typed errors and creates no console window on Windows; verify tests assert arguments, environment and error mapping
+- [ ] 2.3 Implement the single invocation function that applies the rules of ADR 0006, maps failures to the typed errors and creates no console window on Windows; verify tests assert arguments, environment and error mapping
 - [ ] 2.4 Implement cancellation by terminating the Git process; verify a test cancels a long-running command and finds no remaining process
 - [ ] 2.5 Implement the streaming reader for records delimited by NUL or newline; verify tests with records split across chunk boundaries
 - [ ] 2.6 Add the test helper that creates real repositories with fixed authors and dates; verify an integration test creates a repository and reads HEAD on all three platforms in CI

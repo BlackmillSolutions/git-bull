@@ -14,7 +14,8 @@ message) only for visible rows. The graph layout stores a checkpoint every
 
 - **Load everything in one stream** is simpler and makes in-memory search
   possible. It was rejected because author and message for 1.5 million
-  commits would add well over 100 MB and slow the stream down.
+  commits would add an estimated 100 MB or more and slow the stream down.
+  The figure is an estimate, not a measurement.
 - **Store the full graph layout per row** is simpler to draw from. It was
   rejected because memory would grow with the number of parallel branches
   per row, which is large in repositories such as the Linux kernel.
@@ -29,7 +30,7 @@ message) only for visible rows. The graph layout stores a checkpoint every
 - Search by message or author cannot run in memory. It is delegated to Git
   and takes several seconds on very large repositories.
 - Fast loading depends on Git's commit-graph file. When it is missing,
-  git-bull offers to generate it (see ADR 0008).
+  git-bull offers to generate it after the user confirms.
 - The memory target is below 250 MB for the Linux kernel. It is a target
   that the benchmarks must confirm.
 

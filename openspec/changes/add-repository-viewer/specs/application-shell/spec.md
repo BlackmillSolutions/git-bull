@@ -16,15 +16,20 @@ with the same features on each platform.
 - **THEN** the main window appears
 
 ### Requirement: Main window areas
-The main window SHALL consist of a tab bar, a toolbar, a sidebar, a commit
-list, a commit panel, a diff panel and a status bar. The commit panel and the
-diff panel SHALL sit side by side below the commit list. Every divider
-between areas SHALL be draggable and every column width SHALL be adjustable.
+The main window SHALL consist of a tab bar, a toolbar, a sidebar, a main area
+and a status bar. In the History view, the main area SHALL consist of the
+commit list, with the commit panel and the diff panel side by side below it.
+Every divider between areas SHALL be draggable and every column width SHALL
+be adjustable.
 
 #### Scenario: Areas are present
-- **WHEN** a repository is open
+- **WHEN** a repository is open and the History view is shown
 - **THEN** the window shows the tab bar, toolbar, sidebar, commit list, commit panel, diff panel and status bar
 - **AND** the commit panel and the diff panel are below the commit list
+
+#### Scenario: Another view is shown
+- **WHEN** the user switches to the File status view
+- **THEN** the tab bar, toolbar, sidebar and status bar stay in place and the main area shows the File status view
 
 #### Scenario: Divider is dragged
 - **WHEN** the user drags the divider between the commit list and the panels below it
@@ -75,6 +80,15 @@ MUST NOT start new background work until it is shown again.
 #### Scenario: No refresh while hidden
 - **WHEN** the window gains focus while a tab is not shown
 - **THEN** that tab does not refresh until the user switches to it
+
+### Requirement: Several instances
+Starting git-bull while it is already running SHALL open a further,
+independent window. When several instances save settings, the last one to
+save SHALL win.
+
+#### Scenario: Second start
+- **WHEN** git-bull is running and the user starts it again
+- **THEN** a second window opens, independent of the first
 
 ### Requirement: Opening repositories
 git-bull SHALL let the user open a repository through a chooser that lists
@@ -144,7 +158,8 @@ a percentage while loading, the current branch and the version of Git in use.
 
 ### Requirement: Keyboard operation
 git-bull SHALL be operable with the keyboard using the shortcuts below. On
-macOS, Cmd SHALL replace Ctrl.
+macOS, Cmd SHALL replace Ctrl, except for switching tabs: Cmd+Tab belongs to
+the operating system, so switching tabs SHALL use Ctrl on every platform.
 
 | Keys | Action |
 |---|---|
@@ -154,9 +169,9 @@ macOS, Cmd SHALL replace Ctrl.
 | Ctrl+O | Open a repository |
 | Ctrl+T | New tab |
 | Ctrl+W | Close the current tab |
-| Ctrl+Tab, Ctrl+Shift+Tab | Next and previous tab |
-| F5 | Refresh |
-| Ctrl+C | Copy the selection |
+| Ctrl+Tab, Ctrl+Shift+Tab | Next and previous tab, with Ctrl on every platform |
+| F5, Ctrl+R | Refresh |
+| Ctrl+C | Copy: the full hash in the commit list, the path in a file list, the selected text in diff and blame |
 
 #### Scenario: Move in the commit list
 - **WHEN** the commit list has focus and the user presses Down
@@ -173,6 +188,14 @@ macOS, Cmd SHALL replace Ctrl.
 #### Scenario: Shortcut on macOS
 - **WHEN** the user presses Cmd+W on macOS
 - **THEN** the current tab closes
+
+#### Scenario: Switching tabs on macOS
+- **WHEN** the user presses Ctrl+Tab on macOS
+- **THEN** the next tab becomes active
+
+#### Scenario: Copy in the commit list
+- **WHEN** the commit list has focus and the user presses Ctrl+C
+- **THEN** the clipboard contains the full hash of the selected commit
 
 ### Requirement: Responsive interface
 The interface SHALL respond to input within 100 ms at all times, including

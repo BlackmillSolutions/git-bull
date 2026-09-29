@@ -80,6 +80,6 @@ None. The project has no existing specs.
 - **Infrastructure:** GitHub Actions for tests on three platforms and for
   building release packages.
 - **Documentation:** Architecture decisions are recorded in `docs/adr/`,
-  numbers 0001 to 0009. This change supersedes
+  numbers 0001 to 0006. This change supersedes
   `docs/superpowers/specs/2026-09-29-git-bull-viewer-design.md`, which is
   removed.

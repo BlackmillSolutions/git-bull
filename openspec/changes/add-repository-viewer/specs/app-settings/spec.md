@@ -74,9 +74,9 @@ highlighting and the colours of the commit graph.
 - **WHEN** the user switches the theme in the toolbar, closes git-bull and starts it again
 - **THEN** git-bull uses the theme the user chose
 
-#### Scenario: Graph colours are distinguishable
+#### Scenario: Graph colours are visible
 - **WHEN** either theme is active
-- **THEN** neighbouring lines in the commit graph have colours that can be told apart against the background
+- **THEN** every colour of the commit graph has a contrast ratio of at least 3:1 against the background of the commit list
 
 ### Requirement: Interface language
 git-bull SHALL ship with English as its interface language. Every

@@ -44,8 +44,6 @@ document refers to them instead of repeating their reasoning.
 
 ### 1. Three crates with one direction of dependency
 
-See ADR 0004.
-
 ```
 gitbull-app   (egui UI, theme, i18n; produces the `git-bull` binary)
      |
@@ -71,7 +69,7 @@ UI types from leaking into the logic.
 
 ### 2. egui for the interface
 
-See ADR 0002. The version is pinned to the 0.36 series.
+See ADR 0001. The version is pinned to the 0.36 series.
 
 The main window uses egui's resizable panels. No docking library is needed,
 because the arrangement of areas is fixed:
@@ -104,13 +102,13 @@ button.
 
 ### 3. Git CLI behind a trait
 
-See ADR 0003 and ADR 0009.
+See ADR 0002 and ADR 0006.
 
 `gitbull-git` defines a trait covering every read operation, and the plain
 data types they return. Two implementations exist: the CLI backend and a
 fake backend for tests.
 
-All invocations go through one function that applies the rules of ADR 0009.
+All invocations go through one function that applies the rules of ADR 0006.
 
 | Purpose | Command |
 |---|---|
@@ -155,11 +153,11 @@ Errors are typed:
 
 On Windows, processes are created without a console window.
 
-*Alternatives considered:* gitoxide and libgit2, see ADR 0003.
+*Alternatives considered:* gitoxide and libgit2, see ADR 0002.
 
 ### 4. Threads and channels
 
-See ADR 0005.
+See ADR 0003.
 
 - Every Git call runs on a worker thread.
 - Results return over channels. The worker requests a repaint when data
@@ -171,7 +169,7 @@ See ADR 0005.
 
 ### 5. Structure and content are loaded separately
 
-See ADR 0006.
+See ADR 0004.
 
 | Step | Action | Result |
 |---|---|---|
@@ -220,7 +218,7 @@ row, and a cap on loaded commits. See the ADR.
 
 ### 6. Custom virtual list
 
-See ADR 0007.
+See ADR 0005.
 
 - The scroll position is a row index plus a fractional offset, in 64-bit
   precision.
@@ -356,11 +354,11 @@ choice:
   computation.
 - [Search by message reads every commit and takes seconds] → Results arrive
   progressively and the interface stays responsive. This is a limit of the
-  approach, accepted in ADR 0006.
+  approach, accepted in ADR 0004.
 - [Unsigned packages trigger warnings of the operating system] → Documented
   in the README. Signing is a later decision.
 - [An untrusted repository could execute configured commands] → Hardened
-  invocation, see ADR 0009.
+  invocation, see ADR 0006.
 - [Disabling text conversion hides diffs the user configured on purpose] →
   Accepted for the viewer. Such files show as binary.
 - [The output format of Git could change] → Plumbing commands are preferred,

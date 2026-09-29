@@ -27,25 +27,33 @@ SHALL be triggered by a version tag.
 - **WHEN** building one of the packages fails
 - **THEN** no release is published
 
-### Requirement: Packages run on a clean system
-Every package SHALL start on a clean installation of its platform that has
-Git 2.34 or newer. No further software SHALL need to be installed.
+### Requirement: Supported systems
+Every package SHALL start on a clean installation of the systems below that
+has Git 2.34 or newer. The README SHALL list any further software a system
+needs. A package MUST NOT depend on software that the README does not list.
+
+| Platform | Oldest supported system |
+|---|---|
+| Windows | Windows 10 |
+| macOS | macOS 12 |
+| Linux | Ubuntu 22.04, and distributions with the same or a newer C library |
 
 #### Scenario: Windows
-- **WHEN** the user unpacks the ZIP archive on a clean Windows installation with Git and starts `git-bull.exe`
+- **WHEN** the user unpacks the ZIP archive on a clean installation of Windows 10 with Git and starts `git-bull.exe`
 - **THEN** the main window appears
 
 #### Scenario: macOS
-- **WHEN** the user unpacks the archive on a clean macOS installation with Git and opens the application
+- **WHEN** the user unpacks the archive on a clean installation of macOS 12 with Git and opens the application
 - **THEN** the main window appears
 
 #### Scenario: Linux
-- **WHEN** the user makes the AppImage executable on a clean Linux installation with Git and starts it
+- **WHEN** the user installs the software listed in the README on a clean installation of Ubuntu 22.04 with Git, makes the AppImage executable and starts it
 - **THEN** the main window appears
 
 ### Requirement: Unsigned packages are documented
-Packages SHALL be unsigned in this milestone. The README SHALL explain, for
-each platform, which warning the operating system shows and how to proceed.
+In this milestone, packages SHALL NOT be signed with a developer certificate
+and SHALL NOT be notarised. The README SHALL explain, for each platform,
+which warning the operating system shows and how to proceed.
 
 #### Scenario: Warning on first start
 - **WHEN** the operating system warns about an unverified application on first start

@@ -82,6 +82,11 @@ commit list and scroll to it.
 - **WHEN** the user selects a branch whose commit is not part of the filtered graph
 - **THEN** git-bull shows a notice that the commit is hidden by the branch filter and offers to show all branches
 
+#### Scenario: Tag does not point to a commit
+- **WHEN** the user selects a tag that points to a tree or a file instead of a commit, such as the tag `v2.6.11-tree` of the Linux kernel
+- **THEN** git-bull shows a notice that the tag does not point to a commit
+- **AND** the selection in the commit list is unchanged
+
 ### Requirement: Stashes
 Stashes SHALL be listed in the sidebar and MUST NOT appear in the commit
 graph. Selecting a stash SHALL clear the selection in the commit list and

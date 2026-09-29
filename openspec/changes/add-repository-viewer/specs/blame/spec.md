@@ -57,6 +57,10 @@ the History view.
 - **WHEN** the user selects a margin entry
 - **THEN** the History view is shown with that commit selected and visible
 
+#### Scenario: Commit is hidden by the branch filter
+- **WHEN** the user selects a margin entry whose commit is not part of the filtered graph
+- **THEN** git-bull shows a notice that the commit is hidden by the branch filter and offers to show all branches
+
 ### Requirement: Highlighting and limits in blame
 The content SHALL be shown with syntax highlighting, except for files larger
 than 512 KB. For a binary file, git-bull SHALL show a notice instead of

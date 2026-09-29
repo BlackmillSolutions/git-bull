@@ -20,17 +20,33 @@ author, the text SHALL be matched literally and without regard to case.
 - **WHEN** the user searches for `novak` in the mode author
 - **THEN** the matches are the commits whose author name or e-mail address contains `novak` in any letter case
 
-#### Scenario: Search by file path
-- **WHEN** the user searches for `src/graph/lanes.rs` in the mode file path
-- **THEN** the matches are the commits that changed that file
-
 #### Scenario: Special characters are literal
 - **WHEN** the user searches for `a.b` in the mode message
 - **THEN** a commit whose message contains `axb` is not a match
 
+### Requirement: Search by file path
+In the mode file path, the text SHALL be a path relative to the root of the
+repository, written with `/` and in the letter case used in the repository.
+The path of a file SHALL match the commits that changed that file. The path
+of a folder SHALL match the commits that changed any file below it. Parts of
+a path MUST NOT match.
+
+#### Scenario: Path of a file
+- **WHEN** the user searches for `src/graph/lanes.rs`
+- **THEN** the matches are the commits that changed that file
+
+#### Scenario: Path of a folder
+- **WHEN** the user searches for `src/graph`
+- **THEN** the matches are the commits that changed any file below `src/graph`
+
+#### Scenario: File name without its folder
+- **WHEN** the user searches for `lanes.rs` and the repository has no file of that name in its root
+- **THEN** there are no matches
+
 ### Requirement: Search by hash
 In the mode hash, git-bull SHALL select the commit with the given hash and
-scroll to it. Abbreviated hashes SHALL be accepted.
+scroll to it. Abbreviated hashes of at least four characters SHALL be
+accepted.
 
 #### Scenario: Abbreviated hash
 - **WHEN** the user searches for an abbreviated hash that identifies one commit
@@ -44,8 +60,17 @@ scroll to it. Abbreviated hashes SHALL be accepted.
 - **WHEN** the user searches for an abbreviated hash that matches several commits
 - **THEN** git-bull shows a message that the hash is ambiguous
 
+#### Scenario: Commit is hidden by the branch filter
+- **WHEN** the user searches for the hash of a commit that is reachable from a branch but not part of the filtered graph
+- **THEN** git-bull shows a notice that the commit is hidden by the branch filter and offers to show all branches
+
+#### Scenario: Commit is not part of any branch
+- **WHEN** the user searches for the hash of a commit that no branch, tag or remote branch leads to
+- **THEN** git-bull shows a message that the commit exists but is not part of the displayed history
+
 ### Requirement: Search scope
-A search SHALL cover the commits selected by the branch filter.
+A search by message, author or file path SHALL cover the commits selected by
+the branch filter.
 
 #### Scenario: Filter is set to the current branch
 - **WHEN** the branch filter is "Current branch" and the user searches by message
@@ -53,7 +78,7 @@ A search SHALL cover the commits selected by the branch filter.
 
 ### Requirement: Progressive results
 Matches SHALL appear while the search is running. They SHALL be marked in the
-commit graph and listed in the Search view. Next and Previous SHALL move
+commit list and listed in the Search view. Next and Previous SHALL move
 between matches.
 
 #### Scenario: Matches arrive continuously

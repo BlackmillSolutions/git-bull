@@ -11,11 +11,18 @@ syntax highlighting, and protects the interface against very large diffs.
 The diff panel SHALL show the changes of the selected file as a unified diff:
 hunks with their header, and added, removed and context lines. Added and
 removed lines SHALL be marked with `+` and `-` and with a background colour.
-Only the diff of the selected file SHALL be loaded.
+Every line SHALL show its line number in the old and in the new version of
+the file, where it exists in that version. Each hunk SHALL show three lines
+of context.
 
 #### Scenario: Modified file
 - **WHEN** the user selects a modified file
 - **THEN** the diff panel shows its hunks with added, removed and context lines
+
+#### Scenario: Line numbers
+- **WHEN** a hunk replaces line 42 of the old version by two lines
+- **THEN** the removed line shows the old line number 42 and no new line number
+- **AND** the two added lines show the new line numbers 42 and 43 and no old line number
 
 #### Scenario: Added file
 - **WHEN** the user selects an added file
@@ -25,6 +32,14 @@ Only the diff of the selected file SHALL be loaded.
 - **WHEN** the user selects a deleted file
 - **THEN** every line of the file is shown as removed
 
+#### Scenario: Missing newline at the end of the file
+- **WHEN** a change adds or removes the newline at the end of the file
+- **THEN** the diff marks the affected line as lacking a newline at the end of the file
+
+### Requirement: Changes without a change in content
+When a file changed in a way that leaves no lines to compare, the diff panel
+SHALL say what changed instead of staying empty.
+
 #### Scenario: Renamed file with changes
 - **WHEN** the user selects a file that was renamed and changed
 - **THEN** the header shows the old and the new path and the hunks show the changes in content
@@ -32,6 +47,14 @@ Only the diff of the selected file SHALL be loaded.
 #### Scenario: Renamed file without changes
 - **WHEN** the user selects a file that was renamed without a change in content
 - **THEN** the diff panel shows the old and the new path and a note that the content is unchanged
+
+#### Scenario: Changed file mode
+- **WHEN** the user selects a file of which only the mode changed, for example to executable
+- **THEN** the diff panel shows the old and the new mode
+
+#### Scenario: Changed submodule
+- **WHEN** the user selects a submodule that points to another commit
+- **THEN** the diff panel shows the old and the new commit hash of the submodule
 
 ### Requirement: Syntax highlighting
 The diff SHALL be highlighted according to the type of the file. The diff
@@ -62,7 +85,8 @@ git-bull SHALL apply the limits below to keep the interface responsive.
 | Condition | Behaviour |
 |---|---|
 | Diff longer than 10,000 lines | Truncated, with a button to load the full diff |
-| File larger than 512 KB | Diff shown without syntax highlighting |
+| Old or new version of the file larger than 512 KB | Diff shown without syntax highlighting |
+| Line longer than 10,000 characters | Line shown truncated, with a marker |
 | Binary file | Notice with the old and the new file size |
 
 #### Scenario: Very long diff
@@ -74,12 +98,25 @@ git-bull SHALL apply the limits below to keep the interface responsive.
 - **THEN** the complete diff is shown
 
 #### Scenario: Large file
-- **WHEN** the file is larger than 512 KB
+- **WHEN** the new version of the file is larger than 512 KB
 - **THEN** the diff is shown without syntax highlighting
+
+#### Scenario: Very long line
+- **WHEN** a changed line has 200,000 characters, as in a minified file
+- **THEN** the first 10,000 characters are shown, followed by a marker that the line was truncated
+- **AND** the interface stays responsive
 
 #### Scenario: Binary file
 - **WHEN** the user selects a binary file
 - **THEN** the diff panel shows a notice with the old and the new file size instead of a diff
+
+### Requirement: Content that is not valid UTF-8
+Text content that is not valid UTF-8 SHALL be shown with replacement
+characters.
+
+#### Scenario: File in ISO-8859-1
+- **WHEN** the user selects a text file encoded in ISO-8859-1 that contains umlauts
+- **THEN** the diff is shown, with replacement characters in place of the umlauts
 
 ### Requirement: Copying from the diff
 Visible lines of the diff SHALL be selectable and copyable. The context menu

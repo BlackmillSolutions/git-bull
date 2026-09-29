@@ -25,13 +25,19 @@ a separate window.
 - **THEN** File history is not offered
 
 ### Requirement: Commits of a file
-The file history SHALL list all commits that changed the file, newest first,
-with description, date, author and abbreviated hash. It SHALL follow renames
-and show the path the file had in each commit.
+The file history SHALL list the commits that changed the file, newest first,
+with description, date, author and abbreviated hash. Opened from a commit, it
+SHALL start at that commit and cover the commits that lead up to it. Opened
+from the File status view, it SHALL start at the last commit. It SHALL follow
+renames and show the path the file had in each commit.
 
 #### Scenario: File without renames
 - **WHEN** the user opens the history of a file that was never renamed
-- **THEN** the list shows every commit that changed the file
+- **THEN** the list shows every commit up to the starting commit that changed the file
+
+#### Scenario: Later commits are not included
+- **WHEN** the user opens the file history from a commit and a later commit changed the file as well
+- **THEN** the later commit is not in the list
 
 #### Scenario: File was renamed
 - **WHEN** a file was renamed from `a.rs` to `b.rs` and the user opens the history of `b.rs`

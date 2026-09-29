@@ -31,7 +31,7 @@ compatibility with whatever Git itself supports, including reftable.
 - Output formats of Git become a dependency. Plumbing commands are preferred
   over porcelain because their output is stable.
 - Running Git inside an untrusted repository can execute configured commands.
-  ADR 0009 defines the countermeasures.
+  ADR 0006 defines the countermeasures.
 - Git access sits behind a trait. If measurements show that an in-process
   reader helps on a specific read path, `gix` can be added there.
 

@@ -9,22 +9,30 @@ stays fluid for histories with more than one million commits.
 
 ### Requirement: Commit list
 The commit list SHALL show one row per commit with the columns Graph,
-Description, Date, Author and Commit. The Commit column SHALL show the
-abbreviated hash. Commits SHALL be ordered from newest to oldest, and a
-commit MUST NOT appear above any of its children.
+Description, Date, Author and Commit. The Description column SHALL show the
+first line of the message. The Date column SHALL show the commit date, which
+is the date the list is ordered by. The Commit column SHALL show the
+abbreviated hash. Commits SHALL be ordered from newest to oldest by commit
+date, and a commit MUST NOT appear above any of its children.
 
 #### Scenario: Columns are shown
 - **WHEN** a repository with commits is open
-- **THEN** each row shows the graph, the first line of the message, the date, the author and the abbreviated hash
+- **THEN** each row shows the graph, the first line of the message, the commit date, the author and the abbreviated hash
 
 #### Scenario: Parent with a later date
-- **WHEN** a commit has a later date than its child
+- **WHEN** a commit has a later commit date than its child
 - **THEN** the commit still appears below its child
+
+#### Scenario: Author date differs from commit date
+- **WHEN** a commit was authored on one day and committed on a later day, for example after a rebase
+- **THEN** the Date column shows the later day
 
 ### Requirement: Reference badges
 Branches, tags and remote branches SHALL appear as badges before the
 description of the commit they point to. HEAD SHALL have its own badge. Each
-kind of reference SHALL have its own colour.
+kind of reference SHALL have its own colour. When a commit has more badges
+than fit into half the width of the Description column, the remaining ones
+SHALL be summarised as a count, and the tooltip SHALL list all of them.
 
 #### Scenario: Commit with several references
 - **WHEN** the branch `main`, the remote branch `origin/main` and HEAD point to the same commit
@@ -33,6 +41,11 @@ kind of reference SHALL have its own colour.
 #### Scenario: Detached HEAD
 - **WHEN** no branch is checked out
 - **THEN** the HEAD badge appears on the checked-out commit without a branch badge belonging to it
+
+#### Scenario: More badges than fit
+- **WHEN** forty tags point to the same commit
+- **THEN** the row shows the badges that fit, followed by a count of the remaining ones
+- **AND** the description of the commit stays visible
 
 ### Requirement: Date display
 Dates SHALL be shown as `YYYY-MM-DD HH:MM` in the local time zone. A tooltip
@@ -91,37 +104,40 @@ while loading.
 
 ### Requirement: Content placeholders
 A row whose content has not been loaded SHALL show placeholders for
-description, author and date. Its graph SHALL be drawn immediately.
+description and author. Its graph, date and hash SHALL be shown immediately.
 
 #### Scenario: Fast scrolling
 - **WHEN** the user scrolls quickly through a large history
-- **THEN** every visible row shows its graph at once
-- **AND** rows without loaded content show placeholders, which are replaced when the content arrives
+- **THEN** every visible row shows its graph, date and hash at once
+- **AND** rows without loaded content show placeholders for description and author, which are replaced when the content arrives
 
 ### Requirement: Branch filter
 A switch above the commit list SHALL select between "All branches" and
-"Current branch". The context menu of the sidebar SHALL restrict the graph to
-selected branches. "All branches" SHALL cover local branches, tags, remote
-branches and HEAD. Stashes and other kinds of references MUST NOT be part of
-the graph.
+"Current branch". The context menu of a branch or remote branch in the
+sidebar SHALL offer "Show only this branch", which restricts the graph to
+that branch; the switch SHALL then show the name of the branch. "All
+branches" SHALL cover local branches, tags, remote branches and HEAD. Stashes
+and other kinds of references MUST NOT be part of the graph.
 
 #### Scenario: Current branch only
 - **WHEN** the user selects "Current branch"
 - **THEN** the commit list shows only commits reachable from HEAD
 
-#### Scenario: Selected branches
-- **WHEN** the user restricts the graph to two branches through the sidebar
-- **THEN** the commit list shows only commits reachable from these two branches
+#### Scenario: One branch from the sidebar
+- **WHEN** the user chooses "Show only this branch" for the branch `feature/diff-view`
+- **THEN** the commit list shows only commits reachable from that branch
+- **AND** the switch shows `feature/diff-view`
 
 #### Scenario: Back to all branches
 - **WHEN** the user selects "All branches"
 - **THEN** the commit list shows the commits reachable from all local branches, tags, remote branches and HEAD
 
 ### Requirement: Refresh
-git-bull SHALL refresh the active tab when the user chooses Refresh and when
-the window gains focus. It SHALL reload the history only when references or
-HEAD have changed. While reloading, the previous list SHALL stay visible
-until the new one fills the visible area. The selection SHALL be kept.
+git-bull SHALL refresh a tab when the user chooses Refresh, when the window
+gains focus while the tab is shown, and when the tab is shown again after
+being hidden. It SHALL reload the history only when references or HEAD have
+changed. While reloading, the previous list SHALL stay visible until the new
+one fills the visible area. The selection SHALL be kept.
 
 #### Scenario: New commit made elsewhere
 - **WHEN** the user creates a commit in a terminal and returns to git-bull
@@ -132,6 +148,10 @@ until the new one fills the visible area. The selection SHALL be kept.
 - **WHEN** the window gains focus and neither references nor HEAD have changed
 - **THEN** the commit list is not reloaded and its scroll position is unchanged
 
+#### Scenario: Tab is shown again
+- **WHEN** references changed while a tab was hidden and the user switches to that tab
+- **THEN** the tab refreshes
+
 #### Scenario: Selected commit no longer exists
 - **WHEN** the selected commit is no longer part of the history after a reload
 - **THEN** no commit is selected and the panels below are empty
@@ -139,11 +159,17 @@ until the new one fills the visible area. The selection SHALL be kept.
 ### Requirement: Uncommitted changes row
 When the working copy has changes, the commit list SHALL show a row
 "Uncommitted changes" above the commit that HEAD points to, connected to it
-in the graph. Selecting the row SHALL open the File status view.
+in the graph. The row SHALL appear as soon as the status of the working copy
+is known; the history SHALL NOT wait for it. Selecting the row SHALL open the
+File status view.
 
 #### Scenario: Working copy has changes
 - **WHEN** the working copy contains a modified file
 - **THEN** the row "Uncommitted changes" appears above the HEAD commit
+
+#### Scenario: Status takes longer than the history
+- **WHEN** the first commits are available before the status of the working copy is known
+- **THEN** the commits are shown, and the row is added when the status arrives
 
 #### Scenario: Working copy is clean
 - **WHEN** the working copy has no changes
