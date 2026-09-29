@@ -1,0 +1,30 @@
+# Dependency checks for git-bull, run with `cargo deny check`.
+# git-bull is distributed under MIT OR Apache-2.0; every dependency must be
+# distributable under these terms (see the `distribution` spec).
+
+[graph]
+all-features = true
+
+[advisories]
+# Fails on security advisories and on crates that are no longer maintained.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+# Permissive licences only, and only those a dependency actually uses. Add a
+# licence when a dependency brings it, with a note on why it is compatible
+# with distribution under MIT OR Apache-2.0.
+allow = [
+    "MIT",
+    "Apache-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

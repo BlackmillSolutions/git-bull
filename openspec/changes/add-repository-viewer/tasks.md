@@ -6,11 +6,11 @@ after each stage.
 
 ## 1. Workspace and CI
 
-- [ ] 1.1 Create the Cargo workspace with the crates `gitbull-git`, `gitbull-core` and `gitbull-app` (binary `git-bull`), pin the toolchain in `rust-toolchain.toml` and ignore `/target`; verify `cargo build --workspace` succeeds
-- [ ] 1.2 Add `LICENSE-MIT` and `LICENSE-APACHE` and set the licence field of every crate; verify `cargo metadata` reports `MIT OR Apache-2.0` for all three crates
-- [ ] 1.3 Add `deny.toml` that allows only licences compatible with MIT OR Apache-2.0; verify `cargo deny check` passes, and fails when a GPL-only crate is added temporarily
+- [x] 1.1 Create the Cargo workspace with the crates `gitbull-git`, `gitbull-core` and `gitbull-app` (binary `git-bull`), pin the toolchain in `rust-toolchain.toml` and ignore `/target`; verify `cargo build --workspace` succeeds
+- [x] 1.2 Add `LICENSE-MIT` and `LICENSE-APACHE` and set the licence field of every crate; verify `cargo metadata` reports `MIT OR Apache-2.0` for all three crates
+- [x] 1.3 Add `deny.toml` that allows only licences compatible with MIT OR Apache-2.0; verify `cargo deny check` passes, and fails when a GPL-only crate is added temporarily
 - [ ] 1.4 Add the CI workflow that runs `cargo fmt --check`, `cargo clippy` with warnings as errors, `cargo test` and `cargo deny check` on Linux, Windows and macOS; verify the workflow is green on all three platforms
-- [ ] 1.5 Write the README section on building and running from source; verify the documented commands run as written
+- [x] 1.5 Write the README section on building and running from source; verify the documented commands run as written
 
 ## 2. Git access foundation
 

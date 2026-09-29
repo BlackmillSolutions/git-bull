@@ -1,0 +1,12 @@
+[package]
+name = "gitbull-core"
+description = "Session state, commit store and graph layout of git-bull, independent of the UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+gitbull-git.workspace = true

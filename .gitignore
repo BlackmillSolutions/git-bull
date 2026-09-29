@@ -1,3 +1,6 @@
+# Build output
+/target
+
 # Brainstorming mockups and session state
 .superpowers/
 
