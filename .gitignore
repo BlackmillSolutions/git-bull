@@ -1,2 +1,5 @@
 # Brainstorming mockups and session state
 .superpowers/
+
+# Personal Claude Code settings; shared settings belong in .claude/settings.json
+.claude/settings.local.json
