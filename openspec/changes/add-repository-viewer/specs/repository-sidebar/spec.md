@@ -91,13 +91,18 @@ commit list and scroll to it.
 Stashes SHALL be listed in the sidebar and MUST NOT appear in the commit
 graph. Selecting a stash SHALL clear the selection in the commit list and
 show the details, the changed files and the diff of the stash, compared
-against its first parent.
+against its first parent. Untracked files saved in the stash SHALL be listed
+as added.
 
 #### Scenario: Stash is selected
 - **WHEN** the user selects a stash
 - **THEN** no commit is selected in the commit list
 - **AND** the commit panel shows the details and changed files of the stash
 - **AND** the diff panel shows the diff of the first changed file
+
+#### Scenario: Stash with untracked files
+- **WHEN** the user selects a stash that was created including untracked files
+- **THEN** the changed files also list the untracked files of the stash, marked as added
 
 #### Scenario: Stashes are not in the graph
 - **WHEN** a repository has stashes and the branch filter is set to all branches

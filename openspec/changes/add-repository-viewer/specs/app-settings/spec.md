@@ -18,8 +18,12 @@ window size and position, divider positions and column widths.
 - **THEN** the divider position and the column width are as the user left them
 
 #### Scenario: Window geometry survives a restart
-- **WHEN** the user resizes and moves the window, closes git-bull and starts it again
+- **WHEN** the user resizes and moves the window on Windows, on macOS or on Linux under X11, closes git-bull and starts it again
 - **THEN** the window has the same size and position
+
+#### Scenario: Window geometry under Wayland
+- **WHEN** the user resizes the window on Linux under Wayland, closes git-bull and starts it again
+- **THEN** the window has the same size, and the system chooses its position
 
 ### Requirement: Recently opened repositories
 git-bull SHALL remember the 20 most recently opened repositories, most recent
@@ -58,17 +62,28 @@ the status bar.
 
 ### Requirement: Theme
 git-bull SHALL offer a light and a dark theme. By default the theme SHALL
-follow the setting of the operating system. The theme switch in the toolbar
-SHALL override it. The theme SHALL apply to every area, including syntax
-highlighting and the colours of the commit graph.
+follow the setting of the operating system. On Windows and macOS it SHALL
+follow changes of that setting while running. On Linux it SHALL read the
+setting of the desktop once at start-up, and SHALL use the dark theme when
+the desktop reports none. The theme switch in the toolbar SHALL override the
+system. The theme SHALL apply to every area, including syntax highlighting
+and the colours of the commit graph.
 
 #### Scenario: Follow the system
 - **WHEN** the theme setting is "system" and the operating system uses a dark appearance
 - **THEN** git-bull uses the dark theme
 
-#### Scenario: System appearance changes
+#### Scenario: System appearance changes on Windows or macOS
 - **WHEN** the theme setting is "system" and the operating system switches to a light appearance while git-bull is running
 - **THEN** git-bull switches to the light theme
+
+#### Scenario: System appearance changes on Linux
+- **WHEN** the theme setting is "system" and the desktop switches its appearance while git-bull is running
+- **THEN** git-bull keeps its theme until it is started again
+
+#### Scenario: Desktop reports no appearance
+- **WHEN** git-bull starts on a Linux desktop that reports no appearance
+- **THEN** git-bull uses the dark theme
 
 #### Scenario: Manual override
 - **WHEN** the user switches the theme in the toolbar, closes git-bull and starts it again

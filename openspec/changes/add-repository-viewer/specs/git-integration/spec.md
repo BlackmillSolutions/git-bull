@@ -58,14 +58,21 @@ directory.
 - **WHEN** the user browses history, views diffs, views the file status, searches and opens blame
 - **THEN** the references, index, objects and working copy of the repository are unchanged
 
+#### Scenario: Files touched without a change
+- **WHEN** the modification time of tracked files changed but not their content, and the user views the file status and the diffs of uncommitted changes
+- **THEN** the index file is byte for byte unchanged
+
 #### Scenario: No interference with concurrent Git use
 - **WHEN** git-bull is computing the file status and the user runs `git commit` in a terminal at the same time
 - **THEN** the commit succeeds without an error about a locked repository
 
 ### Requirement: Untrusted repositories
-git-bull MUST NOT execute commands named in the configuration of a
-repository. This covers file-system monitor hooks, external diff tools and
-text conversion filters.
+git-bull MUST NOT execute commands that a repository brings along. This
+covers commands named in the repository's own configuration, including files
+it includes and the configuration of its worktrees and submodules, as well as
+hooks. Configuration that the user set in the system or global scope SHALL be
+honoured, except for external diff tools and text conversion, which git-bull
+never uses.
 
 #### Scenario: Monitor hook is configured
 - **WHEN** a repository's configuration names a file-system monitor hook and the user opens the repository and views the file status
@@ -76,8 +83,42 @@ text conversion filters.
 - **THEN** git-bull shows its own diff and the tool is not executed
 
 #### Scenario: Text conversion is configured
-- **WHEN** a repository's configuration names a text conversion filter for a file type and the user views the diff of such a file
+- **WHEN** a repository's configuration names a text conversion filter for a file type and the user views the diff or the blame of such a file
 - **THEN** the filter is not executed
+
+#### Scenario: Clean filter is configured
+- **WHEN** a repository's configuration defines a clean filter, its attributes assign it to a file, the file was touched, and the user views the file status and the diff of that file
+- **THEN** the filter is not executed
+- **AND** the file can appear as modified, with a diff of its unfiltered content
+
+#### Scenario: Filter installed by the user
+- **WHEN** the user's global configuration defines a filter such as Git LFS, and the repository's attributes assign it to files
+- **THEN** git-bull uses that filter when computing the file status
+
+#### Scenario: Filter redefined by the repository
+- **WHEN** the user's global configuration defines a filter and the repository's configuration redefines part of it
+- **THEN** that filter is not executed for this repository
+
+#### Scenario: Signature program is configured
+- **WHEN** a repository's configuration enables showing signatures and names a signature program, and the user opens the file history or views stashes
+- **THEN** the program is not executed
+
+#### Scenario: Hook is present
+- **WHEN** a repository contains hooks, in `.git/hooks` or in a folder named by its configuration, and the user browses it
+- **THEN** no hook is executed
+
+#### Scenario: Submodule configuration
+- **WHEN** a submodule's configuration defines a filter or a diff driver and the user views the file status and diffs of the repository that contains it
+- **THEN** nothing named in the submodule's configuration is executed
+
+### Requirement: No network access
+git-bull MUST NOT contact a remote in this milestone. In a partial clone,
+content that is not present locally SHALL NOT be fetched.
+
+#### Scenario: Content missing in a partial clone
+- **WHEN** the user views the diff or the blame of a file whose content was not downloaded in a partial clone
+- **THEN** git-bull shows a notice that the content is not available locally
+- **AND** no connection to the remote is made
 
 ### Requirement: Ownership check
 When Git refuses to work in a repository because of its ownership, git-bull

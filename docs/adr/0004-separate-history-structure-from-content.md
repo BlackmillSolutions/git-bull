@@ -34,6 +34,26 @@ message) only for visible rows. The graph layout stores a checkpoint every
 - The memory target is below 250 MB for the Linux kernel. It is a target
   that the benchmarks must confirm.
 
+## Measurements
+
+Generated repository with 1,000,000 commits, Git 2.55, Intel Core i7-12700H,
+Windows 11, measured on 2026-09-29. The Linux kernel has about 1.5 million
+commits with larger trees and messages, so its numbers will be higher.
+
+| Operation | Without commit-graph | With commit-graph |
+|---|---|---|
+| Structure stream, first line, branches and tags | 4.6 s | 0.53 s |
+| Structure stream, first line, HEAD only | not measured | 0.03 s |
+| Structure stream, complete | 6.4 s | 2.4 s |
+| Commit count | 4.5 s | 0.62 s |
+| Content of 1,000 commits, one request at a time | 0.6 s | |
+| Search by message, complete | 5.4 s | 5.4 s |
+| Writing the commit-graph with changed-path filters | 26.8 s | |
+
+The measurements support the decision: the structure arrives fast only with
+a commit-graph, content for a screen of rows costs milliseconds, and search
+by message costs seconds either way.
+
 ## Sources
 
 - https://devblogs.microsoft.com/devops/supercharging-the-git-commit-graph-iii-generations/

@@ -29,7 +29,8 @@ In the mode file path, the text SHALL be a path relative to the root of the
 repository, written with `/` and in the letter case used in the repository.
 The path of a file SHALL match the commits that changed that file. The path
 of a folder SHALL match the commits that changed any file below it. Parts of
-a path MUST NOT match.
+a path MUST NOT match. Characters such as `*`, `?` and `[` SHALL be matched
+literally, not as patterns.
 
 #### Scenario: Path of a file
 - **WHEN** the user searches for `src/graph/lanes.rs`
@@ -38,6 +39,10 @@ a path MUST NOT match.
 #### Scenario: Path of a folder
 - **WHEN** the user searches for `src/graph`
 - **THEN** the matches are the commits that changed any file below `src/graph`
+
+#### Scenario: Path with brackets
+- **WHEN** the repository has the files `a[1].txt` and `a1.txt` and the user searches for `a[1].txt`
+- **THEN** only the commits that changed `a[1].txt` are matches
 
 #### Scenario: File name without its folder
 - **WHEN** the user searches for `lanes.rs` and the repository has no file of that name in its root

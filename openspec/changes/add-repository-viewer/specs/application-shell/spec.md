@@ -8,8 +8,9 @@ its areas, repository tabs, opening repositories and keyboard operation.
 ## ADDED Requirements
 
 ### Requirement: Supported platforms
-git-bull SHALL run on Linux under X11 and Wayland, on Windows and on macOS,
-with the same features on each platform.
+git-bull SHALL run on Linux under X11 and Wayland, on Windows and on macOS.
+It SHALL offer the same features on each platform, except where a
+requirement names a limitation of a platform.
 
 #### Scenario: Start on a supported platform
 - **WHEN** the user starts git-bull on Linux, Windows or macOS with a supported Git installed
@@ -93,7 +94,8 @@ save SHALL win.
 ### Requirement: Opening repositories
 git-bull SHALL let the user open a repository through a chooser that lists
 recently opened repositories and offers a folder dialog, by dropping a folder
-onto the window, and by passing a path on the command line.
+onto the window, and by passing a path on the command line. Dropping a folder
+is not supported on Linux under Wayland in this milestone.
 
 #### Scenario: Open from the recent list
 - **WHEN** the user chooses an entry from the list of recently opened repositories
@@ -104,8 +106,12 @@ onto the window, and by passing a path on the command line.
 - **THEN** the repository containing that folder opens in a tab
 
 #### Scenario: Open by dropping a folder
-- **WHEN** the user drops a folder onto the window
+- **WHEN** the user drops a folder onto the window on Windows, on macOS or on Linux under X11
 - **THEN** the repository containing that folder opens in a new tab
+
+#### Scenario: Dropping a folder under Wayland
+- **WHEN** the user drops a folder onto the window on Linux under Wayland
+- **THEN** nothing happens, and the chooser and the command line remain available
 
 #### Scenario: Open from the command line
 - **WHEN** the user starts `git-bull <path>` with a path inside a repository
@@ -207,13 +213,23 @@ being computed.
 - **THEN** the interface reacts within 100 ms
 
 ### Requirement: Text rendering
-git-bull SHALL render text in any script supported by the fonts installed on
-the system, including Chinese, Japanese and Korean. Diffs and blame SHALL use
-a monospace font.
+git-bull SHALL render text in scripts written from left to right for which
+the system has a font, including Chinese, Japanese and Korean. Emoji SHALL be
+shown in one colour. Diffs and blame SHALL use a monospace font. The correct
+display of scripts written from right to left, such as Arabic and Hebrew, is
+not part of this milestone.
 
 #### Scenario: Commit message in Japanese
 - **WHEN** a commit message contains Japanese characters and the system has a font that covers them
 - **THEN** the commit list and the commit panel show these characters, not placeholder boxes
+
+#### Scenario: Commit message with emoji
+- **WHEN** a commit message contains an emoji
+- **THEN** the emoji is shown as a symbol in one colour
+
+#### Scenario: Commit message in Arabic
+- **WHEN** a commit message contains Arabic text
+- **THEN** its characters are shown, but their order and joining can be wrong
 
 ### Requirement: Accessibility of lists
 git-bull SHALL expose the selected row of each list and its text to assistive

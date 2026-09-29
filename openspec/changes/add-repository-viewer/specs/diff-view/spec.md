@@ -110,6 +110,14 @@ git-bull SHALL apply the limits below to keep the interface responsive.
 - **WHEN** the user selects a binary file
 - **THEN** the diff panel shows a notice with the old and the new file size instead of a diff
 
+### Requirement: Exactly the selected file
+The diff SHALL show exactly the selected file, also when its name contains
+characters such as `*`, `?` or `[`.
+
+#### Scenario: Name with brackets
+- **WHEN** a commit changed the files `a[1].txt` and `a1.txt` and the user selects `a[1].txt`
+- **THEN** the diff shows only the changes of `a[1].txt`
+
 ### Requirement: Content that is not valid UTF-8
 Text content that is not valid UTF-8 SHALL be shown with replacement
 characters.

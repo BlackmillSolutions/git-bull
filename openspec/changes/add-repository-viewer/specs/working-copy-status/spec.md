@@ -10,11 +10,21 @@ offering any way to change them.
 ### Requirement: File status view
 The File status view SHALL list the uncommitted changes in three groups:
 staged files, unstaged files and untracked files. Every entry SHALL show a
-marker for its kind of change.
+marker for its kind of change. Untracked files SHALL be listed one by one,
+also inside folders that contain only untracked files. Files matched by the
+repository's ignore rules SHALL NOT be listed.
 
 #### Scenario: Changes of each kind
 - **WHEN** the working copy has a staged file, a modified file that is not staged and a new file that is not tracked
 - **THEN** each file is listed in its group
+
+#### Scenario: New folder
+- **WHEN** the working copy contains a new folder with two untracked files
+- **THEN** the untracked group lists both files with their paths, not the folder
+
+#### Scenario: Ignored file
+- **WHEN** a new file matches an ignore rule of the repository
+- **THEN** the file is not listed
 
 #### Scenario: File with staged and unstaged changes
 - **WHEN** a file has staged changes and further changes that are not staged
@@ -31,6 +41,23 @@ with a marker for conflict.
 #### Scenario: Merge with conflicts
 - **WHEN** a merge stopped with a conflict in a file
 - **THEN** the file is listed in the unstaged group with the conflict marker
+
+#### Scenario: Diff of a conflicted file
+- **WHEN** the user selects a conflicted file
+- **THEN** the diff compares the last commit with the working copy, including the conflict markers
+
+### Requirement: Submodules in the file status
+A submodule whose checked-out commit differs from the commit recorded in the
+repository SHALL be listed as modified. Changes inside the working copy of a
+submodule SHALL NOT be shown in the repository that contains it.
+
+#### Scenario: Submodule at another commit
+- **WHEN** a submodule has checked out a commit other than the one recorded
+- **THEN** the submodule is listed as modified, and its diff shows the recorded and the checked-out commit hash
+
+#### Scenario: Changes inside a submodule
+- **WHEN** a file inside a submodule was edited and the submodule is at its recorded commit
+- **THEN** the submodule is not listed
 
 ### Requirement: Diff of uncommitted changes
 Selecting a file SHALL show its diff. For a staged file the diff SHALL

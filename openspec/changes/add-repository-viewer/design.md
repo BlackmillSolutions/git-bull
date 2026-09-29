@@ -98,6 +98,17 @@ because the arrangement of areas is fixed:
 File history and blame replace the area right of the sidebar and show a back
 button.
 
+egui 0.36 has gaps that the specs name as limitations of this milestone:
+
+| Gap | Cause | Handling |
+|---|---|---|
+| Dropping a folder does nothing under Wayland | winit 0.30 has no drag-and-drop for Wayland | Named in the spec; the chooser and the command line remain |
+| The system theme is not detected on Linux | winit reports no theme on X11 and Wayland | Read once at start-up through the `dark-light` crate; dark when nothing is reported |
+| The window position cannot be read or set under Wayland | Wayland does not allow it | Only the size is restored there |
+| Right-to-left scripts are laid out wrongly | egui has no bidirectional text support | Named in the spec as not supported |
+| Emoji are monochrome | egui 0.36 has no colour emoji | Accepted |
+| System fonts are not discovered | Arrives with egui 0.37 | See decision 9 |
+
 *Alternatives considered:* GPUI and Tauri, see the ADR.
 
 ### 3. Git CLI behind a trait
@@ -109,6 +120,8 @@ data types they return. Two implementations exist: the CLI backend and a
 fake backend for tests.
 
 All invocations go through one function that applies the rules of ADR 0006.
+Among them, it sets `GIT_LITERAL_PATHSPECS=1`, so every path below is matched
+literally, and it passes the neutralised filter drivers of the repository.
 
 | Purpose | Command |
 |---|---|
@@ -116,20 +129,26 @@ All invocations go through one function that applies the rules of ADR 0006.
 | References | `git for-each-ref` with a format string covering name, target, peeled target and upstream |
 | Current HEAD | `git symbolic-ref -q HEAD`, falling back to `git rev-parse HEAD` |
 | Stashes | `git stash list` with a format string |
+| Untracked files of a stash | `git diff-tree -r --root --name-status -z <stash>^3`, when the stash has a third parent |
 | Submodules | `git submodule status` |
 | History structure | `git rev-list --date-order --parents --timestamp <revisions>` |
 | Commit count | `git rev-list --count <revisions>` |
 | Commit content | one persistent `git cat-file --batch` process per session |
 | Changed files of a commit | `git diff-tree -r --no-commit-id --name-status -M -z` against the first parent; `--root` for root commits |
 | Diff of one file | `git diff-tree -p -M` restricted to the paths of that file |
-| Working-copy status | `git status --porcelain=v2 -z` |
-| Working-copy diff | `git diff` and `git diff --cached`, restricted to one path |
+| Working-copy status | `git status --porcelain=v2 -z --untracked-files=all --ignore-submodules=dirty` |
+| Working-copy diff | `git diff` and `git diff --cached`, restricted to one path; `git diff HEAD` for a conflicted file |
 | Search by hash | `git rev-parse --verify --quiet <prefix>^{commit}` |
 | Search by message or author | `git rev-list -i --fixed-strings --grep=<text> <revisions>`, or the same with `--author=<text>` |
 | Search by path | `git rev-list <revisions> -- <path>` |
 | File history | `git log --follow -M --format=<format> --name-status -- <path>` |
-| Blame | `git blame --incremental <revision> -- <path>` |
-| Generate commit-graph | `git commit-graph write --reachable --changed-paths` |
+| Blame | `git blame --incremental --no-textconv <revision> -- <path>` |
+| Generate commit-graph | `git commit-graph write --reachable --changed-paths --progress` |
+| Filter drivers of the repository | `git config --list --show-scope --show-origin -z` |
+
+Diff commands additionally get `--no-ext-diff --no-textconv --no-color
+--src-prefix=a/ --dst-prefix=b/ --submodule=short`, so that neither
+configuration nor the user's settings change what git-bull parses.
 
 `<revisions>` follows the branch filter:
 
@@ -190,6 +209,16 @@ See ADR 0004.
 - Content lives in a cache bounded to 50,000 commits, evicting the least
   recently used.
 
+**Content reader**
+
+- One `git cat-file --batch` process per session, with a writer and a
+  separate reader thread.
+- Requests are pipelined, with at most 256 outstanding. Writing all requests
+  before reading any response deadlocks as soon as the output pipe is full;
+  the measurement script of the experiment did exactly that.
+- Measured round trip: 0.6 ms per commit one at a time, about 0.1 ms
+  pipelined. A screen of 40 rows costs well under 30 ms.
+
 **Graph layout**
 
 The layout runs in one pass, in stream order.
@@ -204,6 +233,16 @@ The layout runs in one pass, in stream order.
 - A lane gets its colour index when it is allocated.
 - The lane state is saved as a checkpoint every 1024 rows. Visible rows are
   computed by replaying from the nearest checkpoint, then cached.
+
+**Time to first rows**
+
+With a commit-graph, Git emits the first line only after its walk has
+reached the generation of the oldest tip. Tags deep in history delay it:
+0.53 s with branches and tags against 0.03 s from HEAD alone, measured on
+1,000,000 generated commits. The Linux kernel has tags back to its first
+commits, so this is the largest risk for the target of 1 s. If the benchmark
+misses it, tags already reachable from a branch are left out of
+`<revisions>`, because they add no commits.
 
 **Refresh**
 
@@ -233,11 +272,17 @@ Diff and blame use egui's `ScrollArea`, because their length is limited.
 
 ### 7. Syntax highlighting with syntect
 
-- syntect is used with its pure-Rust regex engine, so the build needs no C
-  toolchain for it.
+- syntect is used with its pure-Rust regex engine (feature `default-fancy`),
+  so the build needs no C toolchain for it. This engine runs at about half
+  the speed of the C engine and is very slow in debug builds, so dependencies
+  are compiled with optimisation in the development profile as well.
 - Highlighting runs on a worker thread over the complete old and new content
   of the file. Results are mapped onto the lines of the diff.
 - Files above 512 KB are not highlighted.
+- The licences of the syntax definitions and themes bundled with syntect are
+  poorly documented (syntect issue #301). git-bull therefore takes them from
+  the `two-face` crate, which lists the licence of every asset, and uses only
+  themes with a known licence. The acknowledgements go into the notices file.
 
 *Alternative considered:* tree-sitter. It highlights more precisely, but
 every language needs its own grammar crate, most of them with C code. That
@@ -249,6 +294,8 @@ raises build complexity on three platforms for little gain in a diff view.
 - It is written when a value changes, through a temporary file that replaces
   the original, so that a crash cannot leave a half-written file.
 - A file that cannot be parsed is renamed with the suffix `.bak`.
+- Window size and position are saved here as well. eframe's own persistence
+  is an optional feature and stays switched off.
 
 *Alternative considered:* egui's built-in persistence. Rejected because its
 format is not meant to be read or edited by users, and because settings
@@ -262,8 +309,15 @@ belong to `gitbull-core`, which must not depend on egui.
 - All texts go through Fluent. English is the only shipped language.
 - A test fails when a message id used in code is missing from the English
   resource file.
-- System fonts are loaded as fallback for scripts that the fonts bundled
-  with egui do not cover.
+- The fonts bundled with egui cover no Chinese, Japanese or Korean. git-bull
+  finds a system font for these scripts through the `fontdb` crate and
+  registers it as fallback.
+- Only the fallback fonts that are needed are loaded, at most one per script
+  group. egui keeps every registered font completely in memory, and loading
+  all system fonts has been reported to cost several hundred megabytes. The
+  memory of the fallback fonts counts towards the memory target.
+- egui 0.37 brings its own discovery of system fonts. Moving to it is a
+  separate change.
 
 *Alternative considered for texts:* gettext. Rejected because Fluent handles
 plurals and grammatical variants better and is the common choice in Rust.
@@ -281,6 +335,14 @@ Development is test-driven.
 | `gitbull-core` sessions | Driven through actions against the fake backend |
 | `gitbull-app` | UI tests without a real window, using `egui_kittest` |
 | Performance | Benchmarks against a generated repository with more than one million commits |
+
+UI tests come in two kinds:
+
+- **Tests by query** find widgets through the accessibility tree and simulate
+  input. They need no graphics adapter and run on all three platforms.
+- **Snapshot tests** compare rendered images. They need a graphics adapter,
+  and images differ between systems and drivers. They run on Windows only,
+  where a software rasteriser is always present.
 
 The generator builds its repository through `git fast-import`. Benchmarks run
 on demand. Results are recorded in `docs/benchmarks.md` with the hardware and
@@ -316,13 +378,25 @@ The tasks follow these stages. The application is runnable after each one.
 The benchmarks belong to stage 2 so that the scale targets are verified
 before most of the interface is built.
 
-### 13. Details settled while writing the specs
+### 13. Details settled while writing and reviewing the specs
 
 These points were not discussed beforehand. They are small, but each is a
 choice:
 
 | Point | Choice |
 |---|---|
+| Date column | Commit date, because the list is ordered by it and it arrives with the structure stream |
+| Restricting the graph from the sidebar | One branch at a time, through "Show only this branch" |
+| Search by file path | Exact path from the root of the repository; a folder matches everything below it |
+| Start of the file history | The selected commit; the last commit when opened from File status |
+| Several instances | Independent windows; the last one to save settings wins |
+| Oldest supported systems | Windows 10, macOS 12, Ubuntu 22.04 |
+| Theme on Linux when the desktop reports none | Dark |
+| Native folder dialog on Linux | Through the desktop portal, which the README lists as a prerequisite |
+| Untracked files | Listed one by one, also inside new folders, so that each can show its content |
+| Diff of a conflicted file | Last commit against the working copy, with the conflict markers |
+| Stash with untracked files | The untracked files are listed as added |
+| Changes inside a submodule | Not shown in the containing repository; a consequence of ADR 0006 |
 | Start screen when Git is missing | Offers to check again and to set the path to Git |
 | Reference hidden by the branch filter | A notice offers to show all branches |
 | Row "Uncommitted changes" | Selecting it opens the File status view |
@@ -342,14 +416,36 @@ choice:
 - [egui has breaking changes in each release] → The version is pinned.
   Upgrades are separate changes.
 - [Fonts bundled with egui lack CJK coverage] → System fonts as fallback.
+- [Fallback fonts cost memory, tens of megabytes for one CJK font] → Only
+  the fonts needed are loaded, and their memory counts towards the target.
+- [egui 0.36 lacks drag-and-drop under Wayland, theme detection on Linux and
+  right-to-left text] → Named as limitations in the specs, see decision 2.
+- [Snapshot tests differ between systems and need a graphics adapter] →
+  They run on one platform; tests by query cover all three.
+- [The licences of bundled syntax definitions are poorly documented] →
+  Assets come from `two-face`, see decision 7.
 - [Starting a process is slow, most of all on Windows] → Commit content is
   read through one persistent process. All other calls happen per user
   action, not per row.
 - [The commit-graph file may be missing] → Detection, hint and confirmed
-  generation.
-- [Generating the commit-graph with changed-path filters takes minutes on
-  very large repositories] → It runs in the background, shows progress and
-  can be cancelled.
+  generation. Without it the first rows took 4.6 s on 1,000,000 generated
+  commits.
+- [Generating the commit-graph with changed-path filters takes time: 26.8 s
+  on 1,000,000 generated commits, more on the Linux kernel] → It runs in the
+  background, shows progress and can be cancelled.
+- [Tags deep in history delay the first rows] → Measured, see decision 5;
+  leaving out tags reachable from a branch is the prepared remedy.
+- [A repository brings along commands that Git executes] → ADR 0006. The
+  first version of these rules was incomplete; an experiment found filters,
+  signature programs, lazy fetch, hooks and submodule configuration as
+  further ways. Integration tests with marker commands guard every one.
+- [Filters of the repository are not run] → Files they would normalise can
+  appear as modified. Accepted; filters the user installed keep working.
+- [Changes inside submodules are not shown in the containing repository] →
+  Accepted; the submodule opens in its own tab.
+- [Untracked folders with very many files slow down the file status,
+  because every file is listed] → Status runs in the background; the list is
+  virtual.
 - [Syntax highlighting is slow on large files] → Size limit and background
   computation.
 - [Search by message reads every commit and takes seconds] → Results arrive
@@ -376,8 +472,9 @@ Not applicable. There is no earlier version and no data to migrate.
   macOS. It does not affect this change, which ships unsigned packages.
 - **Further translations.** Which languages follow English, and how
   contributions are reviewed. The texts are prepared either way.
-- **Default branch name.** The repository currently uses `master`. Renaming
-  to `main` is possible at any time before the first push.
+- **Default branch name.** The repository uses `master`, with `dev` for
+  ongoing work. Renaming `master` to `main` remains possible, but now needs
+  the change on GitHub as well.
 
 ## References
 
