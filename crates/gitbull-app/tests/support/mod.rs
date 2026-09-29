@@ -140,10 +140,14 @@ fn opening(app: &App) -> bool {
 }
 
 /// Steps the window until no tab is opening any more.
+///
+/// While a tab opens, its spinner keeps asking for frames, so the window
+/// is stepped frame by frame: `Harness::run` gives up on a UI that does not
+/// settle within a few frames, which a slow machine hits.
 pub fn settle_window(harness: &mut Harness<'_, App>) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        harness.run();
+        harness.step();
         if !opening(harness.state()) {
             harness.run();
             return;
