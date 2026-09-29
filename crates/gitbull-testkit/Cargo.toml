@@ -1,6 +1,6 @@
 [package]
-name = "gitbull-git"
-description = "Runs the Git command line and returns typed data for git-bull."
+name = "gitbull-testkit"
+description = "Test helpers for git-bull: real Git repositories with fixed authors and dates."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,5 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-
-[dev-dependencies]
-gitbull-testkit.workspace = true
+gitbull-git.workspace = true
 tempfile = "3.27.0"

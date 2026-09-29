@@ -10,3 +10,6 @@ publish.workspace = true
 
 [dependencies]
 gitbull-git.workspace = true
+
+[dev-dependencies]
+gitbull-testkit.workspace = true

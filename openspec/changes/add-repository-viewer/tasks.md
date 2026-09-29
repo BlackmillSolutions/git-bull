@@ -9,21 +9,21 @@ after each stage.
 - [x] 1.1 Create the Cargo workspace with the crates `gitbull-git`, `gitbull-core` and `gitbull-app` (binary `git-bull`), pin the toolchain in `rust-toolchain.toml` and ignore `/target`; verify `cargo build --workspace` succeeds
 - [x] 1.2 Add `LICENSE-MIT` and `LICENSE-APACHE` and set the licence field of every crate; verify `cargo metadata` reports `MIT OR Apache-2.0` for all three crates
 - [x] 1.3 Add `deny.toml` that allows only licences compatible with MIT OR Apache-2.0; verify `cargo deny check` passes, and fails when a GPL-only crate is added temporarily
-- [ ] 1.4 Add the CI workflow that runs `cargo fmt --check`, `cargo clippy` with warnings as errors, `cargo test` and `cargo deny check` on Linux, Windows and macOS; verify the workflow is green on all three platforms
+- [x] 1.4 Add the CI workflow that runs `cargo fmt --check`, `cargo clippy` with warnings as errors, `cargo test` and `cargo deny check` on Linux, Windows and macOS; verify the workflow is green on all three platforms
 - [x] 1.5 Write the README section on building and running from source; verify the documented commands run as written
 
 ## 2. Git access foundation
 
 - [ ] 2.1 Implement locating Git: configured path, search path, default folders of Git for Windows, and treating the macOS shim without developer tools as missing; verify unit tests cover each rule
-- [ ] 2.2 Implement parsing of `git --version` and the check against 2.34; verify tests cover plain, Apple and Windows version strings and a version below the minimum
-- [ ] 2.3 Implement the single invocation function that applies the rules of ADR 0006 (arguments, environment including `GIT_NO_LAZY_FETCH`, `GIT_LITERAL_PATHSPECS` and an empty hooks folder), maps failures to the typed errors and creates no console window on Windows; verify tests assert arguments, environment and error mapping
-- [ ] 2.4 Implement cancellation by terminating the Git process; verify a test cancels a long-running command and finds no remaining process
-- [ ] 2.5 Implement the streaming reader for records delimited by NUL or newline; verify tests with records split across chunk boundaries
+- [x] 2.2 Implement parsing of `git --version` and the check against 2.34; verify tests cover plain, Apple and Windows version strings and a version below the minimum
+- [x] 2.3 Implement the single invocation function that applies the rules of ADR 0006 (arguments, environment including `GIT_NO_LAZY_FETCH`, `GIT_LITERAL_PATHSPECS` and an empty hooks folder), maps failures to the typed errors and creates no console window on Windows; verify tests assert arguments, environment and error mapping
+- [x] 2.4 Implement cancellation by terminating the Git process; verify a test cancels a long-running command and finds no remaining process
+- [x] 2.5 Implement the streaming reader for records delimited by NUL or newline; verify tests with records split across chunk boundaries
 - [ ] 2.6 Add the test helper that creates real repositories with fixed authors and dates; verify an integration test creates a repository and reads HEAD on all three platforms in CI
-- [ ] 2.7 Implement repository validation: root, bare, shallow, object format and refusal by the ownership check; verify integration tests for a normal, bare, shallow and SHA-256 repository, a folder that is no repository, and a refused repository
-- [ ] 2.8 Define the backend trait with its data types and add the fake backend; verify a test in `gitbull-core` runs against the fake backend
-- [ ] 2.9 Implement the log file with command, duration and rotation; verify a test finds an entry per invocation and sees the log rotate at its size limit
-- [ ] 2.10 Implement reading the filter drivers of the local and worktree scope, including included files, and passing them neutralised through `GIT_CONFIG_COUNT`; verify integration tests with a clean filter, a process filter, `required=true`, a driver named `a=b`, a driver with upper-case letters, a driver defined in an included file and one in `config.worktree`, and a global filter that stays active
+- [x] 2.7 Implement repository validation: root, bare, shallow, object format and refusal by the ownership check; verify integration tests for a normal, bare, shallow and SHA-256 repository, a folder that is no repository, and a refused repository
+- [x] 2.8 Define the backend trait with its data types and add the fake backend; verify a test in `gitbull-core` runs against the fake backend
+- [x] 2.9 Implement the log file with command, duration and rotation; verify a test finds an entry per invocation and sees the log rotate at its size limit
+- [x] 2.10 Implement reading the filter drivers of the local and worktree scope, including included files, and passing them neutralised through `GIT_CONFIG_COUNT`; verify integration tests with a clean filter, a process filter, `required=true`, a driver named `a=b`, a driver with upper-case letters, a driver defined in an included file and one in `config.worktree`, and a global filter that stays active
 - [ ] 2.11 Add the integration test suite of ADR 0006: a repository in which every known way to execute a command points to a marker script (monitor hook, external diff, diff driver, text conversion, clean, smudge and process filters, signature program, hooks, lazy fetch, submodule configuration), run through the invocation function with the arguments of every command in the design; verify no marker is written on all three platforms in CI
 
 ## 3. Application shell

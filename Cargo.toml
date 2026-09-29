@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/gitbull-git", "crates/gitbull-core", "crates/gitbull-app"]
+members = [
+    "crates/gitbull-git",
+    "crates/gitbull-core",
+    "crates/gitbull-app",
+    "crates/gitbull-testkit",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,3 +18,4 @@ publish = false
 [workspace.dependencies]
 gitbull-git = { path = "crates/gitbull-git" }
 gitbull-core = { path = "crates/gitbull-core" }
+gitbull-testkit = { path = "crates/gitbull-testkit" }
