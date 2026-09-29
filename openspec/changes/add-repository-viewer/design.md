@@ -142,7 +142,7 @@ literally, and it passes the neutralised filter drivers of the repository.
 | Search by message or author | `git rev-list -i --fixed-strings --grep=<text> <revisions>`, or the same with `--author=<text>` |
 | Search by path | `git rev-list <revisions> -- <path>` |
 | File history | `git log --follow -M --format=<format> --name-status -- <path>` |
-| Blame | `git blame --incremental --no-textconv <revision> -- <path>` |
+| Blame | `git blame --incremental --no-textconv --no-ignore-revs-file [--ignore-revs-file=<trusted path>...] <revision> -- <path>` |
 | Generate commit-graph | `git commit-graph write --reachable --changed-paths --progress` |
 | Filter drivers of the repository | `git config --list --show-scope --show-origin -z` |
 

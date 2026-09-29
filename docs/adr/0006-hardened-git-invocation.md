@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-09-29
 ---
 
@@ -35,6 +35,7 @@ answers one of them.
 | `GIT_LITERAL_PATHSPECS=1` | Paths read as patterns; otherwise the path `a[1].txt` also selects `a1.txt` |
 | `--no-pager`, `--no-color`, `-c color.ui=false`, `--src-prefix=a/`, `--dst-prefix=b/`, `--untracked-files=all`, `LC_ALL=C` | Output shaped by configuration or locale, which would break parsing |
 | `-c core.quotepath=false`, `-z` where available | Paths quoted or escaped instead of passed as raw bytes |
+| `--no-ignore-revs-file` on every blame, followed by `--ignore-revs-file=<path>` for each `blame.ignoreRevsFile` of the system and global scope | Blame failing because the repository names a missing ignore file; this executes nothing but makes blame unusable |
 
 **Neutralising filter drivers.** Before the first status or diff of a
 repository, git-bull reads `git config --list --show-scope --show-origin -z`.
@@ -45,6 +46,11 @@ to empty and `required` to false. The values are passed through
 through `-c`: `-c` splits at the first `=`, so a driver named `a=b` cannot be
 overridden with it. Driver names are case-sensitive and are copied exactly.
 The list is read again on every refresh.
+
+**Ignore files for blame.** `--no-ignore-revs-file` clears every ignore file
+named so far, including those from configuration. Files given after it take
+effect; files given before it are cleared too. The user's ignore files are
+therefore passed after it, read from the same configuration list.
 
 git-bull never bypasses Git's ownership check (`safe.directory`).
 
@@ -73,12 +79,38 @@ git-bull never bypasses Git's ownership check (`safe.directory`).
   where the same rules apply.
 - In partial clones, content that is not present locally is not fetched.
   Diff and blame show a notice instead. git-bull makes no network connection.
-- A repository can still make blame fail, for example with
-  `blame.ignoreRevsFile` naming a missing file; no override was found. It
-  shows as an error in the blame view.
+  Git's own messages cannot drive that notice: diff reports that lazy
+  fetching is disabled, but blame reports `no such path <path> in HEAD` for a
+  file whose content is merely missing. git-bull detects a partial clone
+  itself.
+- Ignore files for blame that the repository names are not used, including
+  a `.git-blame-ignore-revs` that the project recommends. The user can name
+  it in their global configuration.
 - All invocations go through one function that applies these rules. Calling
   Git anywhere else is a defect.
 - New Git versions can add new ways to execute commands. Integration tests
   set every known one to a marker command and fail when a marker is written.
   They run against the Git version installed in CI, and a new finding
   extends this record.
+- The rules are verified with Git 2.55 only. Whether Git 2.34 to 2.43
+  honours `GIT_NO_LAZY_FETCH`, and treats `core.fsmonitor=false` as a boolean
+  rather than as the name of a hook, is not verified. Until it is, the
+  minimum version of ADR 0002 does not guarantee these rules, and CI should
+  also run the integration tests against Git 2.34.
+
+## Verification
+
+Re-run on 2026-09-29 with Git 2.55 on Windows 11. Each vector got its own
+repository with a marker command, and the commands of the design ran once
+without and once with the rules above. Without the rules every marker fired;
+with them none did, and no hardened command failed except the expected
+failures to fetch in the partial clone. Covered: monitor hook and daemon,
+external diff, diff driver command, text conversion, clean, smudge and
+process filters (assigned through `.gitattributes` and `.git/info/attributes`,
+defined directly, through `include.path` and through `config.worktree`, with
+the driver names `a=b` and `Fx`), GPG and SSH signature programs, hooks in
+`.git/hooks` and through `core.hooksPath`, index writes, lazy fetch,
+submodule configuration, and a global filter that the repository partly
+redefines. A filter defined only in the global scope kept running, as
+intended. `--attr-source` with an empty tree still ran the filter from
+`.git/info/attributes`.
