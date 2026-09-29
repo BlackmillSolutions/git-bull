@@ -28,19 +28,19 @@ after each stage.
 
 ## 3. Application shell
 
-- [ ] 3.1 Implement the settings model with TOML persistence, atomic writing and renaming an invalid file to `.bak`; verify tests for round trip, defaults, the invalid file, and two instances saving in turn without damaging the file
-- [ ] 3.2 Implement the list of recently opened repositories, capped at 20 and without duplicates; verify tests for the cap and for reopening an entry
-- [ ] 3.3 Set up Fluent with the English resource file and the test for missing message ids; verify the test fails when an id used in code is removed from the resource file
-- [ ] 3.4 Implement the theme tokens with a light and a dark palette, the manual override, following the system with its changes on Windows and macOS, and reading the desktop setting once at start-up on Linux with dark as fallback; verify a test finds every token in both palettes with a contrast of at least 3:1 for graph colours, and tests for each rule of following the system
-- [ ] 3.5 Find a system font for Chinese, Japanese and Korean through `fontdb` and register it as fallback, loading at most one font per script group; verify a UI test renders a Japanese sample with a font supplied by the test, check by hand on Windows that a system font is found, and record the memory the font adds
-- [ ] 3.6 Build the main window with its areas, draggable dividers, and persisted divider positions, window size and window position, leaving the position to the system under Wayland; verify a UI test finds all areas of the History view and restored divider positions
-- [ ] 3.7 Implement sessions and the tab bar: open, activate an existing tab, close, restore at start-up; verify session tests against the fake backend for every scenario of "Repository tabs" and "Restoring tabs at start-up"
+- [x] 3.1 Implement the settings model with TOML persistence, atomic writing and renaming an invalid file to `.bak`; verify tests for round trip, defaults, the invalid file, and two instances saving in turn without damaging the file
+- [x] 3.2 Implement the list of recently opened repositories, capped at 20 and without duplicates; verify tests for the cap and for reopening an entry
+- [x] 3.3 Set up Fluent with the English resource file and the test for missing message ids; verify the test fails when an id used in code is removed from the resource file
+- [x] 3.4 Implement the theme tokens with a light and a dark palette, the manual override, following the system with its changes on Windows and macOS, and reading the desktop setting once at start-up on Linux with dark as fallback; verify a test finds every token in both palettes with a contrast of at least 3:1 for graph colours, and tests for each rule of following the system
+- [x] 3.5 Find a system font for Chinese, Japanese and Korean through `fontdb` and register it as fallback, loading at most one font per script group; verify a UI test renders a Japanese sample with a font supplied by the test, check by hand on Windows that a system font is found, and record the memory the font adds
+- [x] 3.6 Build the main window with its areas, draggable dividers, and persisted divider positions, window size and window position, leaving the position to the system under Wayland; verify a UI test finds all areas of the History view and restored divider positions
+- [x] 3.7 Implement sessions and the tab bar: open, activate an existing tab, close, restore at start-up; verify session tests against the fake backend for every scenario of "Repository tabs" and "Restoring tabs at start-up"
 - [ ] 3.8 Implement opening repositories: chooser with recent list, native folder dialog, dropped folder except under Wayland, command-line path and the message for a folder that is no repository; verify tests for the opening logic, and the dialog and drop manually on Windows
-- [ ] 3.9 Build the start screen for missing or outdated Git with "check again" and setting the path; verify UI tests for both states
-- [ ] 3.10 Build the settings dialog with theme, language and validated Git path; verify UI tests for a valid and an invalid path
+- [x] 3.9 Build the start screen for missing or outdated Git with "check again" and setting the path; verify UI tests for both states
+- [x] 3.10 Build the settings dialog with theme, language and validated Git path; verify UI tests for a valid and an invalid path
 - [ ] 3.11 Implement the keyboard shortcuts, with Cmd on macOS except for switching tabs, and copying according to the focused area; verify a UI test for every row of the shortcut table
-- [ ] 3.12 Build the status bar with current branch and Git version; verify a UI test
-- [ ] 3.13 Build the error display with expandable details and turn worker panics into tab errors; verify tests for a failed command and for a panicking worker
+- [x] 3.12 Build the status bar with current branch and Git version; verify a UI test
+- [x] 3.13 Build the error display with expandable details and turn worker panics into tab errors; verify tests for a failed command and for a panicking worker
 - [ ] 3.14 Stage check: start the application, open a repository and see its tab; verify by hand on Windows and through the UI tests in CI on Linux and macOS
 
 ## 4. Commit history

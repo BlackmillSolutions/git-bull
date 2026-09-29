@@ -7,6 +7,7 @@ pub mod backend;
 pub mod error;
 pub mod filters;
 pub mod flags;
+pub mod head;
 pub mod invoke;
 pub mod locate;
 pub mod log;

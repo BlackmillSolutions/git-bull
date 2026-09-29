@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use crate::error::Error;
+use crate::head::{self, Head};
 use crate::invoke::Git;
 use crate::repository::{self, RepositoryInfo};
 
@@ -15,6 +16,9 @@ use crate::repository::{self, RepositoryInfo};
 pub trait Backend: Send + Sync {
     /// Checks the repository that contains `path`.
     fn inspect(&self, path: &Path) -> Result<RepositoryInfo, Error>;
+
+    /// What HEAD of the repository at `repo` points to.
+    fn head(&self, repo: &Path) -> Result<Head, Error>;
 }
 
 /// Reads repositories through the Git command line.
@@ -31,5 +35,9 @@ impl CliBackend {
 impl Backend for CliBackend {
     fn inspect(&self, path: &Path) -> Result<RepositoryInfo, Error> {
         repository::inspect(&self.git, path)
+    }
+
+    fn head(&self, repo: &Path) -> Result<Head, Error> {
+        head::head(&self.git, repo)
     }
 }

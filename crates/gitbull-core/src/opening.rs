@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use gitbull_git::head::Head;
 use gitbull_git::repository::RepositoryInfo;
 use gitbull_git::{Backend, Error};
 
@@ -14,6 +15,7 @@ pub struct OpenedRepository {
     /// The name shown on the tab.
     pub title: String,
     pub info: RepositoryInfo,
+    pub head: Head,
 }
 
 /// Resolves `path`, which may be any folder inside a repository.
@@ -27,7 +29,13 @@ pub fn open(backend: &dyn Backend, path: &Path) -> Result<OpenedRepository, Erro
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.to_string_lossy().into_owned());
-    Ok(OpenedRepository { root, title, info })
+    let head = backend.head(&root)?;
+    Ok(OpenedRepository {
+        root,
+        title,
+        info,
+        head,
+    })
 }
 
 #[cfg(test)]
@@ -65,6 +73,18 @@ mod tests {
         let opened = open(&backend, &path(&["srv", "project.git"])).unwrap();
         assert_eq!(opened.root, path(&["srv", "project.git"]));
         assert_eq!(opened.title, "project.git");
+    }
+
+    #[test]
+    fn opened_repository_knows_its_head() {
+        let backend = FakeBackend::default()
+            .with_repository(path(&["work", "git-bull"]))
+            .with_head(
+                path(&["work", "git-bull"]),
+                Head::Branch("feature/graph".into()),
+            );
+        let opened = open(&backend, &path(&["work", "git-bull", "crates"])).unwrap();
+        assert_eq!(opened.head, Head::Branch("feature/graph".into()));
     }
 
     #[test]

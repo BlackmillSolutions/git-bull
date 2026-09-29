@@ -1,0 +1,94 @@
+# English texts of git-bull. Every message used by the UI must be here;
+# other languages fall back to these.
+
+app-title = git-bull
+
+## Start screen
+
+start-title = git-bull needs Git
+start-missing = No Git was found on this computer.
+start-configured-missing = The Git set in the settings does not exist: { $path }
+start-too-old = Git { $version } at { $path } is too old. git-bull needs Git { $minimum } or newer.
+start-unusable = { $path } does not work as Git.
+start-install-windows = Install Git for Windows from https://git-scm.com, then check again.
+start-install-macos = Install the command line developer tools with `xcode-select --install`, or Git from https://git-scm.com, then check again.
+start-install-linux = Install Git with your package manager, for example `sudo apt install git`, then check again.
+start-check-again = Check again
+start-set-path = Set path to Git…
+start-details = Details
+
+## Tab bar
+
+tab-new = New tab
+tab-opening = Opening { $folder }…
+
+## Repository chooser
+
+chooser-title = Open a repository
+chooser-choose-folder = Choose folder…
+chooser-recent = Recent repositories
+chooser-no-recent = No repositories opened yet.
+notice-not-a-repository = { $folder } is not inside a Git repository.
+notice-dismiss = Dismiss
+
+## Toolbar
+
+toolbar-open = Open
+toolbar-refresh = Refresh
+toolbar-theme = Theme
+toolbar-settings = Settings
+theme-system = Follow the system
+theme-light = Light
+theme-dark = Dark
+
+## Sidebar
+
+sidebar-workspace = WORKSPACE
+sidebar-branches = BRANCHES
+sidebar-tags = TAGS
+sidebar-remotes = REMOTES
+sidebar-stashes = STASHES
+sidebar-submodules = SUBMODULES
+view-history = History
+view-file-status = File status
+view-search = Search
+
+## Commit list
+
+column-graph = Graph
+column-description = Description
+column-date = Date
+column-author = Author
+column-commit = Commit
+
+## Commit and diff panels
+
+panel-commit = COMMIT
+panel-diff = DIFF
+
+## Errors in a tab
+
+error-open-failed = { $folder } could not be opened.
+error-internal = git-bull ran into an internal error. The details help to report it.
+error-ownership = Git refuses to work in this folder because it belongs to another user. The check protects you from repositories that someone else could have prepared. git-bull does not bypass it; if you trust the folder, add it to `safe.directory` in your Git configuration.
+error-details = Details
+error-command = Command: { $command }
+error-retry = Retry
+error-close = Close
+
+## Settings dialog
+
+settings-title = Settings
+settings-theme = Theme
+settings-language = Language
+settings-git = Git executable
+settings-git-automatic = Found automatically
+settings-git-browse = Browse…
+settings-git-apply = Use this Git
+settings-git-applied = git-bull now uses this Git.
+
+## Status bar
+
+status-git-version = Git { $version }
+status-detached = Detached at { $commit }
+status-settings-reset = The settings file could not be read; git-bull started with default settings.

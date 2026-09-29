@@ -103,7 +103,7 @@ egui 0.36 has gaps that the specs name as limitations of this milestone:
 | Gap | Cause | Handling |
 |---|---|---|
 | Dropping a folder does nothing under Wayland | winit 0.30 has no drag-and-drop for Wayland | Named in the spec; the chooser and the command line remain |
-| The system theme is not detected on Linux | winit reports no theme on X11 and Wayland | Read once at start-up through the `dark-light` crate; dark when nothing is reported |
+| The system theme is not detected on Linux | winit reports no theme on X11 and Wayland | Read once at start-up from the XDG desktop portal (`org.freedesktop.appearance color-scheme`) with `gdbus`; dark when nothing is reported. The `dark-light` crate was rejected: it adds about 150 crates, including an async runtime, for one value |
 | The window position cannot be read or set under Wayland | Wayland does not allow it | Only the size is restored there |
 | Right-to-left scripts are laid out wrongly | egui has no bidirectional text support | Named in the spec as not supported |
 | Emoji are monochrome | egui 0.36 has no colour emoji | Accepted |

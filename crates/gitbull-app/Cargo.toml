@@ -13,4 +13,19 @@ name = "git-bull"
 path = "src/main.rs"
 
 [dependencies]
+eframe = "0.36.2"
+fluent-bundle = "0.16.0"
+fluent-syntax = "0.12.0"
+fontdb = "0.24"
 gitbull-core.workspace = true
+gitbull-git.workspace = true
+rfd = "0.17.2"
+skrifa = "0.44.0"
+unic-langid = "0.9.6"
+
+[dev-dependencies]
+egui_kittest = "0.36.2"
+gitbull-testkit.workspace = true
+kurbo = "0.13"
+tempfile = "3.27.0"
+write-fonts = "0.53"
