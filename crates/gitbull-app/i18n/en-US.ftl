@@ -30,6 +30,9 @@ chooser-recent = Recent repositories
 chooser-no-recent = No repositories opened yet.
 notice-not-a-repository = { $folder } is not inside a Git repository.
 notice-dismiss = Dismiss
+notice-hidden-by-filter = The commit of { $reference } is hidden by the branch filter.
+notice-show-all-branches = Show all branches
+notice-not-a-commit = The tag { $tag } does not point to a commit.
 
 ## Toolbar
 
@@ -52,6 +55,12 @@ sidebar-submodules = SUBMODULES
 view-history = History
 view-file-status = File status
 view-search = Search
+sidebar-filter = Filter
+sidebar-current-branch = checked out
+sidebar-not-initialised = not initialised
+sidebar-show-only-branch = Show only this branch
+filter-all-branches = All branches
+filter-current-branch = Current branch
 
 ## Commit list
 
@@ -60,6 +69,17 @@ column-description = Description
 column-date = Date
 column-author = Author
 column-commit = Commit
+row-loading = Loading…
+history-empty = This repository has no commits yet.
+graph-hint = This repository has no commit-graph file. With one, the history loads faster.
+graph-generate = Generate commit-graph
+graph-confirm-title = Generate the commit-graph?
+graph-confirm-body = git-bull will run { $command }. It writes the commit-graph file into the .git directory of this repository. The content and the history of the repository do not change.
+graph-confirm-generate = Generate
+graph-cancel = Cancel
+graph-generating = Generating the commit-graph
+graph-failed = The commit-graph could not be generated: { $error }
+copy-full-hash = Copy full hash
 
 ## Commit and diff panels
 
@@ -90,5 +110,14 @@ settings-git-applied = git-bull now uses this Git.
 ## Status bar
 
 status-git-version = Git { $version }
+status-loading = { $loaded } of { $total } commits ({ $percent }%)
+status-loaded-so-far = { $loaded ->
+    [one] { $loaded } commit loaded
+   *[other] { $loaded } commits loaded
+}
+status-commits = { $count ->
+    [one] { $count } commit
+   *[other] { $count } commits
+}
 status-detached = Detached at { $commit }
 status-settings-reset = The settings file could not be read; git-bull started with default settings.

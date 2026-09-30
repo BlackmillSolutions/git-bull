@@ -3,6 +3,7 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use eframe::egui::accesskit::Role;
 use egui_kittest::kittest::Queryable;
@@ -105,6 +106,19 @@ fn dropped_folder_opens_in_a_new_tab() {
 
     assert_eq!(tab_titles(harness.state()), ["git-bull", "linux"]);
     assert_eq!(active_title(harness.state()).as_deref(), Some("linux"));
+}
+
+#[test]
+fn a_slow_opening_settles_while_its_spinner_keeps_repainting() {
+    let settings = one_tab_open();
+    let test = build(Setup {
+        settings,
+        backend: repositories().with_inspect_delay(Duration::from_millis(300)),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    assert_eq!(tab_titles(harness.state()), ["git-bull"]);
 }
 
 #[test]

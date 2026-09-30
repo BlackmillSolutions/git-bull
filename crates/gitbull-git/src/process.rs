@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 use crate::error::Error;
 use crate::log::{CommandLog, Outcome};
 
+/// Sees the error output of a process as it arrives, such as progress.
+pub type StderrWatcher = Box<dyn FnMut(&[u8]) + Send>;
+
 /// A Git process started by [`crate::Git::spawn`].
 ///
 /// Dropping it stops the process and every process it started.
@@ -38,6 +41,7 @@ impl Process {
         command: String,
         log: Option<Arc<CommandLog>>,
         started: Instant,
+        mut watcher: Option<StderrWatcher>,
     ) -> Process {
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
@@ -50,6 +54,9 @@ impl Process {
                 while let Ok(read) = pipe.read(&mut chunk) {
                     if read == 0 {
                         break;
+                    }
+                    if let Some(watch) = &mut watcher {
+                        watch(&chunk[..read]);
                     }
                     let room = STDERR_LIMIT.saturating_sub(kept.len());
                     kept.extend_from_slice(&chunk[..read.min(room)]);

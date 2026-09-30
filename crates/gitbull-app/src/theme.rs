@@ -264,6 +264,26 @@ mod tests {
     }
 
     #[test]
+    fn badge_text_is_readable_on_every_badge() {
+        // Badge text is drawn in the colour of the list background.
+        for (name, palette) in [("light", &LIGHT), ("dark", &DARK)] {
+            for badge in [
+                palette.badge_head,
+                palette.badge_branch,
+                palette.badge_remote,
+                palette.badge_tag,
+                palette.text_muted,
+            ] {
+                let ratio = badge.contrast(palette.list);
+                assert!(
+                    ratio >= 4.5,
+                    "{name} badge {badge:?} has contrast {ratio:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_graph_colour_stands_out_against_the_commit_list() {
         for (name, palette) in [("light", &LIGHT), ("dark", &DARK)] {
             for (index, lane) in palette.lanes.iter().enumerate() {

@@ -74,6 +74,8 @@ pub struct Setup {
     pub open_at_start: Option<PathBuf>,
     /// Replaces the always usable Git.
     pub checker: Option<GitChecker>,
+    /// The local time zone; UTC unless given.
+    pub time_zone: Option<jiff::tz::TimeZone>,
 }
 
 pub fn build(setup: Setup) -> TestApp {
@@ -92,6 +94,7 @@ pub fn build(setup: Setup) -> TestApp {
             git: setup.picked_git,
         }),
         open_at_start: setup.open_at_start,
+        time_zone: setup.time_zone.unwrap_or(jiff::tz::TimeZone::UTC),
     });
     TestApp { dir, app }
 }

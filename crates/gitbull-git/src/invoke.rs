@@ -5,14 +5,16 @@
 //! else is a defect.
 
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::cancel::CancelToken;
 use crate::error::Error;
 use crate::log::{CommandLog, Outcome};
-use crate::process::Process;
+use crate::process::{Process, StderrWatcher};
 
 /// A configuration value passed to Git through `GIT_CONFIG_COUNT`.
 ///
@@ -113,11 +115,44 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.spawn_with(repo, overrides, &[], args, stdin, None)
+    }
+
+    /// Like [`Git::spawn`], with further environment variables and a
+    /// watcher that sees the error output as it arrives, such as progress.
+    pub fn spawn_watching<I, S>(
+        &self,
+        repo: &Path,
+        env: &[(&str, &str)],
+        args: I,
+        watcher: StderrWatcher,
+    ) -> Result<Process, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.spawn_with(repo, &[], env, args, false, Some(watcher))
+    }
+
+    fn spawn_with<I, S>(
+        &self,
+        repo: &Path,
+        overrides: &[ConfigOverride],
+        env: &[(&str, &str)],
+        args: I,
+        stdin: bool,
+        watcher: Option<StderrWatcher>,
+    ) -> Result<Process, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
         let command_line = command_line(&args);
         let started = Instant::now();
-        let child = self
-            .command(repo, overrides, &args)
+        let mut command = self.command(repo, overrides, &args);
+        command.envs(env.iter().copied());
+        let child = command
             .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -129,7 +164,13 @@ impl Git {
                     source,
                 }
             })?;
-        Ok(Process::new(child, command_line, self.log.clone(), started))
+        Ok(Process::new(
+            child,
+            command_line,
+            self.log.clone(),
+            started,
+            watcher,
+        ))
     }
 
     /// Runs `git <args>` in `repo` and returns its standard output.
@@ -175,6 +216,35 @@ impl Git {
 }
 
 impl Git {
+    /// Like [`Git::run`], but `cancel` stops Git; the result is then
+    /// [`Error::Cancelled`].
+    pub fn run_cancellable<I, S>(
+        &self,
+        repo: &Path,
+        overrides: &[ConfigOverride],
+        args: I,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut process = self.spawn(repo, overrides, args, false)?;
+        let canceller = process.canceller();
+        let registration = cancel.on_cancel(move || canceller.cancel());
+        let mut output = Vec::new();
+        let read = process
+            .take_stdout()
+            .expect("standard output is piped")
+            .read_to_end(&mut output);
+        let command = process.command().to_owned();
+        let result = process.wait();
+        cancel.forget(registration);
+        result?;
+        read.map_err(|source| Error::Io { command, source })?;
+        Ok(output)
+    }
+
     fn record(&self, command: &str, started: Instant, outcome: Outcome) {
         if let Some(log) = &self.log {
             log.record(command, started.elapsed(), outcome);

@@ -6,8 +6,9 @@
 //! like Git without running it.
 
 mod fake;
+pub mod generator;
 
-pub use fake::FakeBackend;
+pub use fake::{FakeBackend, GraphGate, HistoryFeed, LiveRepo, Probe, commit_line, fake_id};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -188,6 +189,40 @@ impl TestRepo {
         self.git(&["add", "--all"]);
         let date = format!("{} +0000", FIRST_COMMIT_EPOCH + 60 * self.commits);
         let mut command = self.command(&["commit", "--quiet", "--message", message]);
+        command
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date);
+        run(command);
+        self.commits += 1;
+        self.git(&["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
+    /// Creates `count` commits on `main` with `git fast-import`, messages
+    /// "Commit 1" to "Commit <count>"; fast enough for thousands.
+    pub fn import_commits(&self, count: usize) {
+        let mut stream = String::new();
+        for n in 1..=count {
+            let message = format!("Commit {n}\n");
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{n}\ncommitter {AUTHOR_NAME} <{AUTHOR_EMAIL}> {} +0000\ndata {}\n{message}",
+                FIRST_COMMIT_EPOCH + n as u64,
+                message.len()
+            ));
+            if n > 1 {
+                stream.push_str(&format!("from :{}\n", n - 1));
+            }
+            stream.push('\n');
+        }
+        self.git_with_input(&["fast-import", "--quiet"], &stream);
+    }
+
+    /// Merges `branches` into the current branch with a merge commit, an
+    /// octopus merge for more than one; returns the full hash.
+    pub fn merge(&mut self, message: &str, branches: &[&str]) -> String {
+        let date = format!("{} +0000", FIRST_COMMIT_EPOCH + 60 * self.commits);
+        let mut args = vec!["merge", "--quiet", "--no-ff", "--message", message];
+        args.extend(branches);
+        let mut command = self.command(&args);
         command
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_DATE", &date);

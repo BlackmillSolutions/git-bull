@@ -19,6 +19,7 @@ fluent-syntax = "0.12.0"
 fontdb = "0.24"
 gitbull-core.workspace = true
 gitbull-git.workspace = true
+jiff = "0.2.37"
 rfd = "0.17.2"
 skrifa = "0.44.0"
 unic-langid = "0.9.6"
@@ -27,5 +28,11 @@ unic-langid = "0.9.6"
 egui_kittest = "0.36.2"
 gitbull-testkit.workspace = true
 kurbo = "0.13"
+memory-stats = "1.2.0"
 tempfile = "3.27.0"
 write-fonts = "0.53"
+
+# Snapshot tests render with a software rasteriser, which Windows always has.
+[target.'cfg(windows)'.dev-dependencies]
+egui_kittest = { version = "0.36.2", features = ["snapshot", "wgpu"] }
+image = { version = "0.25.10", default-features = false }

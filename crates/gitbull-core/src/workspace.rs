@@ -12,6 +12,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use gitbull_git::{Backend, Error};
 
 use crate::opening::{self, OpenedRepository};
+use crate::session::Session;
 
 /// Asks the UI to draw again, because background work has finished.
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
@@ -33,7 +34,7 @@ pub enum View {
 #[derive(Debug)]
 pub enum TabState {
     Opening,
-    Ready(OpenedRepository),
+    Ready(Box<Session>),
     Failed(Failure),
 }
 
@@ -85,10 +86,25 @@ impl Tab {
         self.view
     }
 
+    /// The session of a tab that has opened.
+    pub fn session(&self) -> Option<&Session> {
+        match &self.state {
+            TabState::Ready(session) => Some(session),
+            _ => None,
+        }
+    }
+
+    pub fn session_mut(&mut self) -> Option<&mut Session> {
+        match &mut self.state {
+            TabState::Ready(session) => Some(session),
+            _ => None,
+        }
+    }
+
     /// The name on the tab: the repository's, or the folder's until known.
     pub fn title(&self) -> String {
         match &self.state {
-            TabState::Ready(opened) => opened.title.clone(),
+            TabState::Ready(session) => session.opened().title.clone(),
             _ => self
                 .requested
                 .file_name()
@@ -115,6 +131,8 @@ pub struct Workspace {
     notify: Notify,
     tabs: Vec<Tab>,
     active: Option<TabId>,
+    /// The tab shown in the last frame.
+    last_shown: Option<TabId>,
     events: Vec<Event>,
     next_id: u64,
 }
@@ -126,6 +144,7 @@ impl Workspace {
             notify,
             tabs: Vec::new(),
             active: None,
+            last_shown: None,
             events: Vec::new(),
             next_id: 0,
         }
@@ -173,6 +192,10 @@ impl Workspace {
                 index += 1;
             }
         }
+        self.show_active();
+        for session in self.tabs.iter_mut().filter_map(Tab::session_mut) {
+            changed |= session.poll();
+        }
         changed
     }
 
@@ -203,7 +226,7 @@ impl Workspace {
         self.active = Some(self.tabs[(position + step) % count].id);
     }
 
-    /// Closes the tab; its background work is abandoned.
+    /// Closes the tab; its background work stops.
     pub fn close(&mut self, id: TabId) {
         let Some(position) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
@@ -250,13 +273,39 @@ impl Workspace {
             .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
     }
 
+    pub fn active_mut(&mut self) -> Option<&mut Tab> {
+        self.active
+            .and_then(|id| self.tabs.iter_mut().find(|tab| tab.id == id))
+    }
+
+    /// Looks for changes made outside git-bull in the tab shown.
+    pub fn refresh_active(&mut self) {
+        if let Some(session) = self.active_mut().and_then(Tab::session_mut) {
+            session.refresh();
+        }
+    }
+
+    /// A tab starts its background work only once it is shown; `poll`
+    /// runs every frame, so this covers every change of the active tab.
+    fn show_active(&mut self) {
+        // A tab shown again after another one was may be out of date.
+        let again = self.active != self.last_shown;
+        self.last_shown = self.active;
+        if let Some(session) = self.active_mut().and_then(Tab::session_mut) {
+            if again && session.is_started() {
+                session.refresh();
+            }
+            session.show();
+        }
+    }
+
     /// The paths to reopen next time, in tab order, and the active index.
     pub fn session_to_save(&self) -> (Vec<PathBuf>, Option<usize>) {
         let paths = self
             .tabs
             .iter()
             .map(|tab| match &tab.state {
-                TabState::Ready(opened) => opened.root.clone(),
+                TabState::Ready(session) => session.opened().root.clone(),
                 _ => tab.requested.clone(),
             })
             .collect();
@@ -317,7 +366,7 @@ impl Workspace {
                 }
                 let existing = self.tabs.iter().find(|tab| {
                     tab.id != id
-                        && matches!(&tab.state, TabState::Ready(other) if other.root == opened.root)
+                        && matches!(&tab.state, TabState::Ready(other) if other.opened().root == opened.root)
                 });
                 if let Some(existing) = existing.map(|tab| tab.id) {
                     self.tabs.remove(index);
@@ -326,7 +375,9 @@ impl Workspace {
                     }
                     return false;
                 }
-                self.tabs[index].state = TabState::Ready(opened);
+                let session =
+                    Session::new(opened, Arc::clone(&self.backend), Arc::clone(&self.notify));
+                self.tabs[index].state = TabState::Ready(Box::new(session));
                 true
             }
             Err(Failure::Git(Error::NotARepository(path))) if origin == Origin::User => {
@@ -349,7 +400,7 @@ impl Workspace {
 }
 
 /// The message a panic was raised with.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|message| (*message).to_owned())
@@ -360,7 +411,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gitbull_testkit::FakeBackend;
+    use crate::session::LoadState;
+    use gitbull_testkit::{FakeBackend, HistoryFeed, Probe, commit_line};
     use std::time::{Duration, Instant};
 
     fn path(parts: &[&str]) -> PathBuf {
@@ -397,6 +449,168 @@ mod tests {
 
     fn active_title(workspace: &Workspace) -> Option<String> {
         workspace.active().map(Tab::title)
+    }
+
+    fn session_of<'a>(workspace: &'a Workspace, title: &str) -> &'a Session {
+        workspace
+            .tabs()
+            .iter()
+            .find(|tab| tab.title() == title)
+            .and_then(Tab::session)
+            .unwrap_or_else(|| panic!("no ready tab {title}"))
+    }
+
+    /// Polls until `done` holds.
+    fn wait_for(workspace: &mut Workspace, done: impl Fn(&Workspace) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done(workspace) {
+            assert!(Instant::now() < deadline, "timed out");
+            workspace.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn histories(probe: &Probe, repo: &[&str]) -> usize {
+        probe
+            .calls(&path(repo))
+            .iter()
+            .filter(|call| *call == "history")
+            .count()
+    }
+
+    fn reference_reads(probe: &Probe, repo: &[&str]) -> usize {
+        probe
+            .calls(&path(repo))
+            .iter()
+            .filter(|call| *call == "references")
+            .count()
+    }
+
+    fn loaded(workspace: &Workspace, title: &str) -> bool {
+        matches!(
+            session_of(workspace, title).history().state,
+            LoadState::Loaded
+        )
+    }
+
+    #[test]
+    fn showing_a_tab_again_refreshes_it_but_the_first_showing_does_not() {
+        let backend = two_repositories();
+        let probe = backend.probe();
+        let mut workspace = workspace(backend);
+        workspace.restore(
+            &[path(&["work", "git-bull"]), path(&["work", "linux"])],
+            Some(0),
+        );
+        settle(&mut workspace);
+        wait_for(&mut workspace, |w| loaded(w, "git-bull"));
+        wait_for(&mut workspace, |_| {
+            reference_reads(&probe, &["work", "git-bull"]) == 1
+        });
+
+        let (first, second) = (workspace.tabs()[0].id(), workspace.tabs()[1].id());
+        workspace.activate(second);
+        wait_for(&mut workspace, |w| loaded(w, "linux"));
+        assert_eq!(reference_reads(&probe, &["work", "linux"]), 1);
+
+        workspace.activate(first);
+        wait_for(&mut workspace, |_| {
+            reference_reads(&probe, &["work", "git-bull"]) == 2
+        });
+    }
+
+    #[test]
+    fn refreshing_the_active_tab_leaves_the_hidden_ones() {
+        let backend = two_repositories();
+        let probe = backend.probe();
+        let mut workspace = workspace(backend);
+        workspace.restore(
+            &[path(&["work", "git-bull"]), path(&["work", "linux"])],
+            Some(1),
+        );
+        settle(&mut workspace);
+        wait_for(&mut workspace, |w| loaded(w, "linux"));
+        workspace.refresh_active();
+        wait_for(&mut workspace, |_| {
+            reference_reads(&probe, &["work", "linux"]) == 2
+        });
+        assert_eq!(reference_reads(&probe, &["work", "git-bull"]), 0);
+    }
+
+    #[test]
+    fn a_restored_tab_loads_nothing_until_it_is_shown() {
+        let backend = two_repositories();
+        let probe = backend.probe();
+        let mut workspace = workspace(backend);
+        workspace.restore(
+            &[path(&["work", "git-bull"]), path(&["work", "linux"])],
+            Some(0),
+        );
+        settle(&mut workspace);
+        wait_for(&mut workspace, |_| {
+            histories(&probe, &["work", "git-bull"]) == 1
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        workspace.poll();
+        assert_eq!(histories(&probe, &["work", "linux"]), 0);
+
+        let linux = workspace.tabs()[1].id();
+        workspace.activate(linux);
+        wait_for(&mut workspace, |_| {
+            histories(&probe, &["work", "linux"]) == 1
+        });
+    }
+
+    #[test]
+    fn switching_tabs_with_the_keyboard_shows_the_new_tab() {
+        let backend = two_repositories();
+        let probe = backend.probe();
+        let mut workspace = workspace(backend);
+        workspace.restore(
+            &[path(&["work", "git-bull"]), path(&["work", "linux"])],
+            Some(0),
+        );
+        settle(&mut workspace);
+        workspace.activate_next();
+        wait_for(&mut workspace, |_| {
+            histories(&probe, &["work", "linux"]) == 1
+        });
+    }
+
+    #[test]
+    fn a_load_in_progress_finishes_while_its_tab_is_hidden() {
+        let feed = HistoryFeed::new();
+        let backend = two_repositories().with_history_feed(path(&["work", "git-bull"]), &feed);
+        let mut workspace = workspace(backend);
+        workspace.open(path(&["work", "git-bull"]));
+        settle(&mut workspace);
+        wait_for(&mut workspace, |_| feed.starts() == 1);
+
+        workspace.open(path(&["work", "linux"]));
+        settle(&mut workspace);
+        feed.send([commit_line("b", &["a"]), commit_line("a", &[])]);
+        feed.finish();
+
+        wait_for(&mut workspace, |w| {
+            matches!(session_of(w, "git-bull").history().state, LoadState::Loaded)
+        });
+        assert_eq!(session_of(&workspace, "git-bull").history().store.len(), 2);
+        assert_eq!(active_title(&workspace).as_deref(), Some("linux"));
+    }
+
+    #[test]
+    fn closing_a_loading_tab_stops_its_work() {
+        let feed = HistoryFeed::new();
+        let backend = two_repositories().with_history_feed(path(&["work", "git-bull"]), &feed);
+        let mut workspace = workspace(backend);
+        let id = workspace.open(path(&["work", "git-bull"]));
+        settle(&mut workspace);
+        wait_for(&mut workspace, |_| feed.starts() == 1);
+
+        workspace.close(id);
+
+        assert!(feed.was_cancelled());
+        assert!(workspace.tabs().is_empty());
     }
 
     #[test]

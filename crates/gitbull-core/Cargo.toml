@@ -10,9 +10,11 @@ publish.workspace = true
 
 [dependencies]
 gitbull-git.workspace = true
+hashbrown = { version = "0.17.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
 
 [dev-dependencies]
+fastrand = "2.5.0"
 gitbull-testkit.workspace = true
 tempfile = "3.27.0"

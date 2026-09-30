@@ -59,6 +59,7 @@ fn main() -> eframe::Result {
                 theme,
                 picker: Box::new(SystemPicker),
                 open_at_start,
+                time_zone: jiff::tz::TimeZone::system(),
             });
             Ok(Box::new(NativeApp {
                 app,

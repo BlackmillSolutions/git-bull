@@ -154,9 +154,14 @@ configuration nor the user's settings change what git-bull parses.
 
 | Filter | Revisions |
 |---|---|
-| All branches | `--branches --tags --remotes HEAD` |
+| All branches | `--branches --tags --remotes`, and `HEAD` when it is detached |
 | Current branch | `HEAD` |
 | Selected branches | the selected reference names |
+
+Options come first, then `--end-of-options`, then the names, so that a
+reference name is never read as an option. A checked-out branch is already
+covered by `--branches`; adding `HEAD` for it would make the walk fail when
+the branch has no commits yet.
 
 Errors are typed:
 
@@ -239,10 +244,12 @@ The layout runs in one pass, in stream order.
 With a commit-graph, Git emits the first line only after its walk has
 reached the generation of the oldest tip. Tags deep in history delay it:
 0.53 s with branches and tags against 0.03 s from HEAD alone, measured on
-1,000,000 generated commits. The Linux kernel has tags back to its first
-commits, so this is the largest risk for the target of 1 s. If the benchmark
-misses it, tags already reachable from a branch are left out of
-`<revisions>`, because they add no commits.
+1,000,000 generated commits. The benchmark of task 4.21 found 0.99 s to the
+first rows in git-bull with branches and tags, 0.84 s of them until Git's
+first line, against 0.17 s for the current branch. The Linux kernel has tags
+back to its first commits, so this is the largest risk for the target of
+1 s. If the benchmark misses it, tags already reachable from a branch are
+left out of `<revisions>`, because they add no commits.
 
 **Refresh**
 
@@ -405,6 +412,13 @@ choice:
 | Blame opened from File status | Shows the file as of the last commit |
 | A release package fails to build | No release is published |
 | Dates | `YYYY-MM-DD HH:MM` in local time, so that no month names need translation |
+| Decoding a declared commit encoding | `encoding_rs`, with the labels of the WHATWG Encoding Standard; ISO-8859-1 is read as its superset windows-1252, and an unknown label as UTF-8 |
+| Names in author and committer | Decoded from the declared encoding too, as `git log` does |
+| Local time zone for dates | `jiff`, with the offset each date had in the system time zone, so that daylight saving time is right for old commits; on Windows its bundled time zone database. The zone is passed in, so that tests fix it |
+| Selecting text in the commit list | Not possible: it would take the clicks that select rows and the copy command that copies the hash |
+| Progress of the commit-graph | `GIT_PROGRESS_DELAY=0` for this command, since Git otherwise reports nothing for two seconds |
+| Cancelling the commit-graph | Git is stopped; a `commit-graph.lock` made during the run is removed, since a stopped Git cannot remove it and later writes would fail on it. Whether the file exists is checked afterwards, as Git may finish just before it is stopped |
+| Growing the commit store | Columns grow by chunks of 65,536 rows, and the id index moves its rows into a table of twice the size two per appended commit. Commits are appended on the UI thread, and growing everything at once took 33 ms at 900,000 commits |
 
 ## Risks / Trade-offs
 

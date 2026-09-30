@@ -1,20 +1,26 @@
 //! The state of the running application, independent of eframe so that
 //! tests can drive it.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gitbull_core::git_setup::GitCheck;
+use gitbull_core::session::{BranchFilter, Navigation, Session};
 use gitbull_core::settings::{
     Layout, Loaded, Settings, SettingsFile, ThemeSetting, WindowGeometry,
 };
-use gitbull_core::workspace::{Event, Notify, Workspace};
+use gitbull_core::sidebar_tree::{SidebarRow, SidebarState};
+use gitbull_core::workspace::{Event, Notify, TabId, Workspace};
+use gitbull_git::object_id::ObjectId;
 use gitbull_git::version::GitVersion;
 use gitbull_git::{Backend, CliBackend};
+use jiff::tz::TimeZone;
 
 use crate::i18n::Translations;
 use crate::theme::{Appearance, ThemeFollower};
+use crate::virtual_list::ListState;
 
 /// Whether Git can be used.
 #[derive(Debug)]
@@ -59,6 +65,11 @@ pub type GitChecker = Box<dyn Fn(Option<&Path>) -> (GitStatus, Option<Arc<dyn Ba
 pub enum Notice {
     /// The folder the user opened is not inside a Git repository.
     NotARepository(PathBuf),
+    /// The commit of the reference with this full name is not in the graph
+    /// the branch filter shows.
+    HiddenByFilter(String),
+    /// The tag with this name points to a tree or a file.
+    NotACommit(String),
 }
 
 /// The settings dialog while it is open.
@@ -84,6 +95,28 @@ pub struct Parts {
     pub picker: Box<dyn Picker>,
     /// A folder named on the command line, opened after the restored tabs.
     pub open_at_start: Option<PathBuf>,
+    /// The local time zone, in which dates are shown.
+    pub time_zone: TimeZone,
+}
+
+/// What the UI keeps for one tab while it is open, such as the scroll
+/// position and selection of its lists.
+#[derive(Default)]
+pub(crate) struct TabView {
+    pub(crate) commits: ListState,
+    pub(crate) sidebar: SidebarState,
+    pub(crate) sidebar_list: ListState,
+    /// The rows laid out for `sidebar_key`, kept until it changes.
+    pub(crate) sidebar_rows: Vec<SidebarRow>,
+    pub(crate) sidebar_key: Option<(u64, SidebarState)>,
+    /// The reference the last navigation went to.
+    pub(crate) target: Option<String>,
+    /// The selected commit, to select it again in a reloaded history.
+    pub(crate) selected_id: Option<ObjectId>,
+    /// The generation of the history the list last showed.
+    pub(crate) generation: u64,
+    /// The dialog that asks before writing the commit-graph is open.
+    pub(crate) confirm_graph: bool,
 }
 
 /// Everything the window shows.
@@ -105,6 +138,8 @@ pub struct App {
     pub(crate) dialog: Option<SettingsDialog>,
     dirty: bool,
     last_saved: Instant,
+    pub(crate) time_zone: TimeZone,
+    views: HashMap<TabId, TabView>,
 }
 
 impl App {
@@ -117,6 +152,7 @@ impl App {
             theme,
             picker,
             open_at_start,
+            time_zone,
         } = parts;
         let texts = Translations::load(&loaded.settings.language);
         let (git, backend) = checker(loaded.settings.git_path.as_deref());
@@ -136,6 +172,8 @@ impl App {
             dialog: None,
             dirty: false,
             last_saved: Instant::now(),
+            time_zone,
+            views: HashMap::new(),
         };
         if let Some(backend) = backend {
             app.start_workspace(backend);
@@ -354,6 +392,100 @@ impl App {
 
     pub fn workspace_mut(&mut self) -> Option<&mut Workspace> {
         self.workspace.as_mut()
+    }
+
+    /// The session of the active tab and what the UI keeps for it, if the
+    /// tab is ready.
+    pub(crate) fn active_view(&mut self) -> Option<(&mut Session, &mut TabView)> {
+        let tab = self.workspace.as_mut()?.active_mut()?;
+        let id = tab.id();
+        let session = tab.session_mut()?;
+        Some((session, self.views.entry(id).or_default()))
+    }
+
+    /// Selects the commit of the reference with the full `name`, or tells
+    /// why it cannot.
+    pub(crate) fn navigate(&mut self, name: &str) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        let outcome = session.navigate(name);
+        let short = session
+            .sidebar()
+            .and_then(|sidebar| sidebar.as_ref().ok())
+            .and_then(|sidebar| sidebar.references.iter().find(|r| r.name == name))
+            .map(|reference| reference.short.clone())
+            .unwrap_or_else(|| name.to_owned());
+        view.target = Some(name.to_owned());
+        self.show_navigation(outcome, short);
+    }
+
+    /// Applies a navigation that waited for its commit to load.
+    pub(crate) fn poll_navigation(&mut self) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        if let Some(outcome) = session.take_navigation() {
+            let target = view.target.clone().unwrap_or_default();
+            self.show_navigation(outcome, target);
+        }
+    }
+
+    fn show_navigation(&mut self, outcome: Navigation, reference: String) {
+        match outcome {
+            Navigation::Selected(row) => {
+                if let Some((session, view)) = self.active_view() {
+                    view.commits.select_and_reveal(u64::from(row));
+                    // Remembered at once: a history replaced before the list
+                    // is drawn again selects this commit, not the old one.
+                    view.selected_id = Some(session.history().store.id(row));
+                }
+                if matches!(
+                    self.notice,
+                    Some(Notice::HiddenByFilter(_) | Notice::NotACommit(_))
+                ) {
+                    self.notice = None;
+                }
+            }
+            Navigation::Waiting => {}
+            Navigation::HiddenByFilter => {
+                let full = self
+                    .active_view()
+                    .and_then(|(_, view)| view.target.clone())
+                    .unwrap_or(reference);
+                self.notice = Some(Notice::HiddenByFilter(full));
+            }
+            Navigation::NotACommit => self.notice = Some(Notice::NotACommit(reference)),
+        }
+    }
+
+    /// Shows other branches in the graph of the active tab. The rows
+    /// change, so the selection and the scroll position start afresh.
+    pub(crate) fn set_branch_filter(&mut self, filter: BranchFilter) {
+        if let Some((session, view)) = self.active_view()
+            && *session.filter() != filter
+        {
+            session.set_filter(filter);
+            view.commits = ListState::default();
+            view.selected_id = None;
+        }
+    }
+
+    /// Shows all branches and goes to the reference again.
+    pub(crate) fn show_all_branches(&mut self, name: &str) {
+        self.notice = None;
+        self.set_branch_filter(BranchFilter::All);
+        self.navigate(name);
+    }
+
+    /// Forgets what the UI kept for tabs that are closed.
+    pub(crate) fn forget_closed_views(&mut self) {
+        let open: Vec<TabId> = self
+            .workspace
+            .iter()
+            .flat_map(|workspace| workspace.tabs().iter().map(|tab| tab.id()))
+            .collect();
+        self.views.retain(|id, _| open.contains(id));
     }
 
     /// Records a divider position or column width the UI measured.
