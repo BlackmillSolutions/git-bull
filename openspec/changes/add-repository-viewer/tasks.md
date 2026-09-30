@@ -35,13 +35,13 @@ after each stage.
 - [x] 3.5 Find a system font for Chinese, Japanese and Korean through `fontdb` and register it as fallback, loading at most one font per script group; verify a UI test renders a Japanese sample with a font supplied by the test, check by hand on Windows that a system font is found, and record the memory the font adds
 - [x] 3.6 Build the main window with its areas, draggable dividers, and persisted divider positions, window size and window position, leaving the position to the system under Wayland; verify a UI test finds all areas of the History view and restored divider positions
 - [x] 3.7 Implement sessions and the tab bar: open, activate an existing tab, close, restore at start-up; verify session tests against the fake backend for every scenario of "Repository tabs" and "Restoring tabs at start-up"
-- [ ] 3.8 Implement opening repositories: chooser with recent list, native folder dialog, dropped folder except under Wayland, command-line path and the message for a folder that is no repository; verify tests for the opening logic, and the dialog and drop manually on Windows
+- [x] 3.8 Implement opening repositories: chooser with recent list, native folder dialog, dropped folder except under Wayland, command-line path and the message for a folder that is no repository; verify tests for the opening logic, and the dialog and drop manually on Windows
 - [x] 3.9 Build the start screen for missing or outdated Git with "check again" and setting the path; verify UI tests for both states
 - [x] 3.10 Build the settings dialog with theme, language and validated Git path; verify UI tests for a valid and an invalid path
 - [x] 3.11 Implement the keyboard shortcuts for tabs and opening: Ctrl+O, Ctrl+T, Ctrl+W with Cmd on macOS, and Ctrl+Tab, Ctrl+Shift+Tab with Ctrl on every platform; verify a UI test for each of them, also as on macOS. The shortcuts for lists, focus, refresh, search and copying are verified with the tasks that build their targets: 4.10, 4.11, 4.15, 5.2, 5.6 and 7.4
 - [x] 3.12 Build the status bar with current branch and Git version; verify a UI test
 - [x] 3.13 Build the error display with expandable details and turn worker panics into tab errors; verify tests for a failed command and for a panicking worker
-- [ ] 3.14 Stage check: start the application, open a repository and see its tab; verify by hand on Windows and through the UI tests in CI on Linux and macOS
+- [x] 3.14 Stage check: start the application, open a repository and see its tab; verify by hand on Windows and through the UI tests in CI on Linux and macOS
 
 ## 4. Commit history
 
