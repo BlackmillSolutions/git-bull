@@ -85,6 +85,8 @@ pub struct DiffPane {
     /// The diff that arrives next shows other versions, which are
     /// highlighted afresh.
     versions_changed: bool,
+    /// How often a diff with other content replaced the one shown.
+    version: u64,
 }
 
 impl DiffPane {
@@ -101,6 +103,7 @@ impl DiffPane {
             highlight: HighlightState::NotStarted,
             highlight_work: Pending::none(),
             versions_changed: false,
+            version: 0,
         }
     }
 
@@ -222,10 +225,20 @@ impl DiffPane {
     pub(crate) fn poll(&mut self) -> bool {
         let mut changed = false;
         if let Some(diff) = self.work.take() {
-            self.diff = match diff {
+            let diff = match diff {
                 Ok(diff) => DiffState::Loaded(diff),
                 Err(failure) => DiffState::Failed(failure),
             };
+            // A refresh that reads the same diff keeps what the user did
+            // with the one shown, such as a selection.
+            let same = matches!(
+                (&self.diff, &diff),
+                (DiffState::Loaded(old), DiffState::Loaded(new)) if old == new
+            );
+            if !same {
+                self.version += 1;
+            }
+            self.diff = diff;
             // The versions are the same when the whole diff is loaded
             // later; their highlighting stays.
             if matches!(self.highlight, HighlightState::NotStarted) || self.versions_changed {
@@ -250,6 +263,12 @@ impl DiffPane {
     /// The diff shown; meaningless while none is.
     pub fn diff(&self) -> &DiffState {
         &self.diff
+    }
+
+    /// Changes whenever a diff with other content replaced the one shown,
+    /// so that the UI knows when what it keeps for the diff is stale.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// The colours of the diff shown, once it is highlighted.

@@ -4,11 +4,13 @@
 //! data. Every invocation applies the rules of ADR 0006.
 
 pub mod backend;
+pub mod batch_check;
 pub mod blame;
 pub mod blob;
 pub mod cancel;
 pub mod changes;
 pub mod commit_graph;
+pub mod config;
 pub mod content;
 pub mod diff;
 pub mod error;

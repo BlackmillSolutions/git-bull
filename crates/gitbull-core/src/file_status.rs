@@ -170,6 +170,11 @@ impl FileStatus {
         self.pane.diff()
     }
 
+    /// Changes whenever a diff with other content replaced the one shown.
+    pub fn diff_version(&self) -> u64 {
+        self.pane.version()
+    }
+
     /// The colours of the diff shown, once it is highlighted.
     pub fn highlighting(&self) -> Option<&Highlighting> {
         self.pane.highlighting()

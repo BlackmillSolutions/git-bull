@@ -155,6 +155,9 @@ pub struct ListOutput {
     pub selection_changed: bool,
     /// The row the user double-clicked, or pressed Enter on.
     pub activated: Option<u64>,
+    /// The row whose context menu the user opened. The caller keeps what
+    /// the row shows now, as the rows may change while the menu is open.
+    pub menu_opened: Option<u64>,
 }
 
 /// A list of `rows` rows that fills the space it is given.
@@ -208,6 +211,7 @@ impl VirtualList {
 
         let mut clicked = None;
         let mut activated = None;
+        let mut menu_opened = None;
         let secondary = response.secondary_clicked();
         if response.clicked() || secondary {
             response.request_focus();
@@ -220,6 +224,7 @@ impl VirtualList {
                     state.select(Some(hit));
                     if secondary {
                         state.menu_row = Some(hit);
+                        menu_opened = Some(hit);
                     } else {
                         clicked = Some(hit);
                     }
@@ -301,6 +306,7 @@ impl VirtualList {
             clicked,
             selection_changed: state.selected() != before,
             activated,
+            menu_opened,
         }
     }
 }

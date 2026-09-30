@@ -16,7 +16,7 @@ use gitbull_core::sidebar_tree::{SidebarRow, SidebarState};
 use gitbull_core::workspace::{Event, Notify, TabId, View, Workspace};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
-use gitbull_git::status::Group;
+use gitbull_git::status::{Group, StatusEntry};
 use gitbull_git::version::GitVersion;
 use gitbull_git::{Backend, CliBackend};
 use jiff::tz::TimeZone;
@@ -123,6 +123,8 @@ pub(crate) struct TabView {
     pub(crate) target: Option<String>,
     /// The selected commit, to select it again in a reloaded history.
     pub(crate) selected_id: Option<ObjectId>,
+    /// The commit whose context menu was opened last in the commit list.
+    pub(crate) commit_menu: Option<ObjectId>,
     /// The generation of the history the list last showed.
     pub(crate) generation: u64,
     /// The dialog that asks before writing the commit-graph is open.
@@ -146,6 +148,12 @@ pub(crate) struct TabView {
     /// The version of the status `status_files` shows, to select the file
     /// chosen again where a new status puts it.
     pub(crate) status_version: Option<u64>,
+    /// The entry of the File status view whose context menu was opened
+    /// last, with the path the last commit has of it.
+    pub(crate) status_menu: Option<(StatusEntry, Option<RepoPath>)>,
+    /// The full name of the branch or remote branch whose context menu was
+    /// opened last in the sidebar.
+    pub(crate) sidebar_menu: Option<String>,
     /// The diff of the file chosen in the commit panel.
     pub(crate) commit_diff: DiffView,
     /// The diff of the file chosen in the File status view.
@@ -191,15 +199,17 @@ pub(crate) struct DiffView {
     pub(crate) key: Option<DiffKey>,
 }
 
-/// Which diff a diff panel shows.
+/// Which diff a diff panel shows. The last field counts how often a diff
+/// with other content replaced the one shown in that panel, so that a
+/// refresh that changes the diff of the same file makes another key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DiffKey {
     /// Of the file at an index of the files of a commit.
-    Commit(ObjectId, usize),
+    Commit(ObjectId, usize, u64),
     /// Of the file at an index of a group of the file status.
-    Status(Group, usize),
+    Status(Group, usize, u64),
     /// Of the file in the commit at an index of the file history.
-    FileHistory(usize),
+    FileHistory(usize, u64),
 }
 
 /// Everything the window shows.
@@ -376,8 +386,11 @@ impl App {
         }
     }
 
-    /// Opens the tabs of the last run with `backend`.
+    /// Opens the tabs of the last run with `backend`, each in its initial
+    /// state: the ids of the new tabs start afresh, so what the UI kept for
+    /// the old ones would land on other tabs.
     fn start_workspace(&mut self, backend: Arc<dyn Backend>) {
+        self.views.clear();
         let mut workspace = Workspace::new(backend, Arc::clone(&self.notify));
         workspace.restore(&self.settings.tabs, self.settings.active_tab);
         self.workspace = Some(workspace);

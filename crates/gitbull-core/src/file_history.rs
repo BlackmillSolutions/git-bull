@@ -187,6 +187,11 @@ impl FileHistory {
         self.pane.diff()
     }
 
+    /// Changes whenever a diff with other content replaced the one shown.
+    pub fn diff_version(&self) -> u64 {
+        self.pane.version()
+    }
+
     pub fn highlighting(&self) -> Option<&Highlighting> {
         self.pane.highlighting()
     }

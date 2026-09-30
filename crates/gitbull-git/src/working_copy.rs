@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cancel::CancelToken;
 use crate::changes::ChangeKind;
-use crate::diff::{Content, FileDiff, blob_sizes, parse_diff, passable, read_diff};
+use crate::diff::{Content, DiffCommand, FileDiff, blob_sizes, find_diff, passable};
 use crate::error::Error;
 use crate::filters::neutralised_filters;
 use crate::flags;
@@ -18,6 +18,10 @@ use crate::status::{Group, StatusEntry, StatusKind};
 /// compares it.
 fn arguments(group: Group, entry: &StatusEntry) -> Vec<OsString> {
     let comparison: &[&str] = match (group, entry.kind) {
+        // Git detects what the status reported: a copy only for a copy.
+        // Without a pathspec, for a path Git cannot be given, `-C` could
+        // turn a file listed as added into a copy of another one.
+        (Group::Staged, StatusKind::Changed(ChangeKind::Copied)) => &["diff", "--cached", "-C"],
         (Group::Staged, _) => &["diff", "--cached", "-M"],
         // Both sides of a conflict would give a combined diff.
         (Group::Unstaged, StatusKind::Conflicted) => &["diff", "HEAD"],
@@ -58,31 +62,22 @@ pub fn working_diff(
     cancel: &CancelToken,
 ) -> Result<FileDiff, Error> {
     let args = arguments(group, entry);
-    let command = || {
-        let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
-        format!("git {}", args.join(" "))
-    };
     // Reading files of the working copy runs the filters of the repository.
     let overrides = neutralised_filters(git, repo)?;
-    let no_index = group == Group::Untracked;
-    let (output, truncated) = read_diff(git, repo, &overrides, &args, limit, no_index, cancel)?;
-    let parsed = parse_diff(&output).map_err(|message| Error::Parse {
-        command: command(),
-        message,
-        bytes: output.clone(),
-    })?;
-    let found = parsed.into_iter().find(|diff| describes(diff, entry));
-    let mut diff = match found {
-        Some(diff) => FileDiff { truncated, ..diff },
-        None if truncated => return working_diff(git, repo, group, entry, None, cancel),
-        None => {
-            return Err(Error::Parse {
-                command: command(),
-                message: format!("no diff of {}", entry.path),
-                bytes: output,
-            });
-        }
+    let command = DiffCommand {
+        args: &args,
+        overrides: &overrides,
+        no_index: group == Group::Untracked,
     };
+    let mut diff = find_diff(
+        git,
+        repo,
+        &command,
+        limit,
+        &entry.path,
+        |diff| describes(diff, entry),
+        cancel,
+    )?;
     // The working copy is the new version, except in the staged group. Git
     // names it by the hash of its content, which is no blob of the object
     // database.

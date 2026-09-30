@@ -240,17 +240,24 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     {
         ui.ctx().copy_text(path);
     }
-    let menu_row = view.status_files.menu_row();
+    // The menu acts on the entry it was opened for, wherever a refresh
+    // moves it meanwhile, and on the path the last commit had of it then.
+    if let Some(row) = output.menu_opened {
+        view.status_menu = entry_at(row).map(|(group, index)| {
+            let entry = &status.group(group)[index];
+            (entry.clone(), last_commit_path(status, group, entry))
+        });
+    }
+    let (menu_entry, in_last_commit) = match &view.status_menu {
+        Some((entry, path)) => (Some(entry), path.as_ref()),
+        None => (None, None),
+    };
     let mut opened = None;
     output.response.context_menu(|ui| {
         // Nothing here changes the index, the working copy or the
         // repository. The history and blame show the file as of the last
         // commit, which a file new to it does not have.
-        let in_last_commit = menu_row
-            .and_then(entry_at)
-            .map(|(group, index)| &status.group(group)[index])
-            .and_then(last_commit_path);
-        if let Some(path) = &in_last_commit {
+        if let Some(path) = in_last_commit {
             if ui.button(&texts.file_history).clicked() {
                 opened = Some(FileAction::History("HEAD".to_owned(), path.clone()));
                 ui.close();
@@ -261,8 +268,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             }
         }
         if ui.button(&texts.copy_path).clicked() {
-            if let Some(path) = menu_row.and_then(path_of) {
-                ui.ctx().copy_text(path);
+            if let Some(entry) = menu_entry {
+                ui.ctx().copy_text(entry.path.to_string());
             }
             ui.close();
         }
@@ -275,13 +282,23 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     true
 }
 
-/// The path `entry` has in the last commit; `None` for a file the last
-/// commit does not have, such as an untracked or an added one.
-fn last_commit_path(entry: &StatusEntry) -> Option<RepoPath> {
+/// The path `entry` of `group` has in the last commit; `None` for a file
+/// the last commit does not have, such as an untracked, an added or a
+/// copied one. The staged entry of a file tells what the last commit has of
+/// it, also for the further changes of that file in the unstaged group.
+fn last_commit_path(status: &WorkingStatus, group: Group, entry: &StatusEntry) -> Option<RepoPath> {
+    let staged = match group {
+        Group::Unstaged => status
+            .staged
+            .iter()
+            .find(|staged| staged.path == entry.path),
+        _ => None,
+    };
+    let entry = staged.unwrap_or(entry);
     match entry.kind {
-        StatusKind::Untracked | StatusKind::Changed(ChangeKind::Added) => None,
-        // A renamed or copied file was in the last commit under its old path.
-        StatusKind::Changed(ChangeKind::Renamed | ChangeKind::Copied) => entry.old_path.clone(),
+        StatusKind::Untracked | StatusKind::Changed(ChangeKind::Added | ChangeKind::Copied) => None,
+        // A renamed file was in the last commit under its old path.
+        StatusKind::Changed(ChangeKind::Renamed) => entry.old_path.clone(),
         _ => Some(entry.path.clone()),
     }
 }

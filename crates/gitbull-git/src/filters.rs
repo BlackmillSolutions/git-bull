@@ -8,15 +8,15 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::config;
 use crate::error::Error;
 use crate::invoke::{ConfigOverride, Git};
 
 /// The overrides that neutralise the filters of the repository at `repo`.
 pub fn neutralised_filters(git: &Git, repo: &Path) -> Result<Vec<ConfigOverride>, Error> {
-    const ARGS: [&str; 5] = ["config", "--list", "--show-scope", "--show-origin", "-z"];
-    let output = git.run(repo, &[], ARGS)?;
+    let output = git.run(repo, &[], config::LIST)?;
     let names = repository_filter_names(&output).map_err(|message| Error::Parse {
-        command: format!("git {}", ARGS.join(" ")),
+        command: format!("git {}", config::LIST.join(" ")),
         message,
         bytes: output.clone(),
     })?;
@@ -24,21 +24,16 @@ pub fn neutralised_filters(git: &Git, repo: &Path) -> Result<Vec<ConfigOverride>
 }
 
 /// Names of filter drivers with an entry in the local or worktree scope, from
-/// `git config --list --show-scope --show-origin -z`, whose entries read
-/// `scope NUL origin NUL key [LF value] NUL`.
+/// a listing of [`config::LIST`].
 ///
 /// Fails when a name is not valid UTF-8: it could not be overridden
 /// exactly and would stay active.
 fn repository_filter_names(output: &[u8]) -> Result<BTreeSet<String>, String> {
-    let mut fields = output.split(|&b| b == 0);
     let mut names = BTreeSet::new();
-    while let (Some(scope), Some(_origin), Some(entry)) =
-        (fields.next(), fields.next(), fields.next())
-    {
+    for (scope, key, _) in config::entries(output) {
         if !matches!(scope, b"local" | b"worktree") {
             continue;
         }
-        let key = entry.split(|&b| b == b'\n').next().unwrap_or_default();
         let Some(rest) = key.strip_prefix(b"filter.") else {
             continue;
         };

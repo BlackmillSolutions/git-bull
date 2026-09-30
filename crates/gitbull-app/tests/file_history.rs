@@ -472,3 +472,90 @@ fn a_new_file_history_replaces_the_one_before() {
     open_history_of_c(&mut harness);
     assert_eq!(opened(&probe), 2);
 }
+
+/// The tab whose repository is at `name` in `work`.
+fn tab_of(harness: &Harness<'_, App>, name: &str) -> gitbull_core::workspace::TabId {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| {
+            workspace
+                .tabs()
+                .iter()
+                .find(|tab| tab.requested() == path(&["work", name]))
+        })
+        .map(|tab| tab.id())
+        .unwrap_or_else(|| panic!("no tab of {name}"))
+}
+
+fn activate(harness: &mut Harness<'_, App>, name: &str) {
+    let id = tab_of(harness, name);
+    harness.state_mut().workspace_mut().unwrap().activate(id);
+    settle_window(harness);
+    wait_until(harness, |h| {
+        row(h, "Add a").is_some() || entries(h).len() == 3
+    });
+}
+
+fn selected_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::Row)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+#[test]
+fn another_git_opens_every_tab_again_in_its_initial_state() {
+    let names = ["a", "b", "c", "d"];
+    let mut backend = backend();
+    for name in names {
+        let root = path(&["work", name]);
+        backend = backend
+            .with_repository(root.clone())
+            .with_history(root, history());
+    }
+    let test = build(Setup {
+        settings: Settings {
+            tabs: names.iter().map(|name| path(&["work", name])).collect(),
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    wait_until(&mut harness, |h| row(h, "Add a").is_some());
+    // A commit selected in the first tab, the second tab closed and a file
+    // history open in the third.
+    let at = row(&harness, "Add a").unwrap();
+    click_at(&mut harness, at, PointerButton::Primary);
+    let second = tab_of(&harness, "b");
+    harness.state_mut().workspace_mut().unwrap().close(second);
+    activate(&mut harness, "c");
+    open_history_of_c(&mut harness);
+
+    harness
+        .state_mut()
+        .set_git_path(std::path::PathBuf::from("/opt/git/bin/git"))
+        .expect("the other Git is usable");
+    settle_window(&mut harness);
+
+    for name in ["a", "c", "d"] {
+        activate(&mut harness, name);
+        assert!(row(&harness, "Add a").is_some(), "{name} shows the history");
+        assert!(
+            harness
+                .query_all_by_label("File history of src/b.rs")
+                .next()
+                .is_none(),
+            "{name} shows a file history"
+        );
+        assert!(
+            selected_rows(&harness).is_empty(),
+            "{name} has {:?} selected",
+            selected_rows(&harness)
+        );
+    }
+}
