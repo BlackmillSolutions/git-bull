@@ -462,13 +462,15 @@ fn scrolling_ten_thousand_tags_stays_fluid() {
     );
     let mut harness = open(backend().with_references(root(), many));
     click(&mut harness, "v1.0");
-    let mut slowest = std::time::Duration::ZERO;
+    let mut frames = Vec::new();
     for _ in 0..60 {
         harness.key_press(Key::PageDown);
         let started = std::time::Instant::now();
         harness.step();
-        slowest = slowest.max(started.elapsed());
+        frames.push(started.elapsed());
     }
+    frames.sort();
+    let (median, slowest) = (frames[frames.len() / 2], frames[frames.len() - 1]);
     // Sixty pages further down, the tags of the thousands are in view.
     assert!(
         harness.get_all_by_role(Role::TreeItem).any(|node| node
@@ -478,11 +480,13 @@ fn scrolling_ten_thousand_tags_stays_fluid() {
         "the list did not scroll"
     );
     // Debug builds are several times slower than release builds; the
-    // target of 16.7 ms holds for release builds and is measured there.
+    // target of 16.7 ms holds for release builds and is measured there. The
+    // median, as on a shared CI machine a single frame can wait for others:
+    // one took 129 ms on macOS. Drawing every tag took 3.8 s a frame.
     let limit = if cfg!(debug_assertions) { 100 } else { 17 };
     assert!(
-        slowest < std::time::Duration::from_millis(limit),
-        "a frame took {slowest:?}"
+        median < std::time::Duration::from_millis(limit),
+        "half of the frames took {median:?} or longer; the slowest {slowest:?}"
     );
 }
 

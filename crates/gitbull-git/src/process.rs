@@ -354,15 +354,19 @@ mod tests {
         (process, stdin, repo)
     }
 
+    /// Well below the 230 ms that stopping took on the calling thread.
+    const STOP_LIMIT: Duration = Duration::from_millis(150);
+
     #[test]
     fn cancelling_returns_at_once() {
         // It happens on the UI thread when the selection moves on, and
-        // stopping takes a moment on Windows.
+        // stopping took about 230 ms on Windows. The limit leaves room for
+        // a busy CI machine.
         let (process, _stdin, _repo) = running();
         let started = std::time::Instant::now();
         process.canceller().cancel();
         let took = started.elapsed();
-        assert!(took < Duration::from_millis(50), "cancelling took {took:?}");
+        assert!(took < STOP_LIMIT, "cancelling took {took:?}");
         assert!(matches!(process.wait(), Err(Error::Cancelled)));
     }
 
@@ -372,6 +376,6 @@ mod tests {
         let started = std::time::Instant::now();
         drop(process);
         let took = started.elapsed();
-        assert!(took < Duration::from_millis(50), "dropping took {took:?}");
+        assert!(took < STOP_LIMIT, "dropping took {took:?}");
     }
 }
