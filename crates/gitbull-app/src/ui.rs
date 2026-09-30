@@ -2,7 +2,8 @@
 //!
 //! Tab bar, toolbar and status bar frame the main area. For a repository
 //! that is ready, the History view shows the sidebar on the left and the
-//! commit list above the commit panel and the diff panel.
+//! commit list above the commit panel and the diff panel. The File status
+//! view shows the uncommitted files beside the diff panel.
 
 use eframe::egui::{
     self, CentralPanel, Color32, EventFilter, Id, Key, Modifiers, Panel, RichText, Sense,
@@ -24,7 +25,8 @@ use gitbull_core::settings::ThemeSetting;
 use crate::app::{App, GitMessage, GitStatus, Notice};
 use crate::commit_list;
 use crate::commit_panel;
-use crate::diff_view;
+use crate::diff_view::{self, Pane};
+use crate::file_status_view::{self, STATUS_LIST};
 use crate::i18n;
 use crate::i18n::Msg;
 use crate::paths::System;
@@ -39,6 +41,8 @@ pub const COMMIT_LIST: &str = "commit-list";
 pub const AREA_COMMIT_PANEL: &str = "area-commit-panel";
 pub const AREA_DIFF: &str = "area-diff";
 const AREAS: [&str; 4] = [AREA_SIDEBAR, COMMIT_LIST, AREA_COMMIT_PANEL, AREA_DIFF];
+/// The areas of the File status view.
+const STATUS_AREAS: [&str; 3] = [AREA_SIDEBAR, STATUS_LIST, AREA_DIFF];
 
 /// Sizes the UI starts with when the settings have none.
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -681,8 +685,31 @@ fn history(app: &mut App, ui: &mut Ui) {
     match shown {
         View::History => {}
         View::FileStatus => {
-            let title = app.texts.text(Msg::ViewFileStatus);
-            CentralPanel::default().show(ui, |ui| view_placeholder(ui, title));
+            let (files_title, diff_title) = (
+                app.texts.text(Msg::PanelFiles),
+                app.texts.text(Msg::PanelDiff),
+            );
+            CentralPanel::default().show(ui, |ui| {
+                // The file list shares its width with the commit panel.
+                let files = Panel::left("status_files")
+                    .resizable(true)
+                    .default_size(commit_panel_width)
+                    .size_range(200.0..=f32::INFINITY)
+                    .show(ui, |ui| {
+                        fill(ui);
+                        section_title(ui, files_title);
+                        if !file_status_view::show(app, ui, palette) {
+                            focus_area(ui, STATUS_LIST);
+                        }
+                    });
+                commit_panel_width = files.response.rect.width();
+                CentralPanel::default().show(ui, |ui| {
+                    section_title(ui, diff_title);
+                    if !diff_view::show(app, ui, palette, Pane::FileStatus) {
+                        focus_area(ui, AREA_DIFF);
+                    }
+                });
+            });
         }
         View::Search => {
             let title = app.texts.text(Msg::ViewSearch);
@@ -713,7 +740,7 @@ fn history(app: &mut App, ui: &mut Ui) {
                     commit_panel_width = commit.response.rect.width();
                     CentralPanel::default().show(ui, |ui| {
                         section_title(ui, app.texts.text(Msg::PanelDiff));
-                        if !diff_view::show(app, ui, palette) {
+                        if !diff_view::show(app, ui, palette, Pane::Commit) {
                             focus_area(ui, AREA_DIFF);
                         }
                     });
@@ -722,7 +749,11 @@ fn history(app: &mut App, ui: &mut Ui) {
             CentralPanel::default().show(ui, |ui| commit_list::show(app, ui, palette));
         });
     }
-    move_between_areas(ui);
+    let areas: &[&str] = match shown {
+        View::FileStatus => &STATUS_AREAS,
+        _ => &AREAS,
+    };
+    move_between_areas(ui, areas);
     apply_sidebar(app, sidebar_actions);
 
     app.update_layout(|layout| {
@@ -747,13 +778,7 @@ fn view_placeholder(ui: &mut Ui, title: String) {
 fn apply_sidebar(app: &mut App, actions: Vec<SidebarAction>) {
     for action in actions {
         match action {
-            SidebarAction::ShowView(view) => {
-                if let Some(workspace) = app.workspace_mut()
-                    && let Some(id) = workspace.active().map(|tab| tab.id())
-                {
-                    workspace.set_view(id, view);
-                }
-            }
+            SidebarAction::ShowView(view) => app.show_view(view),
             SidebarAction::Navigate(name) => app.navigate(&name),
             SidebarAction::ShowStash(index) => app.show_stash(index),
             SidebarAction::ShowOnly(name) => {
@@ -807,10 +832,11 @@ pub(crate) fn lock_tab(ui: &Ui, id: Id) {
     });
 }
 
-/// Tab and Shift+Tab move the focus from one area to the next or back.
-fn move_between_areas(ui: &Ui) {
+/// Tab and Shift+Tab move the focus from one of `areas` to the next or
+/// back.
+fn move_between_areas(ui: &Ui, areas: &[&str]) {
     let focused = ui.memory(|memory| memory.focused());
-    let areas = AREAS.map(Id::new);
+    let areas: Vec<Id> = areas.iter().map(Id::new).collect();
     let Some(position) = focused.and_then(|id| areas.iter().position(|area| *area == id)) else {
         return;
     };

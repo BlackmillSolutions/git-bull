@@ -81,6 +81,8 @@ fn design_commands() -> Vec<Vec<String>> {
         diff(&["diff"], &["--", "file.txt"]),
         diff(&["diff", "--cached"], &["--", "file.txt"]),
         diff(&["diff", "HEAD"], &["--", "file.txt"]),
+        // The diff of an untracked file.
+        diff(&["diff", "--no-index"], &["--", "/dev/null", "file.txt"]),
         // The diff of a submodule entry, as File status shows it.
         diff(&["diff"], &["--", "sub"]),
         diff(&["diff", "HEAD"], &["--", "sub"]),

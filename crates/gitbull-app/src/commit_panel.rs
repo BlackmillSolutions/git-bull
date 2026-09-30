@@ -9,10 +9,11 @@ use eframe::egui::{
 use gitbull_core::badges::Badge;
 use gitbull_core::details::ChangedFiles;
 use gitbull_core::store::Parent;
-use gitbull_core::workspace::Failure;
+use gitbull_core::workspace::{Failure, View};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::object_id::ObjectId;
+use gitbull_git::path::RepoPath;
 use jiff::tz::TimeZone;
 
 use crate::app::App;
@@ -69,7 +70,7 @@ impl Texts {
     }
 }
 
-fn kind_index(kind: ChangeKind) -> usize {
+pub(crate) fn kind_index(kind: ChangeKind) -> usize {
     match kind {
         ChangeKind::Added => 0,
         ChangeKind::Modified => 1,
@@ -81,11 +82,11 @@ fn kind_index(kind: ChangeKind) -> usize {
 }
 
 /// The letter that marks a kind of change, as Git abbreviates it.
-fn marker(kind: ChangeKind) -> &'static str {
+pub(crate) fn marker(kind: ChangeKind) -> &'static str {
     ["A", "M", "D", "R", "C", "T"][kind_index(kind)]
 }
 
-fn marker_color(kind: ChangeKind, palette: &Palette) -> Color32 {
+pub(crate) fn marker_color(kind: ChangeKind, palette: &Palette) -> Color32 {
     color(match kind {
         ChangeKind::Added => palette.status_added,
         ChangeKind::Modified | ChangeKind::TypeChanged => palette.status_modified,
@@ -112,6 +113,18 @@ const MIN_FILE_ROOM: f32 = 4.0 * 24.0;
 pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let texts = Texts::new(app);
     let zone = app.time_zone.clone();
+    let uncommitted = app.texts.text(Msg::HistoryUncommitted);
+    let open_file_status = app.texts.text(Msg::OpenFileStatus);
+    let Some((_, view)) = app.active_view() else {
+        return false;
+    };
+    if view.uncommitted_selected() {
+        ui.label(RichText::new(uncommitted).italics());
+        if ui.button(open_file_status).clicked() {
+            app.show_view(View::FileStatus);
+        }
+        return false;
+    }
     let Some((session, view)) = app.active_view() else {
         return false;
     };
@@ -359,19 +372,28 @@ fn files(
     true
 }
 
-/// The shown path as text to lay out. The arrow of a rename is set in the
-/// monospace font, as the proportional default font has no arrow.
 fn path_text(change: &FileChange, ui: &Ui) -> egui::text::LayoutJob {
+    path_job(change.old_path.as_ref(), &change.path, ui)
+}
+
+/// A path as text to lay out, after where it came from if it was renamed
+/// or copied. The arrow is set in the monospace font, as the proportional
+/// default font has no arrow.
+pub(crate) fn path_job(
+    old_path: Option<&RepoPath>,
+    path: &RepoPath,
+    ui: &Ui,
+) -> egui::text::LayoutJob {
     let style = ui.style();
     let body = TextStyle::Body.resolve(style);
     let text = ui.visuals().text_color();
     let format = |font: egui::FontId| egui::TextFormat::simple(font, text);
     let mut job = egui::text::LayoutJob::default();
-    if let Some(old) = &change.old_path {
+    if let Some(old) = old_path {
         job.append(&old.to_string(), 0.0, format(body.clone()));
         job.append(" → ", 0.0, format(egui::FontId::monospace(body.size)));
     }
-    job.append(&change.path.to_string(), 0.0, format(body));
+    job.append(&path.to_string(), 0.0, format(body));
     job
 }
 

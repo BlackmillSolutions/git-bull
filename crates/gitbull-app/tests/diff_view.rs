@@ -56,6 +56,7 @@ fn diff(old: Option<&str>, new: Option<&str>, content: Content) -> FileDiff {
         new_mode: new.map(|_| "100644".to_owned()),
         old_blob: None,
         new_blob: None,
+        new_in_working_copy: false,
         content,
         truncated: false,
     }

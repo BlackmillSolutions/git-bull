@@ -14,9 +14,11 @@ use gitbull_git::diff::FileDiff;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
 use gitbull_git::object_id::ObjectId;
+use gitbull_git::path::RepoPath;
 use gitbull_git::refs::Reference;
 use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
 use gitbull_git::stashes::{Stash, Submodule};
+use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
 use gitbull_git::{Backend, Error};
 
 /// An object id made from a short name, such as the commits of a test.
@@ -50,7 +52,7 @@ pub struct FakeBackend {
     stashes: Vec<(PathBuf, Vec<Stash>)>,
     /// Repositories that have a commit-graph file, also once written.
     graphs: Arc<Mutex<Vec<PathBuf>>>,
-    gates: Vec<(PathBuf, GraphGate)>,
+    gates: Vec<(PathBuf, Gate)>,
     live: Vec<(PathBuf, LiveRepo)>,
     submodules: Vec<(PathBuf, Vec<Submodule>)>,
     contents: HashMap<ObjectId, CommitContent>,
@@ -59,6 +61,11 @@ pub struct FakeBackend {
     diffs: HashMap<(ObjectId, String), FileDiff>,
     blobs: HashMap<ObjectId, Vec<u8>>,
     missing: Vec<(ObjectId, String)>,
+    statuses: Vec<(PathBuf, WorkingStatus)>,
+    failing_statuses: Vec<PathBuf>,
+    status_gates: Vec<(PathBuf, Gate)>,
+    working_diffs: HashMap<(Group, String), FileDiff>,
+    working_files: HashMap<String, Vec<u8>>,
     inspect_delay: Option<std::time::Duration>,
     probe: Probe,
 }
@@ -277,6 +284,37 @@ impl FakeBackend {
         self
     }
 
+    /// The uncommitted changes of `root`; without, its working copy is
+    /// clean.
+    pub fn with_status(mut self, root: impl Into<PathBuf>, status: WorkingStatus) -> FakeBackend {
+        self.statuses.push((root.into(), status));
+        self
+    }
+
+    /// Reading the status of `root` fails as if `git status` did.
+    pub fn with_failing_status(mut self, root: impl Into<PathBuf>) -> FakeBackend {
+        self.failing_statuses.push(root.into());
+        self
+    }
+
+    /// Reading the status of `root` takes until the test opens `gate`.
+    pub fn with_status_gate(mut self, root: impl Into<PathBuf>, gate: &Gate) -> FakeBackend {
+        self.status_gates.push((root.into(), gate.clone()));
+        self
+    }
+
+    /// The diff of `path` in `group` of the file status.
+    pub fn with_working_diff(mut self, group: Group, path: &str, diff: FileDiff) -> FakeBackend {
+        self.working_diffs.insert((group, path.to_owned()), diff);
+        self
+    }
+
+    /// The content of `path` in the working copy.
+    pub fn with_working_file(mut self, path: &str, content: &[u8]) -> FakeBackend {
+        self.working_files.insert(path.to_owned(), content.to_vec());
+        self
+    }
+
     /// Listing the files of `commit` fails as if `git diff-tree` did.
     pub fn with_failing_changes(mut self, commit: ObjectId) -> FakeBackend {
         self.failing_changes.push(commit);
@@ -342,11 +380,7 @@ impl FakeBackend {
     }
 
     /// Writing the commit-graph of `root` runs until the test opens `gate`.
-    pub fn with_commit_graph_gate(
-        mut self,
-        root: impl Into<PathBuf>,
-        gate: &GraphGate,
-    ) -> FakeBackend {
+    pub fn with_commit_graph_gate(mut self, root: impl Into<PathBuf>, gate: &Gate) -> FakeBackend {
         self.gates.push((root.into(), gate.clone()));
         self
     }
@@ -663,6 +697,80 @@ impl Backend for FakeBackend {
         })?;
         Ok((content.len() as u64 <= limit).then(|| content.clone()))
     }
+
+    fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error> {
+        self.probe.record("status", repo);
+        self.gone(repo)?;
+        let root = self.root_of(repo);
+        if let Some((_, gate)) = self.status_gates.iter().find(|(known, _)| *known == root) {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
+        if self.failing_statuses.contains(&root) {
+            return Err(Error::CommandFailed {
+                command: "git status --porcelain=v2 -z".to_owned(),
+                code: Some(128),
+                stderr: "fatal: index file corrupt".to_owned(),
+            });
+        }
+        if let Some(status) = self.live_of(repo).and_then(|live| live.status.clone()) {
+            return Ok(status);
+        }
+        Ok(self
+            .statuses
+            .iter()
+            .find(|(known, _)| *known == root)
+            .map(|(_, status)| status.clone())
+            .unwrap_or_default())
+    }
+
+    fn working_diff(
+        &self,
+        repo: &Path,
+        group: Group,
+        entry: &StatusEntry,
+        limit: Option<usize>,
+        _cancel: &CancelToken,
+    ) -> Result<FileDiff, Error> {
+        self.probe.record("working-diff", repo);
+        let path = entry.path.to_string();
+        self.probe
+            .lock()
+            .working_diffs
+            .push((group, path.clone(), limit));
+        self.working_diffs
+            .get(&(group, path.clone()))
+            .cloned()
+            .map(|diff| FileDiff {
+                truncated: diff.truncated && limit.is_some(),
+                ..diff
+            })
+            .ok_or_else(|| Error::CommandFailed {
+                command: "git diff".to_owned(),
+                code: Some(128),
+                stderr: format!("no diff of {path} in {group:?}"),
+            })
+    }
+
+    fn working_file(
+        &self,
+        repo: &Path,
+        path: &RepoPath,
+        limit: u64,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.probe.record("working-file", repo);
+        let content = self
+            .working_files
+            .get(&path.to_string())
+            .ok_or_else(|| Error::Io {
+                command: format!("read {path}"),
+                source: std::io::ErrorKind::NotFound.into(),
+            })?;
+        Ok((content.len() as u64 <= limit).then(|| content.clone()))
+    }
 }
 
 /// A stream of lines given in advance.
@@ -674,10 +782,10 @@ impl CommitStream for Lines {
     }
 }
 
-/// Holds a fake commit-graph generation until the test opens or it is
-/// cancelled.
+/// Holds fake work, such as a commit-graph generation or a status, until
+/// the test opens it or it is cancelled.
 #[derive(Clone, Default)]
-pub struct GraphGate {
+pub struct Gate {
     inner: Arc<(Mutex<GateState>, Condvar)>,
 }
 
@@ -687,12 +795,12 @@ struct GateState {
     cancelled: bool,
 }
 
-impl GraphGate {
-    pub fn new() -> GraphGate {
-        GraphGate::default()
+impl Gate {
+    pub fn new() -> Gate {
+        Gate::default()
     }
 
-    /// Lets the generation finish.
+    /// Lets the work finish.
     pub fn open(&self) {
         self.update(|state| state.open = true);
     }
@@ -701,7 +809,7 @@ impl GraphGate {
         self.update(|state| state.cancelled = true);
     }
 
-    /// Whether the generation was cancelled.
+    /// Whether the work was cancelled.
     pub fn was_cancelled(&self) -> bool {
         self.inner
             .0
@@ -746,6 +854,7 @@ struct LiveState {
     feed: Option<HistoryFeed>,
     /// The folder is gone: every read fails.
     missing: bool,
+    status: Option<WorkingStatus>,
 }
 
 impl LiveRepo {
@@ -766,6 +875,11 @@ impl LiveRepo {
         let mut state = self.lock();
         state.lines = Some(lines);
         state.feed = None;
+    }
+
+    /// The uncommitted changes from now on.
+    pub fn set_status(&self, status: WorkingStatus) {
+        self.lock().status = Some(status);
     }
 
     /// The folder is deleted, or back again.
@@ -914,6 +1028,7 @@ struct ProbeLog {
     requested: Vec<ObjectId>,
     compared: Vec<(ObjectId, Option<ObjectId>)>,
     diffs: Vec<(ObjectId, String, Option<usize>)>,
+    working_diffs: Vec<(Group, String, Option<usize>)>,
 }
 
 impl Probe {
@@ -941,6 +1056,12 @@ impl Probe {
     /// Every diff asked for: the commit, the path and the line limit.
     pub fn diffs(&self) -> Vec<(ObjectId, String, Option<usize>)> {
         self.lock().diffs.clone()
+    }
+
+    /// Every diff of the file status asked for: the group, the path and
+    /// the line limit.
+    pub fn working_diffs(&self) -> Vec<(Group, String, Option<usize>)> {
+        self.lock().working_diffs.clone()
     }
 
     /// Content sources that have been started and not dropped.

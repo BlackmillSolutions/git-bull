@@ -22,16 +22,18 @@ use gitbull_git::history::{CommitLine, Revisions};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::stashes::{Stash, Submodule};
+use gitbull_git::status::Group;
 use gitbull_git::{Backend, Error};
 
 use crate::badges::{self, Badge};
 use crate::content_cache::ContentCache;
 use crate::details::Details;
+use crate::file_status::FileStatus;
 use crate::graph::{Checkpoint, Graph, GraphBuilder};
 use crate::highlight::HighlightTheme;
 use crate::opening::OpenedRepository;
 use crate::store::{CommitStore, Parent, Row};
-use crate::workspace::{Failure, Notify, panic_message};
+use crate::workspace::{Failure, Notify, View, panic_message};
 
 /// Lines the loader collects before handing them over.
 const BATCH_LINES: usize = 4096;
@@ -157,6 +159,10 @@ pub struct Session {
     requested: HashSet<ObjectId>,
     cache: ContentCache,
     details: Details,
+    /// `None` for a repository without a working copy.
+    file_status: Option<FileStatus>,
+    /// The commit HEAD points to, once the references are known.
+    head_commit: Option<ObjectId>,
 }
 
 impl fmt::Debug for Session {
@@ -177,6 +183,13 @@ impl Session {
             opened.root.clone(),
             Arc::clone(&notify),
         );
+        let file_status = (!opened.info.bare).then(|| {
+            FileStatus::new(
+                Arc::clone(&backend),
+                opened.root.clone(),
+                Arc::clone(&notify),
+            )
+        });
         Session {
             opened,
             backend,
@@ -213,6 +226,8 @@ impl Session {
             requested: HashSet::new(),
             cache: ContentCache::default(),
             details,
+            file_status,
+            head_commit: None,
         }
     }
 
@@ -245,6 +260,10 @@ impl Session {
                 Some(self.in_background(move || backend.shallow_commits(&root)));
         }
 
+        // The history does not wait for it.
+        if let Some(status) = &mut self.file_status {
+            status.refresh();
+        }
         self.start_history();
     }
 
@@ -371,6 +390,7 @@ impl Session {
         if let Some(sidebar) = take(&mut self.sidebar_result) {
             if let Ok(loaded) = &sidebar {
                 self.badges = badges::badges(&loaded.references, &self.opened.head);
+                self.head_commit = badges::head_commit(&loaded.references, &self.opened.head);
             }
             self.sidebar = Some(sidebar);
             self.sidebar_version += 1;
@@ -403,6 +423,9 @@ impl Session {
             changed = true;
         }
         changed |= self.details.poll();
+        if let Some(status) = &mut self.file_status {
+            changed |= status.poll();
+        }
         if let Some(source) = &self.content {
             while let Some(answer) = source.try_next() {
                 // A commit whose content cannot be read keeps its
@@ -527,7 +550,14 @@ impl Session {
     /// references or HEAD have changed. Nothing happens before the tab was
     /// first shown.
     pub fn refresh(&mut self) {
-        if !self.started || self.refresh_result.is_some() {
+        if !self.started {
+            return;
+        }
+        // Files may have changed without any reference changing.
+        if let Some(status) = &mut self.file_status {
+            status.refresh();
+        }
+        if self.refresh_result.is_some() {
             return;
         }
         let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
@@ -553,6 +583,7 @@ impl Session {
         }
         self.opened.head = head;
         self.badges = badges::badges(&sidebar.references, &self.opened.head);
+        self.head_commit = badges::head_commit(&sidebar.references, &self.opened.head);
         self.sidebar = Some(Ok(sidebar));
         self.sidebar_version += 1;
         if history_changed {
@@ -739,6 +770,9 @@ impl Session {
     /// appearance of the window.
     pub fn set_highlight_theme(&mut self, theme: HighlightTheme) {
         self.details.set_theme(theme);
+        if let Some(status) = &mut self.file_status {
+            status.set_theme(theme);
+        }
     }
 
     /// Loads all of a diff that stopped at its limit.
@@ -750,6 +784,46 @@ impl Session {
     /// of the file chosen.
     pub fn details(&self) -> &Details {
         &self.details
+    }
+
+    /// The views the Workspace section offers: File status only for a
+    /// repository with a working copy.
+    pub fn views(&self) -> &'static [View] {
+        match self.file_status {
+            Some(_) => &View::ALL,
+            None => &View::BARE,
+        }
+    }
+
+    /// The uncommitted changes and the diff of the file chosen among them;
+    /// `None` for a repository without a working copy.
+    pub fn file_status(&self) -> Option<&FileStatus> {
+        self.file_status.as_ref()
+    }
+
+    /// Chooses the file at `index` of `group` of the file status, and loads
+    /// its diff; `None` chooses none.
+    pub fn choose_status_file(&mut self, chosen: Option<(Group, usize)>) {
+        if let Some(status) = &mut self.file_status {
+            status.choose(chosen);
+        }
+    }
+
+    /// Loads all of a diff of the file status that stopped at its limit.
+    pub fn load_whole_status_diff(&mut self) {
+        if let Some(status) = &mut self.file_status {
+            status.load_whole_diff();
+        }
+    }
+
+    /// The row of the history shown above which the row "Uncommitted
+    /// changes" goes: that of the commit HEAD points to, while the working
+    /// copy has changes and that commit is loaded.
+    pub fn uncommitted_row(&self) -> Option<Row> {
+        if !self.file_status.as_ref()?.has_changes() {
+            return None;
+        }
+        self.history().store.row_of(&self.head_commit?)
     }
 
     /// The content of a commit, if it has arrived.
@@ -928,8 +1002,10 @@ pub(crate) fn take<T>(slot: &mut Option<Receiver<T>>) -> Option<T> {
 mod tests {
     use super::*;
     use crate::details::ChangedFiles;
+    use crate::file_status::StatusState;
     use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
-    use gitbull_testkit::{FakeBackend, GraphGate, HistoryFeed, LiveRepo, commit_line, fake_id};
+    use gitbull_git::status::{Group, WorkingStatus};
+    use gitbull_testkit::{FakeBackend, Gate, HistoryFeed, LiveRepo, commit_line, fake_id};
     use std::path::PathBuf;
 
     fn root() -> PathBuf {
@@ -998,14 +1074,20 @@ mod tests {
         assert!(matches!(session.history().state, LoadState::NotStarted));
     }
 
+    fn status_read(session: &mut Session) -> bool {
+        session
+            .file_status()
+            .is_some_and(|status| !matches!(status.state(), StatusState::Loading))
+    }
+
     #[test]
-    fn showing_loads_sidebar_history_and_count() {
+    fn showing_loads_sidebar_history_count_and_status() {
         let backend = backend().with_history(root(), five_lines());
         let probe = backend.probe();
         let mut session = session(backend);
         session.show();
         wait_until(&mut session, |s| {
-            loaded(s) && s.count().is_some() && s.sidebar().is_some()
+            loaded(s) && s.count().is_some() && s.sidebar().is_some() && status_read(s)
         });
         assert_eq!(rows(&session), 5);
         assert_eq!(session.history().graph.len(), 5);
@@ -1014,7 +1096,117 @@ mod tests {
         calls.sort();
         assert_eq!(
             calls,
-            ["count", "history", "references", "stashes", "submodules"]
+            [
+                "count",
+                "history",
+                "references",
+                "stashes",
+                "status",
+                "submodules"
+            ]
+        );
+    }
+
+    fn modified(path: &str) -> WorkingStatus {
+        WorkingStatus {
+            unstaged: vec![gitbull_git::status::StatusEntry {
+                kind: gitbull_git::status::StatusKind::Changed(
+                    gitbull_git::changes::ChangeKind::Modified,
+                ),
+                path: path.into(),
+                old_path: None,
+                submodule: false,
+            }],
+            ..WorkingStatus::default()
+        }
+    }
+
+    /// main at c of x, c, b, a, with a modified file.
+    fn changed_below_the_top() -> FakeBackend {
+        backend()
+            .with_history(
+                root(),
+                vec![
+                    commit_line("x", &["b"]),
+                    commit_line("c", &["b"]),
+                    commit_line("b", &["a"]),
+                    commit_line("a", &[]),
+                ],
+            )
+            .with_references(root(), vec![branch("main", "c"), branch("side", "x")])
+            .with_status(root(), modified("a.txt"))
+    }
+
+    #[test]
+    fn uncommitted_changes_sit_above_the_commit_of_head() {
+        let mut session = ready(changed_below_the_top());
+        wait_until(&mut session, status_read);
+        assert_eq!(session.uncommitted_row(), Some(1));
+    }
+
+    #[test]
+    fn a_clean_working_copy_has_no_uncommitted_row() {
+        let mut session = ready(branched());
+        wait_until(&mut session, status_read);
+        assert_eq!(session.uncommitted_row(), None);
+    }
+
+    #[test]
+    fn the_history_does_not_wait_for_the_status() {
+        let gate = Gate::new();
+        let mut session = ready(changed_below_the_top().with_status_gate(root(), &gate));
+        assert_eq!(rows(&session), 4);
+        assert_eq!(session.uncommitted_row(), None);
+        gate.open();
+        wait_until(&mut session, status_read);
+        assert_eq!(session.uncommitted_row(), Some(1));
+    }
+
+    #[test]
+    fn a_bare_repository_has_no_file_status() {
+        let mut opened = opened();
+        opened.info.work_tree = None;
+        opened.info.bare = true;
+        let backend = backend().with_history(root(), five_lines());
+        let probe = backend.probe();
+        let mut session = Session::new(opened, Arc::new(backend), Arc::new(|| {}));
+        session.show();
+        wait_until(&mut session, |s| loaded(s) && s.sidebar().is_some());
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(session.file_status().is_none());
+        assert_eq!(session.views(), View::BARE);
+        assert_eq!(session.uncommitted_row(), None);
+        assert!(!probe.calls(&root()).contains(&"status".to_owned()));
+    }
+
+    #[test]
+    fn refreshing_reads_the_status_again() {
+        let (mut session, live, probe) = live();
+        wait_until(&mut session, status_read);
+        assert_eq!(session.uncommitted_row(), None);
+        live.set_status(modified("a.txt"));
+        session.refresh();
+        wait_until(&mut session, |s| {
+            probe
+                .calls(&root())
+                .iter()
+                .filter(|c| *c == "status")
+                .count()
+                == 2
+                && status_read(s)
+                && !s.file_status().unwrap().is_refreshing()
+        });
+        assert_eq!(session.uncommitted_row(), Some(0));
+    }
+
+    #[test]
+    fn a_file_of_the_status_can_be_chosen_for_its_diff() {
+        let mut session = ready(changed_below_the_top());
+        wait_until(&mut session, status_read);
+        session.choose_status_file(Some((Group::Unstaged, 0)));
+        assert_eq!(
+            session.file_status().unwrap().chosen(),
+            Some((Group::Unstaged, 0))
         );
     }
 
@@ -1706,7 +1898,7 @@ mod tests {
 
     #[test]
     fn generation_shows_progress_and_cancelling_keeps_the_hint() {
-        let gate = GraphGate::new();
+        let gate = Gate::new();
         let backend = backend()
             .with_history(root(), many(HINT_COMMITS + 1))
             .with_commit_graph_gate(root(), &gate);
@@ -1729,7 +1921,7 @@ mod tests {
 
     #[test]
     fn closing_the_tab_stops_the_generation() {
-        let gate = GraphGate::new();
+        let gate = Gate::new();
         let backend = backend()
             .with_history(root(), many(HINT_COMMITS + 1))
             .with_commit_graph_gate(root(), &gate);

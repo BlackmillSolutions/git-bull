@@ -302,7 +302,16 @@ fn choosing_file_status_shows_it_and_history_comes_back_as_it_was() {
 
     click(&mut harness, "File status");
     assert!(harness.query_by_label("Description").is_none());
-    harness.get_by_role_and_label(Role::Heading, "File status");
+    // The working copy of the fake repository is clean.
+    let clean = "There are no uncommitted changes.";
+    for _ in 0..500 {
+        if harness.query_all_by_value(clean).next().is_some() {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(harness.query_all_by_value(clean).next().is_some());
 
     click(&mut harness, "History");
     harness.get_by_label("Description");

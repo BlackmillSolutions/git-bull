@@ -81,8 +81,13 @@ pub enum SidebarRow {
 }
 
 /// The rows to show for `sidebar`, or only sections and views while it is
-/// loading.
-pub fn rows(sidebar: Option<&Sidebar>, head: &Head, state: &SidebarState) -> Vec<SidebarRow> {
+/// loading. The Workspace section offers `views`.
+pub fn rows(
+    sidebar: Option<&Sidebar>,
+    head: &Head,
+    state: &SidebarState,
+    views: &[View],
+) -> Vec<SidebarRow> {
     let filter = state.filter.to_lowercase();
     let current = match head {
         Head::Branch(name) => Some(name.as_str()),
@@ -95,37 +100,35 @@ pub fn rows(sidebar: Option<&Sidebar>, head: &Head, state: &SidebarState) -> Vec
         if collapsed {
             continue;
         }
-        let kind = match section {
-            Section::Workspace => {
-                rows.extend([View::History, View::FileStatus, View::Search].map(SidebarRow::View));
-                continue;
-            }
-            Section::Branches => RefKind::Branch,
-            Section::Tags => RefKind::Tag,
-            Section::Remotes => RefKind::RemoteBranch,
-            Section::Stashes => {
-                let stashes = sidebar.map(|s| s.stashes.as_slice()).unwrap_or_default();
-                rows.extend(
-                    stashes
-                        .iter()
-                        .enumerate()
-                        .map(|(index, stash)| SidebarRow::Stash {
+        let kind =
+            match section {
+                Section::Workspace => {
+                    rows.extend(views.iter().copied().map(SidebarRow::View));
+                    continue;
+                }
+                Section::Branches => RefKind::Branch,
+                Section::Tags => RefKind::Tag,
+                Section::Remotes => RefKind::RemoteBranch,
+                Section::Stashes => {
+                    let stashes = sidebar.map(|s| s.stashes.as_slice()).unwrap_or_default();
+                    rows.extend(stashes.iter().enumerate().map(|(index, stash)| {
+                        SidebarRow::Stash {
                             index,
                             selector: stash.selector.clone(),
                             message: stash.message.clone(),
-                        }),
-                );
-                continue;
-            }
-            Section::Submodules => {
-                let submodules = sidebar.map(|s| s.submodules.as_slice()).unwrap_or_default();
-                rows.extend(submodules.iter().map(|submodule| SidebarRow::Submodule {
-                    path: submodule.path.clone(),
-                    initialised: submodule.state != SubmoduleState::NotInitialised,
-                }));
-                continue;
-            }
-        };
+                        }
+                    }));
+                    continue;
+                }
+                Section::Submodules => {
+                    let submodules = sidebar.map(|s| s.submodules.as_slice()).unwrap_or_default();
+                    rows.extend(submodules.iter().map(|submodule| SidebarRow::Submodule {
+                        path: submodule.path.clone(),
+                        initialised: submodule.state != SubmoduleState::NotInitialised,
+                    }));
+                    continue;
+                }
+            };
         let Some(sidebar) = sidebar else {
             continue;
         };
@@ -316,7 +319,12 @@ mod tests {
 
     #[test]
     fn sections_come_in_order_with_their_entries_grouped_by_slash() {
-        let rows = rows(Some(&sidebar()), &main(), &SidebarState::default());
+        let rows = rows(
+            Some(&sidebar()),
+            &main(),
+            &SidebarState::default(),
+            &View::ALL,
+        );
         assert_eq!(
             outline(&rows),
             [
@@ -351,7 +359,7 @@ mod tests {
             collapsed_sections: HashSet::from([Section::Tags]),
             ..SidebarState::default()
         };
-        let text = outline(&rows(Some(&sidebar()), &main(), &state));
+        let text = outline(&rows(Some(&sidebar()), &main(), &state, &View::ALL));
         assert!(text.contains(&"+ Tags (collapsed)".to_owned()));
         assert!(!text.contains(&"  v1.0".to_owned()));
         assert!(text.contains(&"  main *".to_owned()));
@@ -364,7 +372,7 @@ mod tests {
             collapsed_folders: HashSet::from([(Section::Remotes, "origin/release".to_owned())]),
             ..SidebarState::default()
         };
-        let text = outline(&rows(Some(&sidebar()), &main(), &state));
+        let text = outline(&rows(Some(&sidebar()), &main(), &state, &View::ALL));
         assert!(text.contains(&"    release/ (collapsed)".to_owned()));
         assert!(!text.contains(&"      0.1".to_owned()));
         assert!(text.contains(&"    main".to_owned()));
@@ -373,7 +381,12 @@ mod tests {
     #[test]
     fn with_a_detached_head_no_branch_is_current() {
         let head = Head::Detached("1111111111111111111111111111111111111111".into());
-        let rows = rows(Some(&sidebar()), &head, &SidebarState::default());
+        let rows = rows(
+            Some(&sidebar()),
+            &head,
+            &SidebarState::default(),
+            &View::ALL,
+        );
         assert!(
             !rows
                 .iter()
@@ -383,7 +396,12 @@ mod tests {
 
     #[test]
     fn a_remote_branch_named_like_the_current_branch_is_not_current() {
-        let rows = rows(Some(&sidebar()), &main(), &SidebarState::default());
+        let rows = rows(
+            Some(&sidebar()),
+            &main(),
+            &SidebarState::default(),
+            &View::ALL,
+        );
         let current: Vec<&str> = rows
             .iter()
             .filter_map(|row| match row {
@@ -404,7 +422,7 @@ mod tests {
             filter: "GRAPH".into(),
             ..SidebarState::default()
         };
-        let text = outline(&rows(Some(&sidebar()), &main(), &state));
+        let text = outline(&rows(Some(&sidebar()), &main(), &state, &View::ALL));
         assert_eq!(
             text,
             [
@@ -433,7 +451,7 @@ mod tests {
             collapsed_folders: HashSet::from([(Section::Remotes, "origin".to_owned())]),
             ..SidebarState::default()
         };
-        let text = outline(&rows(Some(&sidebar()), &main(), &state));
+        let text = outline(&rows(Some(&sidebar()), &main(), &state, &View::ALL));
         assert!(text.contains(&"      0.1".to_owned()), "{text:#?}");
     }
 
@@ -443,14 +461,14 @@ mod tests {
             filter: "origin/rel".into(),
             ..SidebarState::default()
         };
-        let text = outline(&rows(Some(&sidebar()), &main(), &state));
+        let text = outline(&rows(Some(&sidebar()), &main(), &state, &View::ALL));
         assert!(text.contains(&"      0.1".to_owned()), "{text:#?}");
         assert!(!text.contains(&"    main".to_owned()));
     }
 
     #[test]
     fn while_loading_only_sections_and_views_are_shown() {
-        let text = outline(&rows(None, &main(), &SidebarState::default()));
+        let text = outline(&rows(None, &main(), &SidebarState::default(), &View::ALL));
         assert_eq!(text.len(), 3 + 6);
     }
 
@@ -460,8 +478,14 @@ mod tests {
         many.references
             .extend((0..10_000).map(|n| reference(&format!("refs/tags/v{n}"), RefKind::Tag)));
         let started = std::time::Instant::now();
-        let rows = rows(Some(&many), &main(), &SidebarState::default());
+        let rows = rows(Some(&many), &main(), &SidebarState::default(), &View::ALL);
         assert!(rows.len() > 10_000);
         assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn the_workspace_section_offers_the_views_given() {
+        let text = outline(&rows(None, &main(), &SidebarState::default(), &View::BARE));
+        assert_eq!(text[..3], ["+ Workspace", "  History", "  Search"]);
     }
 }

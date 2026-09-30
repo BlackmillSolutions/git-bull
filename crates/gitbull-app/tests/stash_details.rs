@@ -109,6 +109,7 @@ fn backend() -> FakeBackend {
                 new_mode: Some("100644".to_owned()),
                 old_blob: None,
                 new_blob: None,
+                new_in_working_copy: false,
                 content: Content::Text(vec![hunk]),
                 truncated: false,
             },

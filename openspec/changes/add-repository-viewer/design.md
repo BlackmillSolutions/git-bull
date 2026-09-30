@@ -138,7 +138,7 @@ literally, and it passes the neutralised filter drivers of the repository.
 | Changed files of a commit | `git diff-tree -r --no-commit-id --name-status -M -C -z` against the first parent; `--root` for root commits |
 | Diff of one file | `git diff-tree -r -p -M -C --full-index -U3` restricted to the paths of that file; for a binary file the sizes of both blobs from `git cat-file --batch-check` |
 | Working-copy status | `git status --porcelain=v2 -z --untracked-files=all --ignore-submodules=dirty` |
-| Working-copy diff | `git diff` and `git diff --cached`, restricted to one path; `git diff HEAD` for a conflicted file |
+| Working-copy diff | `git diff` and `git diff --cached -M`, restricted to the paths of one file; `git diff HEAD` for a conflicted file; `git diff --no-index -- /dev/null <path>` for an untracked file, whose exit code 1 means that the files differ |
 | Search by hash | `git rev-parse --verify --quiet <prefix>^{commit}` |
 | Search by message or author | `git rev-list -i --fixed-strings --grep=<text> <revisions>`, or the same with `--author=<text>` |
 | Search by path | `git rev-list <revisions> -- <path>` |
@@ -414,7 +414,7 @@ choice:
 | Changes inside a submodule | Not shown in the containing repository; a consequence of ADR 0006 |
 | Start screen when Git is missing | Offers to check again and to set the path to Git |
 | Reference hidden by the branch filter | A notice offers to show all branches |
-| Row "Uncommitted changes" | Selecting it opens the File status view |
+| Row "Uncommitted changes" | Right above the row of the commit HEAD points to, in its lane, or in the first free lane when a lane from above leads into HEAD. A click or Enter opens the File status view; moving onto it with the keyboard only selects it, and the commit panel offers a button to open the view |
 | Selecting a commit | The first changed file is selected |
 | Files with merge conflicts | Listed in the unstaged group with a conflict marker |
 | Blame opened from File status | Shows the file as of the last commit |
@@ -438,6 +438,10 @@ choice:
 | Lines of the graph | Laid out only for the lanes the graph column shows, and only for the rows asked for; rows of the kernel reach 500 lanes. Scrolling on continues from the layout after the rows shown last instead of the checkpoint |
 | Selecting commits quickly | A selection within 150 ms of the one before loads its files once it has stayed for 75 ms; a single click loads at once. A held key started Git for every commit it passed |
 | Stopping Git | On a thread of its own; on Windows it waits for `taskkill`, which took about 230 ms |
+| Reading the status | Starts with the history, in parallel; on the Linux kernel the first rows took as long as before. Refresh reads it again and stops a read still running. The list and the file chosen stay until the new status arrives; the diff of that file loads again |
+| Groups of the File status view | Only groups that have files are listed, under a title with their number of files. Titles are not selected: the selection moves on to the file next to them in the direction it moved. The first file is chosen when none is. The list shares its width with the commit panel |
+| New version of a working-copy diff | The file in the working copy, read directly for highlighting and for the size of a binary file. A symbolic link reads as its target and is not followed. Git names the working copy by the hash of its content, which is no blob of the object database |
+| Filters and the size of a file | Git counts a file whose size differs from the index as modified without running a filter; a filter of the repository matters only for files of the same size |
 | Growing the commit store | Columns grow by chunks of 65,536 rows, and the id index moves its rows into a table of twice the size two per appended commit. Commits are appended on the UI thread, and growing everything at once took 33 ms at 900,000 commits |
 
 ## Risks / Trade-offs

@@ -4,17 +4,16 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use gitbull_git::Backend;
-use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::FileChange;
-use gitbull_git::diff::{Content, DiffLine, FileDiff, LINE_LIMIT, LineKind};
 use gitbull_git::object_id::ObjectId;
 
-use crate::highlight::{HIGHLIGHT_LIMIT, HighlightTheme, HighlightedLines, Span, highlight};
-use crate::session::{catch, take};
+use crate::diff_pane::{DiffPane, DiffSource};
+pub use crate::diff_pane::{DiffState, Highlighting};
+use crate::highlight::HighlightTheme;
+use crate::pending::Pending;
 use crate::workspace::{Failure, Notify};
 
 /// The files of the commit shown.
@@ -23,47 +22,6 @@ pub enum ChangedFiles {
     Loading,
     Loaded(Vec<FileChange>),
     Failed(Failure),
-}
-
-/// The diff of the file chosen.
-#[derive(Debug)]
-pub enum DiffState {
-    Loading,
-    Loaded(FileDiff),
-    Failed(Failure),
-}
-
-/// The colours of the diff shown.
-#[derive(Debug)]
-pub struct Highlighting {
-    pub theme: HighlightTheme,
-    /// The lines of the old version, where it exists.
-    pub old: Option<HighlightedLines>,
-    /// The lines of the new version, where it exists.
-    pub new: Option<HighlightedLines>,
-}
-
-impl Highlighting {
-    /// The spans of `line` of the diff: from the old version for a removed
-    /// line, otherwise from the new one.
-    pub fn spans(&self, line: &DiffLine) -> Option<&[Span]> {
-        let (lines, number) = match line.kind {
-            LineKind::Removed => (&self.old, line.old_number),
-            LineKind::Added | LineKind::Context => (&self.new, line.new_number),
-        };
-        let index = number?.checked_sub(1)? as usize;
-        lines.as_ref()?.get(index).map(Vec::as_slice)
-    }
-}
-
-/// How far highlighting the diff shown has got.
-#[derive(Debug)]
-enum HighlightState {
-    NotStarted,
-    Running,
-    /// `None` when the diff is shown without: its type is not known, a
-    /// version is larger than [`HIGHLIGHT_LIMIT`], or it could not be read.
-    Done(Option<Highlighting>),
 }
 
 /// A selection made this soon after the one before waits until it
@@ -75,49 +33,6 @@ pub const RAPID: Duration = Duration::from_millis(150);
 /// With the 55 ms the files of a typical commit of the Linux kernel took,
 /// the details stay within the 200 ms of `commit-details`.
 pub const SETTLE: Duration = Duration::from_millis(75);
-
-/// Work in the background for one selection: dropping the receiver drops
-/// its answer, cancelling stops its Git process.
-struct Pending<T> {
-    cancel: CancelToken,
-    result: Option<Receiver<Result<T, Failure>>>,
-}
-
-impl<T: Send + 'static> Pending<T> {
-    fn none() -> Pending<T> {
-        Pending {
-            cancel: CancelToken::new(),
-            result: None,
-        }
-    }
-
-    /// Stops the previous work and starts `work` on a worker thread.
-    fn start(
-        &mut self,
-        notify: &Notify,
-        work: impl FnOnce(&CancelToken) -> Result<T, gitbull_git::Error> + Send + 'static,
-    ) {
-        self.stop();
-        self.cancel = CancelToken::new();
-        let (cancel, notify) = (self.cancel.clone(), Arc::clone(notify));
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            if sender.send(catch(|| work(&cancel))).is_ok() {
-                notify();
-            }
-        });
-        self.result = Some(receiver);
-    }
-
-    fn stop(&mut self) {
-        self.cancel.cancel();
-        self.result = None;
-    }
-
-    fn take(&mut self) -> Option<Result<T, Failure>> {
-        take(&mut self.result)
-    }
-}
 
 /// The commit shown in the commit panel, and the file shown in the diff
 /// panel. Selecting another one stops the work for the previous one and
@@ -137,19 +52,16 @@ pub struct Details {
     files_work: Pending<(Vec<FileChange>, Option<usize>)>,
     /// The index of the chosen file among `files`.
     file: Option<usize>,
-    diff: DiffState,
-    diff_work: Pending<FileDiff>,
+    pane: DiffPane,
     /// When the last selection was made.
     last_selected: Option<Instant>,
     /// Since when a quickly made selection waits to settle.
     settling: Option<Instant>,
-    theme: HighlightTheme,
-    highlight: HighlightState,
-    highlight_work: Pending<Option<Highlighting>>,
 }
 
 impl Details {
     pub fn new(backend: Arc<dyn Backend>, root: PathBuf, notify: Notify) -> Details {
+        let pane = DiffPane::new(Arc::clone(&backend), root.clone(), Arc::clone(&notify));
         Details {
             backend,
             root,
@@ -161,26 +73,16 @@ impl Details {
             files: ChangedFiles::Loading,
             files_work: Pending::none(),
             file: None,
-            diff: DiffState::Loading,
-            diff_work: Pending::none(),
+            pane,
             last_selected: None,
             settling: None,
-            theme: HighlightTheme::Light,
-            highlight: HighlightState::NotStarted,
-            highlight_work: Pending::none(),
         }
     }
 
     /// Highlights with the colours of `theme` from now on, the diff shown
     /// as well.
     pub(crate) fn set_theme(&mut self, theme: HighlightTheme) {
-        if theme == self.theme {
-            return;
-        }
-        self.theme = theme;
-        if !matches!(self.highlight, HighlightState::NotStarted) {
-            self.start_highlight();
-        }
+        self.pane.set_theme(theme);
     }
 
     /// Shows `commit`, compared with `parent`, its first parent; `None`
@@ -279,99 +181,41 @@ impl Details {
     }
 
     /// Shows the diff of the file at `index` in the files of the commit;
-    /// `None` shows none. Long diffs stop at [`LINE_LIMIT`] lines.
+    /// `None` shows none. Long diffs stop at the line limit.
     pub(crate) fn select_file(&mut self, index: Option<usize>) {
-        let known = match (&self.files, index) {
-            (ChangedFiles::Loaded(files), Some(index)) => index < files.len(),
-            _ => false,
+        let loaded = match &self.files {
+            ChangedFiles::Loaded(files) => files.as_slice(),
+            _ => &[],
         };
-        let index = index.filter(|_| known);
+        let index = index.filter(|index| *index < loaded.len());
         if index == self.file {
             return;
         }
-        self.clear_file();
         self.file = index;
-        if index.is_some() {
-            self.load_diff(Some(LINE_LIMIT));
-        }
+        let source = index.zip(self.commit).map(|(index, commit)| {
+            // An untracked file of a stash comes from the commit that holds
+            // them, compared with nothing.
+            let (commit, parent) = match (self.untracked, self.untracked_from) {
+                (Some(untracked), Some(from)) if index >= from => (untracked, None),
+                _ => (commit, self.parent),
+            };
+            DiffSource::Commit {
+                commit,
+                parent,
+                change: loaded[index].clone(),
+            }
+        });
+        self.pane.show(source);
     }
 
     /// Loads all of a diff that stopped at the limit.
     pub(crate) fn load_whole_diff(&mut self) {
-        if matches!(&self.diff, DiffState::Loaded(diff) if diff.truncated) {
-            self.load_diff(None);
-        }
+        self.pane.load_whole();
     }
 
     fn clear_file(&mut self) {
         self.file = None;
-        self.diff = DiffState::Loading;
-        self.diff_work.stop();
-        self.highlight = HighlightState::NotStarted;
-        self.highlight_work.stop();
-    }
-
-    /// Highlights both versions of the diff shown, whole, on a worker.
-    fn start_highlight(&mut self) {
-        let DiffState::Loaded(diff) = &self.diff else {
-            return;
-        };
-        if !matches!(&diff.content, Content::Text(hunks) if !hunks.is_empty()) {
-            self.highlight = HighlightState::Done(None);
-            self.highlight_work.stop();
-            return;
-        }
-        let path = diff
-            .new_path
-            .as_ref()
-            .or(diff.old_path.as_ref())
-            .map(|path| path.to_string())
-            .unwrap_or_default();
-        let (old_blob, new_blob) = (diff.old_blob, diff.new_blob);
-        let (backend, root, theme) = (Arc::clone(&self.backend), self.root.clone(), self.theme);
-        self.highlight = HighlightState::Running;
-        self.highlight_work.start(&self.notify, move |cancel| {
-            // A version that is too large leaves the whole diff without.
-            let read = |blob: Option<ObjectId>| match blob {
-                Some(blob) => backend
-                    .blob(&root, &blob, HIGHLIGHT_LIMIT, cancel)
-                    .map(|content| {
-                        content.map(|bytes| Some(String::from_utf8_lossy(&bytes).into_owned()))
-                    }),
-                None => Ok(Some(None)),
-            };
-            let (Some(old), Some(new)) = (read(old_blob)?, read(new_blob)?) else {
-                return Ok(None);
-            };
-            let lines = |content: Option<String>| {
-                content.and_then(|content| highlight(&path, &content, theme, cancel))
-            };
-            let (old, new) = (lines(old), lines(new));
-            if cancel.is_cancelled() {
-                return Err(gitbull_git::Error::Cancelled);
-            }
-            Ok((old.is_some() || new.is_some()).then_some(Highlighting { theme, old, new }))
-        });
-    }
-
-    fn load_diff(&mut self, limit: Option<usize>) {
-        let (Some(commit), Some(index), ChangedFiles::Loaded(files)) =
-            (self.commit, self.file, &self.files)
-        else {
-            return;
-        };
-        let change = files[index].clone();
-        // An untracked file of a stash comes from the commit that holds
-        // them, compared with nothing.
-        let (commit, parent) = match (self.untracked, self.untracked_from) {
-            (Some(untracked), Some(from)) if index >= from => (untracked, None),
-            _ => (commit, self.parent),
-        };
-        let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
-        self.diff = DiffState::Loading;
-        self.diff_work.start(&self.notify, move |cancel| {
-            backend.file_diff(&root, &commit, parent.as_ref(), &change, limit, cancel)
-        });
+        self.pane.show(None);
     }
 
     /// Applies what has loaded. Returns whether anything changed.
@@ -399,37 +243,18 @@ impl Details {
             };
             changed = true;
         }
-        if let Some(diff) = self.diff_work.take() {
-            self.diff = match diff {
-                Ok(diff) => DiffState::Loaded(diff),
-                Err(failure) => DiffState::Failed(failure),
-            };
-            // The versions are the same when the whole diff is loaded
-            // later; their highlighting stays.
-            if matches!(self.highlight, HighlightState::NotStarted) {
-                self.start_highlight();
-            }
-            changed = true;
-        }
-        if let Some(highlighting) = self.highlight_work.take() {
-            // A version that cannot be read leaves the diff without.
-            self.highlight = HighlightState::Done(highlighting.ok().flatten());
-            changed = true;
-        }
+        changed |= self.pane.poll();
         changed
     }
 
     /// The colours of the diff shown, once it is highlighted.
     pub fn highlighting(&self) -> Option<&Highlighting> {
-        match &self.highlight {
-            HighlightState::Done(highlighting) => highlighting.as_ref(),
-            _ => None,
-        }
+        self.pane.highlighting()
     }
 
     /// Whether the diff shown is being highlighted.
     pub fn is_highlighting(&self) -> bool {
-        matches!(self.highlight, HighlightState::Running)
+        self.pane.is_highlighting()
     }
 
     /// The commit shown, if any.
@@ -455,23 +280,16 @@ impl Details {
 
     /// The diff of the file chosen; meaningless while none is.
     pub fn diff(&self) -> &DiffState {
-        &self.diff
-    }
-}
-
-impl Drop for Details {
-    fn drop(&mut self) {
-        self.files_work.stop();
-        self.diff_work.stop();
-        self.highlight_work.stop();
+        self.pane.diff()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::highlight::{HIGHLIGHT_LIMIT, Span};
     use gitbull_git::changes::ChangeKind;
-    use gitbull_git::diff::Content;
+    use gitbull_git::diff::{Content, DiffLine, FileDiff, LINE_LIMIT, LineKind};
     use gitbull_testkit::{FakeBackend, Probe, fake_id};
     use std::time::{Duration, Instant};
 
@@ -495,6 +313,7 @@ mod tests {
             new_mode: Some("100644".to_owned()),
             old_blob: None,
             new_blob: None,
+            new_in_working_copy: false,
             content: Content::Text(Vec::new()),
             truncated,
         }
@@ -711,6 +530,7 @@ mod tests {
             new_mode: Some("100644".to_owned()),
             old_blob: Some(fake_id(old_blob)),
             new_blob: Some(fake_id(new_blob)),
+            new_in_working_copy: false,
             content: Content::Text(vec![gitbull_git::diff::Hunk {
                 header: "@@ -2 +2 @@".to_owned(),
                 old_start: 2,

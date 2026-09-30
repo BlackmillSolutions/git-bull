@@ -8,7 +8,7 @@ use crate::cancel::CancelToken;
 use crate::changes::{ChangeKind, FileChange};
 use crate::error::Error;
 use crate::flags;
-use crate::invoke::Git;
+use crate::invoke::{ConfigOverride, Git};
 use crate::object_id::ObjectId;
 use crate::path::RepoPath;
 use crate::records::Records;
@@ -82,9 +82,13 @@ pub struct FileDiff {
     /// Such as `100644`, where Git reports it.
     pub old_mode: Option<String>,
     pub new_mode: Option<String>,
-    /// The content of each version, where it exists.
+    /// The content of each version, where it exists in the object
+    /// database.
     pub old_blob: Option<ObjectId>,
     pub new_blob: Option<ObjectId>,
+    /// The new version is the file at `new_path` in the working copy, not a
+    /// blob.
+    pub new_in_working_copy: bool,
     pub content: Content,
     /// Lines beyond the limit asked for were not read.
     pub truncated: bool,
@@ -126,7 +130,7 @@ fn arguments(commit: &ObjectId, parent: Option<&ObjectId>, change: &FileChange) 
 
 /// Whether `path` can be given to Git exactly. Git for Windows reads its
 /// arguments as UTF-8, so a path in another encoding cannot.
-fn passable(path: &RepoPath) -> bool {
+pub(crate) fn passable(path: &RepoPath) -> bool {
     cfg!(unix) || std::str::from_utf8(path.as_bytes()).is_ok()
 }
 
@@ -147,7 +151,7 @@ pub fn file_diff(
         let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
         format!("git {}", args.join(" "))
     };
-    let (output, truncated) = read_diff(git, repo, &args, limit, cancel)?;
+    let (output, truncated) = read_diff(git, repo, &[], &args, limit, false, cancel)?;
     let parsed = parse_diff(&output).map_err(|message| Error::Parse {
         command: command(),
         message,
@@ -181,18 +185,19 @@ pub fn file_diff(
 }
 
 /// The output of `git <args>`, up to `limit` lines of hunks; returns it and
-/// whether lines were left unread.
-fn read_diff(
+/// whether lines were left unread. With `no_index`, Git compares files
+/// outside the repository and exits with 1 when they differ.
+pub(crate) fn read_diff(
     git: &Git,
     repo: &Path,
+    overrides: &[ConfigOverride],
     args: &[OsString],
     limit: Option<usize>,
+    no_index: bool,
     cancel: &CancelToken,
 ) -> Result<(Vec<u8>, bool), Error> {
-    let Some(limit) = limit else {
-        return Ok((git.run_cancellable(repo, &[], args, cancel)?, false));
-    };
-    let mut process = git.spawn(repo, &[], args, false)?;
+    let limit = limit.unwrap_or(usize::MAX);
+    let mut process = git.spawn(repo, overrides, args, false)?;
     let command = process.command().to_owned();
     let canceller = process.canceller();
     let stop = process.canceller();
@@ -226,8 +231,10 @@ fn read_diff(
     }
     let result = process.wait();
     cancel.forget(registration);
-    if !truncated {
-        result?;
+    match result {
+        _ if truncated => {}
+        Err(Error::CommandFailed { code: Some(1), .. }) if no_index => {}
+        result => result?,
     }
     read.map_err(|source| Error::Io { command, source })?;
     Ok((output, truncated))
@@ -248,7 +255,7 @@ fn describes(diff: &FileDiff, change: &FileChange) -> bool {
 
 /// The sizes of `blobs` in bytes, in their order, from
 /// `git cat-file --batch-check`.
-fn blob_sizes(
+pub(crate) fn blob_sizes(
     git: &Git,
     repo: &Path,
     blobs: &[ObjectId],
@@ -480,6 +487,7 @@ impl Section {
             new_mode: if self.deleted { None } else { self.new_mode },
             old_blob: self.old_blob,
             new_blob: self.new_blob,
+            new_in_working_copy: false,
             content,
             truncated: false,
         }

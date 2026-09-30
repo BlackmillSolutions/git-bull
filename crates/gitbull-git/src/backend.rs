@@ -18,10 +18,13 @@ use crate::head::{self, Head};
 use crate::history::{self, CommitLine, HistoryStream, Revisions};
 use crate::invoke::Git;
 use crate::object_id::ObjectId;
+use crate::path::RepoPath;
 use crate::refs::{self, Reference};
 use crate::repository::{self, RepositoryInfo};
 use crate::shallow;
 use crate::stashes::{self, Stash, Submodule};
+use crate::status::{self, Group, StatusEntry, WorkingStatus};
+use crate::working_copy;
 
 /// Commits newest first by commit date, never a parent before its child.
 pub trait CommitStream: Send {
@@ -119,6 +122,29 @@ pub trait Backend: Send + Sync {
         blob: &ObjectId,
         limit: u64,
         cancel: &CancelToken,
+    ) -> Result<Option<Vec<u8>>, Error>;
+
+    /// The uncommitted changes of the working copy.
+    fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error>;
+
+    /// The diff of `entry` of the file status, as `group` compares it; with
+    /// a `limit`, up to that many lines of hunks.
+    fn working_diff(
+        &self,
+        repo: &Path,
+        group: Group,
+        entry: &StatusEntry,
+        limit: Option<usize>,
+        cancel: &CancelToken,
+    ) -> Result<FileDiff, Error>;
+
+    /// The content of the file at `path` in the working copy, or `None`
+    /// when it is larger than `limit` bytes.
+    fn working_file(
+        &self,
+        repo: &Path,
+        path: &RepoPath,
+        limit: u64,
     ) -> Result<Option<Vec<u8>>, Error>;
 }
 
@@ -229,6 +255,30 @@ impl Backend for CliBackend {
         cancel: &CancelToken,
     ) -> Result<Option<Vec<u8>>, Error> {
         blob::blob(&self.git, repo, blob, limit, cancel)
+    }
+
+    fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error> {
+        status::status(&self.git, repo, cancel)
+    }
+
+    fn working_diff(
+        &self,
+        repo: &Path,
+        group: Group,
+        entry: &StatusEntry,
+        limit: Option<usize>,
+        cancel: &CancelToken,
+    ) -> Result<FileDiff, Error> {
+        working_copy::working_diff(&self.git, repo, group, entry, limit, cancel)
+    }
+
+    fn working_file(
+        &self,
+        repo: &Path,
+        path: &RepoPath,
+        limit: u64,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        working_copy::working_file(repo, path, limit)
     }
 }
 

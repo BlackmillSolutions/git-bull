@@ -12,12 +12,14 @@ use gitbull_core::settings::{
     Layout, Loaded, Settings, SettingsFile, ThemeSetting, WindowGeometry,
 };
 use gitbull_core::sidebar_tree::{SidebarRow, SidebarState};
-use gitbull_core::workspace::{Event, Notify, TabId, Workspace};
+use gitbull_core::workspace::{Event, Notify, TabId, View, Workspace};
 use gitbull_git::object_id::ObjectId;
+use gitbull_git::status::Group;
 use gitbull_git::version::GitVersion;
 use gitbull_git::{Backend, CliBackend};
 use jiff::tz::TimeZone;
 
+use crate::commit_list::list_row;
 use crate::i18n::Translations;
 use crate::theme::{Appearance, ThemeFollower};
 use crate::virtual_list::ListState;
@@ -122,15 +124,47 @@ pub(crate) struct TabView {
     /// The commit whose files `files` lists, to select the first file of
     /// the next one.
     pub(crate) files_for: Option<ObjectId>,
-    /// The rows selected in the diff, from where the selection began to
-    /// where it ends.
-    pub(crate) diff_selection: Option<(usize, usize)>,
-    /// The commit and file whose diff `diff_selection` belongs to.
-    pub(crate) diff_for: Option<(ObjectId, usize)>,
+    /// The files of the File status view.
+    pub(crate) status_files: ListState,
+    /// The version of the status `status_files` shows, to select the file
+    /// chosen again where a new status puts it.
+    pub(crate) status_version: Option<u64>,
+    /// The diff of the file chosen in the commit panel.
+    pub(crate) commit_diff: DiffView,
+    /// The diff of the file chosen in the File status view.
+    pub(crate) status_diff: DiffView,
+    /// The row of the history the row "Uncommitted changes" was drawn
+    /// above last, which is also its own row in the list.
+    pub(crate) uncommitted: Option<u64>,
     /// The commit whose details the commit list asked for last. The list
     /// asks again only when its selection moves to another commit, so that
     /// a stash shown from the sidebar stays.
     pub(crate) details_shown: Option<ObjectId>,
+}
+
+impl TabView {
+    /// Whether the row "Uncommitted changes" is selected.
+    pub(crate) fn uncommitted_selected(&self) -> bool {
+        self.uncommitted.is_some() && self.commits.selected() == self.uncommitted
+    }
+}
+
+/// What a diff panel keeps for the diff it shows.
+#[derive(Default)]
+pub(crate) struct DiffView {
+    /// The rows selected, from where the selection began to where it ends.
+    pub(crate) selection: Option<(usize, usize)>,
+    /// The diff the selection belongs to.
+    pub(crate) key: Option<DiffKey>,
+}
+
+/// Which diff a diff panel shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DiffKey {
+    /// Of the file at an index of the files of a commit.
+    Commit(ObjectId, usize),
+    /// Of the file at an index of a group of the file status.
+    Status(Group, usize),
 }
 
 /// Everything the window shows.
@@ -453,6 +487,15 @@ impl App {
         }
     }
 
+    /// Shows `view` in the active tab.
+    pub(crate) fn show_view(&mut self, view: View) {
+        if let Some(workspace) = self.workspace_mut()
+            && let Some(id) = workspace.active().map(|tab| tab.id())
+        {
+            workspace.set_view(id, view);
+        }
+    }
+
     /// Selects the commit `id`, such as a parent of the commit shown.
     pub(crate) fn navigate_to_commit(&mut self, id: ObjectId) {
         let Some((session, view)) = self.active_view() else {
@@ -478,7 +521,10 @@ impl App {
         match outcome {
             Navigation::Selected(row) => {
                 if let Some((session, view)) = self.active_view() {
-                    view.commits.select_and_reveal(u64::from(row));
+                    // Below the row "Uncommitted changes", a commit is one
+                    // row further down the list.
+                    view.commits
+                        .select_and_reveal(list_row(view.uncommitted, u64::from(row)));
                     // Remembered at once: a history replaced before the list
                     // is drawn again selects this commit, not the old one.
                     view.selected_id = Some(session.history().store.id(row));

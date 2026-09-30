@@ -83,11 +83,11 @@ after each stage.
 
 ## 6. Working-copy status
 
-- [ ] 6.1 Implement parsing of the status for ordinary, renamed, unmerged, untracked and submodule entries, with untracked files listed one by one; verify parser tests with recorded output and an integration test with a new folder of two files
-- [ ] 6.2 Implement the diffs of staged, unstaged, untracked and conflicted files and of a submodule at another commit; verify integration tests for each
-- [ ] 6.3 Build the File status view: three groups, markers, conflict marker, the note for a clean working copy, the progress indicator and a context menu without modifying actions; verify UI tests for every scenario of `working-copy-status`
-- [ ] 6.4 Show the row "Uncommitted changes" in the graph, open File status on selection, and hide File status for bare repositories; verify session and UI tests
-- [ ] 6.5 Refresh the status through the button and on window focus; verify a test that a file edited elsewhere appears
+- [x] 6.1 Implement parsing of the status for ordinary, renamed, unmerged, untracked and submodule entries, with untracked files listed one by one; verify parser tests with recorded output and an integration test with a new folder of two files
+- [x] 6.2 Implement the diffs of staged, unstaged, untracked and conflicted files and of a submodule at another commit; verify integration tests for each
+- [x] 6.3 Build the File status view: three groups, markers, conflict marker, the note for a clean working copy, the progress indicator and a context menu without modifying actions; verify UI tests for every scenario of `working-copy-status`
+- [x] 6.4 Show the row "Uncommitted changes" in the graph, open File status on selection, and hide File status for bare repositories; verify session and UI tests
+- [x] 6.5 Refresh the status through the button and on window focus; verify a test that a file edited elsewhere appears
 - [ ] 6.6 Add integration tests that a configured monitor hook, a clean filter of the repository and a filter in a submodule's configuration are not executed, that a file touched by such a filter shows as modified, and that `git commit` succeeds while the status is being computed; verify all pass on all three platforms in CI
 
 ## 7. Commit search

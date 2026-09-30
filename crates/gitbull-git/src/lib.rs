@@ -26,7 +26,9 @@ pub mod refs;
 pub mod repository;
 pub mod shallow;
 pub mod stashes;
+pub mod status;
 pub mod version;
+pub mod working_copy;
 
 pub use backend::{Backend, CliBackend};
 pub use error::Error;

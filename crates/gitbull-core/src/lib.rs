@@ -7,10 +7,13 @@
 pub mod badges;
 pub mod content_cache;
 pub mod details;
+pub mod diff_pane;
+pub mod file_status;
 pub mod git_setup;
 pub mod graph;
 pub mod highlight;
 pub mod opening;
+mod pending;
 pub mod session;
 pub mod settings;
 pub mod sidebar_tree;

@@ -9,7 +9,7 @@ use gitbull_app::app::App;
 use gitbull_core::session::HINT_COMMITS;
 use gitbull_core::settings::Settings;
 use gitbull_git::history::CommitLine;
-use gitbull_testkit::{FakeBackend, GraphGate, Probe, commit_line};
+use gitbull_testkit::{FakeBackend, Gate, Probe, commit_line};
 use support::{Setup, build, path, settle_window, window};
 
 fn root() -> std::path::PathBuf {
@@ -149,7 +149,7 @@ fn the_confirmation_names_the_command_and_declining_writes_nothing() {
 
 #[test]
 fn confirming_shows_progress_and_the_hint_goes_when_done() {
-    let gate = GraphGate::new();
+    let gate = Gate::new();
     let (mut harness, probe) = open(large().with_commit_graph_gate(root(), &gate));
     wait_for(&mut harness, |h| has_button(h, GENERATE));
     harness
@@ -181,7 +181,7 @@ fn confirming_shows_progress_and_the_hint_goes_when_done() {
 
 #[test]
 fn cancelling_the_generation_brings_the_hint_back() {
-    let gate = GraphGate::new();
+    let gate = Gate::new();
     let (mut harness, _) = open(large().with_commit_graph_gate(root(), &gate));
     wait_for(&mut harness, |h| has_button(h, GENERATE));
     harness

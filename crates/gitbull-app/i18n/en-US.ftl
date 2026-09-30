@@ -71,6 +71,8 @@ column-author = Author
 column-commit = Commit
 row-loading = Loading…
 history-empty = This repository has no commits yet.
+history-uncommitted = Uncommitted changes
+open-file-status = Open File status
 graph-hint = This repository has no commit-graph file. With one, the history loads faster.
 graph-generate = Generate commit-graph
 graph-confirm-title = Generate the commit-graph?
@@ -80,6 +82,15 @@ graph-cancel = Cancel
 graph-generating = Generating the commit-graph
 graph-failed = The commit-graph could not be generated: { $error }
 copy-full-hash = Copy full hash
+
+## File status view
+
+panel-files = FILES
+file-status-staged = Staged files ({ $count })
+file-status-unstaged = Unstaged files ({ $count })
+file-status-untracked = Untracked files ({ $count })
+file-status-loading = Reading the status of the working copy…
+file-status-clean = There are no uncommitted changes.
 
 ## Commit and diff panels
 
@@ -102,6 +113,9 @@ change-deleted = Deleted
 change-renamed = Renamed
 change-copied = Copied
 change-type-changed = Type changed
+change-conflicted = Conflict
+change-untracked = Untracked
+
 diff-unchanged = The content is unchanged.
 diff-mode = Mode changed from { $old } to { $new }.
 diff-binary = Binary file. Before: { $old }. After: { $new }.

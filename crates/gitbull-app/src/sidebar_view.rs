@@ -89,7 +89,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     let key = (session.sidebar_version(), sidebar.clone());
     if sidebar_key.as_ref() != Some(&key) {
         let loaded = session.sidebar().and_then(|result| result.as_ref().ok());
-        *sidebar_rows = sidebar_tree::rows(loaded, &session.opened().head, sidebar);
+        *sidebar_rows =
+            sidebar_tree::rows(loaded, &session.opened().head, sidebar, session.views());
         *sidebar_key = Some(key);
     }
 

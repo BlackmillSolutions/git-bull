@@ -277,3 +277,24 @@ branch `feature/old` points halfway down, so Git needs 0.39 s to its first
 line even without tags, and finding the tags that no branch reaches takes
 0.72 s there, as proving that the oldest tag is reachable walks most of the
 history.
+
+## Linux kernel with the file status (group 6)
+
+Measured on 2026-09-30 on the same machine and clone, release build. The
+status of the working copy now starts together with the history. The clone
+has no working copy, so Git reports all 96,045 files as staged deletions:
+`git status` takes 3.4 s there, and the row "Uncommitted changes" appears
+above HEAD.
+
+| Measure | Result | Before | Target | Met |
+|---|---|---|---|---|
+| First rows, all branches and tags | 0.32 s to 0.35 s | 0.31 s to 0.32 s | under 1 s | yes |
+| First rows, current branch | 0.15 s to 0.18 s | 0.15 s to 0.17 s | under 1 s | yes |
+| Slowest frame while loading | 9.1 ms to 13.0 ms | 6.8 ms | under 16.7 ms | yes |
+| Slowest frame after loading | 3.0 ms to 5.6 ms | 3.0 ms | under 16.7 ms | yes |
+
+The first run after a build gave 0.56 s to the first rows; the two runs
+after it gave the range above. The slowest frame while loading varies from
+run to run: without reading the status it was 6.8 ms and 10.3 ms, so the
+status is not its cause. Median and 99th percentile stayed at 0.9 ms and
+3.9 ms.

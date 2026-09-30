@@ -1,5 +1,5 @@
-//! The diff panel: the diff of the file chosen in the commit panel (spec
-//! `diff-view`).
+//! The diff panel: the diff of the file chosen in the commit panel or in
+//! the File status view (spec `diff-view`).
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::text::{LayoutJob, TextFormat};
@@ -10,12 +10,13 @@ use eframe::egui::{
 use fluent_bundle::FluentArgs;
 use gitbull_core::details::{DiffState, Highlighting};
 use gitbull_core::highlight::{HighlightTheme, Span};
+use gitbull_core::session::Session;
 use gitbull_core::workspace::Failure;
 use gitbull_git::Error;
 use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LINE_LIMIT, LineKind};
 use gitbull_git::path::RepoPath;
 
-use crate::app::{App, TabView};
+use crate::app::{App, DiffKey, DiffView};
 use crate::commit_list::{color, take_copy};
 use crate::i18n::Msg;
 use crate::theme::{Appearance, Palette};
@@ -204,9 +205,35 @@ impl NoteData {
     }
 }
 
-/// Draws the diff of the file chosen in the active tab. Returns whether it
-/// drew one, which then takes the focus of the panel.
-pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
+/// Which diff a panel shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pane {
+    /// Of the file chosen in the commit panel.
+    Commit,
+    /// Of the file chosen in the File status view.
+    FileStatus,
+}
+
+/// The diff `pane` shows, its colours and what it belongs to.
+fn shown(session: &Session, pane: Pane) -> Option<(&DiffState, Option<&Highlighting>, DiffKey)> {
+    match pane {
+        Pane::Commit => {
+            let details = session.details();
+            let key = DiffKey::Commit(details.commit()?, details.file()?);
+            Some((details.diff(), details.highlighting(), key))
+        }
+        Pane::FileStatus => {
+            let status = session.file_status()?;
+            let (group, index) = status.chosen()?;
+            let key = DiffKey::Status(group, index);
+            Some((status.diff(), status.highlighting(), key))
+        }
+    }
+}
+
+/// Draws the diff `pane` of the active tab shows. Returns whether it drew
+/// one, which then takes the focus of the panel.
+pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) -> bool {
     let texts = Texts::new(app);
     let theme = match appearance(app, ui) {
         Appearance::Light => HighlightTheme::Light,
@@ -217,10 +244,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             return false;
         };
         session.set_highlight_theme(theme);
-        match session.details().diff() {
-            DiffState::Loaded(diff) if session.details().file().is_some() => {
-                Some(NoteData::of(diff))
-            }
+        match shown(session, pane) {
+            Some((DiffState::Loaded(diff), _, _)) => Some(NoteData::of(diff)),
             _ => None,
         }
     }
@@ -228,11 +253,14 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let Some((session, view)) = app.active_view() else {
         return false;
     };
-    let details = session.details();
-    let (Some(commit), Some(file)) = (details.commit(), details.file()) else {
+    let state = match pane {
+        Pane::Commit => &mut view.commit_diff,
+        Pane::FileStatus => &mut view.status_diff,
+    };
+    let Some((diff, highlighting, key)) = shown(session, pane) else {
         return false;
     };
-    let diff = match details.diff() {
+    let diff = match diff {
         DiffState::Loading => {
             ui.weak(&texts.loading);
             return false;
@@ -251,9 +279,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         }
         DiffState::Loaded(diff) => diff,
     };
-    if view.diff_for != Some((commit, file)) {
-        view.diff_for = Some((commit, file));
-        view.diff_selection = None;
+    if state.key != Some(key) {
+        state.key = Some(key);
+        state.selection = None;
     }
 
     if let Some((old, new)) = paths(diff) {
@@ -273,7 +301,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         Content::Text(hunks) if !hunks.is_empty() => hunks,
         _ => {
             if load_all {
-                session.load_whole_diff();
+                load_whole(session, pane);
             }
             return false;
         }
@@ -293,9 +321,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         ui,
         &all,
         hunks,
-        details.highlighting(),
-        view,
-        (commit, file),
+        highlighting,
+        state.selection,
+        key,
         &texts,
         palette,
     );
@@ -303,28 +331,28 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         background.request_focus();
     }
     if let Some((row, extend)) = outcome.clicked {
-        view.diff_selection = match (extend, view.diff_selection) {
+        state.selection = match (extend, state.selection) {
             (true, Some((anchor, _))) => Some((anchor, row)),
             _ => Some((row, row)),
         };
     }
     if let Some(row) = outcome.menu
-        && !selected(view.diff_selection, row)
+        && !selected(state.selection, row)
     {
-        view.diff_selection = Some((row, row));
+        state.selection = Some((row, row));
     }
-    let selected_text = |view: &TabView| {
-        view.diff_selection.map(|(anchor, end)| {
+    let selected_text = |state: &DiffView| {
+        state.selection.map(|(anchor, end)| {
             let range = anchor.min(end)..=anchor.max(end);
             copied_rows(hunks, &all[range])
         })
     };
-    if copy && let Some(text) = selected_text(view) {
+    if copy && let Some(text) = selected_text(state) {
         ui.ctx().copy_text(text);
     }
     match outcome.copy {
         Some(Copy::Lines) => {
-            if let Some(text) = selected_text(view) {
+            if let Some(text) = selected_text(state) {
                 ui.ctx().copy_text(text);
             }
         }
@@ -341,9 +369,16 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         );
     }
     if load_all {
-        session.load_whole_diff();
+        load_whole(session, pane);
     }
     true
+}
+
+fn load_whole(session: &mut Session, pane: Pane) {
+    match pane {
+        Pane::Commit => session.load_whole_diff(),
+        Pane::FileStatus => session.load_whole_status_diff(),
+    }
 }
 
 /// What the context menu of the diff copies.
@@ -380,8 +415,8 @@ fn draw_rows(
     all: &[Row],
     hunks: &[Hunk],
     highlighting: Option<&Highlighting>,
-    view: &TabView,
-    shown: (gitbull_git::object_id::ObjectId, usize),
+    selection: Option<(usize, usize)>,
+    shown: DiffKey,
     texts: &Texts,
     palette: &Palette,
 ) -> Outcome {
@@ -410,7 +445,7 @@ fn draw_rows(
             // Rows are exactly as high as `show_rows` expects.
             ui.spacing_mut().item_spacing.y = 0.0;
             for index in range {
-                let is_selected = selected(view.diff_selection, index);
+                let is_selected = selected(selection, index);
                 let response = match all[index] {
                     Row::Header(hunk) => {
                         header_row(ui, &hunks[hunk].header, is_selected, &font, palette)

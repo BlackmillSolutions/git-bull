@@ -4,6 +4,7 @@ pub mod app;
 pub mod commit_list;
 pub mod commit_panel;
 pub mod diff_view;
+pub mod file_status_view;
 pub mod fonts;
 pub mod graph_view;
 pub mod i18n;

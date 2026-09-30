@@ -160,8 +160,10 @@ one fills the visible area. The selection SHALL be kept.
 When the working copy has changes, the commit list SHALL show a row
 "Uncommitted changes" above the commit that HEAD points to, connected to it
 in the graph. The row SHALL appear as soon as the status of the working copy
-is known; the history SHALL NOT wait for it. Selecting the row SHALL open the
-File status view.
+is known; the history SHALL NOT wait for it. Clicking the row or pressing
+Enter on it SHALL open the File status view. Moving the selection onto the row
+with the keyboard SHALL only select it, and the commit panel SHALL offer to
+open the File status view.
 
 #### Scenario: Working copy has changes
 - **WHEN** the working copy contains a modified file
@@ -175,9 +177,14 @@ File status view.
 - **WHEN** the working copy has no changes
 - **THEN** the commit list shows no such row
 
-#### Scenario: Row is selected
-- **WHEN** the user selects the row "Uncommitted changes"
+#### Scenario: Row is clicked
+- **WHEN** the user clicks the row "Uncommitted changes" or presses Enter on it
 - **THEN** the File status view opens
+
+#### Scenario: Row is reached with the keyboard
+- **WHEN** the user moves the selection onto the row "Uncommitted changes" with the arrow keys
+- **THEN** the row is selected and the History view stays
+- **AND** the commit panel offers to open the File status view
 
 ### Requirement: Empty repository
 For a repository without commits, git-bull SHALL show an empty state with a

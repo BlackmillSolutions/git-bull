@@ -427,6 +427,54 @@ fn parent_ids(store: &CommitStore, row: Row) -> Vec<ObjectId> {
         .collect()
 }
 
+/// The rows the graph shows when the row "Uncommitted changes" goes right
+/// above the row `head` of the commit HEAD points to: that row, and the row
+/// of HEAD with the line that joins them.
+pub fn uncommitted_rows(head: &GraphRow) -> (GraphRow, GraphRow) {
+    // The lanes that pass between the row above and the row of HEAD.
+    let mut passing: Vec<Edge> = Vec::new();
+    for edge in &head.upper {
+        if !passing.iter().any(|lane| lane.from == edge.from) {
+            passing.push(Edge {
+                to: edge.from,
+                ..*edge
+            });
+        }
+    }
+    // The lane of HEAD, unless a lane from above leads into it, as from a
+    // child of HEAD on another branch.
+    let taken = |column: usize| passing.iter().any(|lane| lane.from == column);
+    let column = match taken(head.column) {
+        false => head.column,
+        true => (0..).find(|&column| !taken(column)).unwrap_or(head.column),
+    };
+    let own = Edge {
+        from: column,
+        to: column,
+        color: head.color,
+    };
+    let width = passing
+        .iter()
+        .map(|lane| lane.from + 1)
+        .fold(column + 1, usize::max);
+    let mut lower = passing.clone();
+    lower.push(own);
+    let uncommitted = GraphRow {
+        column,
+        color: head.color,
+        upper: passing,
+        lower,
+        width,
+    };
+    let mut joined = head.clone();
+    joined.upper.push(Edge {
+        to: head.column,
+        ..own
+    });
+    joined.width = joined.width.max(column + 1);
+    (uncommitted, joined)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +731,78 @@ mod tests {
                 color: 1
             }
         );
+    }
+    #[test]
+    fn uncommitted_changes_take_the_lane_of_head_when_it_is_free() {
+        // x passes the row of c, the tip of the branch HEAD is on.
+        let rows = lay_out(&[("x", &["b"]), ("c", &["b"]), ("b", &["a"]), ("a", &[])]);
+        let head = &rows[1].1;
+        assert_eq!(head.column, 1);
+        let (uncommitted, joined) = uncommitted_rows(head);
+        let passing = Edge {
+            from: 0,
+            to: 0,
+            color: rows[0].1.color,
+        };
+        let own = Edge {
+            from: 1,
+            to: 1,
+            color: head.color,
+        };
+        assert_eq!(
+            uncommitted,
+            GraphRow {
+                column: 1,
+                color: head.color,
+                upper: vec![passing],
+                lower: vec![passing, own],
+                width: 2,
+            }
+        );
+        assert_eq!(joined.upper, [head.upper.clone(), vec![own]].concat());
+        assert_eq!(joined.lower, head.lower);
+    }
+
+    #[test]
+    fn uncommitted_changes_go_beside_a_lane_that_leads_into_head() {
+        // y is a child of c, the commit HEAD points to.
+        let rows = lay_out(&[("y", &["c"]), ("c", &["b"]), ("b", &[])]);
+        let head = &rows[1].1;
+        let (uncommitted, joined) = uncommitted_rows(head);
+        assert_eq!(uncommitted.column, 1);
+        assert_eq!(
+            uncommitted.upper,
+            [Edge {
+                from: 0,
+                to: 0,
+                color: head.color
+            }]
+        );
+        assert_eq!(
+            joined.upper.last(),
+            Some(&Edge {
+                from: 1,
+                to: 0,
+                color: head.color,
+            })
+        );
+        assert_eq!(joined.width, 2);
+    }
+
+    #[test]
+    fn uncommitted_changes_above_the_first_row_have_only_their_own_line() {
+        let rows = lay_out(&[("c", &["b"]), ("b", &[])]);
+        let (uncommitted, joined) = uncommitted_rows(&rows[0].1);
+        assert!(uncommitted.upper.is_empty());
+        assert_eq!(
+            uncommitted.lower,
+            [Edge {
+                from: 0,
+                to: 0,
+                color: rows[0].1.color
+            }]
+        );
+        assert_eq!(uncommitted.width, 1);
+        assert_eq!(joined.upper, uncommitted.lower);
     }
 }

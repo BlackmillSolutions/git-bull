@@ -22,18 +22,23 @@ pub struct Badge {
     pub name: String,
 }
 
-/// The badges of every commit that has any, HEAD first, then branches,
-/// remote branches and tags, each in the order of their names.
-pub fn badges(references: &[Reference], head: &Head) -> HashMap<ObjectId, Vec<Badge>> {
-    let mut all: HashMap<ObjectId, Vec<Badge>> = HashMap::new();
-    let head_commit = match head {
+/// The commit HEAD points to; `None` on a branch without commits.
+pub fn head_commit(references: &[Reference], head: &Head) -> Option<ObjectId> {
+    let hex = match head {
         Head::Detached(commit) => Some(commit.as_str()),
         Head::Branch(name) => references
             .iter()
             .find(|r| r.kind == RefKind::Branch && r.short == *name)
             .and_then(|r| r.commit.as_deref()),
     };
-    if let Some(id) = head_commit.and_then(|hex| ObjectId::from_hex(hex.as_bytes())) {
+    hex.and_then(|hex| ObjectId::from_hex(hex.as_bytes()))
+}
+
+/// The badges of every commit that has any, HEAD first, then branches,
+/// remote branches and tags, each in the order of their names.
+pub fn badges(references: &[Reference], head: &Head) -> HashMap<ObjectId, Vec<Badge>> {
+    let mut all: HashMap<ObjectId, Vec<Badge>> = HashMap::new();
+    if let Some(id) = head_commit(references, head) {
         all.entry(id).or_default().push(Badge {
             kind: BadgeKind::Head,
             name: "HEAD".to_owned(),

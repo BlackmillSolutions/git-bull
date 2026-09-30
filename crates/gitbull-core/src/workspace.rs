@@ -30,6 +30,13 @@ pub enum View {
     Search,
 }
 
+impl View {
+    /// Every view, in the order of the sidebar.
+    pub const ALL: [View; 3] = [View::History, View::FileStatus, View::Search];
+    /// The views of a repository without a working copy.
+    pub const BARE: [View; 2] = [View::History, View::Search];
+}
+
 /// What a tab shows.
 #[derive(Debug)]
 pub enum TabState {

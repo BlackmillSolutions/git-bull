@@ -9,10 +9,10 @@ use eframe::egui::{
     UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 use gitbull_core::badges::{Badge, BadgeKind};
-use gitbull_core::graph::GraphRow;
+use gitbull_core::graph::{GraphRow, uncommitted_rows};
 use gitbull_core::session::{BranchFilter, CommitGraph, History, LoadState, Session};
 use gitbull_core::store::Row;
-use gitbull_core::workspace::Failure;
+use gitbull_core::workspace::{Failure, View};
 use gitbull_git::commit_graph::WRITE_ARGS;
 use gitbull_git::object_id::ObjectId;
 use jiff::Timestamp;
@@ -93,6 +93,8 @@ const SHORT_HASH: usize = 7;
 /// What one row shows, collected before drawing so that the history is
 /// locked only briefly.
 struct RowData {
+    /// The row "Uncommitted changes", not a commit.
+    uncommitted: bool,
     date: String,
     /// The date with its original offset, once the content has arrived.
     tooltip: Option<String>,
@@ -105,9 +107,46 @@ struct RowData {
     boundary: bool,
 }
 
+/// The rows of the commit list: the commits of the history, and the row
+/// "Uncommitted changes" right above the commit at the row `uncommitted`
+/// of the history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ListRows {
+    pub(crate) commits: u64,
+    pub(crate) uncommitted: Option<u64>,
+}
+
+impl ListRows {
+    pub(crate) fn len(self) -> u64 {
+        self.commits + u64::from(self.uncommitted.is_some())
+    }
+
+    /// The row of the history that `row` of the list shows; `None` for the
+    /// row "Uncommitted changes".
+    pub(crate) fn commit(self, row: u64) -> Option<u64> {
+        match self.uncommitted {
+            Some(at) if row == at => None,
+            Some(at) if row > at => Some(row - 1),
+            _ => Some(row),
+        }
+    }
+
+    /// The row of the list that shows the row `commit` of the history.
+    pub(crate) fn list_row(self, commit: u64) -> u64 {
+        list_row(self.uncommitted, commit)
+    }
+}
+
+/// The row of the list that shows the row `commit` of the history, with
+/// the row "Uncommitted changes" above the row `uncommitted`.
+pub(crate) fn list_row(uncommitted: Option<u64>, commit: u64) -> u64 {
+    commit + u64::from(uncommitted.is_some_and(|at| commit >= at))
+}
+
 /// Draws the column headers and the list of the active tab.
 pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let loading = app.texts.text(Msg::RowLoading);
+    let uncommitted_text = app.texts.text(Msg::HistoryUncommitted);
     let empty = app.texts.text(Msg::HistoryEmpty);
     let copy_label = app.texts.text(Msg::CopyFullHash);
     let titles = [
@@ -151,22 +190,52 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         text_cell(ui, cell, RichText::new(title).strong());
     }
 
+    // Each in a statement of its own: the guard of the history lives to the
+    // end of its statement, and asking for the row takes it again.
+    let commits = session.history().store.len() as u64;
+    let uncommitted = session.uncommitted_row().map(u64::from);
+    let list = ListRows {
+        commits,
+        uncommitted,
+    };
     // A reloaded history took the place of the one shown: the selected
     // commit is selected again where it now is, if it still exists.
     let generation = session.history_generation();
     if view.generation != generation {
         view.generation = generation;
+        view.uncommitted = list.uncommitted;
         let row = view
             .selected_id
             .and_then(|id| session.history().store.row_of(&id));
         match row {
-            Some(row) => view.commits.select_and_reveal(u64::from(row)),
+            Some(row) => view
+                .commits
+                .select_and_reveal(list.list_row(u64::from(row))),
             None => view.commits.select(None),
         }
     }
+    // The row "Uncommitted changes" came, went or moved: the selection
+    // stays on the commit, or on that row while it is there.
+    if view.uncommitted != list.uncommitted {
+        let before = ListRows {
+            uncommitted: view.uncommitted,
+            ..list
+        };
+        let on_uncommitted = view
+            .commits
+            .selected()
+            .is_some_and(|row| before.commit(row).is_none());
+        view.uncommitted = list.uncommitted;
+        let row = view
+            .selected_id
+            .and_then(|id| session.history().store.row_of(&id))
+            .map(|row| list.list_row(u64::from(row)))
+            .or(list.uncommitted.filter(|_| on_uncommitted));
+        view.commits.select(row);
+    }
 
-    let rows = session.history().store.len() as u64;
-    if rows == 0 && matches!(session.history().state, LoadState::Loaded) {
+    let rows = list.len();
+    if list.commits == 0 && matches!(session.history().state, LoadState::Loaded) {
         ui.add_space(24.0);
         ui.vertical_centered(|ui| ui.label(RichText::new(empty).weak()));
         return;
@@ -177,8 +246,14 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     // Rows around the view too, so that scrolling in this frame finds them.
     let margin = visible.end - visible.start;
     let gathered = visible.start.saturating_sub(margin)..(visible.end + margin).min(rows);
-    session.request_content(gathered.start as Row..gathered.end as Row);
-    let data = gather(session, gathered.clone(), &zone, graph_width);
+    let data = gather(
+        session,
+        list,
+        gathered.clone(),
+        &zone,
+        graph_width,
+        &uncommitted_text,
+    );
     let needed = data
         .iter()
         .map(|row| graph_view::needed_lanes(&row.graph))
@@ -200,30 +275,44 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     );
 
     let selected = view.commits.selected().filter(|row| *row < rows);
-    view.selected_id = selected.map(|row| session.history().store.id(row as Row));
+    let selected_commit = selected.and_then(|row| list.commit(row));
+    view.selected_id = selected_commit.map(|row| session.history().store.id(row as Row));
     if view.selected_id != view.details_shown {
         view.details_shown = view.selected_id;
-        session.show_details(selected.map(|row| row as Row));
+        session.show_details(selected_commit.map(|row| row as Row));
     }
+    // Clicking the row "Uncommitted changes" or pressing Enter on it opens
+    // the File status view; moving onto it with the keyboard only selects
+    // it, and the commit panel offers to open the view.
+    let open_file_status = [output.clicked, output.activated]
+        .into_iter()
+        .flatten()
+        .any(|row| row < rows && list.commit(row).is_none());
 
-    let hash_of = |row: u64| session.history().store.id(row as Row).to_string();
+    let hash_of = |row: u64| {
+        list.commit(row)
+            .map(|row| session.history().store.id(row as Row).to_string())
+    };
     if output.response.has_focus()
         && ui.input_mut(take_copy)
-        && let Some(row) = view.commits.selected()
+        && let Some(hash) = view.commits.selected().and_then(hash_of)
     {
-        ui.ctx().copy_text(hash_of(row));
+        ui.ctx().copy_text(hash);
     }
     let menu_row = view.commits.menu_row();
     output.response.context_menu(|ui| {
         if ui.button(&copy_label).clicked() {
-            if let Some(row) = menu_row {
-                ui.ctx().copy_text(hash_of(row));
+            if let Some(hash) = menu_row.and_then(hash_of) {
+                ui.ctx().copy_text(hash);
             }
             ui.close();
         }
     });
     if resize.dragged() {
         app.update_layout(|layout| layout.graph_column = Some(graph_width));
+    }
+    if open_file_status {
+        app.show_view(View::FileStatus);
     }
 }
 
@@ -394,56 +483,117 @@ pub(crate) fn take_copy(input: &mut InputState) -> bool {
 
 fn gather(
     session: &mut Session,
+    list: ListRows,
     rows: Range<u64>,
     zone: &TimeZone,
     graph_width: f32,
+    uncommitted_text: &str,
 ) -> Vec<RowData> {
+    // The rows of the history among `rows`; also that of HEAD when the row
+    // "Uncommitted changes" is among them, as its lines join HEAD.
+    let first = list.commit(rows.start).unwrap_or(rows.start);
+    let mut end = rows
+        .clone()
+        .rev()
+        .find_map(|row| list.commit(row))
+        .map_or(first, |row| row + 1);
+    if let Some(at) = list.uncommitted.filter(|at| rows.contains(at)) {
+        end = end.max(at + 1).min(list.commits);
+    }
+    session.request_content(first as Row..end as Row);
     // Lines of lanes the column cannot show are not laid out.
     let limit = (graph_width / LANE_WIDTH).ceil() as usize;
-    let commits: Vec<(ObjectId, i64, GraphRow)> = {
+    let mut commits: Vec<(ObjectId, i64, GraphRow)> = {
         let mut history = session.history();
         let History { store, graph, .. } = &mut *history;
-        let graph_rows = graph
-            .rows(store, rows.start as Row..rows.end as Row, limit)
-            .to_vec();
-        rows.zip(graph_rows)
+        let graph_rows = graph.rows(store, first as Row..end as Row, limit).to_vec();
+        (first..end)
+            .zip(graph_rows)
             .map(|(row, graph_row)| {
                 let row = row as Row;
                 (store.id(row), store.timestamp(row), graph_row)
             })
             .collect()
     };
-    commits
-        .into_iter()
-        .map(|(id, timestamp, graph)| {
-            let content = session.content(&id).map(|content| {
-                (
-                    content
-                        .message
-                        .lines()
-                        .next()
-                        .unwrap_or_default()
-                        .to_owned(),
-                    content.author.name.clone(),
-                    original_date(content.committer.time, content.committer.offset_minutes),
-                )
+    let mut uncommitted = None;
+    if let Some(at) = list.uncommitted
+        && let Some(head) = at
+            .checked_sub(first)
+            .and_then(|i| commits.get_mut(i as usize))
+    {
+        let (row, joined) = uncommitted_rows(&head.2);
+        head.2 = joined;
+        uncommitted = Some(row);
+    }
+    let mut data: Vec<RowData> = Vec::with_capacity(rows.clone().count());
+    for row in rows {
+        let Some(commit) = list.commit(row) else {
+            data.push(RowData {
+                uncommitted: true,
+                date: String::new(),
+                tooltip: None,
+                summary: Some(uncommitted_text.to_owned()),
+                author: Some(String::new()),
+                short: String::new(),
+                badges: Vec::new(),
+                graph: uncommitted.clone().unwrap_or_else(|| GraphRow {
+                    column: 0,
+                    color: 0,
+                    upper: Vec::new(),
+                    lower: Vec::new(),
+                    width: 1,
+                }),
+                boundary: false,
             });
-            let (summary, author, tooltip) = match content {
-                Some((summary, author, tooltip)) => (Some(summary), Some(author), Some(tooltip)),
-                None => (None, None, None),
-            };
-            RowData {
-                date: local_date(timestamp, zone),
-                tooltip,
-                summary,
-                author,
-                short: id.short(SHORT_HASH),
-                badges: session.badges(&id).to_vec(),
-                graph,
-                boundary: session.is_boundary(&id),
-            }
-        })
-        .collect()
+            continue;
+        };
+        let Some((id, timestamp, graph)) = commit
+            .checked_sub(first)
+            .and_then(|i| commits.get(i as usize))
+            .cloned()
+        else {
+            continue;
+        };
+        data.push(commit_data(session, id, timestamp, graph, zone));
+    }
+    data
+}
+
+/// What the row of the commit `id` shows.
+fn commit_data(
+    session: &mut Session,
+    id: ObjectId,
+    timestamp: i64,
+    graph: GraphRow,
+    zone: &TimeZone,
+) -> RowData {
+    let content = session.content(&id).map(|content| {
+        (
+            content
+                .message
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+            content.author.name.clone(),
+            original_date(content.committer.time, content.committer.offset_minutes),
+        )
+    });
+    let (summary, author, tooltip) = match content {
+        Some((summary, author, tooltip)) => (Some(summary), Some(author), Some(tooltip)),
+        None => (None, None, None),
+    };
+    RowData {
+        uncommitted: false,
+        date: local_date(timestamp, zone),
+        tooltip,
+        summary,
+        author,
+        short: id.short(SHORT_HASH),
+        badges: session.badges(&id).to_vec(),
+        graph,
+        boundary: session.is_boundary(&id),
+    }
 }
 
 /// The cells of a row or of the header: graph, description, date, author
@@ -479,13 +629,16 @@ fn draw_row(
     paint_graph(ui, graph, &shapes, palette);
 
     let row = ui.interact(rect, ui.id().with("row"), Sense::hover());
-    let label = format!(
-        "{}, {}, {}, {}",
-        data.summary.as_deref().unwrap_or(loading),
-        data.author.as_deref().unwrap_or(loading),
-        data.date,
-        data.short
-    );
+    let label = match data.uncommitted {
+        true => data.summary.clone().unwrap_or_default(),
+        false => format!(
+            "{}, {}, {}, {}",
+            data.summary.as_deref().unwrap_or(loading),
+            data.author.as_deref().unwrap_or(loading),
+            data.date,
+            data.short
+        ),
+    };
     // `widget_info` gives the node its position; the rest is set after it.
     row.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
     ui.ctx().accesskit_node_builder(row.id, |node| {
@@ -496,6 +649,7 @@ fn draw_row(
     let summary_left = draw_badges(ui, description, &data.badges, palette);
     let summary = Rect::from_min_max(pos2(summary_left, description.top()), description.max);
     match &data.summary {
+        Some(text) if data.uncommitted => text_cell(ui, summary, RichText::new(text).italics()),
         Some(text) => text_cell(ui, summary, RichText::new(text)),
         None => text_cell(ui, summary, RichText::new(loading).weak()),
     };
@@ -645,6 +799,30 @@ pub(crate) fn color(rgb: Rgb) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_uncommitted_row_goes_right_above_the_commit_of_head() {
+        let list = ListRows {
+            commits: 3,
+            uncommitted: Some(1),
+        };
+        assert_eq!(list.len(), 4);
+        let shown: Vec<Option<u64>> = (0..4).map(|row| list.commit(row)).collect();
+        assert_eq!(shown, [Some(0), None, Some(1), Some(2)]);
+        let rows: Vec<u64> = (0..3).map(|commit| list.list_row(commit)).collect();
+        assert_eq!(rows, [0, 2, 3]);
+    }
+
+    #[test]
+    fn without_uncommitted_changes_rows_are_the_commits() {
+        let list = ListRows {
+            commits: 2,
+            uncommitted: None,
+        };
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.commit(1), Some(1));
+        assert_eq!(list.list_row(1), 1);
+    }
 
     fn seconds(text: &str) -> i64 {
         text.parse::<Timestamp>().unwrap().as_second()
