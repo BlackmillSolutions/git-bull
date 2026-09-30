@@ -75,6 +75,9 @@ benchmark prints a table in the form used below.
   does and measures the time to the first rows, with all branches and tags
   and with the current branch only, the time to the whole history, and the
   memory the loaded history takes.
+- `wide_commit` generates a repository whose one commit adds 50,000 files
+  into `target/bench-wide`, selects the commit and scrolls through its file
+  list with Page Down and the mouse wheel in turn.
 - `scrolling` opens the repository in the window without a graphics
   adapter and scrolls with Page Down and the mouse wheel in turn, while the
   history loads and afterwards, then drags the scrollbar from the top to
@@ -136,3 +139,29 @@ branch; the table gives the medians.
   needed.
 - Without the commit-graph file the first rows take more than four
   seconds; git-bull then offers to generate it, which took 24.5 s here.
+
+## Details of a commit with 50,000 files (task 5.10, first part)
+
+Measured on 2026-09-30 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, NVMe SSD, Git 2.55.0.windows.5, release build, with
+the `wide_commit` benchmark: one commit that adds 50,000 files in 50
+folders.
+
+| Measure | Result | Target |
+|---|---|---|
+| Details and file list shown after selecting the commit | 0.10 s | fluid |
+
+| Scrolling the file list | Frames | Median | 99th percentile | Slowest |
+|---|---|---|---|---|
+| File list, Page Down and wheel in turn | 400 | 0.4 ms | 0.7 ms | 0.8 ms |
+
+The file list is a virtual list, as the commit list is, so it costs the same
+for fifty files as for fifty thousand. The measurement on the Linux kernel,
+the second part of task 5.10, is still open.
+
+The `scrolling` benchmark of task 4.21, run again now that selecting a
+commit loads its details, files, diff and highlighting, stays within the
+target: the slowest frame took 9.9 ms while loading and 5.0 ms after it,
+against 7.6 ms and 3.2 ms before. Page Down selects another commit in each
+frame there; the work for the commit selected before is cancelled, but
+every selection still starts Git.

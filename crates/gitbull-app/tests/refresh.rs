@@ -135,6 +135,29 @@ fn selected(harness: &Harness<'_, App>) -> Vec<String> {
         .collect()
 }
 
+/// Whether the commit list shows the commit with `summary`.
+fn has_row(harness: &Harness<'_, App>, summary: &str) -> bool {
+    harness.query_all_by_role(Role::Row).any(|node| {
+        node.accesskit_node()
+            .label()
+            .is_some_and(|label| label.starts_with(summary))
+    })
+}
+
+/// Where the row of a commit is in the commit list. Its summary alone is
+/// not enough: the commit panel shows the message of the selected commit.
+fn row_rect(harness: &Harness<'_, App>, summary: &str) -> eframe::egui::Rect {
+    harness
+        .get_all_by_role(Role::Row)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(summary))
+        })
+        .expect("a row")
+        .rect()
+}
+
 fn select(harness: &mut Harness<'_, App>, summary: &str) {
     harness.get_by_label(summary).click();
     harness.run();
@@ -224,9 +247,7 @@ fn a_selected_commit_that_no_longer_exists_leaves_nothing_selected() {
 
     test.harness.key_press(Key::F5);
     test.harness.run();
-    wait_for(&mut test.harness, |h| {
-        h.query_by_label("Side work").is_none()
-    });
+    wait_for(&mut test.harness, |h| !has_row(h, "Side work"));
     wait_for(&mut test.harness, |h| selected(h).is_empty());
 }
 
@@ -234,13 +255,13 @@ fn a_selected_commit_that_no_longer_exists_leaves_nothing_selected() {
 fn nothing_changed_loads_nothing_and_keeps_the_scroll_position() {
     let mut test = open();
     select(&mut test.harness, "Fourth");
-    let before = test.harness.get_by_label("Fourth").rect();
+    let before = row_rect(&test.harness, "Fourth");
 
     test.harness.key_press(Key::F5);
     test.harness.run();
     refreshed(&mut test, 2);
 
     assert_eq!(count(&test.probe, "history"), 1);
-    assert_eq!(test.harness.get_by_label("Fourth").rect(), before);
+    assert_eq!(row_rect(&test.harness, "Fourth"), before);
     assert!(selected(&test.harness)[0].starts_with("Fourth"));
 }

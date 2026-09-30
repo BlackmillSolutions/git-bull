@@ -7,9 +7,12 @@
 
 use std::path::Path;
 
+use crate::blob;
 use crate::cancel::CancelToken;
+use crate::changes::{self, FileChange};
 use crate::commit_graph::{self, GraphProgress};
 use crate::content::{Content, ContentReader};
+use crate::diff::{self, FileDiff};
 use crate::error::Error;
 use crate::head::{self, Head};
 use crate::history::{self, CommitLine, HistoryStream, Revisions};
@@ -84,6 +87,39 @@ pub trait Backend: Send + Sync {
         repo: &Path,
         notify: Box<dyn Fn() + Send>,
     ) -> Result<Box<dyn ContentSource>, Error>;
+
+    /// The files `commit` changed against `parent`, its first parent; all
+    /// of its files for a root commit.
+    fn changed_files(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        parent: Option<&ObjectId>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<FileChange>, Error>;
+
+    /// The diff of the file `change` describes, in `commit` against
+    /// `parent`, its first parent; with a `limit`, up to that many lines
+    /// of hunks.
+    fn file_diff(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        parent: Option<&ObjectId>,
+        change: &FileChange,
+        limit: Option<usize>,
+        cancel: &CancelToken,
+    ) -> Result<FileDiff, Error>;
+
+    /// The content of `blob`, or `None` when it is larger than `limit`
+    /// bytes.
+    fn blob(
+        &self,
+        repo: &Path,
+        blob: &ObjectId,
+        limit: u64,
+        cancel: &CancelToken,
+    ) -> Result<Option<Vec<u8>>, Error>;
 }
 
 /// Reads repositories through the Git command line.
@@ -161,6 +197,38 @@ impl Backend for CliBackend {
         notify: Box<dyn Fn() + Send>,
     ) -> Result<Box<dyn ContentSource>, Error> {
         Ok(Box::new(ContentReader::start(&self.git, repo, notify)?))
+    }
+
+    fn changed_files(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        parent: Option<&ObjectId>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<FileChange>, Error> {
+        changes::changed_files(&self.git, repo, commit, parent, cancel)
+    }
+
+    fn file_diff(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        parent: Option<&ObjectId>,
+        change: &FileChange,
+        limit: Option<usize>,
+        cancel: &CancelToken,
+    ) -> Result<FileDiff, Error> {
+        diff::file_diff(&self.git, repo, commit, parent, change, limit, cancel)
+    }
+
+    fn blob(
+        &self,
+        repo: &Path,
+        blob: &ObjectId,
+        limit: u64,
+        cancel: &CancelToken,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        blob::blob(&self.git, repo, blob, limit, cancel)
     }
 }
 

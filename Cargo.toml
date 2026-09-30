@@ -19,3 +19,9 @@ publish = false
 gitbull-git = { path = "crates/gitbull-git" }
 gitbull-core = { path = "crates/gitbull-core" }
 gitbull-testkit = { path = "crates/gitbull-testkit" }
+
+# The regular expressions of syntax highlighting are very slow without
+# optimisation, so dependencies are optimised in debug builds as well
+# (design, decision 7).
+[profile.dev.package."*"]
+opt-level = 2

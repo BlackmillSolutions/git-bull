@@ -142,11 +142,11 @@ impl Process {
         if status.success() {
             Ok(())
         } else {
-            Err(Error::CommandFailed {
-                command: self.command.clone(),
-                code: status.code(),
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
-            })
+            Err(Error::failed(
+                self.command.clone(),
+                status.code(),
+                String::from_utf8_lossy(&stderr).into_owned(),
+            ))
         }
     }
 }

@@ -10,6 +10,9 @@ use crate::invoke::Git;
 pub struct Stash {
     /// The stash commit.
     pub commit: String,
+    /// The commit the stash was made on, the saved index, and when the
+    /// stash includes untracked files, a commit that holds them.
+    pub parents: Vec<String>,
     /// Its name, such as `stash@{0}`.
     pub selector: String,
     /// Its message, such as `WIP on main: 1a2b3c4 Fix parser`.
@@ -39,8 +42,8 @@ pub struct Submodule {
     pub state: SubmoduleState,
 }
 
-/// The format of `git stash list`: commit, selector and message.
-const STASH_FORMAT: &str = "--format=%H%x00%gd%x00%s";
+/// The format of `git stash list`: commit, parents, selector and message.
+const STASH_FORMAT: &str = "--format=%H%x00%P%x00%gd%x00%s";
 
 /// Lists the stashes, newest first.
 pub fn stashes(git: &Git, repo: &Path) -> Result<Vec<Stash>, Error> {
@@ -67,12 +70,13 @@ fn parse_stashes(output: &[u8]) -> Result<Vec<Stash>, String> {
         .lines()
         .filter(|line| !line.is_empty())
         .map(|line| match line.split('\0').collect::<Vec<_>>()[..] {
-            [commit, selector, message] => Ok(Stash {
+            [commit, parents, selector, message] => Ok(Stash {
                 commit: commit.to_owned(),
+                parents: parents.split_whitespace().map(str::to_owned).collect(),
                 selector: selector.to_owned(),
                 message: message.to_owned(),
             }),
-            _ => Err(format!("expected 3 fields: {line:?}")),
+            _ => Err(format!("expected 4 fields: {line:?}")),
         })
         .collect()
 }
@@ -118,21 +122,29 @@ mod tests {
     const C1: &str = "1111111111111111111111111111111111111111";
     const C2: &str = "2222222222222222222222222222222222222222";
 
+    const C3: &str = "3333333333333333333333333333333333333333";
+    const C4: &str = "4444444444444444444444444444444444444444";
+    const C5: &str = "5555555555555555555555555555555555555555";
+
     #[test]
-    fn stashes_are_read_newest_first() {
+    fn stashes_are_read_newest_first_with_their_parents() {
+        // The second stash was made with its untracked files: they are in
+        // a third parent.
         let output = format!(
-            "{C1}\0stash@{{0}}\0On main: try the new layout\n{C2}\0stash@{{1}}\0WIP on main: 1a2b3c4 Fix parser\n"
+            "{C1}\0{C3} {C4}\0stash@{{0}}\0On main: try the new layout\n{C2}\0{C3} {C4} {C5}\0stash@{{1}}\0WIP on main: 1a2b3c4 Fix parser\n"
         );
         assert_eq!(
             parse_stashes(output.as_bytes()).unwrap(),
             [
                 Stash {
                     commit: C1.to_owned(),
+                    parents: vec![C3.to_owned(), C4.to_owned()],
                     selector: "stash@{0}".to_owned(),
                     message: "On main: try the new layout".to_owned(),
                 },
                 Stash {
                     commit: C2.to_owned(),
+                    parents: vec![C3.to_owned(), C4.to_owned(), C5.to_owned()],
                     selector: "stash@{1}".to_owned(),
                     message: "WIP on main: 1a2b3c4 Fix parser".to_owned(),
                 },

@@ -41,6 +41,15 @@ fn stashes_are_listed_newest_first() {
     assert_eq!(messages, ["On main: second stash", "On main: first stash"]);
     assert_eq!(list[0].selector, "stash@{0}");
     assert_eq!(list[1].commit, repo.git(&["rev-parse", "stash@{1}"]).trim());
+    // The base and the index, and for the untracked files a third parent.
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    assert_eq!(list[1].parents.len(), 2);
+    assert_eq!(list[1].parents[0], head.trim());
+    assert_eq!(list[0].parents.len(), 3);
+    assert_eq!(
+        list[0].parents[2],
+        repo.git(&["rev-parse", "stash@{0}^3"]).trim()
+    );
 }
 
 #[test]

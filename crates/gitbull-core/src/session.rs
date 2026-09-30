@@ -26,9 +26,11 @@ use gitbull_git::{Backend, Error};
 
 use crate::badges::{self, Badge};
 use crate::content_cache::ContentCache;
+use crate::details::Details;
 use crate::graph::Graph;
+use crate::highlight::HighlightTheme;
 use crate::opening::OpenedRepository;
-use crate::store::{CommitStore, Row};
+use crate::store::{CommitStore, Parent, Row};
 use crate::workspace::{Failure, Notify, panic_message};
 
 /// Lines the loader collects before handing them over.
@@ -152,6 +154,7 @@ pub struct Session {
     /// Requested and not answered, or answered with an error.
     requested: HashSet<ObjectId>,
     cache: ContentCache,
+    details: Details,
 }
 
 impl fmt::Debug for Session {
@@ -167,6 +170,11 @@ impl Session {
     /// A session that loads nothing until it is shown.
     pub fn new(opened: OpenedRepository, backend: Arc<dyn Backend>, notify: Notify) -> Session {
         let history = empty_history();
+        let details = Details::new(
+            Arc::clone(&backend),
+            opened.root.clone(),
+            Arc::clone(&notify),
+        );
         Session {
             opened,
             backend,
@@ -202,6 +210,7 @@ impl Session {
             wanted: Vec::new(),
             requested: HashSet::new(),
             cache: ContentCache::default(),
+            details,
         }
     }
 
@@ -391,6 +400,7 @@ impl Session {
             }
             changed = true;
         }
+        changed |= self.details.poll();
         if let Some(source) = &self.content {
             while let Some(answer) = source.try_next() {
                 // A commit whose content cannot be read keeps its
@@ -468,9 +478,15 @@ impl Session {
             .and_then(|sidebar| sidebar.references.iter().find(|r| r.name == name))
             .and_then(|reference| reference.commit.as_deref())
             .and_then(|hex| ObjectId::from_hex(hex.as_bytes()));
-        let Some(id) = commit else {
-            return Navigation::NotACommit;
-        };
+        match commit {
+            Some(id) => self.navigate_to_commit(id),
+            None => Navigation::NotACommit,
+        }
+    }
+
+    /// Finds the commit `id` in the graph, such as a parent of the commit
+    /// shown.
+    pub fn navigate_to_commit(&mut self, id: ObjectId) -> Navigation {
         self.target = None;
         self.navigation = None;
         match self.locate(&id) {
@@ -647,6 +663,11 @@ impl Session {
                 .map(|row| history.store.id(row))
                 .collect()
         };
+        self.request_ids(ids);
+    }
+
+    /// Asks for the content of the commits `ids`, each once.
+    fn request_ids(&mut self, ids: Vec<ObjectId>) {
         let new: Vec<ObjectId> = ids
             .into_iter()
             .filter(|id| !self.requested.contains(id) && self.cache.get(id).is_none())
@@ -664,6 +685,69 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Shows the details of the commit at `row` of the history shown, and
+    /// loads the files it changed; `None` shows none.
+    pub fn show_details(&mut self, row: Option<Row>) {
+        let selected = row.and_then(|row| {
+            let history = self.history();
+            if row as usize >= history.store.len() {
+                return None;
+            }
+            let parent = history
+                .store
+                .parents(row)
+                .first()
+                .map(|parent| match parent {
+                    Parent::Loaded(parent) => history.store.id(*parent),
+                    Parent::Waiting(id) => *id,
+                });
+            Some((history.store.id(row), parent, row))
+        });
+        if let Some((_, _, row)) = selected {
+            self.request_content(row..row + 1);
+        }
+        let (commit, parent) = selected.map_or((None, None), |(id, parent, _)| (Some(id), parent));
+        self.details.select(commit, parent);
+    }
+
+    /// Shows the details of `stash`, its changed files compared with its
+    /// first parent, and the untracked files it saved as added.
+    pub fn show_stash(&mut self, stash: &Stash) {
+        let id = |hex: &str| ObjectId::from_hex(hex.as_bytes());
+        let Some(commit) = id(&stash.commit) else {
+            return;
+        };
+        let parent = stash.parents.first().and_then(|hex| id(hex));
+        // A stash made with `--include-untracked` keeps them in a third
+        // parent.
+        let untracked = stash.parents.get(2).and_then(|hex| id(hex));
+        self.request_ids(vec![commit]);
+        self.details.select_stash(commit, parent, untracked);
+    }
+
+    /// Shows the diff of the file at `index` in the files of the commit
+    /// shown; `None` shows none.
+    pub fn show_file(&mut self, index: Option<usize>) {
+        self.details.select_file(index);
+    }
+
+    /// Highlights diffs with the colours of `theme`, which follows the
+    /// appearance of the window.
+    pub fn set_highlight_theme(&mut self, theme: HighlightTheme) {
+        self.details.set_theme(theme);
+    }
+
+    /// Loads all of a diff that stopped at its limit.
+    pub fn load_whole_diff(&mut self) {
+        self.details.load_whole_diff();
+    }
+
+    /// The commit whose details are shown, its changed files and the diff
+    /// of the file chosen.
+    pub fn details(&self) -> &Details {
+        &self.details
     }
 
     /// The content of a commit, if it has arrived.
@@ -793,7 +877,7 @@ fn load(
 }
 
 /// Runs `work`, turning an error or a panic into a failure.
-fn catch<T>(work: impl FnOnce() -> Result<T, Error>) -> Result<T, Failure> {
+pub(crate) fn catch<T>(work: impl FnOnce() -> Result<T, Error>) -> Result<T, Failure> {
     catch_failure(|| work().map_err(Failure::Git))
 }
 
@@ -810,7 +894,7 @@ fn lock(history: &Mutex<History>) -> MutexGuard<'_, History> {
 
 /// The result of finished work, taking its receiver; a worker that ended
 /// without sending is cancelled work.
-fn take<T>(slot: &mut Option<Receiver<T>>) -> Option<T> {
+pub(crate) fn take<T>(slot: &mut Option<Receiver<T>>) -> Option<T> {
     let result = slot.as_ref()?.try_recv();
     match result {
         Ok(value) => {
@@ -828,6 +912,7 @@ fn take<T>(slot: &mut Option<Receiver<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::details::ChangedFiles;
     use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
     use gitbull_testkit::{FakeBackend, GraphGate, HistoryFeed, LiveRepo, commit_line, fake_id};
     use std::path::PathBuf;
@@ -1444,6 +1529,7 @@ mod tests {
             live.set_lines(five_lines());
             let stashes = vec![gitbull_git::stashes::Stash {
                 commit: fake_id("s").to_string(),
+                parents: Vec::new(),
                 selector: "stash@{0}".into(),
                 message: "On main: try".into(),
             }];
@@ -1655,5 +1741,105 @@ mod tests {
         );
         session.show();
         told.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    fn merged() -> Vec<CommitLine> {
+        vec![
+            commit_line("m", &["c", "t"]),
+            commit_line("t", &["b"]),
+            commit_line("c", &["b"]),
+            commit_line("b", &["a"]),
+            commit_line("a", &[]),
+        ]
+    }
+
+    #[test]
+    fn the_details_of_a_merge_compare_it_with_its_first_parent() {
+        let backend = backend().with_history(root(), merged());
+        let probe = backend.probe();
+        let mut session = session(backend);
+        session.show();
+        wait_until(&mut session, loaded);
+
+        session.show_details(Some(0));
+
+        assert_eq!(session.details().commit(), Some(fake_id("m")));
+        wait_until(&mut session, |s| {
+            matches!(s.details().files(), ChangedFiles::Loaded(_))
+        });
+        assert_eq!(probe.compared(), [(fake_id("m"), Some(fake_id("c")))]);
+        // The panel shows its message and names, so its content is read.
+        assert!(probe.requested().contains(&fake_id("m")));
+    }
+
+    #[test]
+    fn the_details_of_a_root_commit_compare_it_with_nothing() {
+        let backend = backend().with_history(root(), merged());
+        let probe = backend.probe();
+        let mut session = session(backend);
+        session.show();
+        wait_until(&mut session, loaded);
+
+        session.show_details(Some(4));
+        wait_until(&mut session, |s| {
+            matches!(s.details().files(), ChangedFiles::Loaded(_))
+        });
+        assert_eq!(probe.compared(), [(fake_id("a"), None)]);
+
+        session.show_details(None);
+        assert_eq!(session.details().commit(), None);
+    }
+
+    #[test]
+    fn a_parent_that_has_not_loaded_yet_is_selected_once_it_has() {
+        let feed = HistoryFeed::new();
+        let mut session = session(backend().with_history_feed(root(), &feed));
+        session.show();
+        feed.send(five_lines().into_iter().take(2));
+        wait_until(&mut session, |s| rows(s) == 2);
+
+        assert_eq!(
+            session.navigate_to_commit(fake_id("d")),
+            Navigation::Selected(1)
+        );
+        assert_eq!(
+            session.navigate_to_commit(fake_id("c")),
+            Navigation::Waiting
+        );
+        feed.send(five_lines().into_iter().skip(2));
+        feed.finish();
+        wait_until(&mut session, loaded);
+        session.poll();
+        assert_eq!(session.take_navigation(), Some(Navigation::Selected(2)));
+    }
+
+    #[test]
+    fn a_stash_is_shown_against_its_first_parent_with_its_untracked_files() {
+        let backend = backend().with_history(root(), five_lines());
+        let probe = backend.probe();
+        let mut session = session(backend);
+        session.show();
+        wait_until(&mut session, loaded);
+        let stash = Stash {
+            commit: fake_id("s").to_string(),
+            parents: vec![
+                fake_id("e").to_string(),
+                fake_id("i").to_string(),
+                fake_id("u").to_string(),
+            ],
+            selector: "stash@{0}".to_owned(),
+            message: "On main: try".to_owned(),
+        };
+
+        session.show_stash(&stash);
+
+        assert_eq!(session.details().commit(), Some(fake_id("s")));
+        wait_until(&mut session, |s| {
+            matches!(s.details().files(), ChangedFiles::Loaded(_))
+        });
+        assert_eq!(
+            probe.compared(),
+            [(fake_id("s"), Some(fake_id("e"))), (fake_id("u"), None)]
+        );
+        assert!(probe.requested().contains(&fake_id("s")));
     }
 }

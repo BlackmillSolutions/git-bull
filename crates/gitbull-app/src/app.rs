@@ -117,6 +117,20 @@ pub(crate) struct TabView {
     pub(crate) generation: u64,
     /// The dialog that asks before writing the commit-graph is open.
     pub(crate) confirm_graph: bool,
+    /// The files of the commit shown in the commit panel.
+    pub(crate) files: ListState,
+    /// The commit whose files `files` lists, to select the first file of
+    /// the next one.
+    pub(crate) files_for: Option<ObjectId>,
+    /// The rows selected in the diff, from where the selection began to
+    /// where it ends.
+    pub(crate) diff_selection: Option<(usize, usize)>,
+    /// The commit and file whose diff `diff_selection` belongs to.
+    pub(crate) diff_for: Option<(ObjectId, usize)>,
+    /// The commit whose details the commit list asked for last. The list
+    /// asks again only when its selection moves to another commit, so that
+    /// a stash shown from the sidebar stays.
+    pub(crate) details_shown: Option<ObjectId>,
 }
 
 /// Everything the window shows.
@@ -418,6 +432,35 @@ impl App {
             .unwrap_or_else(|| name.to_owned());
         view.target = Some(name.to_owned());
         self.show_navigation(outcome, short);
+    }
+
+    /// Shows the stash at `index` of the sidebar in the details; no commit
+    /// is selected meanwhile.
+    pub(crate) fn show_stash(&mut self, index: usize) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        let stash = session
+            .sidebar()
+            .and_then(|sidebar| sidebar.as_ref().ok())
+            .and_then(|sidebar| sidebar.stashes.get(index))
+            .cloned();
+        if let Some(stash) = stash {
+            view.commits.select(None);
+            view.selected_id = None;
+            view.details_shown = None;
+            session.show_stash(&stash);
+        }
+    }
+
+    /// Selects the commit `id`, such as a parent of the commit shown.
+    pub(crate) fn navigate_to_commit(&mut self, id: ObjectId) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        let outcome = session.navigate_to_commit(id);
+        view.target = Some(id.to_string());
+        self.show_navigation(outcome, id.to_string());
     }
 
     /// Applies a navigation that waited for its commit to load.

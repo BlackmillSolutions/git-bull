@@ -206,11 +206,11 @@ impl Git {
         if output.status.success() {
             Ok(output.stdout)
         } else {
-            Err(Error::CommandFailed {
-                command: command_line,
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            })
+            Err(Error::failed(
+                command_line,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
         }
     }
 }

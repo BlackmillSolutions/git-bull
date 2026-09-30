@@ -1,0 +1,609 @@
+//! The diff panel (spec `diff-view`).
+
+mod support;
+
+use eframe::egui::accesskit::Role;
+use eframe::egui::{Event, Key, Modifiers, OutputCommand, PointerButton, Pos2, Rect, pos2};
+use egui_kittest::Harness;
+use egui_kittest::kittest::{NodeT, Queryable};
+use gitbull_app::app::App;
+use gitbull_core::settings::Settings;
+use gitbull_git::changes::{ChangeKind, FileChange};
+use gitbull_git::content::{CommitContent, Signature};
+use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
+use gitbull_git::history::CommitLine;
+use gitbull_testkit::{FakeBackend, Probe, fake_id};
+use support::{Setup, build, path, settle_window, window};
+
+fn root() -> std::path::PathBuf {
+    path(&["work", "git-bull"])
+}
+
+fn person() -> Signature {
+    Signature {
+        name: "Ada Lovelace".to_owned(),
+        email: "ada@example.com".to_owned(),
+        time: 1_767_268_800,
+        offset_minutes: 0,
+    }
+}
+
+fn line(kind: LineKind, old: Option<u32>, new: Option<u32>, text: &str) -> DiffLine {
+    DiffLine {
+        kind,
+        old_number: old,
+        new_number: new,
+        text: text.to_owned(),
+        no_newline: false,
+        cut: false,
+    }
+}
+
+fn hunk(header: &str, lines: Vec<DiffLine>) -> Hunk {
+    Hunk {
+        header: header.to_owned(),
+        old_start: 0,
+        new_start: 0,
+        lines,
+    }
+}
+
+fn diff(old: Option<&str>, new: Option<&str>, content: Content) -> FileDiff {
+    FileDiff {
+        old_path: old.map(Into::into),
+        new_path: new.map(Into::into),
+        old_mode: old.map(|_| "100644".to_owned()),
+        new_mode: new.map(|_| "100644".to_owned()),
+        old_blob: None,
+        new_blob: None,
+        content,
+        truncated: false,
+    }
+}
+
+fn change(kind: ChangeKind, path: &str, old: Option<&str>) -> FileChange {
+    FileChange {
+        kind,
+        path: path.into(),
+        old_path: old.map(Into::into),
+    }
+}
+
+const HEADER: &str = "@@ -40,4 +40,5 @@ fn parse()";
+
+/// Line 42 is replaced by two lines.
+fn replaced() -> FileDiff {
+    use LineKind::*;
+    diff(
+        Some("src/parser.rs"),
+        Some("src/parser.rs"),
+        Content::Text(vec![hunk(
+            HEADER,
+            vec![
+                line(Context, Some(40), Some(40), "line 40"),
+                line(Context, Some(41), Some(41), "line 41"),
+                line(Removed, Some(42), None, "line 42"),
+                line(Added, None, Some(42), "line 42 changed"),
+                line(Added, None, Some(43), "line 42b"),
+                line(Context, Some(43), Some(44), "line 43"),
+            ],
+        )]),
+    )
+}
+
+/// Commit c changes one file of each kind.
+fn backend() -> FakeBackend {
+    use LineKind::*;
+    let mut no_newline = line(Added, None, Some(2), "second");
+    no_newline.no_newline = true;
+    let mut cut = line(Added, None, Some(1), "minified");
+    cut.cut = true;
+    let mut long = diff(
+        Some("long.txt"),
+        Some("long.txt"),
+        Content::Text(vec![hunk("@@ -1 +1 @@", vec![cut])]),
+    );
+    long.truncated = true;
+    let mut mode = diff(Some("run.sh"), Some("run.sh"), Content::Text(Vec::new()));
+    mode.new_mode = Some("100755".to_owned());
+    let mut sub = diff(
+        Some("sub"),
+        Some("sub"),
+        Content::Submodule {
+            old: Some("1111111111111111111111111111111111111111".to_owned()),
+            new: Some("2222222222222222222222222222222222222222".to_owned()),
+        },
+    );
+    sub.old_mode = Some("160000".to_owned());
+    sub.new_mode = Some("160000".to_owned());
+    let files = vec![
+        change(ChangeKind::Modified, "src/parser.rs", None),
+        change(ChangeKind::Added, "added.txt", None),
+        change(ChangeKind::Deleted, "gone.txt", None),
+        change(ChangeKind::Renamed, "src/b.rs", Some("src/a.rs")),
+        change(ChangeKind::Renamed, "same.txt", Some("old-same.txt")),
+        change(ChangeKind::Modified, "run.sh", None),
+        change(ChangeKind::Modified, "sub", None),
+        change(ChangeKind::Modified, "image.bin", None),
+        change(ChangeKind::Modified, "long.txt", None),
+        change(ChangeKind::Modified, "latin1.txt", None),
+        change(ChangeKind::Modified, "not-here.txt", None),
+    ];
+    let c = fake_id("c");
+    FakeBackend::default()
+        .with_repository(root())
+        .with_history(
+            root(),
+            vec![
+                CommitLine {
+                    timestamp: 1_767_268_800,
+                    id: c,
+                    parents: vec![fake_id("b")],
+                },
+                CommitLine {
+                    timestamp: 1_767_268_000,
+                    id: fake_id("b"),
+                    parents: Vec::new(),
+                },
+            ],
+        )
+        .with_content(
+            c,
+            CommitContent {
+                author: person(),
+                committer: person(),
+                message: "Change many files\n".to_owned(),
+            },
+        )
+        .with_changes(c, files)
+        .with_diff(c, "src/parser.rs", replaced())
+        .with_diff(
+            c,
+            "added.txt",
+            diff(
+                None,
+                Some("added.txt"),
+                Content::Text(vec![hunk(
+                    "@@ -0,0 +1,2 @@",
+                    vec![line(Added, None, Some(1), "first"), no_newline],
+                )]),
+            ),
+        )
+        .with_diff(
+            c,
+            "gone.txt",
+            diff(
+                Some("gone.txt"),
+                None,
+                Content::Text(vec![hunk(
+                    "@@ -1,2 +0,0 @@",
+                    vec![
+                        line(Removed, Some(1), None, "one"),
+                        line(Removed, Some(2), None, "two"),
+                    ],
+                )]),
+            ),
+        )
+        .with_diff(
+            c,
+            "src/b.rs",
+            diff(
+                Some("src/a.rs"),
+                Some("src/b.rs"),
+                Content::Text(vec![hunk(
+                    "@@ -9 +9,2 @@",
+                    vec![
+                        line(Context, Some(9), Some(9), "fn a() {}"),
+                        line(Added, None, Some(10), "fn b() {}"),
+                    ],
+                )]),
+            ),
+        )
+        .with_diff(
+            c,
+            "same.txt",
+            diff(
+                Some("old-same.txt"),
+                Some("same.txt"),
+                Content::Text(Vec::new()),
+            ),
+        )
+        .with_diff(c, "run.sh", mode)
+        .with_diff(c, "sub", sub)
+        .with_diff(
+            c,
+            "image.bin",
+            diff(
+                Some("image.bin"),
+                Some("image.bin"),
+                Content::Binary {
+                    old_size: Some(4),
+                    new_size: Some(10),
+                },
+            ),
+        )
+        .with_diff(c, "long.txt", long)
+        .with_missing_content(c, "not-here.txt")
+        .with_diff(
+            c,
+            "latin1.txt",
+            diff(
+                Some("latin1.txt"),
+                Some("latin1.txt"),
+                Content::Text(vec![hunk(
+                    "@@ -1 +1 @@",
+                    vec![line(Added, None, Some(1), "Gr\u{fffd}\u{fffd}e")],
+                )]),
+            ),
+        )
+}
+
+struct Test {
+    harness: Harness<'static, App>,
+    probe: Probe,
+}
+
+fn open() -> Test {
+    let backend = backend();
+    let probe = backend.probe();
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    wait_until(&mut harness, |h| {
+        row_of(h, Role::Row, "Change many files").is_some()
+    });
+    let at = row_of(&harness, Role::Row, "Change many files")
+        .unwrap()
+        .center();
+    click(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |h| !diff_rows(h).is_empty());
+    Test { harness, probe }
+}
+
+fn wait_until(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -> bool) {
+    for _ in 0..1000 {
+        if done(harness) {
+            return;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("timed out");
+}
+
+/// The rectangle of the node with `role` whose label starts with `prefix`.
+fn row_of(harness: &Harness<'_, App>, role: Role, prefix: &str) -> Option<Rect> {
+    harness
+        .query_all_by_role(role)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(prefix))
+        })
+        .map(|node| node.rect())
+}
+
+fn click(harness: &mut Harness<'_, App>, at: Pos2, button: PointerButton) {
+    click_with(harness, at, button, Modifiers::NONE);
+}
+
+/// Clicks with `modifiers` held, as egui-winit reports them: pressed
+/// before the click and released after it.
+fn click_with(
+    harness: &mut Harness<'_, App>,
+    at: Pos2,
+    button: PointerButton,
+    modifiers: Modifiers,
+) {
+    harness.hover_at(at);
+    harness.event(Event::ModifiersChanged(modifiers));
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers,
+        });
+    }
+    harness.event(Event::ModifiersChanged(Modifiers::NONE));
+    harness.run();
+}
+
+/// The labels of the rows of the diff: hunk headers and lines.
+fn diff_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::Code)
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+/// Whether the entry of the file list that starts with `entry` is shown
+/// and selected.
+fn entry_selected(harness: &Harness<'_, App>, entry: &str) -> bool {
+    harness.query_all_by_role(Role::ListItem).any(|node| {
+        let node = node.accesskit_node();
+        node.is_selected() == Some(true)
+            && node.label().is_some_and(|label| label.starts_with(entry))
+    })
+}
+
+/// Shows the diff of the file whose entry starts with `entry`. The list
+/// shows only the entries in view, so Down moves to the others, as a user
+/// would scroll to them.
+fn choose(test: &mut Test, entry: &str) {
+    let first = row_of(&test.harness, Role::ListItem, "Modified: src/parser.rs")
+        .expect("the first entry")
+        .center();
+    click(&mut test.harness, first, PointerButton::Primary);
+    for _ in 0..20 {
+        if entry_selected(&test.harness, entry) {
+            break;
+        }
+        test.harness.key_press(Key::ArrowDown);
+        test.harness.run();
+    }
+    assert!(entry_selected(&test.harness, entry), "no entry {entry}");
+    wait_until(&mut test.harness, |h| {
+        !diff_texts(h).iter().any(|text| text == "Loading…")
+    });
+}
+
+/// The texts in the diff panel: right of its title, above the status bar.
+fn diff_texts(harness: &Harness<'_, App>) -> Vec<String> {
+    let title = harness.get_by_label("DIFF").rect();
+    let status_bar = harness
+        .query_all_by_value("Git 2.55.0")
+        .next()
+        .expect("the status bar")
+        .rect();
+    let area = Rect::from_min_max(
+        pos2(title.left() - 4.0, title.top()),
+        pos2(f32::INFINITY, status_bar.top()),
+    );
+    harness
+        .query_all_by(|node| {
+            node.role() != Role::TextRun && (node.label().is_some() || node.value().is_some())
+        })
+        .filter(|node| area.contains_rect(node.rect()))
+        .filter_map(|node| {
+            let node = node.accesskit_node();
+            node.label().or_else(|| node.value())
+        })
+        .collect()
+}
+
+fn copied(harness: &Harness<'_, App>) -> Option<String> {
+    harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+}
+
+fn press_copy(harness: &mut Harness<'_, App>) {
+    for pressed in [true, false] {
+        harness.input_mut().events.push(Event::Key {
+            key: Key::C,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        });
+    }
+    harness.step();
+}
+
+#[test]
+fn selecting_a_commit_shows_the_diff_of_its_first_file() {
+    let test = open();
+    assert_eq!(diff_rows(&test.harness)[0], HEADER);
+    assert!(diff_texts(&test.harness).contains(&"src/parser.rs".to_owned()));
+}
+
+#[test]
+fn a_replaced_line_keeps_its_old_number_and_the_new_lines_get_new_numbers() {
+    let test = open();
+    assert_eq!(
+        diff_rows(&test.harness),
+        [
+            HEADER,
+            "Unchanged, 40, 40: line 40",
+            "Unchanged, 41, 41: line 41",
+            "Removed, 42, –: line 42",
+            "Added, –, 42: line 42 changed",
+            "Added, –, 43: line 42b",
+            "Unchanged, 43, 44: line 43",
+        ]
+    );
+}
+
+#[test]
+fn an_added_file_is_all_added_and_a_deleted_one_all_removed() {
+    let mut test = open();
+    choose(&mut test, "Added: added.txt");
+    assert!(
+        diff_rows(&test.harness)[1..]
+            .iter()
+            .all(|row| row.starts_with("Added"))
+    );
+    choose(&mut test, "Deleted: gone.txt");
+    assert_eq!(
+        diff_rows(&test.harness)[1..],
+        ["Removed, 1, –: one", "Removed, 2, –: two"]
+    );
+}
+
+#[test]
+fn a_missing_newline_at_the_end_is_marked() {
+    let mut test = open();
+    choose(&mut test, "Added: added.txt");
+    assert_eq!(
+        diff_rows(&test.harness)[2],
+        "Added, –, 2: second (No newline at end of file)"
+    );
+}
+
+#[test]
+fn a_renamed_file_shows_both_paths_and_its_changes() {
+    let mut test = open();
+    choose(&mut test, "Renamed: src/a.rs");
+    assert!(diff_texts(&test.harness).contains(&"src/a.rs → src/b.rs".to_owned()));
+    assert_eq!(diff_rows(&test.harness)[2], "Added, –, 10: fn b() {}");
+}
+
+#[test]
+fn a_renamed_file_without_changes_says_so() {
+    let mut test = open();
+    choose(&mut test, "Renamed: old-same.txt");
+    let texts = diff_texts(&test.harness);
+    assert!(
+        texts.contains(&"old-same.txt → same.txt".to_owned()),
+        "{texts:?}"
+    );
+    assert!(
+        texts.contains(&"The content is unchanged.".to_owned()),
+        "{texts:?}"
+    );
+    assert!(diff_rows(&test.harness).is_empty());
+}
+
+#[test]
+fn a_changed_mode_shows_both_modes() {
+    let mut test = open();
+    choose(&mut test, "Modified: run.sh");
+    let texts = diff_texts(&test.harness);
+    assert!(
+        texts.contains(&"Mode changed from 100644 to 100755.".to_owned()),
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn a_changed_submodule_shows_both_commits() {
+    let mut test = open();
+    choose(&mut test, "Modified: sub");
+    let texts = diff_texts(&test.harness);
+    let expected = "Submodule. Before: 1111111111111111111111111111111111111111. After: 2222222222222222222222222222222222222222.";
+    assert!(texts.iter().any(|text| text == expected), "{texts:?}");
+}
+
+#[test]
+fn a_binary_file_shows_both_sizes_instead_of_a_diff() {
+    let mut test = open();
+    choose(&mut test, "Modified: image.bin");
+    let texts = diff_texts(&test.harness);
+    let expected = "Binary file. Before: 4 bytes. After: 10 bytes.";
+    assert!(texts.iter().any(|text| text == expected), "{texts:?}");
+    assert!(diff_rows(&test.harness).is_empty());
+}
+
+#[test]
+fn a_long_diff_offers_to_load_the_rest_and_a_long_line_is_marked() {
+    let mut test = open();
+    choose(&mut test, "Modified: long.txt");
+    assert!(
+        diff_texts(&test.harness).contains(&"Only the first 10000 lines are shown.".to_owned())
+    );
+    assert_eq!(diff_rows(&test.harness)[1], "Added, –, 1: minified ([cut])");
+
+    test.harness.get_by_label("Load full diff").click();
+    test.harness.run();
+    wait_until(&mut test.harness, |h| {
+        h.query_by_label("Load full diff").is_none()
+    });
+    let limits: Vec<_> = test
+        .probe
+        .diffs()
+        .into_iter()
+        .filter(|(_, path, _)| path == "long.txt")
+        .map(|(_, _, limit)| limit)
+        .collect();
+    assert_eq!(limits, [Some(10_000), None]);
+}
+
+#[test]
+fn text_that_is_not_utf8_shows_replacement_characters() {
+    let mut test = open();
+    choose(&mut test, "Modified: latin1.txt");
+    assert_eq!(
+        diff_rows(&test.harness)[1],
+        "Added, –, 1: Gr\u{fffd}\u{fffd}e"
+    );
+}
+
+#[test]
+fn selected_lines_are_copied_with_control_c() {
+    let mut test = open();
+    let first = row_of(&test.harness, Role::Code, "Removed, 42")
+        .unwrap()
+        .center();
+    let last = row_of(&test.harness, Role::Code, "Added, –, 43")
+        .unwrap()
+        .center();
+    click(&mut test.harness, first, PointerButton::Primary);
+    click_with(
+        &mut test.harness,
+        last,
+        PointerButton::Primary,
+        Modifiers::SHIFT,
+    );
+    press_copy(&mut test.harness);
+    assert_eq!(
+        copied(&test.harness),
+        Some("line 42\nline 42 changed\nline 42b".to_owned())
+    );
+}
+
+#[test]
+fn the_context_menu_copies_the_hunk_with_its_header() {
+    let mut test = open();
+    let at = row_of(&test.harness, Role::Code, "Added, –, 42")
+        .unwrap()
+        .center();
+    click(&mut test.harness, at, PointerButton::Secondary);
+    test.harness.get_by_label("Copy hunk").click();
+    test.harness.step();
+    assert_eq!(
+        copied(&test.harness),
+        Some(format!(
+            "{HEADER}\n line 40\n line 41\n-line 42\n+line 42 changed\n+line 42b\n line 43"
+        ))
+    );
+}
+
+#[test]
+fn the_context_menu_copies_the_line_it_was_opened_on() {
+    let mut test = open();
+    let at = row_of(&test.harness, Role::Code, "Unchanged, 43")
+        .unwrap()
+        .center();
+    click(&mut test.harness, at, PointerButton::Secondary);
+    test.harness.get_by_label("Copy lines").click();
+    test.harness.step();
+    assert_eq!(copied(&test.harness), Some("line 43".to_owned()));
+}
+
+#[test]
+fn content_missing_in_a_partial_clone_is_explained() {
+    let mut test = open();
+    choose(&mut test, "Modified: not-here.txt");
+    let texts = diff_texts(&test.harness);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.starts_with("The content of this file is not available locally.")),
+        "{texts:?}"
+    );
+}

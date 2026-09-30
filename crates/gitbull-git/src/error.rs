@@ -24,6 +24,9 @@ pub enum Error {
         code: Option<i32>,
         stderr: String,
     },
+    /// Git needs content that a partial clone did not download. git-bull
+    /// does not fetch it (ADR 0006).
+    MissingContent { command: String, stderr: String },
     /// Git's output did not have the expected format.
     Parse {
         command: String,
@@ -63,11 +66,33 @@ impl fmt::Display for Error {
                 Some(code) => write!(f, "`{command}` failed with exit code {code}"),
                 None => write!(f, "`{command}` was terminated"),
             },
+            Error::MissingContent { command, .. } => write!(
+                f,
+                "`{command}` needs content that is not in this partial clone"
+            ),
             Error::Parse {
                 command, message, ..
             } => write!(f, "unexpected output from `{command}`: {message}"),
             Error::Cancelled => write!(f, "cancelled"),
             Error::Io { command, source } => write!(f, "could not run `{command}`: {source}"),
+        }
+    }
+}
+
+impl Error {
+    /// The error of a Git command that exited with `code`: content missing
+    /// in a partial clone, which Git was not allowed to fetch, or else a
+    /// failure.
+    pub fn failed(command: String, code: Option<i32>, stderr: String) -> Error {
+        const MISSING: [&str; 2] = ["from promisor remote", "lazy fetching disabled"];
+        if MISSING.iter().any(|sign| stderr.contains(sign)) {
+            Error::MissingContent { command, stderr }
+        } else {
+            Error::CommandFailed {
+                command,
+                code,
+                stderr,
+            }
         }
     }
 }
@@ -78,5 +103,31 @@ impl std::error::Error for Error {
             Error::Io { source, .. } => Some(source),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_a_partial_clone_lacks_is_told_apart_from_other_failures() {
+        // What Git 2.55 writes when `GIT_NO_LAZY_FETCH` stops a fetch.
+        let stderr = "warning: lazy fetching disabled; some objects may not be available\nfatal: could not fetch 5626abf0 from promisor remote\n";
+        assert!(matches!(
+            Error::failed("git diff-tree".to_owned(), Some(128), stderr.to_owned()),
+            Error::MissingContent { .. }
+        ));
+        assert!(matches!(
+            Error::failed(
+                "git diff-tree".to_owned(),
+                Some(128),
+                "fatal: bad object\n".to_owned()
+            ),
+            Error::CommandFailed {
+                code: Some(128),
+                ..
+            }
+        ));
     }
 }

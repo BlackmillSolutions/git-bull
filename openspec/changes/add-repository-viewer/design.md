@@ -134,8 +134,8 @@ literally, and it passes the neutralised filter drivers of the repository.
 | History structure | `git rev-list --date-order --parents --timestamp <revisions>` |
 | Commit count | `git rev-list --count <revisions>` |
 | Commit content | one persistent `git cat-file --batch` process per session |
-| Changed files of a commit | `git diff-tree -r --no-commit-id --name-status -M -z` against the first parent; `--root` for root commits |
-| Diff of one file | `git diff-tree -p -M` restricted to the paths of that file |
+| Changed files of a commit | `git diff-tree -r --no-commit-id --name-status -M -C -z` against the first parent; `--root` for root commits |
+| Diff of one file | `git diff-tree -r -p -M -C --full-index -U3` restricted to the paths of that file; for a binary file the sizes of both blobs from `git cat-file --batch-check` |
 | Working-copy status | `git status --porcelain=v2 -z --untracked-files=all --ignore-submodules=dirty` |
 | Working-copy diff | `git diff` and `git diff --cached`, restricted to one path; `git diff HEAD` for a conflicted file |
 | Search by hash | `git rev-parse --verify --quiet <prefix>^{commit}` |
@@ -418,6 +418,14 @@ choice:
 | Selecting text in the commit list | Not possible: it would take the clicks that select rows and the copy command that copies the hash |
 | Progress of the commit-graph | `GIT_PROGRESS_DELAY=0` for this command, since Git otherwise reports nothing for two seconds |
 | Cancelling the commit-graph | Git is stopped; a `commit-graph.lock` made during the run is removed, since a stopped Git cannot remove it and later writes would fail on it. Whether the file exists is checked afterwards, as Git may finish just before it is stopped |
+| Copied files | Found with `-C`, which takes files changed in the same commit as sources; without it Git reports no copies. `--find-copies-harder` would compare with every file of the parent and is too slow for large trees |
+| References in the commit panel | The first 20 by name, the rest as a count whose tooltip names up to 50; a commit can carry thousands of tags, and drawing all of them took seconds per frame |
+| Order in the commit panel | The message first, then hash, parents, author, committer and references, so that the message shows in a panel of the default height; the rest scrolls |
+| Themes of syntax highlighting | OneHalf Light and OneHalf Dark from `two-face`, both under MIT, following the appearance of the window |
+| A version larger than 512 KB | The whole diff is shown without highlighting, also when the other version is small; so is a file whose content cannot be read, and plain text counts as a type that is not known |
+| Loading the whole of a long diff | The versions are the same, so their highlighting is kept |
+| A path that is not UTF-8 | Shown with replacement characters. Git for Windows reads its arguments as UTF-8, so there the diff of such a file is read for the whole commit and the file is picked from it by its bytes |
+| Content missing in a partial clone | Recognised from Git's message when a lazy fetch is refused, for every command, and shown as a notice |
 | Growing the commit store | Columns grow by chunks of 65,536 rows, and the id index moves its rows into a table of twice the size two per appended commit. Commits are appended on the UI thread, and growing everything at once took 33 ms at 900,000 commits |
 
 ## Risks / Trade-offs

@@ -86,6 +86,43 @@ copy-full-hash = Copy full hash
 panel-commit = COMMIT
 panel-diff = DIFF
 
+detail-commit = Commit
+detail-parents = Parents
+detail-author = Author
+detail-committer = Committer
+detail-references = References
+files-none = No files changed.
+files-failed = The changed files could not be read: { $error }
+file-history = File history
+file-blame = Blame
+copy-path = Copy path
+change-added = Added
+change-modified = Modified
+change-deleted = Deleted
+change-renamed = Renamed
+change-copied = Copied
+change-type-changed = Type changed
+diff-unchanged = The content is unchanged.
+diff-mode = Mode changed from { $old } to { $new }.
+diff-binary = Binary file. Before: { $old }. After: { $new }.
+diff-submodule = Submodule. Before: { $old }. After: { $new }.
+diff-absent = none
+diff-size = { $bytes ->
+    [one] { $bytes } byte
+   *[other] { $bytes } bytes
+}
+diff-truncated = Only the first { $lines } lines are shown.
+diff-load-all = Load full diff
+diff-cut = [cut]
+diff-no-newline = No newline at end of file
+diff-failed = The diff could not be read: { $error }
+diff-missing-content = The content of this file is not available locally. The repository is a partial clone, and git-bull does not download missing content.
+diff-line-added = Added
+diff-line-removed = Removed
+diff-line-context = Unchanged
+copy-lines = Copy lines
+copy-hunk = Copy hunk
+
 ## Errors in a tab
 
 error-open-failed = { $folder } could not be opened.

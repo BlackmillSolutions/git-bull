@@ -100,6 +100,7 @@ fn backend() -> FakeBackend {
                 root(),
                 vec![Stash {
                     commit: fake_id("s").to_string(),
+                    parents: Vec::new(),
                     selector: "stash@{0}".into(),
                     message: "On main: try the layout".into(),
                 }],
@@ -513,8 +514,10 @@ fn the_switch_shows_the_current_branch_only_and_all_branches_again() {
         Some("All branches")
     );
     choose_filter(&mut harness, "Current branch");
-    wait_for(&mut harness, |h| h.query_by_label("Side work").is_none());
-    harness.get_by_label("Fifth");
+    // The labels of new rows arrive with their content.
+    wait_for(&mut harness, |h| {
+        h.query_by_label("Side work").is_none() && h.query_by_label("Fifth").is_some()
+    });
 
     choose_filter(&mut harness, "All branches");
     wait_for(&mut harness, |h| h.query_by_label("Side work").is_some());
@@ -526,8 +529,9 @@ fn show_only_this_branch_restricts_the_graph_and_names_the_branch() {
     right_click(&mut harness, "diff-view");
     harness.get_by_label("Show only this branch").click();
     harness.run();
-    wait_for(&mut harness, |h| h.query_by_label("Fifth").is_none());
-    harness.get_by_label("Fourth");
+    wait_for(&mut harness, |h| {
+        h.query_by_label("Fifth").is_none() && h.query_by_label("Fourth").is_some()
+    });
     assert!(harness.query_by_label("Side work").is_none());
     assert_eq!(
         branch_filter(&harness).accesskit_node().value().as_deref(),

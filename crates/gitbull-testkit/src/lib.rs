@@ -96,6 +96,12 @@ impl TestRepo {
 
     /// Runs `git <args>` with `input` on its standard input.
     pub fn git_with_input(&self, args: &[&str], input: &str) -> String {
+        self.git_with_bytes(args, input.as_bytes())
+    }
+
+    /// Like [`TestRepo::git_with_input`], with input that need not be
+    /// UTF-8, such as paths in other encodings.
+    pub fn git_with_bytes(&self, args: &[&str], input: &[u8]) -> String {
         use std::io::Write;
         let mut child = self
             .command(args)
@@ -107,7 +113,7 @@ impl TestRepo {
             .stdin
             .take()
             .expect("stdin")
-            .write_all(input.as_bytes())
+            .write_all(input)
             .expect("input written");
         let output = child.wait_with_output().expect("Git finishes");
         assert!(output.status.success(), "git {args:?} failed");

@@ -194,7 +194,8 @@ fn retry_loads_the_repository_once_it_is_back() {
 
     live.set_missing(false);
     harness.get_by_role_and_label(Role::Button, "Retry").click();
-    harness.run();
+    // Frame by frame: the tab opens again behind a spinner.
+    harness.step();
     wait_for(&mut harness, |h| h.query_by_label("First").is_some());
     assert!(
         harness

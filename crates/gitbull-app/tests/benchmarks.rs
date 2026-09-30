@@ -328,3 +328,146 @@ fn scrolling() {
         assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
     }
 }
+
+/// Files in the commit of [`wide_repository`].
+const WIDE_FILES: usize = 50_000;
+
+/// A repository whose one commit adds [`WIDE_FILES`] files, generated into
+/// `target/bench-wide` once with `git fast-import`.
+fn wide_repository() -> PathBuf {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/bench-wide");
+    if path.join(".git").exists() {
+        return path;
+    }
+    std::fs::create_dir_all(&path).unwrap();
+    let git = |args: &[&str], input: Option<&[u8]>| {
+        use std::io::Write;
+        let mut child = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        if let Some(input) = input {
+            child.stdin.take().unwrap().write_all(input).unwrap();
+        }
+        assert!(child.wait().unwrap().success(), "git {args:?}");
+    };
+    git(&["init", "--quiet", "--initial-branch", "main"], None);
+    let message = "Add fifty thousand files\n";
+    let mut stream = format!(
+        "blob\nmark :1\ndata 6\nwide!\ncommit refs/heads/main\nmark :2\ncommitter Ada Lovelace <ada@example.com> 1767268800 +0000\ndata {}\n{message}",
+        message.len()
+    );
+    for n in 0..WIDE_FILES {
+        stream.push_str(&format!("M 100644 :1 dir{:03}/file{n:05}.txt\n", n / 1000));
+    }
+    stream.push('\n');
+    git(&["fast-import", "--quiet"], Some(stream.as_bytes()));
+    path
+}
+
+fn file_count(harness: &Harness<'_, App>) -> usize {
+    harness.query_all_by_role(Role::ListItem).count()
+}
+
+#[test]
+#[ignore]
+fn wide_commit() {
+    let repo = wide_repository();
+    eprintln!("repository: {}, {}", repo.display(), git_version());
+    let hooks = hooks();
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![repo],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        checker: Some(Box::new(move |configured| {
+            App::git_parts(check_git(configured, hooks.clone(), None))
+        })),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    while !loaded(&harness) {
+        harness.step();
+    }
+    for _ in 0..20 {
+        harness.step();
+    }
+    // Select the commit, the only row, and wait for its files.
+    let row = harness
+        .query_all_by_role(Role::Row)
+        .next()
+        .expect("the commit")
+        .rect()
+        .center();
+    harness.hover_at(row);
+    let started = Instant::now();
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: row,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    while file_count(&harness) == 0 {
+        harness.step();
+    }
+    let listed = started.elapsed();
+
+    // Focus the file list, then scroll through it with the keyboard and
+    // the mouse wheel in turn.
+    let first = harness
+        .query_all_by_role(Role::ListItem)
+        .next()
+        .unwrap()
+        .rect()
+        .center();
+    harness.drag_at(first);
+    harness.drop_at(first);
+    harness.step();
+    harness.hover_at(first);
+    let shown = |harness: &Harness<'_, App>| -> std::collections::BTreeSet<String> {
+        harness
+            .query_all_by_role(Role::ListItem)
+            .filter_map(|node| node.accesskit_node().label())
+            .collect()
+    };
+    let top = shown(&harness);
+    let mut times = Vec::new();
+    for frame in 0..400 {
+        if frame % 2 == 0 {
+            harness.input_mut().events.push(Event::Key {
+                key: Key::PageDown,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            });
+        } else {
+            harness.input_mut().events.push(Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: vec2(0.0, -240.0),
+                phase: TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        let started = Instant::now();
+        harness.step();
+        times.push(started.elapsed());
+    }
+    eprintln!();
+    eprintln!("| Commit with {WIDE_FILES} files | Result |");
+    eprintln!("|---|---|");
+    eprintln!("| Files listed after | {:.2} s |", listed.as_secs_f64());
+    eprintln!();
+    eprintln!("| Scrolling the file list | Frames | Median | 99th percentile | Slowest |");
+    eprintln!("|---|---|---|---|---|");
+    let slowest = summary("File list", times);
+    assert!(shown(&harness).is_disjoint(&top), "the file list moved");
+    assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
+}

@@ -199,11 +199,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         },
     );
 
-    view.selected_id = view
-        .commits
-        .selected()
-        .filter(|row| *row < rows)
-        .map(|row| session.history().store.id(row as Row));
+    let selected = view.commits.selected().filter(|row| *row < rows);
+    view.selected_id = selected.map(|row| session.history().store.id(row as Row));
+    if view.selected_id != view.details_shown {
+        view.details_shown = view.selected_id;
+        session.show_details(selected.map(|row| row as Row));
+    }
 
     let hash_of = |row: u64| session.history().store.id(row as Row).to_string();
     if output.response.has_focus()
@@ -384,7 +385,7 @@ fn clamp_graph(width: f32) -> f32 {
 
 /// Whether the user asked to copy, by the shortcut or by the platform's
 /// copy command.
-fn take_copy(input: &mut InputState) -> bool {
+pub(crate) fn take_copy(input: &mut InputState) -> bool {
     let shortcut = input.consume_key(Modifiers::COMMAND, Key::C);
     let before = input.events.len();
     input.events.retain(|event| !matches!(event, Event::Copy));
@@ -608,7 +609,7 @@ fn draw_badges(ui: &mut Ui, cell: Rect, badges: &[Badge], palette: &Palette) -> 
     x
 }
 
-fn badge_color(kind: BadgeKind, palette: &Palette) -> Rgb {
+pub(crate) fn badge_color(kind: BadgeKind, palette: &Palette) -> Rgb {
     match kind {
         BadgeKind::Head => palette.badge_head,
         BadgeKind::Branch => palette.badge_branch,
@@ -630,7 +631,7 @@ fn text_cell(ui: &mut Ui, cell: Rect, text: RichText) -> Response {
     .inner
 }
 
-fn color(rgb: Rgb) -> Color32 {
+pub(crate) fn color(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.0, rgb.1, rgb.2)
 }
 

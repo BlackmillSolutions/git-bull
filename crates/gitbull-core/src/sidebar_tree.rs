@@ -244,6 +244,7 @@ mod tests {
             ],
             stashes: vec![Stash {
                 commit: "2222222222222222222222222222222222222222".into(),
+                parents: Vec::new(),
                 selector: "stash@{0}".into(),
                 message: "WIP on main: try".into(),
             }],

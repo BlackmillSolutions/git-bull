@@ -7,8 +7,10 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use gitbull_git::backend::{CommitStream, ContentSource};
 use gitbull_git::cancel::CancelToken;
+use gitbull_git::changes::FileChange;
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::content::{CommitContent, Content};
+use gitbull_git::diff::FileDiff;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
 use gitbull_git::object_id::ObjectId;
@@ -52,6 +54,11 @@ pub struct FakeBackend {
     live: Vec<(PathBuf, LiveRepo)>,
     submodules: Vec<(PathBuf, Vec<Submodule>)>,
     contents: HashMap<ObjectId, CommitContent>,
+    changes: HashMap<ObjectId, Vec<FileChange>>,
+    failing_changes: Vec<ObjectId>,
+    diffs: HashMap<(ObjectId, String), FileDiff>,
+    blobs: HashMap<ObjectId, Vec<u8>>,
+    missing: Vec<(ObjectId, String)>,
     inspect_delay: Option<std::time::Duration>,
     probe: Probe,
 }
@@ -242,6 +249,37 @@ impl FakeBackend {
 
     pub fn with_stashes(mut self, root: impl Into<PathBuf>, stashes: Vec<Stash>) -> FakeBackend {
         self.stashes.push((root.into(), stashes));
+        self
+    }
+
+    /// The files `commit` changed; a commit without an entry changed none.
+    pub fn with_changes(mut self, commit: ObjectId, changes: Vec<FileChange>) -> FakeBackend {
+        self.changes.insert(commit, changes);
+        self
+    }
+
+    /// The diff of `path` in `commit`.
+    pub fn with_diff(mut self, commit: ObjectId, path: &str, diff: FileDiff) -> FakeBackend {
+        self.diffs.insert((commit, path.to_owned()), diff);
+        self
+    }
+
+    /// The diff of `path` in `commit` needs content that this partial clone
+    /// lacks.
+    pub fn with_missing_content(mut self, commit: ObjectId, path: &str) -> FakeBackend {
+        self.missing.push((commit, path.to_owned()));
+        self
+    }
+
+    /// The content of the blob `id`.
+    pub fn with_blob(mut self, id: ObjectId, content: &[u8]) -> FakeBackend {
+        self.blobs.insert(id, content.to_vec());
+        self
+    }
+
+    /// Listing the files of `commit` fails as if `git diff-tree` did.
+    pub fn with_failing_changes(mut self, commit: ObjectId) -> FakeBackend {
+        self.failing_changes.push(commit);
         self
     }
 
@@ -555,6 +593,76 @@ impl Backend for FakeBackend {
             probe: self.probe.clone(),
         }))
     }
+
+    fn changed_files(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        parent: Option<&ObjectId>,
+        _cancel: &CancelToken,
+    ) -> Result<Vec<FileChange>, Error> {
+        self.probe.record("changed-files", repo);
+        self.probe.lock().compared.push((*commit, parent.copied()));
+        if self.failing_changes.contains(commit) {
+            return Err(Error::CommandFailed {
+                command: "git diff-tree".to_owned(),
+                code: Some(128),
+                stderr: format!("fatal: bad object {commit}"),
+            });
+        }
+        Ok(self.changes.get(commit).cloned().unwrap_or_default())
+    }
+
+    fn file_diff(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        _parent: Option<&ObjectId>,
+        change: &FileChange,
+        limit: Option<usize>,
+        _cancel: &CancelToken,
+    ) -> Result<FileDiff, Error> {
+        self.probe.record("file-diff", repo);
+        self.probe
+            .lock()
+            .diffs
+            .push((*commit, change.path.to_string(), limit));
+        if self.missing.contains(&(*commit, change.path.to_string())) {
+            return Err(Error::MissingContent {
+                command: "git diff-tree -p".to_owned(),
+                stderr: "fatal: could not fetch 1111111 from promisor remote".to_owned(),
+            });
+        }
+        self.diffs
+            .get(&(*commit, change.path.to_string()))
+            .cloned()
+            // Asked for without a limit, all of it arrives.
+            .map(|diff| FileDiff {
+                truncated: diff.truncated && limit.is_some(),
+                ..diff
+            })
+            .ok_or_else(|| Error::CommandFailed {
+                command: "git diff-tree -p".to_owned(),
+                code: Some(128),
+                stderr: format!("no diff of {} in {commit}", change.path),
+            })
+    }
+
+    fn blob(
+        &self,
+        repo: &Path,
+        blob: &ObjectId,
+        limit: u64,
+        _cancel: &CancelToken,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.probe.record("blob", repo);
+        let content = self.blobs.get(blob).ok_or_else(|| Error::Parse {
+            command: "git cat-file --batch".to_owned(),
+            message: format!("the object {blob} is missing"),
+            bytes: Vec::new(),
+        })?;
+        Ok((content.len() as u64 <= limit).then(|| content.clone()))
+    }
 }
 
 /// A stream of lines given in advance.
@@ -804,6 +912,8 @@ struct ProbeInner {
 struct ProbeLog {
     calls: Vec<(String, PathBuf)>,
     requested: Vec<ObjectId>,
+    compared: Vec<(ObjectId, Option<ObjectId>)>,
+    diffs: Vec<(ObjectId, String, Option<usize>)>,
 }
 
 impl Probe {
@@ -820,6 +930,17 @@ impl Probe {
     /// Every commit whose content was requested, in order.
     pub fn requested(&self) -> Vec<ObjectId> {
         self.lock().requested.clone()
+    }
+
+    /// Every commit whose changed files were asked for, with the parent it
+    /// was compared with, in order.
+    pub fn compared(&self) -> Vec<(ObjectId, Option<ObjectId>)> {
+        self.lock().compared.clone()
+    }
+
+    /// Every diff asked for: the commit, the path and the line limit.
+    pub fn diffs(&self) -> Vec<(ObjectId, String, Option<usize>)> {
+        self.lock().diffs.clone()
     }
 
     /// Content sources that have been started and not dropped.

@@ -1,0 +1,818 @@
+//! The commit whose details are shown, the files it changed and the diff of
+//! the file chosen among them. Each loads in the background when it is
+//! selected.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
+
+use gitbull_git::Backend;
+use gitbull_git::cancel::CancelToken;
+use gitbull_git::changes::FileChange;
+use gitbull_git::diff::{Content, DiffLine, FileDiff, LINE_LIMIT, LineKind};
+use gitbull_git::object_id::ObjectId;
+
+use crate::highlight::{HIGHLIGHT_LIMIT, HighlightTheme, HighlightedLines, Span, highlight};
+use crate::session::{catch, take};
+use crate::workspace::{Failure, Notify};
+
+/// The files of the commit shown.
+#[derive(Debug)]
+pub enum ChangedFiles {
+    Loading,
+    Loaded(Vec<FileChange>),
+    Failed(Failure),
+}
+
+/// The diff of the file chosen.
+#[derive(Debug)]
+pub enum DiffState {
+    Loading,
+    Loaded(FileDiff),
+    Failed(Failure),
+}
+
+/// The colours of the diff shown.
+#[derive(Debug)]
+pub struct Highlighting {
+    pub theme: HighlightTheme,
+    /// The lines of the old version, where it exists.
+    pub old: Option<HighlightedLines>,
+    /// The lines of the new version, where it exists.
+    pub new: Option<HighlightedLines>,
+}
+
+impl Highlighting {
+    /// The spans of `line` of the diff: from the old version for a removed
+    /// line, otherwise from the new one.
+    pub fn spans(&self, line: &DiffLine) -> Option<&[Span]> {
+        let (lines, number) = match line.kind {
+            LineKind::Removed => (&self.old, line.old_number),
+            LineKind::Added | LineKind::Context => (&self.new, line.new_number),
+        };
+        let index = number?.checked_sub(1)? as usize;
+        lines.as_ref()?.get(index).map(Vec::as_slice)
+    }
+}
+
+/// How far highlighting the diff shown has got.
+#[derive(Debug)]
+enum HighlightState {
+    NotStarted,
+    Running,
+    /// `None` when the diff is shown without: its type is not known, a
+    /// version is larger than [`HIGHLIGHT_LIMIT`], or it could not be read.
+    Done(Option<Highlighting>),
+}
+
+/// Work in the background for one selection: dropping the receiver drops
+/// its answer, cancelling stops its Git process.
+struct Pending<T> {
+    cancel: CancelToken,
+    result: Option<Receiver<Result<T, Failure>>>,
+}
+
+impl<T: Send + 'static> Pending<T> {
+    fn none() -> Pending<T> {
+        Pending {
+            cancel: CancelToken::new(),
+            result: None,
+        }
+    }
+
+    /// Stops the previous work and starts `work` on a worker thread.
+    fn start(
+        &mut self,
+        notify: &Notify,
+        work: impl FnOnce(&CancelToken) -> Result<T, gitbull_git::Error> + Send + 'static,
+    ) {
+        self.stop();
+        self.cancel = CancelToken::new();
+        let (cancel, notify) = (self.cancel.clone(), Arc::clone(notify));
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            if sender.send(catch(|| work(&cancel))).is_ok() {
+                notify();
+            }
+        });
+        self.result = Some(receiver);
+    }
+
+    fn stop(&mut self) {
+        self.cancel.cancel();
+        self.result = None;
+    }
+
+    fn take(&mut self) -> Option<Result<T, Failure>> {
+        take(&mut self.result)
+    }
+}
+
+/// The commit shown in the commit panel, and the file shown in the diff
+/// panel. Selecting another one stops the work for the previous one and
+/// drops its result.
+pub struct Details {
+    backend: Arc<dyn Backend>,
+    root: PathBuf,
+    notify: Notify,
+    commit: Option<ObjectId>,
+    parent: Option<ObjectId>,
+    /// For a stash with untracked files, the commit that holds them.
+    untracked: Option<ObjectId>,
+    /// The index of the first untracked file among `files`.
+    untracked_from: Option<usize>,
+    files: ChangedFiles,
+    /// The files, and where the untracked ones of a stash begin.
+    files_work: Pending<(Vec<FileChange>, Option<usize>)>,
+    /// The index of the chosen file among `files`.
+    file: Option<usize>,
+    diff: DiffState,
+    diff_work: Pending<FileDiff>,
+    theme: HighlightTheme,
+    highlight: HighlightState,
+    highlight_work: Pending<Option<Highlighting>>,
+}
+
+impl Details {
+    pub fn new(backend: Arc<dyn Backend>, root: PathBuf, notify: Notify) -> Details {
+        Details {
+            backend,
+            root,
+            notify,
+            commit: None,
+            parent: None,
+            untracked: None,
+            untracked_from: None,
+            files: ChangedFiles::Loading,
+            files_work: Pending::none(),
+            file: None,
+            diff: DiffState::Loading,
+            diff_work: Pending::none(),
+            theme: HighlightTheme::Light,
+            highlight: HighlightState::NotStarted,
+            highlight_work: Pending::none(),
+        }
+    }
+
+    /// Highlights with the colours of `theme` from now on, the diff shown
+    /// as well.
+    pub(crate) fn set_theme(&mut self, theme: HighlightTheme) {
+        if theme == self.theme {
+            return;
+        }
+        self.theme = theme;
+        if !matches!(self.highlight, HighlightState::NotStarted) {
+            self.start_highlight();
+        }
+    }
+
+    /// Shows `commit`, compared with `parent`, its first parent; `None`
+    /// shows nothing. No file is chosen until its files have loaded.
+    pub(crate) fn select(&mut self, commit: Option<ObjectId>, parent: Option<ObjectId>) {
+        if commit == self.commit {
+            return;
+        }
+        self.show(commit, parent, None);
+    }
+
+    /// Shows the stash `stash`, compared with `parent`, its first parent.
+    /// The untracked files it saved, in the commit `untracked`, are listed
+    /// after its other files, as added.
+    pub(crate) fn select_stash(
+        &mut self,
+        stash: ObjectId,
+        parent: Option<ObjectId>,
+        untracked: Option<ObjectId>,
+    ) {
+        if Some(stash) == self.commit {
+            return;
+        }
+        self.show(Some(stash), parent, untracked);
+    }
+
+    fn show(
+        &mut self,
+        commit: Option<ObjectId>,
+        parent: Option<ObjectId>,
+        untracked: Option<ObjectId>,
+    ) {
+        self.commit = commit;
+        self.parent = parent;
+        self.untracked = untracked;
+        self.untracked_from = None;
+        self.files = ChangedFiles::Loading;
+        self.files_work.stop();
+        self.clear_file();
+        let Some(commit) = commit else {
+            return;
+        };
+        let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
+        self.files_work.start(&self.notify, move |cancel| {
+            let mut files = backend.changed_files(&root, &commit, parent.as_ref(), cancel)?;
+            let Some(untracked) = untracked else {
+                return Ok((files, None));
+            };
+            // The commit of the untracked files has no parent: all of its
+            // files are added.
+            let from = files.len();
+            files.extend(backend.changed_files(&root, &untracked, None, cancel)?);
+            Ok((files, Some(from)))
+        });
+    }
+
+    /// Shows the diff of the file at `index` in the files of the commit;
+    /// `None` shows none. Long diffs stop at [`LINE_LIMIT`] lines.
+    pub(crate) fn select_file(&mut self, index: Option<usize>) {
+        let known = match (&self.files, index) {
+            (ChangedFiles::Loaded(files), Some(index)) => index < files.len(),
+            _ => false,
+        };
+        let index = index.filter(|_| known);
+        if index == self.file {
+            return;
+        }
+        self.clear_file();
+        self.file = index;
+        if index.is_some() {
+            self.load_diff(Some(LINE_LIMIT));
+        }
+    }
+
+    /// Loads all of a diff that stopped at the limit.
+    pub(crate) fn load_whole_diff(&mut self) {
+        if matches!(&self.diff, DiffState::Loaded(diff) if diff.truncated) {
+            self.load_diff(None);
+        }
+    }
+
+    fn clear_file(&mut self) {
+        self.file = None;
+        self.diff = DiffState::Loading;
+        self.diff_work.stop();
+        self.highlight = HighlightState::NotStarted;
+        self.highlight_work.stop();
+    }
+
+    /// Highlights both versions of the diff shown, whole, on a worker.
+    fn start_highlight(&mut self) {
+        let DiffState::Loaded(diff) = &self.diff else {
+            return;
+        };
+        if !matches!(&diff.content, Content::Text(hunks) if !hunks.is_empty()) {
+            self.highlight = HighlightState::Done(None);
+            self.highlight_work.stop();
+            return;
+        }
+        let path = diff
+            .new_path
+            .as_ref()
+            .or(diff.old_path.as_ref())
+            .map(|path| path.to_string())
+            .unwrap_or_default();
+        let (old_blob, new_blob) = (diff.old_blob, diff.new_blob);
+        let (backend, root, theme) = (Arc::clone(&self.backend), self.root.clone(), self.theme);
+        self.highlight = HighlightState::Running;
+        self.highlight_work.start(&self.notify, move |cancel| {
+            // A version that is too large leaves the whole diff without.
+            let read = |blob: Option<ObjectId>| match blob {
+                Some(blob) => backend
+                    .blob(&root, &blob, HIGHLIGHT_LIMIT, cancel)
+                    .map(|content| {
+                        content.map(|bytes| Some(String::from_utf8_lossy(&bytes).into_owned()))
+                    }),
+                None => Ok(Some(None)),
+            };
+            let (Some(old), Some(new)) = (read(old_blob)?, read(new_blob)?) else {
+                return Ok(None);
+            };
+            let lines = |content: Option<String>| {
+                content.and_then(|content| highlight(&path, &content, theme, cancel))
+            };
+            let (old, new) = (lines(old), lines(new));
+            if cancel.is_cancelled() {
+                return Err(gitbull_git::Error::Cancelled);
+            }
+            Ok((old.is_some() || new.is_some()).then_some(Highlighting { theme, old, new }))
+        });
+    }
+
+    fn load_diff(&mut self, limit: Option<usize>) {
+        let (Some(commit), Some(index), ChangedFiles::Loaded(files)) =
+            (self.commit, self.file, &self.files)
+        else {
+            return;
+        };
+        let change = files[index].clone();
+        // An untracked file of a stash comes from the commit that holds
+        // them, compared with nothing.
+        let (commit, parent) = match (self.untracked, self.untracked_from) {
+            (Some(untracked), Some(from)) if index >= from => (untracked, None),
+            _ => (commit, self.parent),
+        };
+        let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
+        self.diff = DiffState::Loading;
+        self.diff_work.start(&self.notify, move |cancel| {
+            backend.file_diff(&root, &commit, parent.as_ref(), &change, limit, cancel)
+        });
+    }
+
+    /// Applies what has loaded. Returns whether anything changed.
+    pub(crate) fn poll(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(files) = self.files_work.take() {
+            self.files = match files {
+                Ok((files, untracked_from)) => {
+                    self.untracked_from = untracked_from;
+                    ChangedFiles::Loaded(files)
+                }
+                Err(failure) => ChangedFiles::Failed(failure),
+            };
+            changed = true;
+        }
+        if let Some(diff) = self.diff_work.take() {
+            self.diff = match diff {
+                Ok(diff) => DiffState::Loaded(diff),
+                Err(failure) => DiffState::Failed(failure),
+            };
+            // The versions are the same when the whole diff is loaded
+            // later; their highlighting stays.
+            if matches!(self.highlight, HighlightState::NotStarted) {
+                self.start_highlight();
+            }
+            changed = true;
+        }
+        if let Some(highlighting) = self.highlight_work.take() {
+            // A version that cannot be read leaves the diff without.
+            self.highlight = HighlightState::Done(highlighting.ok().flatten());
+            changed = true;
+        }
+        changed
+    }
+
+    /// The colours of the diff shown, once it is highlighted.
+    pub fn highlighting(&self) -> Option<&Highlighting> {
+        match &self.highlight {
+            HighlightState::Done(highlighting) => highlighting.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Whether the diff shown is being highlighted.
+    pub fn is_highlighting(&self) -> bool {
+        matches!(self.highlight, HighlightState::Running)
+    }
+
+    /// The commit shown, if any.
+    pub fn commit(&self) -> Option<ObjectId> {
+        self.commit
+    }
+
+    /// The first parent of the commit shown, which its files are compared
+    /// with.
+    pub fn parent(&self) -> Option<ObjectId> {
+        self.parent
+    }
+
+    /// The files of the commit shown; meaningless while none is.
+    pub fn files(&self) -> &ChangedFiles {
+        &self.files
+    }
+
+    /// The index of the file chosen among the files, if any.
+    pub fn file(&self) -> Option<usize> {
+        self.file
+    }
+
+    /// The diff of the file chosen; meaningless while none is.
+    pub fn diff(&self) -> &DiffState {
+        &self.diff
+    }
+}
+
+impl Drop for Details {
+    fn drop(&mut self) {
+        self.files_work.stop();
+        self.diff_work.stop();
+        self.highlight_work.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gitbull_git::changes::ChangeKind;
+    use gitbull_git::diff::Content;
+    use gitbull_testkit::{FakeBackend, Probe, fake_id};
+    use std::time::{Duration, Instant};
+
+    fn root() -> PathBuf {
+        ["work", "git-bull"].iter().collect()
+    }
+
+    fn added(path: &str) -> FileChange {
+        FileChange {
+            kind: ChangeKind::Added,
+            path: path.into(),
+            old_path: None,
+        }
+    }
+
+    fn text_diff(path: &str, truncated: bool) -> FileDiff {
+        FileDiff {
+            old_path: None,
+            new_path: Some(path.into()),
+            old_mode: None,
+            new_mode: Some("100644".to_owned()),
+            old_blob: None,
+            new_blob: None,
+            content: Content::Text(Vec::new()),
+            truncated,
+        }
+    }
+
+    fn details(fake: FakeBackend) -> (Details, Probe) {
+        let probe = fake.probe();
+        let backend: Arc<dyn Backend> = Arc::new(fake.with_repository(root()));
+        (Details::new(backend, root(), Arc::new(|| {})), probe)
+    }
+
+    fn wait_until(details: &mut Details, done: impl Fn(&Details) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done(details) {
+            assert!(Instant::now() < deadline, "timed out");
+            details.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn files_loaded(details: &Details) -> bool {
+        !matches!(details.files(), ChangedFiles::Loading)
+    }
+
+    fn diff_loaded(details: &Details) -> bool {
+        !matches!(details.diff(), DiffState::Loading)
+    }
+
+    fn paths(files: &ChangedFiles) -> Vec<String> {
+        match files {
+            ChangedFiles::Loaded(files) => files.iter().map(|f| f.path.to_string()).collect(),
+            other => panic!("not loaded: {other:?}"),
+        }
+    }
+
+    /// Two files in commit b, each with a diff.
+    fn two_files() -> FakeBackend {
+        FakeBackend::default()
+            .with_changes(fake_id("b"), vec![added("one.txt"), added("two.txt")])
+            .with_diff(fake_id("b"), "one.txt", text_diff("one.txt", true))
+            .with_diff(fake_id("b"), "two.txt", text_diff("two.txt", false))
+    }
+
+    fn shown_path(details: &Details) -> String {
+        match details.diff() {
+            DiffState::Loaded(diff) => diff.new_path.as_ref().unwrap().to_string(),
+            other => panic!("not loaded: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selecting_a_commit_loads_its_files_against_the_parent_given() {
+        let fake = FakeBackend::default().with_changes(fake_id("b"), vec![added("new.txt")]);
+        let (mut details, probe) = details(fake);
+
+        details.select(Some(fake_id("b")), Some(fake_id("a")));
+
+        assert_eq!(details.commit(), Some(fake_id("b")));
+        assert!(matches!(details.files(), ChangedFiles::Loading));
+        wait_until(&mut details, files_loaded);
+        assert_eq!(paths(details.files()), ["new.txt"]);
+        assert_eq!(probe.compared(), [(fake_id("b"), Some(fake_id("a")))]);
+    }
+
+    #[test]
+    fn the_files_of_a_commit_selected_before_are_dropped() {
+        let fake = FakeBackend::default()
+            .with_changes(fake_id("a"), vec![added("of-a.txt")])
+            .with_changes(fake_id("b"), vec![added("of-b.txt")]);
+        let (mut details, _) = details(fake);
+
+        details.select(Some(fake_id("a")), None);
+        // Time for the first answer to arrive before the second selection.
+        std::thread::sleep(Duration::from_millis(20));
+        details.select(Some(fake_id("b")), None);
+
+        wait_until(&mut details, files_loaded);
+        assert_eq!(paths(details.files()), ["of-b.txt"]);
+        std::thread::sleep(Duration::from_millis(20));
+        details.poll();
+        assert_eq!(paths(details.files()), ["of-b.txt"]);
+    }
+
+    #[test]
+    fn selecting_the_same_commit_again_loads_nothing_new() {
+        let (mut details, probe) = details(FakeBackend::default());
+        details.select(Some(fake_id("a")), None);
+        wait_until(&mut details, files_loaded);
+        details.select(Some(fake_id("a")), None);
+        details.poll();
+        assert_eq!(probe.compared().len(), 1);
+        assert!(matches!(details.files(), ChangedFiles::Loaded(_)));
+    }
+
+    #[test]
+    fn selecting_nothing_shows_no_commit() {
+        let (mut details, _) = details(FakeBackend::default());
+        details.select(Some(fake_id("a")), None);
+        details.select(None, None);
+        assert_eq!(details.commit(), None);
+    }
+
+    #[test]
+    fn a_failure_to_list_the_files_is_kept() {
+        let fake = FakeBackend::default().with_failing_changes(fake_id("a"));
+        let (mut details, _) = details(fake);
+        details.select(Some(fake_id("a")), None);
+        wait_until(&mut details, files_loaded);
+        assert!(matches!(
+            details.files(),
+            ChangedFiles::Failed(Failure::Git(_))
+        ));
+    }
+
+    #[test]
+    fn choosing_a_file_loads_its_diff_up_to_the_limit() {
+        let (mut details, probe) = details(two_files());
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, files_loaded);
+
+        details.select_file(Some(1));
+
+        assert_eq!(details.file(), Some(1));
+        wait_until(&mut details, diff_loaded);
+        assert_eq!(shown_path(&details), "two.txt");
+        assert_eq!(
+            probe.diffs(),
+            [(fake_id("b"), "two.txt".to_owned(), Some(LINE_LIMIT))]
+        );
+    }
+
+    #[test]
+    fn a_file_chosen_before_its_files_have_loaded_is_not_chosen() {
+        let (mut details, probe) = details(two_files());
+        details.select(Some(fake_id("b")), None);
+        details.select_file(Some(0));
+        assert_eq!(details.file(), None);
+        wait_until(&mut details, files_loaded);
+        details.select_file(Some(0));
+        assert_eq!(details.file(), Some(0));
+        wait_until(&mut details, diff_loaded);
+        assert_eq!(probe.diffs().len(), 1);
+    }
+
+    #[test]
+    fn the_diff_of_a_file_chosen_before_is_dropped() {
+        let (mut details, _) = details(two_files());
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, files_loaded);
+
+        details.select_file(Some(0));
+        std::thread::sleep(Duration::from_millis(20));
+        details.select_file(Some(1));
+        wait_until(&mut details, diff_loaded);
+        std::thread::sleep(Duration::from_millis(20));
+        details.poll();
+        assert_eq!(shown_path(&details), "two.txt");
+    }
+
+    #[test]
+    fn a_truncated_diff_loads_whole_when_asked() {
+        let (mut details, probe) = details(two_files());
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, files_loaded);
+        details.select_file(Some(0));
+        wait_until(&mut details, diff_loaded);
+
+        details.load_whole_diff();
+
+        assert!(matches!(details.diff(), DiffState::Loading));
+        wait_until(&mut details, diff_loaded);
+        let limits: Vec<_> = probe
+            .diffs()
+            .into_iter()
+            .map(|(_, _, limit)| limit)
+            .collect();
+        assert_eq!(limits, [Some(LINE_LIMIT), None]);
+    }
+
+    #[test]
+    fn a_whole_diff_is_not_loaded_again() {
+        let (mut details, probe) = details(two_files());
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, files_loaded);
+        details.select_file(Some(1));
+        wait_until(&mut details, diff_loaded);
+        details.load_whole_diff();
+        assert_eq!(probe.diffs().len(), 1);
+    }
+
+    #[test]
+    fn selecting_another_commit_chooses_no_file() {
+        let (mut details, _) = details(two_files());
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, files_loaded);
+        details.select_file(Some(0));
+        details.select(Some(fake_id("c")), None);
+        assert_eq!(details.file(), None);
+    }
+
+    fn rust_diff(old_blob: &str, new_blob: &str) -> FileDiff {
+        let line = |kind, old_number, new_number, text: &str| DiffLine {
+            kind,
+            old_number,
+            new_number,
+            text: text.to_owned(),
+            no_newline: false,
+            cut: false,
+        };
+        FileDiff {
+            old_path: Some("src/lib.rs".into()),
+            new_path: Some("src/lib.rs".into()),
+            old_mode: Some("100644".to_owned()),
+            new_mode: Some("100644".to_owned()),
+            old_blob: Some(fake_id(old_blob)),
+            new_blob: Some(fake_id(new_blob)),
+            content: Content::Text(vec![gitbull_git::diff::Hunk {
+                header: "@@ -2 +2 @@".to_owned(),
+                old_start: 2,
+                new_start: 2,
+                lines: vec![
+                    line(LineKind::Removed, Some(2), None, " old words"),
+                    line(LineKind::Added, None, Some(2), " new words"),
+                ],
+            }]),
+            truncated: false,
+        }
+    }
+
+    /// Commit b changes the second line of `src/lib.rs`, inside a comment
+    /// that starts on the first line.
+    fn rust_backend(new_content: &[u8]) -> FakeBackend {
+        FakeBackend::default()
+            .with_changes(
+                fake_id("b"),
+                vec![FileChange {
+                    kind: ChangeKind::Modified,
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                }],
+            )
+            .with_diff(fake_id("b"), "src/lib.rs", rust_diff("old", "new"))
+            .with_blob(fake_id("old"), b"/*\n old words\n*/\nfn f() {}\n")
+            .with_blob(fake_id("new"), new_content)
+    }
+
+    fn highlighted(fake: FakeBackend) -> (Details, Probe) {
+        let (mut details, probe) = details(fake);
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, files_loaded);
+        details.select_file(Some(0));
+        wait_until(&mut details, |d| diff_loaded(d) && !d.is_highlighting());
+        (details, probe)
+    }
+
+    fn lines_of(details: &Details) -> Vec<DiffLine> {
+        match details.diff() {
+            DiffState::Loaded(FileDiff {
+                content: Content::Text(hunks),
+                ..
+            }) => hunks[0].lines.clone(),
+            other => panic!("no text: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_diff_is_highlighted_from_both_whole_versions() {
+        let (details, _) = highlighted(rust_backend(b"/*\n new words\n*/\nfn f() {}\n"));
+        let highlighting = details.highlighting().expect("highlighted");
+        assert_eq!(highlighting.theme, HighlightTheme::Light);
+        let lines = lines_of(&details);
+        // Both lines lie inside the comment that begins a line above.
+        let removed = highlighting.spans(&lines[0]).expect("old spans");
+        let added = highlighting.spans(&lines[1]).expect("new spans");
+        let comment = highlighting.old.as_ref().unwrap()[0][0].color;
+        assert_eq!(removed[0].color, comment);
+        assert_eq!(added[0].color, comment);
+    }
+
+    #[test]
+    fn a_version_larger_than_the_limit_leaves_the_diff_without_highlighting() {
+        let large = vec![b'x'; HIGHLIGHT_LIMIT as usize + 1];
+        let (details, _) = highlighted(rust_backend(&large));
+        assert!(details.highlighting().is_none());
+        assert!(matches!(details.diff(), DiffState::Loaded(_)));
+    }
+
+    #[test]
+    fn another_theme_highlights_the_diff_again() {
+        let (mut details, _) = highlighted(rust_backend(b"/*\n new words\n*/\nfn f() {}\n"));
+        let light = details.highlighting().unwrap().old.clone();
+        details.set_theme(HighlightTheme::Dark);
+        assert!(details.is_highlighting());
+        wait_until(&mut details, |d| !d.is_highlighting());
+        let highlighting = details.highlighting().expect("highlighted");
+        assert_eq!(highlighting.theme, HighlightTheme::Dark);
+        assert_ne!(highlighting.old, light);
+    }
+
+    #[test]
+    fn a_file_of_an_unknown_type_is_shown_without_highlighting() {
+        let mut diff = rust_diff("old", "new");
+        diff.new_path = Some("notes.unknown-type".into());
+        diff.old_path = diff.new_path.clone();
+        let fake = FakeBackend::default()
+            .with_changes(fake_id("b"), vec![added("notes.unknown-type")])
+            .with_diff(fake_id("b"), "notes.unknown-type", diff)
+            .with_blob(fake_id("old"), b"a\nb\n")
+            .with_blob(fake_id("new"), b"a\nc\n");
+        let (details, _) = highlighted(fake);
+        assert!(details.highlighting().is_none());
+    }
+
+    #[test]
+    fn removed_lines_take_the_old_version_and_the_others_the_new_one() {
+        let span = |red| Span {
+            range: 0..1,
+            color: [red, 0, 0],
+            bold: false,
+            italic: false,
+        };
+        let highlighting = Highlighting {
+            theme: HighlightTheme::Light,
+            old: Some(vec![vec![span(1)], vec![span(2)]]),
+            new: Some(vec![vec![span(3)], vec![span(4)]]),
+        };
+        let line = |kind, old_number, new_number| DiffLine {
+            kind,
+            old_number,
+            new_number,
+            text: "x".to_owned(),
+            no_newline: false,
+            cut: false,
+        };
+        let red = |line: &DiffLine| highlighting.spans(line).map(|spans| spans[0].color[0]);
+        assert_eq!(red(&line(LineKind::Removed, Some(2), None)), Some(2));
+        assert_eq!(red(&line(LineKind::Added, None, Some(1))), Some(3));
+        assert_eq!(red(&line(LineKind::Context, Some(1), Some(2))), Some(4));
+        assert_eq!(red(&line(LineKind::Added, None, Some(9))), None);
+    }
+
+    #[test]
+    fn a_stash_lists_its_untracked_files_as_added_and_diffs_them_alone() {
+        let fake = FakeBackend::default()
+            .with_changes(
+                fake_id("stash"),
+                vec![FileChange {
+                    kind: ChangeKind::Modified,
+                    path: "a.txt".into(),
+                    old_path: None,
+                }],
+            )
+            .with_changes(fake_id("untracked"), vec![added("new.txt")])
+            .with_diff(fake_id("untracked"), "new.txt", text_diff("new.txt", false));
+        let (mut details, probe) = details(fake);
+
+        details.select_stash(
+            fake_id("stash"),
+            Some(fake_id("base")),
+            Some(fake_id("untracked")),
+        );
+        wait_until(&mut details, files_loaded);
+
+        assert_eq!(paths(details.files()), ["a.txt", "new.txt"]);
+        assert_eq!(details.parent(), Some(fake_id("base")));
+        assert_eq!(
+            probe.compared(),
+            [
+                (fake_id("stash"), Some(fake_id("base"))),
+                (fake_id("untracked"), None),
+            ]
+        );
+        details.select_file(Some(1));
+        wait_until(&mut details, diff_loaded);
+        assert_eq!(shown_path(&details), "new.txt");
+        assert_eq!(
+            probe.diffs(),
+            [(fake_id("untracked"), "new.txt".to_owned(), Some(LINE_LIMIT))]
+        );
+    }
+
+    #[test]
+    fn a_stash_without_untracked_files_lists_only_its_changes() {
+        let fake = FakeBackend::default().with_changes(fake_id("stash"), vec![added("a.txt")]);
+        let (mut details, probe) = details(fake);
+        details.select_stash(fake_id("stash"), Some(fake_id("base")), None);
+        wait_until(&mut details, files_loaded);
+        assert_eq!(paths(details.files()), ["a.txt"]);
+        assert_eq!(probe.compared().len(), 1);
+    }
+}

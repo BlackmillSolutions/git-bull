@@ -30,6 +30,8 @@ pub(crate) enum SidebarAction {
     OpenSubmodule(PathBuf),
     /// Restrict the graph to the branch with this full name.
     ShowOnly(String),
+    /// Show the stash at this index in the details.
+    ShowStash(usize),
 }
 
 /// The texts rows need, read before the tab is borrowed.
@@ -111,12 +113,14 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     let row_at = |index: u64| rows.get(index as usize).cloned();
     if let Some(row) = output.clicked.and_then(row_at) {
         activate(&row, sidebar, &mut actions, false);
-    } else if output.selection_changed
-        && let Some(SidebarRow::Reference { name, .. }) = sidebar_list.selected().and_then(row_at)
-    {
-        // Moving through the references with the keyboard follows them in
-        // the commit list.
-        actions.push(SidebarAction::Navigate(name));
+    } else if output.selection_changed {
+        // Moving through references and stashes with the keyboard follows
+        // them in the commit list and the details.
+        match sidebar_list.selected().and_then(row_at) {
+            Some(SidebarRow::Reference { name, .. }) => actions.push(SidebarAction::Navigate(name)),
+            Some(SidebarRow::Stash { index, .. }) => actions.push(SidebarAction::ShowStash(index)),
+            _ => {}
+        }
     }
     if let Some(row) = output.activated.and_then(row_at) {
         activate(&row, sidebar, &mut actions, true);
@@ -158,6 +162,7 @@ fn activate(
         SidebarRow::Reference { name, .. } if !open => {
             actions.push(SidebarAction::Navigate(name.clone()))
         }
+        SidebarRow::Stash { index, .. } if !open => actions.push(SidebarAction::ShowStash(*index)),
         SidebarRow::Submodule {
             path,
             initialised: true,

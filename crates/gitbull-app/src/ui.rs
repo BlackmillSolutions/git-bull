@@ -23,6 +23,8 @@ use gitbull_core::settings::ThemeSetting;
 
 use crate::app::{App, GitMessage, GitStatus, Notice};
 use crate::commit_list;
+use crate::commit_panel;
+use crate::diff_view;
 use crate::i18n;
 use crate::i18n::Msg;
 use crate::paths::System;
@@ -704,12 +706,16 @@ fn history(app: &mut App, ui: &mut Ui) {
                         .show(ui, |ui| {
                             fill(ui);
                             section_title(ui, app.texts.text(Msg::PanelCommit));
-                            focus_area(ui, AREA_COMMIT_PANEL);
+                            if !commit_panel::show(app, ui, palette) {
+                                focus_area(ui, AREA_COMMIT_PANEL);
+                            }
                         });
                     commit_panel_width = commit.response.rect.width();
                     CentralPanel::default().show(ui, |ui| {
                         section_title(ui, app.texts.text(Msg::PanelDiff));
-                        focus_area(ui, AREA_DIFF);
+                        if !diff_view::show(app, ui, palette) {
+                            focus_area(ui, AREA_DIFF);
+                        }
                     });
                 });
             details_height = details.response.rect.height();
@@ -749,6 +755,7 @@ fn apply_sidebar(app: &mut App, actions: Vec<SidebarAction>) {
                 }
             }
             SidebarAction::Navigate(name) => app.navigate(&name),
+            SidebarAction::ShowStash(index) => app.show_stash(index),
             SidebarAction::ShowOnly(name) => {
                 app.set_branch_filter(BranchFilter::Selected(vec![name]))
             }
@@ -767,9 +774,10 @@ fn apply_sidebar(app: &mut App, actions: Vec<SidebarAction>) {
 }
 
 /// Makes the rest of the panel a focusable area until its real content
-/// arrives; clicking it focuses it.
+/// arrives; clicking it focuses it. It covers only the space left, so that
+/// it does not take the clicks meant for what the panel shows above it.
 fn focus_area(ui: &mut Ui, id: &str) {
-    let rect = ui.max_rect();
+    let rect = ui.available_rect_before_wrap();
     let response = ui.interact(rect, Id::new(id), Sense::click());
     if response.clicked() {
         response.request_focus();
@@ -787,7 +795,7 @@ fn focus_area(ui: &mut Ui, id: &str) {
 
 /// Keeps egui from moving the focus on Tab, which `move_between_areas`
 /// does instead.
-fn lock_tab(ui: &Ui, id: Id) {
+pub(crate) fn lock_tab(ui: &Ui, id: Id) {
     ui.memory_mut(|memory| {
         memory.set_focus_lock_filter(
             id,
@@ -819,11 +827,16 @@ fn move_between_areas(ui: &Ui) {
 
 /// The palette of the appearance the window is drawn with.
 fn palette(app: &App, ui: &Ui) -> &'static Palette {
+    appearance(app, ui).palette()
+}
+
+/// The appearance the window is drawn with.
+pub(crate) fn appearance(app: &App, ui: &Ui) -> Appearance {
     let reported = ui.ctx().system_theme().map(|theme| match theme {
         egui::Theme::Dark => Appearance::Dark,
         egui::Theme::Light => Appearance::Light,
     });
-    app.appearance(reported).palette()
+    app.appearance(reported)
 }
 
 fn fill(ui: &mut Ui) {

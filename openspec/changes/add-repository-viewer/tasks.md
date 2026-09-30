@@ -70,15 +70,15 @@ after each stage.
 
 ## 5. Commit details and diff
 
-- [ ] 5.1 Implement the changed files of a commit against the first parent, including root commits, renames and copies; verify parser and integration tests
-- [ ] 5.2 Build the commit panel: details, navigation to a parent, file list with status markers, initial file selection, the note for no changes and the context menu, with Ctrl+C copying the path of the selected file; verify UI tests for every scenario of `commit-details`, and a UI test for copying the path
-- [ ] 5.3 Implement the diff of one file: parsing into hunks and lines with old and new line numbers, the marker for a missing newline at the end, binary files with sizes, renames with and without changes, changed file modes and changed submodules; verify parser tests with recorded output for each
-- [ ] 5.4 Implement truncation of diffs at 10,000 lines with loading the full diff, and truncation of lines at 10,000 characters; verify tests for each
-- [ ] 5.5 Implement syntax highlighting on a worker over the complete old and new content, with the 512 KB limit and unknown file types, taking syntax definitions and themes from `two-face` and compiling dependencies with optimisation in the development profile; verify tests including a hunk inside a block comment
-- [ ] 5.6 Build the diff view: colours, markers, line numbers, monospace font, replacement characters for content that is not valid UTF-8, selecting and copying lines, copying a hunk, with Ctrl+C copying the selected text; verify UI tests, and a UI test for copying with Ctrl+C
-- [ ] 5.7 Show details, changed files and diff of a selected stash, listing its untracked files as added; verify tests for all three stash scenarios of `repository-sidebar`
-- [ ] 5.8 Add integration tests with a configured external diff tool, text conversion in diff and blame, and a partial clone with missing content; verify no tool is executed, no connection is made, and the notice for missing content appears
-- [ ] 5.9 Add integration tests for a file whose path is not valid UTF-8 and for the files `a[1].txt` and `a1.txt`; verify the first path shows replacement characters and its diff loads, and the diff of `a[1].txt` contains only that file
+- [x] 5.1 Implement the changed files of a commit against the first parent, including root commits, renames and copies; verify parser and integration tests
+- [x] 5.2 Build the commit panel: details, navigation to a parent, file list with status markers, initial file selection, the note for no changes and the context menu, with Ctrl+C copying the path of the selected file; verify UI tests for every scenario of `commit-details`, and a UI test for copying the path
+- [x] 5.3 Implement the diff of one file: parsing into hunks and lines with old and new line numbers, the marker for a missing newline at the end, binary files with sizes, renames with and without changes, changed file modes and changed submodules; verify parser tests with recorded output for each
+- [x] 5.4 Implement truncation of diffs at 10,000 lines with loading the full diff, and truncation of lines at 10,000 characters; verify tests for each
+- [x] 5.5 Implement syntax highlighting on a worker over the complete old and new content, with the 512 KB limit and unknown file types, taking syntax definitions and themes from `two-face` and compiling dependencies with optimisation in the development profile; verify tests including a hunk inside a block comment
+- [x] 5.6 Build the diff view: colours, markers, line numbers, monospace font, replacement characters for content that is not valid UTF-8, selecting and copying lines, copying a hunk, with Ctrl+C copying the selected text; verify UI tests, and a UI test for copying with Ctrl+C
+- [x] 5.7 Show details, changed files and diff of a selected stash, listing its untracked files as added; verify tests for all three stash scenarios of `repository-sidebar`
+- [x] 5.8 Add integration tests with a configured external diff tool, text conversion in diff and blame, and a partial clone with missing content; verify no tool is executed, no connection is made, and the notice for missing content appears
+- [x] 5.9 Add integration tests for a file whose path is not valid UTF-8 and for the files `a[1].txt` and `a1.txt`; verify the first path shows replacement characters and its diff loads, and the diff of `a[1].txt` contains only that file
 - [ ] 5.10 Measure details and file list on the Linux kernel repository and the frame time for a commit with 50,000 files; verify the results are recorded in `docs/benchmarks.md`
 
 ## 6. Working-copy status

@@ -6,8 +6,10 @@
 
 pub mod badges;
 pub mod content_cache;
+pub mod details;
 pub mod git_setup;
 pub mod graph;
+pub mod highlight;
 pub mod opening;
 pub mod session;
 pub mod settings;

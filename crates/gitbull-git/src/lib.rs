@@ -4,9 +4,12 @@
 //! data. Every invocation applies the rules of ADR 0006.
 
 pub mod backend;
+pub mod blob;
 pub mod cancel;
+pub mod changes;
 pub mod commit_graph;
 pub mod content;
+pub mod diff;
 pub mod error;
 pub mod filters;
 pub mod flags;
@@ -16,6 +19,7 @@ pub mod invoke;
 pub mod locate;
 pub mod log;
 pub mod object_id;
+pub mod path;
 pub mod process;
 pub mod records;
 pub mod refs;
