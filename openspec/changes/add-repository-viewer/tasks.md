@@ -63,7 +63,7 @@ after each stage.
 - [x] 4.16 Implement the empty state for a repository without commits and the error tab with Retry and Close; verify tests for both
 - [x] 4.17 Implement detection of the commit-graph file, the hint, the confirmation dialog and generation with progress and cancel; verify integration tests that nothing is written without confirmation and that the file exists after confirmation
 - [x] 4.18 Show commit count and load progress in the status bar; verify a UI test while loading and after loading
-- [ ] 4.19 Add the integration test that browsing leaves references, index, objects and working copy unchanged, including after touching tracked files without changing them and viewing their diffs; verify the index file is byte for byte unchanged on all three platforms in CI
+- [x] 4.19 Add the integration test that browsing leaves references, index, objects and working copy unchanged, including after touching tracked files without changing them and viewing their diffs; verify the index file is byte for byte unchanged on all three platforms in CI
 - [x] 4.20 Build the repository generator on `git fast-import`; verify it generates 1,000,000 commits and `git rev-list --count` reports that number
 - [x] 4.21 Add benchmarks for time to first rows, total load time, memory and frame time while scrolling, and document how to run them; verify `docs/benchmarks.md` holds results with hardware and Git version
 - [ ] 4.22 Measure against the Linux kernel repository and compare with the targets of `commit-history`, including the time to first rows with and without tags; verify the results are recorded in `docs/benchmarks.md`, and stop to report with numbers if a target is missed
