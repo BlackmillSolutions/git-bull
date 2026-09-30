@@ -91,3 +91,17 @@ fn on_macos_tabs_switch_with_control_tab_because_cmd_tab_belongs_to_the_system()
     harness.run();
     assert_eq!(active_title(harness.state()).as_deref(), Some("chromium"));
 }
+
+/// On macOS Ctrl is not Cmd, so egui takes Ctrl+Shift+Tab for Shift+Tab
+/// too and would move the keyboard focus into the tab just shown.
+#[test]
+fn on_macos_switching_tabs_leaves_the_keyboard_focus_alone() {
+    let mut harness = window_on(OperatingSystem::Mac, build(three_tabs()).app);
+    settle_window(&mut harness);
+    for modifiers in [Modifiers::CTRL, Modifiers::CTRL | Modifiers::SHIFT] {
+        harness.key_press_modifiers(modifiers, Key::Tab);
+        harness.run();
+        let focused = harness.ctx.memory(|memory| memory.focused());
+        assert_eq!(focused, None, "after {modifiers:?}");
+    }
+}

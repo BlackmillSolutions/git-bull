@@ -338,7 +338,7 @@ fn start_screen(app: &App, problem: &GitCheck, ui: &mut Ui, actions: &mut Vec<Ac
 /// switching tabs uses Ctrl everywhere, because Cmd+Tab belongs to macOS.
 fn shortcuts(ui: &Ui) -> Vec<Action> {
     use egui::{Key, Modifiers};
-    ui.ctx().input_mut(|input| {
+    let actions = ui.ctx().input_mut(|input| {
         let mut actions = Vec::new();
         if input.consume_key(Modifiers::COMMAND, Key::O)
             || input.consume_key(Modifiers::COMMAND, Key::T)
@@ -368,7 +368,18 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
             actions.push(Action::NextTab);
         }
         actions
-    })
+    });
+    // On macOS Ctrl is not Cmd, and egui takes Ctrl+Shift+Tab for Shift+Tab
+    // as well, before this code sees it. Its move of the focus is undone,
+    // or the focus would land on a widget of the tab just shown, which may
+    // be gone in the next frame.
+    if actions
+        .iter()
+        .any(|action| matches!(action, Action::NextTab | Action::PreviousTab))
+    {
+        ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    }
+    actions
 }
 
 /// Folders dropped onto the window this frame. A dropped file opens the
