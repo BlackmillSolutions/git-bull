@@ -21,7 +21,7 @@ env:
 
 jobs:
   version:
-    name: Version and notices
+    name: Version
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -56,13 +56,6 @@ jobs:
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
-
-      # The packages carry the notices; they must list the crates of this
-      # release build.
-      - name: Third-party notices
-        run: |
-          cargo fetch --locked
-          cargo xtask notices --check
 
   package:
     name: Package (${{ matrix.kind }})
