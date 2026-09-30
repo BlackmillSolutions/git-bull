@@ -6,10 +6,11 @@ name: Release
 #
 # A change to the packaging builds the packages without publishing them, so
 # that it can be checked before a tag. Path filters do not apply to tags.
+# Branches under plan/ hold only OpenSpec artifacts and build nothing.
 on:
   push:
     tags: ["v*"]
-    branches: ["**"]
+    branches: ["**", "!plan/**"]
     paths: [".github/workflows/release.yml", "packaging/**"]
   workflow_dispatch:
 
