@@ -107,7 +107,7 @@ after each stage.
 
 ## 9. Release
 
-- [ ] 9.1 Generate the third-party notices file, including the acknowledgements for syntax definitions and themes; verify it lists every crate reported by `cargo tree` for the release build and every bundled syntax asset
+- [x] 9.1 Generate the third-party notices file, including the acknowledgements for syntax definitions and themes; verify it lists every crate reported by `cargo tree` for the release build and every bundled syntax asset
 - [ ] 9.2 Add the release workflow that builds the five packages on a version tag, each with both licence texts and the notices file, and publishes nothing when one build fails; verify by pushing a pre-release tag
 - [ ] 9.3 Write the README sections on supported systems, prerequisites per platform including the desktop portal on Linux, installation, the Git requirement and the warnings for packages without a developer signature; verify the documented steps on Windows and record who verified Linux and macOS
 - [ ] 9.4 Start each package on a clean installation of Windows 10, macOS 12 and Ubuntu 22.04 with Git 2.34 or newer and the prerequisites from the README; verify the main window appears on each and record the result in the release notes

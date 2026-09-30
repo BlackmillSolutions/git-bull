@@ -37,6 +37,11 @@ jobs:
       - name: Lints
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The test of the third-party notices reads the crates of every
+      # platform, which a build unpacks only for its own.
+      - name: Fetch
+        run: cargo fetch --locked
+
       - name: Tests
         run: cargo test --workspace --locked
 

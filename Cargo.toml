@@ -5,6 +5,7 @@ members = [
     "crates/gitbull-core",
     "crates/gitbull-app",
     "crates/gitbull-testkit",
+    "crates/xtask",
 ]
 
 [workspace.package]

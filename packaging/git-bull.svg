@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- The icon of git-bull: a branch that leaves the main line and merges back. -->
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#1f2a37"/>
+  <path d="M96 64 V192" stroke="#4ea1ff" stroke-width="16" stroke-linecap="round" fill="none"/>
+  <path d="M96 92 C96 116 160 108 160 132 C160 156 96 148 96 172" stroke="#f5a524" stroke-width="16" stroke-linecap="round" fill="none"/>
+  <circle cx="96" cy="64" r="20" fill="#4ea1ff"/>
+  <circle cx="160" cy="132" r="20" fill="#f5a524"/>
+  <circle cx="96" cy="192" r="20" fill="#4ea1ff"/>
+</svg>

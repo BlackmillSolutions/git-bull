@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=git-bull
+Comment=View the history of Git repositories
+Exec=git-bull
+Icon=git-bull
+Categories=Development;RevisionControl;
+Terminal=false

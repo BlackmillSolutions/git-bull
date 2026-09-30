@@ -457,6 +457,10 @@ choice:
 | Colour of a block in blame | One of the lane colours, picked by the first byte of the hash of the commit, so that every block of a commit has the same |
 | Missing content in blame | git-bull tells a partial clone from its configuration, a promisor remote or `extensions.partialClone`, and then reports a failed blame or content as missing content |
 | Ignore files of the user for blame | An empty `blame.ignoreRevsFile` clears the files named before it, as in Git |
+| Third-party notices | `THIRD-PARTY-NOTICES.md`, written by `cargo xtask notices` from what `cargo tree` reports for the release build on the four targets of the packages. The texts are the licence files each crate ships; for a crate that ships none, the Apache-2.0 text when its expression allows it, otherwise the MIT text with its authors, or the Boost text. Identical texts are listed once. Tests check that the file lists every crate and every syntax definition and theme, and that it is current; CI fetches the crates of every platform for that |
+| Building the packages | Linux on Ubuntu 22.04, so that no newer C library is needed; both macOS packages on the macOS runner with `MACOSX_DEPLOYMENT_TARGET=12.0`, with an ad-hoc signature that Apple silicon needs and that is no developer certificate. The AppImage is made with appimagetool 1.9.1 and the static runtime 20251108, pinned by their digests, so that it needs no libfuse2 |
+| Publishing | Only when all four package jobs succeed, and only with exactly five packages; a tag with a suffix gives a pre-release. A change to the packaging builds the packages without publishing them |
+| Icon | `packaging/git-bull.svg`, used by the AppImage; the macOS bundle has none yet |
 | Growing the commit store | Columns grow by chunks of 65,536 rows, and the id index moves its rows into a table of twice the size two per appended commit. Commits are appended on the UI thread, and growing everything at once took 33 ms at 900,000 commits |
 
 ## Risks / Trade-offs
