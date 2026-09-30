@@ -28,5 +28,5 @@ fix.
 
 ## 4. Final check
 
-- [ ] 4.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace` and `cargo deny check`, and `openspec validate fix-viewer-review-findings --strict`; verify all succeed and CI is green on Linux, Windows and macOS
-- [ ] 4.2 Answer each of the 13 review comments on pull request #2 with the commit that fixes it, after the user agreed to post; verify every review thread on the pull request is answered
+- [x] 4.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace` and `cargo deny check`, and `openspec validate fix-viewer-review-findings --strict`; verify all succeed and CI is green on Linux, Windows and macOS
+- [x] 4.2 Answer each of the 13 review comments on pull request #2 with the commit that fixes it, after the user agreed to post; verify every review thread on the pull request is answered
