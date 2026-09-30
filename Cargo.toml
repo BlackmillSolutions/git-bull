@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/gitbull-git",
+    "crates/gitbull-core",
+    "crates/gitbull-app",
+    "crates/gitbull-testkit",
+    "crates/xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/BlackmillSolutions/git-bull"
+publish = false
+
+[workspace.dependencies]
+gitbull-git = { path = "crates/gitbull-git" }
+gitbull-core = { path = "crates/gitbull-core" }
+gitbull-testkit = { path = "crates/gitbull-testkit" }
+
+# The regular expressions of syntax highlighting are very slow without
+# optimisation, so dependencies are optimised in debug builds as well
+# (design, decision 7).
+[profile.dev.package."*"]
+opt-level = 2

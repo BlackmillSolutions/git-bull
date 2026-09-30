@@ -1,0 +1,175 @@
+name: Release
+
+# A version tag such as v0.1.0 publishes a release with the five packages of
+# the `distribution` spec; a tag with a suffix, such as v0.1.0-rc.1, a
+# pre-release. When one package fails to build, nothing is published.
+#
+# A change to the packaging builds the packages without publishing them, so
+# that it can be checked before a tag. Path filters do not apply to tags.
+on:
+  push:
+    tags: ["v*"]
+    branches: ["**"]
+    paths: [".github/workflows/release.yml", "packaging/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The tag must name the version of the workspace; without a tag the
+      # packages are named after the commit.
+      - name: Version
+        id: version
+        run: |
+          cargo_version=$(cargo metadata --format-version 1 --no-deps --locked \
+            | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "gitbull-app"))')
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version=${GITHUB_REF_NAME#v}
+            if [[ "${version%%-*}" != "$cargo_version" ]]; then
+              echo "The tag $GITHUB_REF_NAME does not name the version $cargo_version of the workspace." >&2
+              exit 1
+            fi
+          else
+            version="$cargo_version-dev.${GITHUB_SHA::8}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  package:
+    name: Package (${{ matrix.kind }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The C runtime linked in, so that a clean Windows 10 without the
+          # Visual C++ Redistributable runs it.
+          - kind: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: git-bull.exe
+            rustflags: -C target-feature=+crt-static
+          - kind: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            binary: git-bull
+          - kind: macos-x64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            binary: git-bull
+          # The oldest supported Linux: the package needs no newer C
+          # library than Ubuntu 22.04 has.
+          - kind: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary: git-bull
+    runs-on: ${{ matrix.os }}
+    env:
+      # The oldest supported macOS.
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Pinned versions, checked against their digests.
+      - name: AppImage tools
+        if: matrix.kind == 'linux-x64'
+        run: |
+          mkdir -p "$RUNNER_TEMP/appimage"
+          cd "$RUNNER_TEMP/appimage"
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          curl -fsSL -o runtime https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          sha256sum -c - <<'EOF'
+          ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool
+          2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime
+          EOF
+          chmod +x appimagetool
+          echo "APPIMAGETOOL=$PWD/appimagetool" >> "$GITHUB_ENV"
+          echo "APPIMAGE_RUNTIME=$PWD/runtime" >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --locked -p gitbull-app --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          bash packaging/package.sh ${{ matrix.kind }} ${{ needs.version.outputs.version }} \
+            target/${{ matrix.target }}/release/${{ matrix.binary }} dist
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.kind }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: [version, package]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          ls -l dist
+          # The five packages, or nothing.
+          count=$(find dist -type f | wc -l)
+          if [[ "$count" != 5 ]]; then
+            echo "Expected 5 packages, found $count." >&2
+            exit 1
+          fi
+          flags=()
+          if [[ "$PRERELEASE" == true ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "git-bull $VERSION" \
+            --generate-notes \
+            "${flags[@]}"

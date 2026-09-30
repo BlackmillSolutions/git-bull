@@ -103,7 +103,7 @@ egui 0.36 has gaps that the specs name as limitations of this milestone:
 | Gap | Cause | Handling |
 |---|---|---|
 | Dropping a folder does nothing under Wayland | winit 0.30 has no drag-and-drop for Wayland | Named in the spec; the chooser and the command line remain |
-| The system theme is not detected on Linux | winit reports no theme on X11 and Wayland | Read once at start-up through the `dark-light` crate; dark when nothing is reported |
+| The system theme is not detected on Linux | winit reports no theme on X11 and Wayland | Read once at start-up from the XDG desktop portal (`org.freedesktop.appearance color-scheme`) with `gdbus`; dark when nothing is reported. The `dark-light` crate was rejected: it adds about 150 crates, including an async runtime, for one value |
 | The window position cannot be read or set under Wayland | Wayland does not allow it | Only the size is restored there |
 | Right-to-left scripts are laid out wrongly | egui has no bidirectional text support | Named in the spec as not supported |
 | Emoji are monochrome | egui 0.36 has no colour emoji | Accepted |
@@ -132,17 +132,20 @@ literally, and it passes the neutralised filter drivers of the repository.
 | Untracked files of a stash | `git diff-tree -r --root --name-status -z <stash>^3`, when the stash has a third parent |
 | Submodules | `git submodule status` |
 | History structure | `git rev-list --date-order --parents --timestamp <revisions>` |
+| Tags that no branch reaches | `git for-each-ref --format=%(refname) --no-merged=<branch>... refs/tags`, for all branches and remote branches in groups of 100, intersected |
 | Commit count | `git rev-list --count <revisions>` |
 | Commit content | one persistent `git cat-file --batch` process per session |
-| Changed files of a commit | `git diff-tree -r --no-commit-id --name-status -M -z` against the first parent; `--root` for root commits |
-| Diff of one file | `git diff-tree -p -M` restricted to the paths of that file |
+| Changed files of a commit | `git diff-tree -r --no-commit-id --name-status -M -C -z` against the first parent; `--root` for root commits |
+| Diff of one file | `git diff-tree -r -p -M -C --full-index -U3` restricted to the paths of that file; for a binary file the sizes of both blobs from `git cat-file --batch-check` |
 | Working-copy status | `git status --porcelain=v2 -z --untracked-files=all --ignore-submodules=dirty` |
-| Working-copy diff | `git diff` and `git diff --cached`, restricted to one path; `git diff HEAD` for a conflicted file |
-| Search by hash | `git rev-parse --verify --quiet <prefix>^{commit}` |
-| Search by message or author | `git rev-list -i --fixed-strings --grep=<text> <revisions>`, or the same with `--author=<text>` |
-| Search by path | `git rev-list <revisions> -- <path>` |
-| File history | `git log --follow -M --format=<format> --name-status -- <path>` |
+| Working-copy diff | `git diff` and `git diff --cached -M`, restricted to the paths of one file; `git diff HEAD` for a conflicted file; `git diff --no-index -- /dev/null <path>` for an untracked file, whose exit code 1 means that the files differ |
+| Search by hash | `git rev-parse --disambiguate=<prefix>`, and the types of the objects it names from `git cat-file --batch-check`; only commits count |
+| Where a found commit is | `git for-each-ref --contains=<commit> refs/heads refs/remotes refs/tags`, and `git merge-base --is-ancestor <commit> <revision>` for the revisions of the filter and for a detached HEAD |
+| Search by message or author | `git rev-list --date-order -i --fixed-strings --grep=<text> <revisions>`, or the same with `--author=<text>` |
+| Search by path | `git rev-list --date-order <revisions> -- <path>` |
+| File history | `git log --follow -M --no-ext-diff --no-textconv --format=%x01%H %P --name-status -z --end-of-options <start> -- <path>` |
 | Blame | `git blame --incremental --no-textconv --no-ignore-revs-file [--ignore-revs-file=<trusted path>...] <revision> -- <path>` |
+| Content for blame | `git ls-tree -z <revision> -- <path>` for the blob, and its content from `git cat-file --batch` |
 | Generate commit-graph | `git commit-graph write --reachable --changed-paths --progress` |
 | Filter drivers of the repository | `git config --list --show-scope --show-origin -z` |
 
@@ -154,9 +157,14 @@ configuration nor the user's settings change what git-bull parses.
 
 | Filter | Revisions |
 |---|---|
-| All branches | `--branches --tags --remotes HEAD` |
+| All branches | `--branches --remotes` and, read with `--stdin`, the tags that no branch reaches; `--tags` in a repository without branches. `HEAD` when it is detached |
 | Current branch | `HEAD` |
 | Selected branches | the selected reference names |
+
+Options come first, then `--end-of-options`, then the names, so that a
+reference name is never read as an option. A checked-out branch is already
+covered by `--branches`; adding `HEAD` for it would make the walk fail when
+the branch has no commits yet.
 
 Errors are typed:
 
@@ -239,10 +247,19 @@ The layout runs in one pass, in stream order.
 With a commit-graph, Git emits the first line only after its walk has
 reached the generation of the oldest tip. Tags deep in history delay it:
 0.53 s with branches and tags against 0.03 s from HEAD alone, measured on
-1,000,000 generated commits. The Linux kernel has tags back to its first
-commits, so this is the largest risk for the target of 1 s. If the benchmark
-misses it, tags already reachable from a branch are left out of
-`<revisions>`, because they add no commits.
+1,000,000 generated commits. The benchmark of task 4.21 found 0.99 s to the
+first rows in git-bull with branches and tags, 0.84 s of them until Git's
+first line, against 0.17 s for the current branch. On the Linux kernel, with
+tags back to its first commits, the first rows took 1.51 s, and Git needed
+1.44 s to its first line with tags against 0.09 s without.
+
+Tags that a branch reaches add no commits, so they are left out of
+`<revisions>`. Finding the tags that no branch reaches can take as long as
+the walk: 0.18 s on the kernel, 0.72 s on the generated history with a
+branch halfway down. So the walk without tags starts at once, and the tags
+are found meanwhile; when a branch reaches them all, as usual, the walk
+goes on, otherwise it starts again with those tags. The first rows then took
+0.31 s on the kernel and 0.83 s to 0.91 s on the generated history.
 
 **Refresh**
 
@@ -399,12 +416,52 @@ choice:
 | Changes inside a submodule | Not shown in the containing repository; a consequence of ADR 0006 |
 | Start screen when Git is missing | Offers to check again and to set the path to Git |
 | Reference hidden by the branch filter | A notice offers to show all branches |
-| Row "Uncommitted changes" | Selecting it opens the File status view |
+| Row "Uncommitted changes" | Right above the row of the commit HEAD points to, in its lane, or in the first free lane when a lane from above leads into HEAD. A click or Enter opens the File status view; moving onto it with the keyboard only selects it, and the commit panel offers a button to open the view |
 | Selecting a commit | The first changed file is selected |
 | Files with merge conflicts | Listed in the unstaged group with a conflict marker |
 | Blame opened from File status | Shows the file as of the last commit |
 | A release package fails to build | No release is published |
 | Dates | `YYYY-MM-DD HH:MM` in local time, so that no month names need translation |
+| Decoding a declared commit encoding | `encoding_rs`, with the labels of the WHATWG Encoding Standard; ISO-8859-1 is read as its superset windows-1252, and an unknown label as UTF-8 |
+| Names in author and committer | Decoded from the declared encoding too, as `git log` does |
+| Local time zone for dates | `jiff`, with the offset each date had in the system time zone, so that daylight saving time is right for old commits; on Windows its bundled time zone database. The zone is passed in, so that tests fix it |
+| Selecting text in the commit list | Not possible: it would take the clicks that select rows and the copy command that copies the hash |
+| Progress of the commit-graph | `GIT_PROGRESS_DELAY=0` for this command, since Git otherwise reports nothing for two seconds |
+| Cancelling the commit-graph | Git is stopped; a `commit-graph.lock` made during the run is removed, since a stopped Git cannot remove it and later writes would fail on it. Whether the file exists is checked afterwards, as Git may finish just before it is stopped |
+| Copied files | Found with `-C`, which takes files changed in the same commit as sources; without it Git reports no copies. `--find-copies-harder` would compare with every file of the parent and is too slow for large trees |
+| References in the commit panel | The first 20 by name, the rest as a count whose tooltip names up to 50; a commit can carry thousands of tags, and drawing all of them took seconds per frame |
+| Order in the commit panel | The message first, then hash, parents, author, committer and references, so that the message shows in a panel of the default height; the rest scrolls |
+| Themes of syntax highlighting | OneHalf Light and OneHalf Dark from `two-face`, both under MIT, following the appearance of the window |
+| A version larger than 512 KB | The whole diff is shown without highlighting, also when the other version is small; so is a file whose content cannot be read, and plain text counts as a type that is not known |
+| Loading the whole of a long diff | The versions are the same, so their highlighting is kept |
+| A path that is not UTF-8 | Shown with replacement characters. Git for Windows reads its arguments as UTF-8, so there the diff of such a file is read for the whole commit and the file is picked from it by its bytes |
+| Content missing in a partial clone | Recognised from Git's message when a lazy fetch is refused, for every command, and shown as a notice |
+| Appending loaded commits | The loader lays out the graph outside the lock of the history and appends 256 commits under it at a time; the UI takes the lock in every frame |
+| Lines of the graph | Laid out only for the lanes the graph column shows, and only for the rows asked for; rows of the kernel reach 500 lanes. Scrolling on continues from the layout after the rows shown last instead of the checkpoint |
+| Selecting commits quickly | A selection within 150 ms of the one before loads its files once it has stayed for 75 ms; a single click loads at once. A held key started Git for every commit it passed |
+| Stopping Git | On a thread of its own; on Windows it waits for `taskkill`, which took about 230 ms |
+| Reading the status | Starts with the history, in parallel; on the Linux kernel the first rows took as long as before. Refresh reads it again and stops a read still running. The list and the file chosen stay until the new status arrives; the diff of that file loads again |
+| Groups of the File status view | Only groups that have files are listed, under a title with their number of files. Titles are not selected: the selection moves on to the file next to them in the direction it moved. The first file is chosen when none is. The list shares its width with the commit panel |
+| New version of a working-copy diff | The file in the working copy, read directly for highlighting and for the size of a binary file. A symbolic link reads as its target and is not followed. Git names the working copy by the hash of its content, which is no blob of the object database |
+| Filters and the size of a file | Git counts a file whose size differs from the index as modified without running a filter; a filter of the repository matters only for files of the same size |
+| Search by hash | The commits among the objects whose name starts with the text. `git rev-parse --verify <prefix>^{commit}` reported a prefix that only a file has as an error, not as unknown |
+| Searches and the tags | A search walks the same revisions as the history, with the tags that no branch reaches |
+| Matches of a search | In the order of the commit list. The UI takes at most 10,000 in a frame, and the search wakes it at most every 50 ms; while a search waits for its text or runs, the window looks for its matches every 50 ms as well |
+| Next and Previous | Move on from the match moved to last, or chosen in the Search view. Enter in the search field goes to the next match. A match that has not loaded yet is selected once it has |
+| A match chosen in the Search view, or a hash found | Selected in the History view. A hash hidden by the branch filter gets the notice that offers all branches, as a reference does |
+| Another branch filter | The search runs again, as its matches were those of the other branches |
+| File history and blame in the tab | They take the place of the view of the sidebar; Back returns to it with its selection and scroll position. Choosing a view or a reference in the sidebar returns as well. A new one replaces the one open |
+| Offering file history and blame | For every file of a commit; blame not for a file the commit deleted. In File status for every file the last commit has, a renamed or copied one under its old path; not for untracked or added files |
+| Commits of a file history | Their header is marked with the byte 0x01, which no status starts with. A commit that lists no change, such as a merge, shows the path followed so far. Its diff is against its first parent |
+| Content of blame | Read at once, while Git finds the commits; a NUL among the first 8,000 bytes makes it binary, as Git decides. Lines longer than 10,000 characters are cut, as in the diff |
+| Colour of a block in blame | One of the lane colours, picked by the first byte of the hash of the commit, so that every block of a commit has the same |
+| Missing content in blame | git-bull tells a partial clone from its configuration, a promisor remote or `extensions.partialClone`, and then reports a failed blame or content as missing content |
+| Ignore files of the user for blame | An empty `blame.ignoreRevsFile` clears the files named before it, as in Git |
+| Third-party notices | `THIRD-PARTY-NOTICES.md`, written by `cargo xtask notices` from what `cargo tree` reports for the release build on the four targets of the packages. The texts are the licence files each crate ships; for a crate that ships none, the Apache-2.0 text when its expression allows it, otherwise the MIT text with its authors, or the Boost text. Identical texts are listed once. Tests check that the file lists every crate and every syntax definition and theme, and that it is current; CI fetches the crates of every platform for that |
+| Building the packages | Linux on Ubuntu 22.04, so that no newer C library is needed; both macOS packages on the macOS runner with `MACOSX_DEPLOYMENT_TARGET=12.0`, with an ad-hoc signature that Apple silicon needs and that is no developer certificate. The AppImage is made with appimagetool 1.9.1 and the static runtime 20251108, pinned by their digests, so that it needs no libfuse2 |
+| Publishing | Only when all four package jobs succeed, and only with exactly five packages; a tag with a suffix gives a pre-release. A change to the packaging builds the packages without publishing them |
+| Icon | `packaging/git-bull.svg`, used by the AppImage; the macOS bundle has none yet |
+| Growing the commit store | Columns grow by chunks of 65,536 rows, and the id index moves its rows into a table of twice the size two per appended commit. Commits are appended on the UI thread, and growing everything at once took 33 ms at 900,000 commits |
 
 ## Risks / Trade-offs
 
@@ -433,8 +490,8 @@ choice:
 - [Generating the commit-graph with changed-path filters takes time: 26.8 s
   on 1,000,000 generated commits, more on the Linux kernel] → It runs in the
   background, shows progress and can be cancelled.
-- [Tags deep in history delay the first rows] → Measured, see decision 5;
-  leaving out tags reachable from a branch is the prepared remedy.
+- [Tags deep in history delay the first rows] → Measured on the Linux
+  kernel, see decision 5; tags reachable from a branch are left out.
 - [A repository brings along commands that Git executes] → ADR 0006. The
   first version of these rules was incomplete; an experiment found filters,
   signature programs, lazy fetch, hooks and submodule configuration as

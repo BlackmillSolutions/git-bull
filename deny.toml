@@ -1,0 +1,48 @@
+# Dependency checks for git-bull, run with `cargo deny check`.
+# git-bull is distributed under MIT OR Apache-2.0; every dependency must be
+# distributable under these terms (see the `distribution` spec).
+
+[graph]
+all-features = true
+
+[advisories]
+# Fails on security advisories and on crates that are no longer maintained.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+# Permissive licences only, and only those a dependency actually uses. Add a
+# licence when a dependency brings it, with a note on why it is compatible
+# with distribution under MIT OR Apache-2.0.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # Permissive and OSI approved; asks only that its notice ships with the
+    # software, which the third-party notices file does. Brought by
+    # unicode-ident, a dependency of serde.
+    "Unicode-3.0",
+    # Permissive licences that ask for their notice in the notices file.
+    # Brought by egui and eframe: arrayref (BSD-2-Clause), tiny-skia
+    # (BSD-3-Clause), clipboard-win (BSL-1.0), libloading (ISC), foldhash,
+    # slotmap and zlib-rs (Zlib).
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    # The fonts bundled with egui (epaint_default_fonts). Both licences allow
+    # bundling fonts with software under any licence, as long as the licence
+    # text ships with them and the fonts are not sold on their own.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
