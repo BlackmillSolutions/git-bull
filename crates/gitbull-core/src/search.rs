@@ -234,8 +234,13 @@ impl Search {
         Some(id)
     }
 
-    /// What a search by hash found, once; the session acts on it.
+    /// What a search by hash found, once it has ended; the session acts on
+    /// it once. The worker sends the outcome before the end, and a poll can
+    /// come between the two.
     pub(crate) fn take_hash(&mut self) -> Option<HashOutcome> {
+        if !matches!(self.state, SearchState::Done) {
+            return None;
+        }
         self.hash.take()
     }
 
@@ -555,6 +560,24 @@ mod tests {
             ),
             HashOutcome::NotInHistory(fake_id("x"))
         );
+    }
+
+    #[test]
+    fn the_outcome_of_a_search_by_hash_comes_with_its_end() {
+        // The worker sends the outcome, then the end; a poll can come
+        // between the two.
+        let (mut search, _) = search(FakeBackend::default());
+        let (sender, receiver) = mpsc::channel();
+        search.state = SearchState::Running;
+        search.events = Some(receiver);
+        sender.send(Event::Hash(HashOutcome::Unknown)).unwrap();
+        search.poll_at(Instant::now(), &revisions());
+        assert_eq!(search.take_hash(), None, "the search still runs");
+
+        sender.send(Event::Done(Ok(()))).unwrap();
+        search.poll_at(Instant::now(), &revisions());
+        assert!(done(&search));
+        assert_eq!(search.take_hash(), Some(HashOutcome::Unknown));
     }
 
     #[test]
