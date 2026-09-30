@@ -99,12 +99,35 @@ pub fn check() -> Result<(), String> {
     let path = root().join(FILE);
     let current =
         std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    if current.replace("\r\n", "\n") != generate()? {
-        return Err(format!(
-            "{FILE} is out of date; run `cargo xtask notices` and commit it"
-        ));
+    match difference(&current.replace("\r\n", "\n"), &generate()?) {
+        None => Ok(()),
+        Some(difference) => Err(format!(
+            "{FILE} is out of date; run `cargo xtask notices` and commit it.\n{difference}"
+        )),
     }
-    Ok(())
+}
+
+/// Where `new` first differs from `old`, line by line, for a message.
+pub fn difference(old: &str, new: &str) -> Option<String> {
+    if old == new {
+        return None;
+    }
+    let (old_lines, new_lines): (Vec<&str>, Vec<&str>) =
+        (old.lines().collect(), new.lines().collect());
+    let at = (0..old_lines.len().max(new_lines.len()))
+        .find(|&i| old_lines.get(i) != new_lines.get(i))
+        .unwrap_or(0);
+    let line = |lines: &[&str]| {
+        lines
+            .get(at)
+            .map_or("(none)".to_owned(), |line| format!("{line:?}"))
+    };
+    Some(format!(
+        "First difference at line {}:\n  file:      {}\n  generated: {}",
+        at + 1,
+        line(&old_lines),
+        line(&new_lines)
+    ))
 }
 
 /// The notices of the release build, as Markdown.
@@ -561,9 +584,20 @@ mod tests {
 
     #[test]
     fn the_notices_are_up_to_date() {
+        if let Some(difference) = difference(&committed(), &generate().unwrap()) {
+            panic!("{FILE} is out of date; run `cargo xtask notices` and commit it.\n{difference}");
+        }
+    }
+
+    #[test]
+    fn a_difference_names_its_first_line() {
+        assert_eq!(difference("a\nb\n", "a\nb\n"), None);
+        let message = difference("a\nb\nc", "a\nx\nc").unwrap();
+        assert!(message.contains("line 2"), "{message}");
         assert!(
-            committed() == generate().unwrap(),
-            "{FILE} is out of date; run `cargo xtask notices` and commit it"
+            message.contains("\"b\"") && message.contains("\"x\""),
+            "{message}"
         );
+        assert!(difference("a", "a\nb").unwrap().contains("(none)"));
     }
 }
