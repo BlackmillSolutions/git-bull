@@ -560,7 +560,10 @@ mod tests {
             .replace("\r\n", "\n")
     }
 
+    /// Run by hand before a release, like the test that the file is up
+    /// to date: an update of a dependency must not block CI.
     #[test]
+    #[ignore = "run by hand before a release"]
     fn the_notices_list_every_crate_of_the_release_build() {
         let notices = committed();
         let crates = release_crates().unwrap();
