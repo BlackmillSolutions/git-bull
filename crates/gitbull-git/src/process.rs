@@ -156,7 +156,7 @@ impl Drop for Process {
         let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
         let outcome = match child.try_wait() {
             Ok(None) => {
-                stop(&mut child);
+                stop_in_background(Arc::clone(&self.child));
                 Outcome::Cancelled
             }
             Ok(Some(status)) if !self.cancelled.load(Ordering::SeqCst) => {
@@ -170,14 +170,23 @@ impl Drop for Process {
 }
 
 impl Canceller {
-    /// Stops the process and every process it started.
+    /// Stops the process and every process it started. Returns at once.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
-        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        stop_in_background(Arc::clone(&self.child));
+    }
+}
+
+/// Stops `child` on a thread of its own, if it still runs. The caller may be
+/// the UI thread, and on Windows stopping waits for `taskkill`, which took
+/// about 230 ms.
+fn stop_in_background(child: Arc<Mutex<Child>>) {
+    std::thread::spawn(move || {
+        let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(child.try_wait(), Ok(None)) {
             stop(&mut child);
         }
-    }
+    });
 }
 
 /// How much error output is kept for messages.
@@ -332,5 +341,37 @@ mod tests {
         output
             .recv_timeout(Duration::from_secs(10))
             .expect("the output closes once no Git process is left");
+    }
+
+    /// A running `cat-file --batch`, which runs until its input ends, the
+    /// input that keeps it alive and its repository.
+    fn running() -> (crate::Process, std::process::ChildStdin, tempfile::TempDir) {
+        let repo = repository();
+        let mut process = git()
+            .spawn(repo.path(), &[], ["cat-file", "--batch"], true)
+            .unwrap();
+        let stdin = process.take_stdin().unwrap();
+        (process, stdin, repo)
+    }
+
+    #[test]
+    fn cancelling_returns_at_once() {
+        // It happens on the UI thread when the selection moves on, and
+        // stopping takes a moment on Windows.
+        let (process, _stdin, _repo) = running();
+        let started = std::time::Instant::now();
+        process.canceller().cancel();
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(50), "cancelling took {took:?}");
+        assert!(matches!(process.wait(), Err(Error::Cancelled)));
+    }
+
+    #[test]
+    fn dropping_a_running_process_returns_at_once() {
+        let (process, _stdin, _repo) = running();
+        let started = std::time::Instant::now();
+        drop(process);
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(50), "dropping took {took:?}");
     }
 }

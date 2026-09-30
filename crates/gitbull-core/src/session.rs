@@ -27,7 +27,7 @@ use gitbull_git::{Backend, Error};
 use crate::badges::{self, Badge};
 use crate::content_cache::ContentCache;
 use crate::details::Details;
-use crate::graph::Graph;
+use crate::graph::{Checkpoint, Graph, GraphBuilder};
 use crate::highlight::HighlightTheme;
 use crate::opening::OpenedRepository;
 use crate::store::{CommitStore, Parent, Row};
@@ -35,6 +35,8 @@ use crate::workspace::{Failure, Notify, panic_message};
 
 /// Lines the loader collects before handing them over.
 const BATCH_LINES: usize = 4096;
+/// Lines the loader appends to the history under one lock.
+const HAND_OVER_LINES: usize = 256;
 /// How long the loader collects lines before handing them over.
 const BATCH_TIME: Duration = Duration::from_millis(8);
 
@@ -829,16 +831,29 @@ fn load(
 
     let mut batch: Vec<CommitLine> = Vec::with_capacity(BATCH_LINES);
     let mut batch_started = Instant::now();
-    let hand_over = |batch: &mut Vec<CommitLine>| {
+    let mut builder = GraphBuilder::new();
+    let mut hand_over = |batch: &mut Vec<CommitLine>| {
         if batch.is_empty() {
             return;
         }
-        let mut history = lock(history);
-        for line in batch.drain(..) {
-            history.store.push(&line);
-            history.graph.push(&line);
+        // The UI takes the lock of the history in every frame. Laying out a
+        // batch of the Linux kernel under it held it for up to 36 ms, so
+        // the layout is done before, and the rows go in piece by piece.
+        let checkpoints: Vec<Option<Checkpoint>> =
+            batch.iter().map(|line| builder.next(line)).collect();
+        let mut checkpoints = checkpoints.into_iter();
+        for piece in batch.chunks(HAND_OVER_LINES) {
+            let mut history = lock(history);
+            for line in piece {
+                history.store.push(line);
+                history.graph.append(checkpoints.next().flatten());
+            }
+            drop(history);
+            // The lock is not fair: without a pause the loader could take
+            // it again before the waiting UI thread.
+            std::thread::yield_now();
         }
-        drop(history);
+        batch.clear();
         notify();
     };
     loop {

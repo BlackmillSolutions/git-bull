@@ -66,7 +66,7 @@ after each stage.
 - [x] 4.19 Add the integration test that browsing leaves references, index, objects and working copy unchanged, including after touching tracked files without changing them and viewing their diffs; verify the index file is byte for byte unchanged on all three platforms in CI
 - [x] 4.20 Build the repository generator on `git fast-import`; verify it generates 1,000,000 commits and `git rev-list --count` reports that number
 - [x] 4.21 Add benchmarks for time to first rows, total load time, memory and frame time while scrolling, and document how to run them; verify `docs/benchmarks.md` holds results with hardware and Git version
-- [ ] 4.22 Measure against the Linux kernel repository and compare with the targets of `commit-history`, including the time to first rows with and without tags; verify the results are recorded in `docs/benchmarks.md`, and stop to report with numbers if a target is missed
+- [x] 4.22 Measure against the Linux kernel repository and compare with the targets of `commit-history`, including the time to first rows with and without tags; verify the results are recorded in `docs/benchmarks.md`, and stop to report with numbers if a target is missed
 
 ## 5. Commit details and diff
 

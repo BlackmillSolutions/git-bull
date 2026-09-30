@@ -223,3 +223,57 @@ frame:
   running, it is stopped. On Windows this runs `taskkill /T /F` and waits
   for it on the UI thread, which took about 230 ms each time. On Linux and
   macOS stopping is a signal.
+
+## Linux kernel after the fixes (task 4.22)
+
+Measured on 2026-09-30 on the same machine and clone as above, release
+build, after these changes, found with timings of the parts of a frame:
+
+1. The walk of all branches leaves out the tags that a branch reaches. It
+   starts without tags at once while `git for-each-ref --no-merged` finds
+   the others, and starts again with them only when there are any.
+2. The loader lays out the graph outside the lock of the history and
+   appends 256 commits under it at a time.
+3. Stopping Git happens on a thread of its own.
+4. The graph lays out only the lines of the lanes the column shows, skips
+   the lines of rows that are not asked for, and continues from the rows
+   shown last when the view scrolls on.
+5. A selection that follows the one before within 150 ms loads its files
+   once it has stayed for 75 ms, so a held key no longer starts Git for
+   every commit it passes.
+
+| Measure | Result | Target | Met |
+|---|---|---|---|
+| First rows, all branches and tags | 0.32 s | under 1 s | yes |
+| First rows, current branch | 0.16 s | under 1 s | yes |
+| Whole history, all branches | 5.68 s | none | |
+| Memory of the process | 101.6 MB | under 250 MB | yes |
+
+Three runs gave 0.306 s to 0.318 s and 0.148 s to 0.166 s to the first
+rows; the tables give the medians, and for frames the slowest run.
+
+| Scrolling | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| While loading | 6,012 | 0.9 ms | 4.0 ms | 6.8 ms | yes |
+| After loading | 400 | 1.0 ms | 1.9 ms | 3.0 ms | yes |
+| Scrollbar from top to bottom | 200 | 0.5 ms | 3.8 ms | 4.2 ms | yes |
+
+| Details and files, 100 commits from HEAD | Commits | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Fewer than 100 files | 99 | 70.8 ms | 93.3 ms | 112.6 ms | yes, under 200 ms |
+
+The details benchmark now pauses before each selection, as between two
+clicks. The generated repository of task 4.21 gave, after the same changes:
+
+| Measure, generated history | Result |
+|---|---|
+| First rows, all branches and tags | 0.90 s (0.83 s to 0.91 s) |
+| First rows, current branch | 0.14 s |
+| Slowest frame while loading, after loading, dragging the scrollbar | 4.0 ms, 1.2 ms, 0.8 ms |
+| Commit with 50,000 files: files listed, slowest frame of the list | 0.14 s, 1.2 ms |
+
+On the generated history the first rows stay closer to the target: its
+branch `feature/old` points halfway down, so Git needs 0.39 s to its first
+line even without tags, and finding the tags that no branch reaches takes
+0.72 s there, as proving that the oldest tag is reachable walks most of the
+history.

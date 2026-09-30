@@ -25,14 +25,7 @@ pub enum Shape {
 
 /// The lanes `row` needs: up to its rightmost line or commit.
 pub fn needed_lanes(row: &GraphRow) -> usize {
-    row.upper
-        .iter()
-        .chain(&row.lower)
-        .flat_map(|edge| [edge.from, edge.to])
-        .chain([row.column])
-        .max()
-        .unwrap_or(0)
-        + 1
+    row.width
 }
 
 /// How many lanes a column of `width` shows when the rows in view need
@@ -120,11 +113,20 @@ mod tests {
     }
 
     fn row(column: usize, upper: Vec<Edge>, lower: Vec<Edge>) -> GraphRow {
+        let width = upper
+            .iter()
+            .chain(&lower)
+            .flat_map(|edge| [edge.from, edge.to])
+            .chain([column])
+            .max()
+            .unwrap_or(0)
+            + 1;
         GraphRow {
             column,
             color: 0,
             upper,
             lower,
+            width,
         }
     }
 

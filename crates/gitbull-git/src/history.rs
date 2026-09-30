@@ -1,5 +1,7 @@
 //! The structure of the history, streamed commit by commit (ADR 0004).
 
+use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::Path;
 use std::process::ChildStdout;
 
@@ -65,6 +67,16 @@ impl Revisions {
         args.extend(self.names.iter().cloned());
     }
 
+    /// Like [`Revisions::push_args`], with the tags left out and read from
+    /// the input instead.
+    fn push_args_without_tags(&self, args: &mut Vec<String>) {
+        if self.all_references {
+            args.extend(["--branches", "--remotes", "--stdin"].map(str::to_owned));
+        }
+        args.push("--end-of-options".to_owned());
+        args.extend(self.names.iter().cloned());
+    }
+
     /// True when the walk has no start point.
     pub fn is_empty(&self) -> bool {
         !self.all_references && self.names.is_empty()
@@ -95,6 +107,14 @@ impl HistoryStream {
         let Some(running) = self.running.as_mut() else {
             return Ok(None);
         };
+        // A cancelled stream ends at once; dropping the process stops Git
+        // in the background.
+        if running.cancel.is_cancelled() {
+            if let Some(running) = self.running.take() {
+                running.cancel.forget(running.registration);
+            }
+            return Err(Error::Cancelled);
+        }
         let record = running.records.next_record().map_err(|source| Error::Io {
             command: running.command.clone(),
             source,
@@ -129,12 +149,23 @@ pub fn history(
     if revisions.is_empty() {
         return Ok(HistoryStream { running: None });
     }
-    let mut args = ["rev-list", "--date-order", "--parents", "--timestamp"]
-        .map(str::to_owned)
-        .to_vec();
-    revisions.push_args(&mut args);
-    args.push("--".to_owned());
-    let mut process = git.spawn(repo, &[], &args, false)?;
+    let mut process = if revisions.all_references {
+        // All branches take only the tags that no branch reaches; the
+        // others add no commits. Finding them can take as long as the walk
+        // itself, so the walk without tags starts at once, and it is kept
+        // when every tag is reached, as usual.
+        let started = walk(git, repo, revisions, Some(&[]))?;
+        match unreached_tags(git, repo, cancel)? {
+            Some(tags) if tags.is_empty() => started,
+            tags => {
+                // Dropping it stops Git.
+                drop(started);
+                walk(git, repo, revisions, tags.as_deref())?
+            }
+        }
+    } else {
+        walk(git, repo, revisions, None)?
+    };
     let stdout = process.take_stdout().expect("standard output is piped");
     let canceller = process.canceller();
     let registration = cancel.on_cancel(move || canceller.cancel());
@@ -147,6 +178,93 @@ pub fn history(
             registration,
         }),
     })
+}
+
+/// Starts `git rev-list` for `revisions`. With `tags`, all branches take
+/// the branches, the remote branches and these tags, read from the input so
+/// that any number fits; without, they take every tag.
+fn walk(
+    git: &Git,
+    repo: &Path,
+    revisions: &Revisions,
+    tags: Option<&[String]>,
+) -> Result<Process, Error> {
+    let mut args = ["rev-list", "--date-order", "--parents", "--timestamp"]
+        .map(str::to_owned)
+        .to_vec();
+    match tags {
+        Some(_) => revisions.push_args_without_tags(&mut args),
+        None => revisions.push_args(&mut args),
+    }
+    args.push("--".to_owned());
+    let mut process = git.spawn(repo, &[], &args, tags.is_some())?;
+    if let Some(tags) = tags {
+        let mut stdin = process.take_stdin().expect("standard input is piped");
+        let input: String = tags.iter().map(|tag| format!("{tag}\n")).collect();
+        let written = stdin.write_all(input.as_bytes());
+        // Closing the input starts the walk.
+        drop(stdin);
+        written.map_err(|source| Error::Io {
+            command: process.command().to_owned(),
+            source,
+        })?;
+    }
+    Ok(process)
+}
+
+/// Branches given to one call of `git for-each-ref`, so that its command
+/// line stays within what Windows allows.
+const BRANCHES_PER_CALL: usize = 100;
+
+/// The tags that no branch and no remote branch reaches; `None` when the
+/// repository has no branches, so that every tag is needed.
+///
+/// The other tags add no commit to a walk from the branches, but Git's
+/// first line waits for them: its walk has to reach the generation of the
+/// oldest tag. On the Linux kernel, whose tags go back to its first
+/// commits, the first line took 1.4 s with them and 0.09 s without.
+pub fn unreached_tags(
+    git: &Git,
+    repo: &Path,
+    cancel: &CancelToken,
+) -> Result<Option<Vec<String>>, Error> {
+    let names = |args: &[String]| -> Result<BTreeSet<String>, Error> {
+        let output = git.run_cancellable(repo, &[], args, cancel)?;
+        Ok(String::from_utf8_lossy(&output)
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    };
+    let list = |patterns: &[&str]| {
+        let mut args = vec!["for-each-ref".to_owned(), "--format=%(refname)".to_owned()];
+        args.extend(patterns.iter().map(|pattern| (*pattern).to_owned()));
+        args
+    };
+    let branches: Vec<String> = names(&list(&["refs/heads", "refs/remotes"]))?
+        .into_iter()
+        .collect();
+    if branches.is_empty() {
+        return Ok(None);
+    }
+    // Several `--no-merged` list the tags that none of them reaches; the
+    // calls for the groups of branches are intersected.
+    let mut unreached: Option<BTreeSet<String>> = None;
+    for group in branches.chunks(BRANCHES_PER_CALL) {
+        let mut args = list(&[]);
+        args.extend(group.iter().map(|branch| format!("--no-merged={branch}")));
+        args.push("refs/tags".to_owned());
+        let found = names(&args)?;
+        let left = match unreached {
+            None => found,
+            Some(before) => before.intersection(&found).cloned().collect(),
+        };
+        let done = left.is_empty();
+        unreached = Some(left);
+        if done {
+            break;
+        }
+    }
+    Ok(Some(unreached.unwrap_or_default().into_iter().collect()))
 }
 
 /// Counts the commits reachable from `revisions`.

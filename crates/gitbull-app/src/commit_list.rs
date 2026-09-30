@@ -178,7 +178,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let margin = visible.end - visible.start;
     let gathered = visible.start.saturating_sub(margin)..(visible.end + margin).min(rows);
     session.request_content(gathered.start as Row..gathered.end as Row);
-    let data = gather(session, gathered.clone(), &zone);
+    let data = gather(session, gathered.clone(), &zone, graph_width);
     let needed = data
         .iter()
         .map(|row| graph_view::needed_lanes(&row.graph))
@@ -392,12 +392,19 @@ pub(crate) fn take_copy(input: &mut InputState) -> bool {
     shortcut || input.events.len() != before
 }
 
-fn gather(session: &mut Session, rows: Range<u64>, zone: &TimeZone) -> Vec<RowData> {
+fn gather(
+    session: &mut Session,
+    rows: Range<u64>,
+    zone: &TimeZone,
+    graph_width: f32,
+) -> Vec<RowData> {
+    // Lines of lanes the column cannot show are not laid out.
+    let limit = (graph_width / LANE_WIDTH).ceil() as usize;
     let commits: Vec<(ObjectId, i64, GraphRow)> = {
         let mut history = session.history();
         let History { store, graph, .. } = &mut *history;
         let graph_rows = graph
-            .rows(store, rows.start as Row..rows.end as Row)
+            .rows(store, rows.start as Row..rows.end as Row, limit)
             .to_vec();
         rows.zip(graph_rows)
             .map(|(row, graph_row)| {

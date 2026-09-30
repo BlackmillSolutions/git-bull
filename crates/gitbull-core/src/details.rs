@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 
 use gitbull_git::Backend;
 use gitbull_git::cancel::CancelToken;
@@ -64,6 +65,16 @@ enum HighlightState {
     /// version is larger than [`HIGHLIGHT_LIMIT`], or it could not be read.
     Done(Option<Highlighting>),
 }
+
+/// A selection made this soon after the one before waits until it
+/// settles. With a key held, the selection moves on in every frame; each
+/// commit started Git for its files, diff and content, and on the Linux
+/// kernel single frames took up to 90 ms.
+pub const RAPID: Duration = Duration::from_millis(150);
+/// How long a quickly moving selection must stay before its files load.
+/// With the 55 ms the files of a typical commit of the Linux kernel took,
+/// the details stay within the 200 ms of `commit-details`.
+pub const SETTLE: Duration = Duration::from_millis(75);
 
 /// Work in the background for one selection: dropping the receiver drops
 /// its answer, cancelling stops its Git process.
@@ -128,6 +139,10 @@ pub struct Details {
     file: Option<usize>,
     diff: DiffState,
     diff_work: Pending<FileDiff>,
+    /// When the last selection was made.
+    last_selected: Option<Instant>,
+    /// Since when a quickly made selection waits to settle.
+    settling: Option<Instant>,
     theme: HighlightTheme,
     highlight: HighlightState,
     highlight_work: Pending<Option<Highlighting>>,
@@ -148,6 +163,8 @@ impl Details {
             file: None,
             diff: DiffState::Loading,
             diff_work: Pending::none(),
+            last_selected: None,
+            settling: None,
             theme: HighlightTheme::Light,
             highlight: HighlightState::NotStarted,
             highlight_work: Pending::none(),
@@ -169,10 +186,20 @@ impl Details {
     /// Shows `commit`, compared with `parent`, its first parent; `None`
     /// shows nothing. No file is chosen until its files have loaded.
     pub(crate) fn select(&mut self, commit: Option<ObjectId>, parent: Option<ObjectId>) {
+        self.select_at(commit, parent, Instant::now());
+    }
+
+    /// Like [`Details::select`], made at `now`.
+    pub(crate) fn select_at(
+        &mut self,
+        commit: Option<ObjectId>,
+        parent: Option<ObjectId>,
+        now: Instant,
+    ) {
         if commit == self.commit {
             return;
         }
-        self.show(commit, parent, None);
+        self.show(commit, parent, None, now);
     }
 
     /// Shows the stash `stash`, compared with `parent`, its first parent.
@@ -187,7 +214,7 @@ impl Details {
         if Some(stash) == self.commit {
             return;
         }
-        self.show(Some(stash), parent, untracked);
+        self.show(Some(stash), parent, untracked, Instant::now());
     }
 
     fn show(
@@ -195,6 +222,7 @@ impl Details {
         commit: Option<ObjectId>,
         parent: Option<ObjectId>,
         untracked: Option<ObjectId>,
+        now: Instant,
     ) {
         self.commit = commit;
         self.parent = parent;
@@ -203,9 +231,39 @@ impl Details {
         self.files = ChangedFiles::Loading;
         self.files_work.stop();
         self.clear_file();
-        let Some(commit) = commit else {
+        let rapid = self
+            .last_selected
+            .is_some_and(|last| now.saturating_duration_since(last) < RAPID);
+        self.last_selected = Some(now);
+        self.settling = None;
+        if commit.is_none() {
+            return;
+        }
+        if rapid {
+            self.settling = Some(now);
+            // Wakes the UI once the selection may have settled, so that the
+            // files load without further input.
+            let notify = Arc::clone(&self.notify);
+            std::thread::spawn(move || {
+                std::thread::sleep(SETTLE);
+                notify();
+            });
+        } else {
+            self.load_files();
+        }
+    }
+
+    /// Whether the files of the commit shown wait for the selection to
+    /// settle.
+    pub fn is_settling(&self) -> bool {
+        self.settling.is_some()
+    }
+
+    fn load_files(&mut self) {
+        let Some(commit) = self.commit else {
             return;
         };
+        let (parent, untracked) = (self.parent, self.untracked);
         let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
         self.files_work.start(&self.notify, move |cancel| {
             let mut files = backend.changed_files(&root, &commit, parent.as_ref(), cancel)?;
@@ -318,7 +376,19 @@ impl Details {
 
     /// Applies what has loaded. Returns whether anything changed.
     pub(crate) fn poll(&mut self) -> bool {
+        self.poll_at(Instant::now())
+    }
+
+    /// Like [`Details::poll`], at `now`.
+    pub(crate) fn poll_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
+        if let Some(since) = self.settling
+            && now.saturating_duration_since(since) >= SETTLE
+        {
+            self.settling = None;
+            self.load_files();
+            changed = true;
+        }
         if let Some(files) = self.files_work.take() {
             self.files = match files {
                 Ok((files, untracked_from)) => {
@@ -814,5 +884,47 @@ mod tests {
         wait_until(&mut details, files_loaded);
         assert_eq!(paths(details.files()), ["a.txt"]);
         assert_eq!(probe.compared().len(), 1);
+    }
+
+    #[test]
+    fn a_selection_that_moves_on_quickly_loads_only_once_it_settles() {
+        let fake = FakeBackend::default()
+            .with_changes(fake_id("a"), vec![added("a.txt")])
+            .with_changes(fake_id("b"), vec![added("b.txt")])
+            .with_changes(fake_id("c"), vec![added("c.txt")]);
+        let (mut details, probe) = details(fake);
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+
+        details.select_at(Some(fake_id("a")), None, at(0));
+        assert!(!details.is_settling(), "the first selection loads at once");
+        // A held key moves the selection on in every frame.
+        details.select_at(Some(fake_id("b")), None, at(30));
+        assert!(details.is_settling());
+        details.select_at(Some(fake_id("c")), None, at(60));
+        assert_eq!(details.commit(), Some(fake_id("c")));
+        details.poll_at(at(100));
+        assert!(details.is_settling());
+        details.poll_at(at(60) + SETTLE);
+        assert!(!details.is_settling());
+
+        wait_until(&mut details, files_loaded);
+        assert_eq!(paths(details.files()), ["c.txt"]);
+        let compared: Vec<_> = probe.compared().into_iter().map(|(id, _)| id).collect();
+        assert!(!compared.contains(&fake_id("b")), "{compared:?}");
+        assert!(compared.contains(&fake_id("c")));
+    }
+
+    #[test]
+    fn a_selection_after_a_pause_loads_at_once() {
+        let (mut details, _) = details(FakeBackend::default());
+        let start = Instant::now();
+        details.select_at(Some(fake_id("a")), None, start);
+        details.select_at(
+            Some(fake_id("b")),
+            None,
+            start + RAPID + Duration::from_millis(1),
+        );
+        assert!(!details.is_settling());
     }
 }

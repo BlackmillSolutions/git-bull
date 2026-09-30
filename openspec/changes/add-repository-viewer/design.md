@@ -132,6 +132,7 @@ literally, and it passes the neutralised filter drivers of the repository.
 | Untracked files of a stash | `git diff-tree -r --root --name-status -z <stash>^3`, when the stash has a third parent |
 | Submodules | `git submodule status` |
 | History structure | `git rev-list --date-order --parents --timestamp <revisions>` |
+| Tags that no branch reaches | `git for-each-ref --format=%(refname) --no-merged=<branch>... refs/tags`, for all branches and remote branches in groups of 100, intersected |
 | Commit count | `git rev-list --count <revisions>` |
 | Commit content | one persistent `git cat-file --batch` process per session |
 | Changed files of a commit | `git diff-tree -r --no-commit-id --name-status -M -C -z` against the first parent; `--root` for root commits |
@@ -154,7 +155,7 @@ configuration nor the user's settings change what git-bull parses.
 
 | Filter | Revisions |
 |---|---|
-| All branches | `--branches --tags --remotes`, and `HEAD` when it is detached |
+| All branches | `--branches --remotes` and, read with `--stdin`, the tags that no branch reaches; `--tags` in a repository without branches. `HEAD` when it is detached |
 | Current branch | `HEAD` |
 | Selected branches | the selected reference names |
 
@@ -246,10 +247,17 @@ reached the generation of the oldest tip. Tags deep in history delay it:
 0.53 s with branches and tags against 0.03 s from HEAD alone, measured on
 1,000,000 generated commits. The benchmark of task 4.21 found 0.99 s to the
 first rows in git-bull with branches and tags, 0.84 s of them until Git's
-first line, against 0.17 s for the current branch. The Linux kernel has tags
-back to its first commits, so this is the largest risk for the target of
-1 s. If the benchmark misses it, tags already reachable from a branch are
-left out of `<revisions>`, because they add no commits.
+first line, against 0.17 s for the current branch. On the Linux kernel, with
+tags back to its first commits, the first rows took 1.51 s, and Git needed
+1.44 s to its first line with tags against 0.09 s without.
+
+Tags that a branch reaches add no commits, so they are left out of
+`<revisions>`. Finding the tags that no branch reaches can take as long as
+the walk: 0.18 s on the kernel, 0.72 s on the generated history with a
+branch halfway down. So the walk without tags starts at once, and the tags
+are found meanwhile; when a branch reaches them all, as usual, the walk
+goes on, otherwise it starts again with those tags. The first rows then took
+0.31 s on the kernel and 0.83 s to 0.91 s on the generated history.
 
 **Refresh**
 
@@ -426,6 +434,10 @@ choice:
 | Loading the whole of a long diff | The versions are the same, so their highlighting is kept |
 | A path that is not UTF-8 | Shown with replacement characters. Git for Windows reads its arguments as UTF-8, so there the diff of such a file is read for the whole commit and the file is picked from it by its bytes |
 | Content missing in a partial clone | Recognised from Git's message when a lazy fetch is refused, for every command, and shown as a notice |
+| Appending loaded commits | The loader lays out the graph outside the lock of the history and appends 256 commits under it at a time; the UI takes the lock in every frame |
+| Lines of the graph | Laid out only for the lanes the graph column shows, and only for the rows asked for; rows of the kernel reach 500 lanes. Scrolling on continues from the layout after the rows shown last instead of the checkpoint |
+| Selecting commits quickly | A selection within 150 ms of the one before loads its files once it has stayed for 75 ms; a single click loads at once. A held key started Git for every commit it passed |
+| Stopping Git | On a thread of its own; on Windows it waits for `taskkill`, which took about 230 ms |
 | Growing the commit store | Columns grow by chunks of 65,536 rows, and the id index moves its rows into a table of twice the size two per appended commit. Commits are appended on the UI thread, and growing everything at once took 33 ms at 900,000 commits |
 
 ## Risks / Trade-offs
@@ -455,8 +467,8 @@ choice:
 - [Generating the commit-graph with changed-path filters takes time: 26.8 s
   on 1,000,000 generated commits, more on the Linux kernel] → It runs in the
   background, shows progress and can be cancelled.
-- [Tags deep in history delay the first rows] → Measured, see decision 5;
-  leaving out tags reachable from a branch is the prepared remedy.
+- [Tags deep in history delay the first rows] → Measured on the Linux
+  kernel, see decision 5; tags reachable from a branch are left out.
 - [A repository brings along commands that Git executes] → ADR 0006. The
   first version of these rules was incomplete; an experiment found filters,
   signature programs, lazy fetch, hooks and submodule configuration as

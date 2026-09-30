@@ -489,6 +489,9 @@ fn details() {
     for row in 0..DETAILS_COMMITS.min(rows) {
         let row = row as gitbull_core::store::Row;
         let id = session.history().store.id(row);
+        // A pause, as between two clicks: a selection that moves on at
+        // once waits until it settles.
+        std::thread::sleep(gitbull_core::details::RAPID);
         let started = Instant::now();
         session.show_details(Some(row));
         let files = loop {

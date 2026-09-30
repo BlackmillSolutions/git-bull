@@ -7,7 +7,7 @@ use gitbull_git::Git;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::error::Error;
 use gitbull_git::head::Head;
-use gitbull_git::history::{CommitLine, Revisions, count, history};
+use gitbull_git::history::{CommitLine, Revisions, count, history, unreached_tags};
 use gitbull_git::locate::{Os, SystemProbe, locate_git};
 use gitbull_git::object_id::ObjectId;
 use gitbull_testkit::TestRepo;
@@ -299,4 +299,146 @@ fn stashes_are_not_part_of_the_history_of_all_branches() {
 
     assert_eq!(all.len(), 1);
     assert!(!all.contains(&stash));
+}
+
+#[test]
+fn tags_that_a_branch_reaches_are_left_out_of_the_walk() {
+    let b = branched();
+    // A tag on main adds no commit to the walk from the branches.
+    b.repo.git(&["tag", "on-main", &b.second]);
+    let dir = tempfile::tempdir().unwrap();
+    let log = std::sync::Arc::new(gitbull_git::log::CommandLog::new(
+        dir.path().join("git.log"),
+        1 << 20,
+    ));
+    let git = git().with_log(std::sync::Arc::clone(&log));
+    let revisions = Revisions::all(&Head::Branch("main".into()));
+
+    let mut stream = history(&git, b.repo.path(), &revisions, &CancelToken::new()).unwrap();
+    let mut all = Vec::new();
+    while let Some(commit) = stream.next_commit().unwrap() {
+        all.push(commit.id);
+    }
+
+    assert_eq!(all.len(), 5);
+    assert!(all.contains(&id(&b.tagged)), "the tag no branch reaches");
+    let logged = std::fs::read_to_string(dir.path().join("git.log")).unwrap();
+    let walk = logged
+        .lines()
+        .find(|line| line.contains("rev-list"))
+        .expect("the walk is logged");
+    assert!(!walk.contains("--tags"), "{walk}");
+    assert_eq!(
+        unreached_tags(&git, b.repo.path(), &CancelToken::new()).unwrap(),
+        Some(vec!["refs/tags/only-tag".to_owned()])
+    );
+}
+
+#[test]
+fn unreached_tags_are_found_among_many_branches() {
+    let mut repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    let first = repo.commit("First");
+    // More branches than one call of `git for-each-ref` is given.
+    let mut refs = String::new();
+    for n in 0..150 {
+        refs.push_str(&format!("create refs/heads/b{n:03} {first}\n"));
+    }
+    repo.git_with_input(&["update-ref", "--stdin"], &refs);
+    // `late` is reached only by the last branch, `alone` by none.
+    repo.git(&["switch", "--quiet", "--detach"]);
+    repo.write("late.txt", "late\n");
+    let late = repo.commit("Late");
+    repo.git(&["tag", "late"]);
+    repo.git(&["update-ref", "refs/heads/b149", &late]);
+    repo.write("alone.txt", "alone\n");
+    repo.commit("Alone");
+    repo.git(&["tag", "alone"]);
+    repo.git(&["switch", "--quiet", "main"]);
+
+    assert_eq!(
+        unreached_tags(&git(), repo.path(), &CancelToken::new()).unwrap(),
+        Some(vec!["refs/tags/alone".to_owned()])
+    );
+}
+
+#[test]
+fn without_branches_every_tag_is_walked() {
+    let mut repo = TestRepo::new();
+    repo.write("a.txt", "a\n");
+    let tagged = repo.commit("First");
+    repo.git(&["tag", "v1"]);
+    repo.git(&["update-ref", "-d", "refs/heads/main"]);
+
+    assert_eq!(
+        unreached_tags(&git(), repo.path(), &CancelToken::new()).unwrap(),
+        None
+    );
+    let all = ids(&read_all(
+        &repo,
+        &Revisions::all(&Head::Branch("main".into())),
+    ));
+    assert_eq!(all, [id(&tagged)]);
+}
+
+/// The walks of history that `git` ran, from its log.
+fn walks(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("git.log"))
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("rev-list"))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn logged_git(dir: &std::path::Path) -> Git {
+    let log = gitbull_git::log::CommandLog::new(dir.join("git.log"), 1 << 20);
+    git().with_log(std::sync::Arc::new(log))
+}
+
+fn read_with(git: &Git, repo: &TestRepo) -> Vec<ObjectId> {
+    let revisions = Revisions::all(&Head::Branch("main".into()));
+    let mut stream = history(git, repo.path(), &revisions, &CancelToken::new()).unwrap();
+    let mut all = Vec::new();
+    while let Some(commit) = stream.next_commit().unwrap() {
+        all.push(commit.id);
+    }
+    all
+}
+
+#[test]
+fn when_a_branch_reaches_every_tag_the_walk_started_at_once_is_kept() {
+    let mut repo = TestRepo::new();
+    repo.write(
+        "a.txt", "a
+",
+    );
+    repo.commit("First");
+    repo.git(&["tag", "v1"]);
+    repo.write(
+        "b.txt", "b
+",
+    );
+    repo.commit("Second");
+    let dir = tempfile::tempdir().unwrap();
+
+    let all = read_with(&logged_git(dir.path()), &repo);
+
+    assert_eq!(all.len(), 2);
+    let walks = walks(dir.path());
+    assert_eq!(walks.len(), 1, "{walks:?}");
+    assert!(walks[0].contains("exit 0"), "{walks:?}");
+}
+
+#[test]
+fn a_tag_that_no_branch_reaches_starts_the_walk_again_with_it() {
+    let b = branched();
+    let dir = tempfile::tempdir().unwrap();
+
+    let all = read_with(&logged_git(dir.path()), &b.repo);
+
+    assert!(all.contains(&id(&b.tagged)));
+    assert_eq!(all.len(), 5);
+    let walks = walks(dir.path());
+    assert_eq!(walks.len(), 2, "{walks:?}");
 }
