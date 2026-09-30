@@ -170,6 +170,42 @@ fn a_staged_rename_shows_both_paths() {
     assert_eq!(diff.content, Content::Text(Vec::new()));
 }
 
+/// `a.txt` changed and staged together with `b.txt`, a copy of what it was
+/// before, with `diff.renames` set to `renames`.
+fn staged_copy(renames: &str) -> TestRepo {
+    let before = "one\ntwo\nthree\nfour\nfive\n";
+    let repo = committed(&[("a.txt", before)]);
+    repo.config("diff.renames", renames);
+    repo.write("a.txt", &format!("{before}six\n"));
+    repo.write("b.txt", before);
+    repo.git(&["add", "a.txt", "b.txt"]);
+    repo
+}
+
+#[test]
+fn a_staged_copy_is_compared_with_the_file_it_was_copied_from() {
+    let repo = staged_copy("copies");
+    let entry = entry(&repo, Group::Staged, "b.txt");
+    assert_eq!(
+        entry.old_path,
+        Some(RepoPath::new("a.txt")),
+        "status lists a copy"
+    );
+    let diff = diff_of(&repo, Group::Staged, "b.txt");
+    assert_eq!(diff.old_path, Some(RepoPath::new("a.txt")));
+    assert_eq!(diff.new_path, Some(RepoPath::new("b.txt")));
+    assert_eq!(diff.content, Content::Text(Vec::new()));
+}
+
+#[test]
+fn a_staged_file_that_status_lists_as_added_diffs_as_added() {
+    // Without copies in the configuration, the same copy is a new file.
+    let repo = staged_copy("true");
+    let diff = diff_of(&repo, Group::Staged, "b.txt");
+    assert_eq!(diff.old_path, None);
+    assert_eq!(texts(&diff, LineKind::Added).len(), 5);
+}
+
 #[test]
 fn a_file_deleted_in_the_working_copy_shows_every_line_as_removed() {
     let repo = committed(&[("gone.txt", "one\ntwo\n")]);

@@ -8,7 +8,7 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Modifiers, PointerButton, Pos2, Rect};
+use eframe::egui::{Event, Key, Modifiers, OutputCommand, PointerButton, Pos2, Rect};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
@@ -691,4 +691,137 @@ fn the_selected_commit_stays_selected_when_the_uncommitted_row_appears() {
         .collect();
     assert_eq!(selected.len(), 1);
     assert!(selected[0].starts_with("Base"), "{selected:?}");
+}
+
+#[test]
+fn the_context_menu_acts_on_its_file_after_a_refresh_moved_it() {
+    let live = LiveRepo::new();
+    live.set_status(WorkingStatus {
+        unstaged: vec![changed(MODIFIED, "b.txt"), changed(MODIFIED, "c.txt")],
+        ..WorkingStatus::default()
+    });
+    let mut harness = open_with(backend().with_live(root(), &live));
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    let at = file(&harness, "Modified: c.txt");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(harness.query_by_label("Copy path").is_some());
+
+    live.set_status(WorkingStatus {
+        unstaged: vec![
+            changed(MODIFIED, "a.txt"),
+            changed(MODIFIED, "b.txt"),
+            changed(MODIFIED, "c.txt"),
+        ],
+        ..WorkingStatus::default()
+    });
+    harness.key_press(Key::F5);
+    wait_until(&mut harness, |h| {
+        labels(h, Role::ListItem).contains(&"Modified: a.txt".to_owned())
+    });
+    harness.run();
+
+    harness.get_by_label("Copy path").click();
+    harness.step();
+    let copied =
+        harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            });
+    assert_eq!(copied, Some("c.txt".to_owned()));
+}
+
+/// A file added with further changes (AM), one added and deleted again
+/// (AD), one renamed with further changes (RM), a copy and a modified file.
+fn mixed_with_new_paths() -> WorkingStatus {
+    let moved = |kind: ChangeKind, path: &str, old: &str| StatusEntry {
+        old_path: Some(RepoPath::new(old)),
+        ..changed(kind, path)
+    };
+    WorkingStatus {
+        staged: vec![
+            changed(ChangeKind::Added, "am.txt"),
+            changed(ChangeKind::Added, "ad.txt"),
+            moved(ChangeKind::Renamed, "rm-new.txt", "rm-old.txt"),
+            moved(ChangeKind::Copied, "copy.txt", "source.txt"),
+        ],
+        unstaged: vec![
+            changed(MODIFIED, "am.txt"),
+            changed(ChangeKind::Deleted, "ad.txt"),
+            changed(MODIFIED, "rm-new.txt"),
+            changed(MODIFIED, "plain.txt"),
+        ],
+        untracked: Vec::new(),
+    }
+}
+
+/// The labels of the buttons of the context menu of the entry `label`,
+/// the one in the unstaged group when both groups list it.
+fn menu_of(harness: &mut Harness<'_, App>, label: &str) -> Vec<String> {
+    let at = harness
+        .query_all_by_role(Role::ListItem)
+        .filter(|node| node.accesskit_node().label().as_deref() == Some(label))
+        .map(|node| node.rect().center())
+        .max_by(|a, b| a.y.total_cmp(&b.y))
+        .unwrap_or_else(|| panic!("no file {label}"));
+    click_at(harness, at, PointerButton::Secondary);
+    let buttons = labels(harness, Role::Button)
+        .into_iter()
+        .filter(|label| ["File history", "Blame", "Copy path"].contains(&label.as_str()))
+        .collect();
+    harness.key_press(Key::Escape);
+    harness.run();
+    buttons
+}
+
+#[test]
+fn file_history_and_blame_are_offered_only_for_files_the_last_commit_has() {
+    let mut harness = open_with(backend().with_status(root(), mixed_with_new_paths()));
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    let all = ["File history", "Blame", "Copy path"];
+    for (label, offered) in [
+        ("Modified: am.txt", &["Copy path"][..]),
+        ("Deleted: ad.txt", &["Copy path"][..]),
+        ("Copied: source.txt → copy.txt", &["Copy path"][..]),
+        ("Modified: rm-new.txt", &all[..]),
+        ("Renamed: rm-old.txt → rm-new.txt", &all[..]),
+        ("Modified: plain.txt", &all[..]),
+    ] {
+        assert_eq!(menu_of(&mut harness, label), offered, "{label}");
+    }
+}
+
+#[test]
+fn blame_and_file_history_of_a_renamed_file_with_further_changes_use_its_old_path() {
+    let backend = backend().with_status(root(), mixed_with_new_paths());
+    let probe = backend.probe();
+    let mut harness = open_with(backend);
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    for (action, kind) in [("Blame", "blame"), ("File history", "file-history")] {
+        let at = harness
+            .query_all_by_role(Role::ListItem)
+            .find(|node| node.accesskit_node().label().as_deref() == Some("Modified: rm-new.txt"))
+            .expect("the unstaged entry")
+            .rect()
+            .center();
+        click_at(&mut harness, at, PointerButton::Secondary);
+        harness.get_by_label(action).click();
+        harness.step();
+        let expected = (kind.to_owned(), "HEAD".to_owned(), "rm-old.txt".to_owned());
+        wait_until(&mut harness, |h| {
+            probe.opened().contains(&expected) && h.query_by_label("Back").is_some()
+        });
+        harness.get_by_label("Back").click();
+        harness.run();
+        wait_until(&mut harness, |h| {
+            labels(h, Role::ListItem).contains(&"Modified: rm-new.txt".to_owned())
+        });
+    }
 }

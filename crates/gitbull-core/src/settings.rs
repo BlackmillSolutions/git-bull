@@ -133,9 +133,10 @@ impl SettingsFile {
         }
     }
 
-    /// Writes the settings, replacing the file in one step.
+    /// Writes the settings, replacing the file in one step. Paths that are
+    /// not valid UTF-8 are left out; see [`storable`].
     pub fn save(&self, settings: &Settings) -> io::Result<()> {
-        let text = toml::to_string_pretty(settings).map_err(io::Error::other)?;
+        let text = toml::to_string_pretty(&storable(settings)).map_err(io::Error::other)?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -164,6 +165,37 @@ impl SettingsFile {
             settings: Settings::default(),
             reset: true,
         }
+    }
+}
+
+/// `settings` without the paths that are not valid UTF-8, which the file
+/// cannot hold: such a repository is neither restored nor listed as
+/// recent, and such a Git is located anew. The active tab stays the one it
+/// was, or becomes the first when it is left out.
+fn storable(settings: &Settings) -> Settings {
+    fn valid(path: &Path) -> bool {
+        path.to_str().is_some()
+    }
+    let kept = |paths: &[PathBuf]| -> Vec<PathBuf> {
+        paths.iter().filter(|path| valid(path)).cloned().collect()
+    };
+    let tabs = kept(&settings.tabs);
+    let left_out_before = |index: usize| {
+        let before = &settings.tabs[..index.min(settings.tabs.len())];
+        before.iter().filter(|path| !valid(path)).count()
+    };
+    let active_tab = settings
+        .active_tab
+        .map(|index| match settings.tabs.get(index) {
+            Some(path) if !valid(path) => 0,
+            _ => index - left_out_before(index),
+        });
+    Settings {
+        git_path: settings.git_path.clone().filter(|path| valid(path)),
+        recent: kept(&settings.recent),
+        active_tab: active_tab.filter(|_| !tabs.is_empty()),
+        tabs,
+        ..settings.clone()
     }
 }
 
@@ -342,5 +374,77 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(leftovers, ["settings.toml"], "temporary files remain");
+    }
+
+    /// A path to `name` in a folder whose name is not valid UTF-8.
+    fn not_utf8(name: &str) -> PathBuf {
+        #[cfg(unix)]
+        let folder = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(b"/work/caf\xe9").to_owned()
+        };
+        #[cfg(windows)]
+        let folder = {
+            use std::os::windows::ffi::OsStringExt;
+            let mut wide: Vec<u16> = r"C:\work\caf".encode_utf16().collect();
+            // A lone surrogate, which no UTF-8 can express.
+            wide.push(0xD800);
+            std::ffi::OsString::from_wide(&wide)
+        };
+        PathBuf::from(folder).join(name)
+    }
+
+    #[test]
+    fn paths_that_are_not_utf8_are_left_out_and_the_rest_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            git_path: Some(not_utf8("git")),
+            recent: vec![repo(1), not_utf8("one"), repo(2)],
+            tabs: vec![not_utf8("one"), repo(1), not_utf8("two"), repo(2)],
+            active_tab: Some(3),
+            ..example()
+        };
+        file.save(&settings).unwrap();
+        assert_eq!(
+            file.load().settings,
+            Settings {
+                git_path: None,
+                recent: vec![repo(1), repo(2)],
+                tabs: vec![repo(1), repo(2)],
+                active_tab: Some(1),
+                ..example()
+            }
+        );
+    }
+
+    #[test]
+    fn an_active_tab_that_is_left_out_makes_the_first_tab_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            tabs: vec![repo(1), not_utf8("one"), repo(2)],
+            active_tab: Some(1),
+            ..example()
+        };
+        file.save(&settings).unwrap();
+        let loaded = file.load().settings;
+        assert_eq!(loaded.tabs, [repo(1), repo(2)]);
+        assert_eq!(loaded.active_tab, Some(0));
+    }
+
+    #[test]
+    fn without_tabs_left_no_tab_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            tabs: vec![not_utf8("one")],
+            active_tab: Some(0),
+            ..example()
+        };
+        file.save(&settings).unwrap();
+        let loaded = file.load().settings;
+        assert!(loaded.tabs.is_empty());
+        assert_eq!(loaded.active_tab, None);
     }
 }

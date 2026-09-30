@@ -3,7 +3,10 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Key, Modifiers, OutputCommand, PointerButton, Pos2, Rect, pos2};
+use eframe::egui::{
+    Event, Key, Modifiers, MouseWheelUnit, OutputCommand, PointerButton, Pos2, Rect, TouchPhase,
+    pos2, vec2,
+};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
@@ -12,7 +15,9 @@ use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
 use gitbull_git::history::CommitLine;
-use gitbull_testkit::{FakeBackend, Probe, fake_id};
+use gitbull_git::path::RepoPath;
+use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
+use gitbull_testkit::{FakeBackend, LiveRepo, Probe, fake_id};
 use support::{Setup, build, path, settle_window, window};
 
 fn root() -> std::path::PathBuf {
@@ -611,5 +616,197 @@ fn content_missing_in_a_partial_clone_is_explained() {
             .iter()
             .any(|text| text.starts_with("The content of this file is not available locally.")),
         "{texts:?}"
+    );
+}
+
+/// The diff of the unstaged file `edit.txt` that adds `count` lines: a
+/// header, then the row of line n at index n.
+fn added_lines(count: u32) -> FileDiff {
+    let lines = (1..=count)
+        .map(|n| line(LineKind::Added, None, Some(n), &format!("line {n}")))
+        .collect();
+    let header = format!("@@ -0,0 +1,{count} @@");
+    FileDiff {
+        new_in_working_copy: true,
+        ..diff(
+            Some("edit.txt"),
+            Some("edit.txt"),
+            Content::Text(vec![hunk(&header, lines)]),
+        )
+    }
+}
+
+/// The File status view of a repository whose only change is `edit.txt`,
+/// with the diff `live` gives it shown.
+fn open_status(live: &LiveRepo) -> (Harness<'static, App>, Probe) {
+    live.set_status(WorkingStatus {
+        unstaged: vec![StatusEntry {
+            kind: StatusKind::Changed(ChangeKind::Modified),
+            path: RepoPath::new("edit.txt"),
+            old_path: None,
+            submodule: false,
+        }],
+        ..WorkingStatus::default()
+    });
+    let c = fake_id("c");
+    let backend = FakeBackend::default()
+        .with_repository(root())
+        .with_history(
+            root(),
+            vec![CommitLine {
+                timestamp: 1_767_268_800,
+                id: c,
+                parents: Vec::new(),
+            }],
+        )
+        .with_content(
+            c,
+            CommitContent {
+                author: person(),
+                committer: person(),
+                message: "Start
+"
+                .to_owned(),
+            },
+        )
+        .with_live(root(), live);
+    let probe = backend.probe();
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    let at = harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| node.accesskit_node().label().as_deref() == Some("File status"))
+        .expect("File status in the sidebar")
+        .rect()
+        .center();
+    click(&mut harness, at, PointerButton::Primary);
+    // The only file is chosen at once.
+    wait_until(&mut harness, |h| !diff_rows(h).is_empty());
+    (harness, probe)
+}
+
+/// The number of the topmost line the diff shows.
+fn top_line(harness: &Harness<'_, App>) -> u32 {
+    harness
+        .query_all_by_role(Role::Code)
+        .filter_map(|node| {
+            let label = node.accesskit_node().label()?;
+            let number = label.strip_prefix("Added, –, ")?.split(':').next()?;
+            Some((node.rect().top(), number.parse().ok()?))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map_or(0, |(_, number)| number)
+}
+
+/// Scrolls the diff with the wheel until line `line` is at its top or
+/// below it.
+fn scroll_to_line(harness: &mut Harness<'_, App>, line: u32) {
+    let at = row_of(harness, Role::Code, "@@")
+        .expect("the hunk header")
+        .center();
+    harness.hover_at(at);
+    for _ in 0..100 {
+        if top_line(harness) >= line {
+            return;
+        }
+        harness.input_mut().events.push(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, -18.0),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run();
+    }
+    panic!("the diff did not scroll to line {line}");
+}
+
+/// Selects the lines `first` to `last` of the diff of `added_lines`.
+fn select_lines(harness: &mut Harness<'_, App>, first: u32, last: u32) {
+    let row = |harness: &Harness<'_, App>, n: u32| {
+        row_of(harness, Role::Code, &format!("Added, –, {n}:"))
+            .unwrap_or_else(|| panic!("line {n} is not shown"))
+            .center()
+    };
+    let (from, to) = (row(harness, first), row(harness, last));
+    click(harness, from, PointerButton::Primary);
+    click_with(harness, to, PointerButton::Primary, Modifiers::SHIFT);
+}
+
+fn selected_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::Code)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+/// Presses F5 and waits until the diff of `edit.txt` was read once more.
+fn refresh(harness: &mut Harness<'_, App>, probe: &Probe) {
+    let reads = probe.working_diffs().len();
+    harness.key_press(Key::F5);
+    let probe = probe.clone();
+    wait_until(harness, |_| probe.working_diffs().len() > reads);
+    // Let the diff arrive and be drawn.
+    for _ in 0..5 {
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    harness.run();
+}
+
+#[test]
+fn a_shorter_diff_after_a_refresh_leaves_nothing_selected_to_copy() {
+    let live = LiveRepo::new();
+    live.set_working_diff(Group::Unstaged, "edit.txt", added_lines(99));
+    let (mut harness, probe) = open_status(&live);
+    scroll_to_line(&mut harness, 38);
+    select_lines(&mut harness, 40, 60);
+    let at = row_of(&harness, Role::Code, "Added, –, 50:")
+        .unwrap()
+        .center();
+    click(&mut harness, at, PointerButton::Secondary);
+    assert!(harness.query_by_label("Copy lines").is_some());
+
+    live.set_working_diff(Group::Unstaged, "edit.txt", added_lines(19));
+    refresh(&mut harness, &probe);
+
+    assert_eq!(diff_rows(&harness).len(), 20);
+    assert!(
+        harness.query_by_label("Copy lines").is_none(),
+        "the menu of the previous diff is still open"
+    );
+    assert!(selected_rows(&harness).is_empty());
+    press_copy(&mut harness);
+    assert_eq!(copied(&harness), None);
+}
+
+#[test]
+fn a_refresh_that_reads_the_same_diff_keeps_the_selection_and_the_scroll_position() {
+    let live = LiveRepo::new();
+    live.set_working_diff(Group::Unstaged, "edit.txt", added_lines(99));
+    let (mut harness, probe) = open_status(&live);
+    scroll_to_line(&mut harness, 38);
+    select_lines(&mut harness, 40, 42);
+    let shown = diff_rows(&harness);
+
+    refresh(&mut harness, &probe);
+
+    assert_eq!(diff_rows(&harness), shown);
+    assert_eq!(
+        selected_rows(&harness),
+        [
+            "Added, –, 40: line 40",
+            "Added, –, 41: line 41",
+            "Added, –, 42: line 42"
+        ]
     );
 }

@@ -4,6 +4,8 @@
 //! after the user confirmed it (spec `commit-history`).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::cancel::CancelToken;
@@ -69,6 +71,9 @@ pub fn write_commit_graph(
     let lock = graph_paths(git, repo)?[0].with_extension("lock");
     let started = SystemTime::now();
     let mut parser = ProgressParser::default();
+    // Set on the thread that reads the error output of Git.
+    let writing = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&writing);
     // Git shows this progress only after two seconds unless told not to.
     let mut process = git.spawn_watching(
         repo,
@@ -76,6 +81,9 @@ pub fn write_commit_graph(
         WRITE_ARGS,
         Box::new(move |chunk| {
             for step in parser.feed(chunk) {
+                if is_writing(&step.phase) {
+                    seen.store(true, Ordering::SeqCst);
+                }
                 progress(step);
             }
         }),
@@ -86,17 +94,30 @@ pub fn write_commit_graph(
     if let Some(mut stdout) = process.take_stdout() {
         let _ = std::io::copy(&mut stdout, &mut std::io::sink());
     }
+    // Joins the thread that reads the error output: every line Git wrote
+    // before it ended has been parsed after this.
     let result = process.wait();
     cancel.forget(registration);
     if matches!(result, Err(Error::Cancelled)) {
-        remove_own_lock(&lock, started);
+        remove_own_lock(&lock, started, writing.load(Ordering::SeqCst));
     }
     result
 }
 
+/// Whether `phase` is the one in which Git writes the file. Git takes its
+/// lock right before it reports this phase; no earlier phase holds it.
+fn is_writing(phase: &str) -> bool {
+    phase.starts_with("Writing out commit graph")
+}
+
 /// A Git that was killed cannot remove its lock, and every later write
-/// would fail on it. A lock made since `started` belongs to that Git.
-fn remove_own_lock(lock: &Path, started: SystemTime) {
+/// would fail on it. The lock belongs to that Git only when it reported
+/// `writing` the file and the lock was made since `started`; before that, a
+/// lock is another Git's, such as that of a background maintenance.
+fn remove_own_lock(lock: &Path, started: SystemTime, writing: bool) {
+    if !writing {
+        return;
+    }
     // File times can be coarser than the clock.
     let since = started - Duration::from_secs(2);
     let ours = std::fs::metadata(lock)
@@ -197,8 +218,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let started = SystemTime::now();
         let lock = lock_in(&dir);
-        remove_own_lock(&lock, started);
+        remove_own_lock(&lock, started, true);
         assert!(!lock.exists());
+    }
+
+    #[test]
+    fn a_lock_before_git_reported_writing_belongs_to_another_git_and_stays() {
+        // Git takes its lock only when it writes the file.
+        let dir = tempfile::tempdir().unwrap();
+        let started = SystemTime::now();
+        let lock = lock_in(&dir);
+        remove_own_lock(&lock, started, false);
+        assert!(lock.exists());
+    }
+
+    #[test]
+    fn only_the_phase_of_writing_the_file_counts_as_writing() {
+        assert!(is_writing("Writing out commit graph in 5 passes"));
+        assert!(is_writing("Writing out commit graph in 1 pass"));
+        assert!(!is_writing("Expanding reachable commits in commit graph"));
+        assert!(!is_writing("Computing commit changed paths Bloom filters"));
     }
 
     #[test]
@@ -212,14 +251,18 @@ mod tests {
             .unwrap()
             .set_modified(hour_ago)
             .unwrap();
-        remove_own_lock(&lock, SystemTime::now());
+        remove_own_lock(&lock, SystemTime::now(), true);
         assert!(lock.exists());
     }
 
     #[test]
     fn no_lock_is_nothing_to_remove() {
         let dir = tempfile::tempdir().unwrap();
-        remove_own_lock(&dir.path().join("commit-graph.lock"), SystemTime::now());
+        remove_own_lock(
+            &dir.path().join("commit-graph.lock"),
+            SystemTime::now(),
+            true,
+        );
     }
 
     #[test]

@@ -98,7 +98,9 @@ pub fn locate_git(
         .var("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .filter(|dir| !dir.as_os_str().is_empty())
+        // A relative entry, an empty one too, would find a Git in the folder
+        // git-bull runs in; Git and Go's `exec.LookPath` skip them as well.
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(file_name));
 
     on_search_path
@@ -295,6 +297,21 @@ mod tests {
         }
 
         #[test]
+        fn relative_search_path_entries_are_skipped() {
+            // They would find a git.exe in the folder git-bull runs in,
+            // such as a repository opened from the command line.
+            let system = FakeSystem::default()
+                .var("PATH", r".;bin;C:\Git\cmd")
+                .file(r".\git.exe")
+                .file(r"bin\git.exe")
+                .file(r"C:\Git\cmd\git.exe");
+            assert_eq!(
+                locate(None, &system),
+                Ok(PathBuf::from(r"C:\Git\cmd\git.exe"))
+            );
+        }
+
+        #[test]
         fn nothing_found_is_not_found() {
             let system = FakeSystem::default()
                 .var("PATH", r"C:\Windows\System32")
@@ -316,6 +333,21 @@ mod tests {
             assert_eq!(
                 locate_git(None, Os::Linux, &system),
                 Ok(PathBuf::from("/b/git"))
+            );
+        }
+
+        #[test]
+        fn relative_search_path_entries_are_skipped() {
+            // They would find a git in the folder git-bull runs in, such as
+            // a repository opened from the command line.
+            let system = FakeSystem::default()
+                .var("PATH", ".:bin:/usr/bin")
+                .file("./git")
+                .file("bin/git")
+                .file("/usr/bin/git");
+            assert_eq!(
+                locate_git(None, Os::Linux, &system),
+                Ok(PathBuf::from("/usr/bin/git"))
             );
         }
 

@@ -7,7 +7,7 @@ Blame SHALL skip the commits listed in the ignore files that the user's
 system or global Git configuration names in `blame.ignoreRevsFile`. Their
 paths SHALL be expanded as Git expands paths in configuration, including a
 leading `~/`. Ignore files that the repository's own configuration names
-MUST NOT be used, and that configuration MUST NOT make blame fail.
+MUST NOT be used.
 
 #### Scenario: Ignore file in the home folder
 - **WHEN** the user's global configuration sets `blame.ignoreRevsFile` to `~/.blame-ignore`, that file lists a commit, and the user opens the blame of a file that this commit changed
@@ -20,10 +20,6 @@ MUST NOT be used, and that configuration MUST NOT make blame fail.
 
 #### Scenario: Ignore file named by the repository
 - **WHEN** the repository's configuration sets `blame.ignoreRevsFile` to a file that does not exist, and the user opens a blame
-- **THEN** blame opens without an error and that setting has no effect
-
-#### Scenario: Repository names a path Git cannot expand
-- **WHEN** the repository's configuration sets `blame.ignoreRevsFile` to `~nosuchuser/list`, in the home folder of a user that does not exist, and the user opens a blame
 - **THEN** blame opens without an error and that setting has no effect
 
 ## MODIFIED Requirements

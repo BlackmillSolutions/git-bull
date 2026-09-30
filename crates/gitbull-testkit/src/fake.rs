@@ -957,9 +957,10 @@ impl Backend for FakeBackend {
             .lock()
             .working_diffs
             .push((group, path.clone(), limit));
-        self.working_diffs
-            .get(&(group, path.clone()))
-            .cloned()
+        let live = self
+            .live_of(repo)
+            .and_then(|live| live.working_diffs.get(&(group, path.clone())).cloned());
+        live.or_else(|| self.working_diffs.get(&(group, path.clone())).cloned())
             .map(|diff| FileDiff {
                 truncated: diff.truncated && limit.is_some(),
                 ..diff
@@ -1124,6 +1125,8 @@ struct LiveState {
     /// The folder is gone: every read fails.
     missing: bool,
     status: Option<WorkingStatus>,
+    /// Take the place of the diffs the backend was given.
+    working_diffs: HashMap<(Group, String), FileDiff>,
 }
 
 impl LiveRepo {
@@ -1149,6 +1152,13 @@ impl LiveRepo {
     /// The uncommitted changes from now on.
     pub fn set_status(&self, status: WorkingStatus) {
         self.lock().status = Some(status);
+    }
+
+    /// The diff of the file at `path` in `group` from now on.
+    pub fn set_working_diff(&self, group: Group, path: &str, diff: FileDiff) {
+        self.lock()
+            .working_diffs
+            .insert((group, path.to_owned()), diff);
     }
 
     /// The folder is deleted, or back again.

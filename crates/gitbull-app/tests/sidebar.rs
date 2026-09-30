@@ -14,7 +14,7 @@ use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::stashes::{Stash, Submodule, SubmoduleState};
-use gitbull_testkit::{FakeBackend, HistoryFeed, commit_line, fake_id};
+use gitbull_testkit::{FakeBackend, HistoryFeed, LiveRepo, commit_line, fake_id};
 use support::{Setup, build, path, settle_window, tab_titles, window};
 
 fn root() -> std::path::PathBuf {
@@ -567,4 +567,81 @@ fn a_tag_offers_no_show_only_this_branch() {
     let mut harness = open(per_filter());
     right_click(&mut harness, "v1.0");
     assert!(harness.query_by_label("Show only this branch").is_none());
+}
+
+/// The branches of `per_filter`, which `live` can change while they are
+/// shown.
+fn open_live(live: &LiveRepo) -> Harness<'static, App> {
+    live.set_references(references());
+    open(per_filter().with_live(root(), live))
+}
+
+/// Refreshes with `references` and waits until the sidebar shows
+/// `shown` and not `gone`.
+fn refresh_with(
+    harness: &mut Harness<'_, App>,
+    live: &LiveRepo,
+    references: Vec<Reference>,
+    shown: &str,
+    gone: Option<&str>,
+) {
+    live.set_references(references);
+    harness.key_press(Key::F5);
+    wait_for(harness, |h| {
+        has_item(h, shown) && gone.is_none_or(|gone| !has_item(h, gone))
+    });
+    harness.run();
+}
+
+#[test]
+fn show_only_this_branch_applies_to_its_branch_after_a_branch_was_added_above() {
+    let live = LiveRepo::new();
+    let mut harness = open_live(&live);
+    right_click(&mut harness, "diff-view");
+    assert!(harness.query_by_label("Show only this branch").is_some());
+
+    // The sidebar keeps the order of the references: the new branch comes
+    // first in its folder.
+    let mut more = references();
+    more.insert(
+        0,
+        reference("refs/heads/feature/api", RefKind::Branch, Some("c")),
+    );
+    refresh_with(&mut harness, &live, more, "api", None);
+
+    harness.get_by_label("Show only this branch").click();
+    harness.run();
+    wait_for(&mut harness, |h| {
+        branch_filter(h).accesskit_node().value().as_deref() != Some("All branches")
+    });
+    assert_eq!(
+        branch_filter(&harness).accesskit_node().value().as_deref(),
+        Some("feature/diff-view")
+    );
+}
+
+#[test]
+fn the_menu_of_a_branch_that_a_refresh_removed_closes() {
+    let live = LiveRepo::new();
+    let mut harness = open_live(&live);
+    right_click(&mut harness, "graph-layout");
+    assert!(harness.query_by_label("Show only this branch").is_some());
+
+    let fewer = references()
+        .into_iter()
+        .filter(|reference| reference.short != "feature/graph-layout")
+        .collect();
+    refresh_with(
+        &mut harness,
+        &live,
+        fewer,
+        "diff-view",
+        Some("graph-layout"),
+    );
+
+    assert!(harness.query_by_label("Show only this branch").is_none());
+    assert_eq!(
+        branch_filter(&harness).accesskit_node().value().as_deref(),
+        Some("All branches")
+    );
 }

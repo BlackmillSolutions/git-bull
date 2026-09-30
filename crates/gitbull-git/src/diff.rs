@@ -1,9 +1,9 @@
 //! The diff of one file of a commit against its first parent.
 
 use std::ffi::OsString;
-use std::io::{Read, Write};
 use std::path::Path;
 
+use crate::batch_check::batch_check;
 use crate::cancel::CancelToken;
 use crate::changes::{ChangeKind, FileChange};
 use crate::error::Error;
@@ -147,30 +147,21 @@ pub fn file_diff(
     cancel: &CancelToken,
 ) -> Result<FileDiff, Error> {
     let args = arguments(commit, parent, change);
-    let command = || {
-        let args: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
-        format!("git {}", args.join(" "))
+    let command = DiffCommand {
+        args: &args,
+        overrides: &[],
+        no_index: false,
     };
-    let (output, truncated) = read_diff(git, repo, &[], &args, limit, false, cancel)?;
-    let parsed = parse_diff(&output).map_err(|message| Error::Parse {
-        command: command(),
-        message,
-        bytes: output.clone(),
-    })?;
     // A copy comes with the diff of its source, which changed as well.
-    let found = parsed.into_iter().find(|diff| describes(diff, change));
-    let mut diff = match found {
-        Some(diff) => FileDiff { truncated, ..diff },
-        // The diff of a copy may follow a long diff of its source.
-        None if truncated => return file_diff(git, repo, commit, parent, change, None, cancel),
-        None => {
-            return Err(Error::Parse {
-                command: command(),
-                message: format!("no diff of {}", change.path),
-                bytes: output,
-            });
-        }
-    };
+    let mut diff = find_diff(
+        git,
+        repo,
+        &command,
+        limit,
+        &change.path,
+        |diff| describes(diff, change),
+        cancel,
+    )?;
     if let Content::Binary { old_size, new_size } = &mut diff.content {
         let blobs: Vec<ObjectId> = [diff.old_blob, diff.new_blob]
             .into_iter()
@@ -184,18 +175,77 @@ pub fn file_diff(
     Ok(diff)
 }
 
-/// The output of `git <args>`, up to `limit` lines of hunks; returns it and
-/// whether lines were left unread. With `no_index`, Git compares files
-/// outside the repository and exits with 1 when they differ.
-pub(crate) fn read_diff(
+/// How Git is asked for diffs: `git <args>` with `overrides`. With
+/// `no_index`, Git compares files outside the repository and exits with 1
+/// when they differ.
+pub(crate) struct DiffCommand<'a> {
+    pub(crate) args: &'a [OsString],
+    pub(crate) overrides: &'a [ConfigOverride],
+    pub(crate) no_index: bool,
+}
+
+/// The diff of the file at `path` that `describes` picks from the output of
+/// `command`, which may hold the diffs of other files too. With a `limit`,
+/// Git is stopped after that many lines of hunks. Only the last diff read
+/// can be cut, so only that one is marked as truncated; when the limit
+/// stopped Git before it reached the diff sought, it is read again without.
+pub(crate) fn find_diff(
     git: &Git,
     repo: &Path,
-    overrides: &[ConfigOverride],
-    args: &[OsString],
+    command: &DiffCommand<'_>,
     limit: Option<usize>,
-    no_index: bool,
+    path: &RepoPath,
+    describes: impl Fn(&FileDiff) -> bool,
+    cancel: &CancelToken,
+) -> Result<FileDiff, Error> {
+    let text = || {
+        let args: Vec<_> = command
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        format!("git {}", args.join(" "))
+    };
+    let (output, truncated) = read_diff(git, repo, command, limit, cancel)?;
+    let parsed = parse_diff(&output).map_err(|message| Error::Parse {
+        command: text(),
+        message,
+        bytes: output.clone(),
+    })?;
+    let last = parsed.len().saturating_sub(1);
+    let found = parsed
+        .into_iter()
+        .enumerate()
+        .find(|(_, diff)| describes(diff));
+    match found {
+        Some((index, diff)) => Ok(FileDiff {
+            truncated: truncated && index == last,
+            ..diff
+        }),
+        // The diff of a copy may follow a long diff of its source.
+        None if truncated => find_diff(git, repo, command, None, path, describes, cancel),
+        None => Err(Error::Parse {
+            command: text(),
+            message: format!("no diff of {path}"),
+            bytes: output,
+        }),
+    }
+}
+
+/// The output of `command`, up to `limit` lines of hunks; returns it and
+/// whether lines were left unread.
+fn read_diff(
+    git: &Git,
+    repo: &Path,
+    command: &DiffCommand<'_>,
+    limit: Option<usize>,
     cancel: &CancelToken,
 ) -> Result<(Vec<u8>, bool), Error> {
+    let DiffCommand {
+        args,
+        overrides,
+        no_index,
+    } = *command;
     let limit = limit.unwrap_or(usize::MAX);
     let mut process = git.spawn(repo, overrides, args, false)?;
     let command = process.command().to_owned();
@@ -261,31 +311,11 @@ pub(crate) fn blob_sizes(
     blobs: &[ObjectId],
     cancel: &CancelToken,
 ) -> Result<Vec<u64>, Error> {
-    const COMMAND: &str = "git cat-file --batch-check";
-    let mut process = git.spawn(repo, &[], ["cat-file", "--batch-check"], true)?;
-    let canceller = process.canceller();
-    let registration = cancel.on_cancel(move || canceller.cancel());
-    let mut stdin = process.take_stdin().expect("standard input is piped");
-    let requests: String = blobs.iter().map(|blob| format!("{blob}\n")).collect();
-    let written = stdin.write_all(requests.as_bytes());
-    // Closing the input tells Git that no more requests come.
-    drop(stdin);
-    let mut output = Vec::new();
-    let read = process
-        .take_stdout()
-        .expect("standard output is piped")
-        .read_to_end(&mut output);
-    let result = process.wait();
-    cancel.forget(registration);
-    result?;
-    let io = |source| Error::Io {
-        command: COMMAND.to_owned(),
-        source,
-    };
-    written.map_err(io)?;
-    read.map_err(io)?;
+    const FORMAT: &str = "%(objectname) %(objecttype) %(objectsize)";
+    let requests: Vec<String> = blobs.iter().map(ToString::to_string).collect();
+    let output = batch_check(git, repo, FORMAT, &requests, cancel)?;
     parse_sizes(&output, blobs.len()).map_err(|message| Error::Parse {
-        command: COMMAND.to_owned(),
+        command: format!("git cat-file --batch-check={FORMAT}"),
         message,
         bytes: output,
     })

@@ -304,11 +304,18 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     {
         ui.ctx().copy_text(hash);
     }
-    let menu_row = view.commits.menu_row();
+    // The menu acts on the commit it was opened for, wherever a refresh
+    // moves it meanwhile.
+    if let Some(row) = output.menu_opened {
+        view.commit_menu = list
+            .commit(row)
+            .map(|row| session.history().store.id(row as Row));
+    }
+    let menu_commit = view.commit_menu;
     output.response.context_menu(|ui| {
         if ui.button(&copy_label).clicked() {
-            if let Some(hash) = menu_row.and_then(hash_of) {
-                ui.ctx().copy_text(hash);
+            if let Some(commit) = menu_commit {
+                ui.ctx().copy_text(commit.to_string());
             }
             ui.close();
         }

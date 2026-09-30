@@ -12,8 +12,10 @@ use gitbull_core::settings::Settings;
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
+use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
-use gitbull_testkit::{FakeBackend, fake_id};
+use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
+use gitbull_testkit::{FakeBackend, HistoryFeed, LiveRepo, fake_id};
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 use support::{Setup, build, path, settle_window, window};
@@ -334,6 +336,168 @@ fn the_context_menu_copies_the_full_hash() {
     harness.get_by_label("Copy full hash").click();
     harness.step();
     assert_eq!(copied(&harness), Some(fake_id("b").to_string()));
+}
+
+/// "Commit 0" on top of "Commit 1" and so on down to "Commit 199".
+fn long_lines() -> Vec<CommitLine> {
+    (0..200)
+        .map(|i| CommitLine {
+            timestamp: seconds(A_DATE) - i,
+            id: fake_id(&format!("n{i}")),
+            parents: if i < 199 {
+                vec![fake_id(&format!("n{}", i + 1))]
+            } else {
+                Vec::new()
+            },
+        })
+        .collect()
+}
+
+/// The history of `long_lines`, with main on its top, that `live` can
+/// change while it is shown.
+fn open_long(live: &LiveRepo) -> Harness<'static, App> {
+    live.set_lines(long_lines());
+    live.set_references(vec![reference("refs/heads/main", RefKind::Branch, "n0")]);
+    live.set_status(WorkingStatus::default());
+    let mut backend = FakeBackend::default()
+        .with_repository(root())
+        .with_live(root(), live);
+    let author = signature("Ada Lovelace", A_DATE, 0);
+    for i in 0..200 {
+        backend = backend.with_content(
+            fake_id(&format!("n{i}")),
+            content(
+                &format!(
+                    "Commit {i}
+"
+                ),
+                author.clone(),
+                author.clone(),
+            ),
+        );
+    }
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    wait_for_label(&mut harness, "Commit 0");
+    harness
+}
+
+/// How many commits the history of the active tab holds.
+fn loaded(harness: &Harness<'_, App>) -> usize {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .map_or(0, |session| session.history().store.len())
+}
+
+/// Clicks the row of the commit with `summary` in the list, found by its
+/// row: the commit panel shows the summary of the selected commit too.
+fn click_list_row(harness: &mut Harness<'_, App>, summary: &str, button: PointerButton) {
+    let prefix = format!("{summary}, ");
+    for _ in 0..500 {
+        if harness.query_all_by_role(Role::Row).any(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(&prefix))
+        }) {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let at = row(harness, &prefix).rect().center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
+#[test]
+fn the_menu_copies_the_hash_of_its_commit_after_the_history_was_replaced() {
+    let live = LiveRepo::new();
+    let mut harness = open_long(&live);
+    click_list_row(&mut harness, "Commit 0", PointerButton::Primary);
+    harness.key_press(Key::End);
+    harness.run();
+    click_list_row(&mut harness, "Commit 199", PointerButton::Secondary);
+    assert!(harness.query_by_label("Copy full hash").is_some());
+
+    // Another branch makes the history load again; the new one has 50 of
+    // its commits so far when it takes the place of the one shown.
+    let feed = HistoryFeed::new();
+    live.set_feed(&feed);
+    live.set_references(vec![
+        reference("refs/heads/main", RefKind::Branch, "n0"),
+        reference("refs/heads/side", RefKind::Branch, "n5"),
+    ]);
+    harness.key_press(Key::F5);
+    feed.send(long_lines().into_iter().take(50));
+    for _ in 0..1000 {
+        if loaded(&harness) == 50 {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(loaded(&harness), 50);
+    harness.run();
+
+    harness.get_by_label("Copy full hash").click();
+    harness.step();
+    assert_eq!(copied(&harness), Some(fake_id("n199").to_string()));
+}
+
+#[test]
+fn the_menu_copies_the_hash_of_its_commit_when_uncommitted_changes_appear_above_it() {
+    let live = LiveRepo::new();
+    let mut harness = open_long(&live);
+    click_list_row(&mut harness, "Commit 3", PointerButton::Secondary);
+    assert!(harness.query_by_label("Copy full hash").is_some());
+
+    live.set_status(WorkingStatus {
+        unstaged: vec![StatusEntry {
+            kind: StatusKind::Changed(gitbull_git::changes::ChangeKind::Modified),
+            path: RepoPath::new("edit.txt"),
+            old_path: None,
+            submodule: false,
+        }],
+        ..WorkingStatus::default()
+    });
+    harness.key_press(Key::F5);
+    for _ in 0..1000 {
+        let shown = harness.query_all_by_role(Role::Row).any(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with("Uncommitted changes"))
+        });
+        if shown {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    harness.run();
+
+    harness.get_by_label("Copy full hash").click();
+    harness.step();
+    assert_eq!(copied(&harness), Some(fake_id("n3").to_string()));
 }
 
 #[test]

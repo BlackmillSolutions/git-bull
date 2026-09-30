@@ -286,6 +286,11 @@ impl Details {
     pub fn diff(&self) -> &DiffState {
         self.pane.diff()
     }
+
+    /// Changes whenever a diff with other content replaced the one shown.
+    pub fn diff_version(&self) -> u64 {
+        self.pane.version()
+    }
 }
 
 #[cfg(test)]

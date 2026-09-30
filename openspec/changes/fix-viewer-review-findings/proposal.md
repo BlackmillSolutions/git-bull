@@ -23,7 +23,7 @@ file. The viewer should not be released as `v0.1.0` with these defects.
 - The diff of a staged file that Git lists as copied compares it with the
   file it was copied from.
 - Blame uses the user's ignore files with their paths expanded by Git, so
-  that `~/` works. The repository's configuration cannot make blame fail.
+  that `~/` works, also in the second global configuration file.
 - The File status view offers File history and Blame only for files that the
   last commit contains, under the path they have there. A staged copy is a
   new file and is no longer offered with the history of its source.
@@ -76,10 +76,11 @@ modifies exist in `openspec/specs/`.
 ## Impact
 
 - **Code:** `gitbull-git` (`working_copy.rs`, `blame.rs`, `search.rs`,
-  `diff.rs`, `locate.rs`, `commit_graph.rs`, `filters.rs`), `gitbull-core`
-  (`settings.rs`, `diff_pane.rs`) and `gitbull-app` (`diff_view.rs`,
-  `commit_list.rs`, `commit_panel.rs`, `file_status_view.rs`,
-  `sidebar_view.rs`, `app.rs`, `virtual_list.rs`).
+  `diff.rs`, `locate.rs`, `commit_graph.rs`, `filters.rs`, and the new
+  modules `config.rs` and `batch_check.rs`), `gitbull-core` (`settings.rs`,
+  `diff_pane.rs`), `gitbull-app` (`diff_view.rs`, `commit_list.rs`,
+  `file_status_view.rs`, `sidebar_view.rs`, `app.rs`, `virtual_list.rs`)
+  and the fake backend of `gitbull-testkit`.
 - **Documentation:** ADR 0006 describes how the ignore files for blame are
   read; that paragraph changes.
 - **Dependencies:** None added.

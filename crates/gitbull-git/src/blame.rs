@@ -6,15 +6,13 @@ use std::path::Path;
 
 use crate::blob;
 use crate::cancel::CancelToken;
+use crate::config;
 use crate::error::Error;
 use crate::flags;
 use crate::history::WalkLines;
 use crate::invoke::Git;
 use crate::object_id::ObjectId;
 use crate::path::RepoPath;
-
-/// Reading configuration executes nothing.
-const CONFIG_LIST: [&str; 5] = ["config", "--list", "--show-scope", "--show-origin", "-z"];
 
 /// A commit that lines stem from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,12 +99,11 @@ impl Parser {
 }
 
 /// The ignore files for blame that the user's own configuration names:
-/// `blame.ignoreRevsFile` of the system and global scope, from
-/// `git config --list --show-scope --show-origin -z`. The repository's own
-/// are left out (ADR 0006).
+/// `blame.ignoreRevsFile` of the system and global scope, from a listing of
+/// [`config::LIST`]. The repository's own are left out (ADR 0006).
 fn user_ignore_files(listing: &[u8]) -> Vec<String> {
     let mut files = Vec::new();
-    for (scope, key, value) in config_entries(listing) {
+    for (scope, key, value) in config::entries(listing) {
         if !matches!(scope, b"system" | b"global") || key != b"blame.ignorerevsfile" {
             continue;
         }
@@ -120,26 +117,44 @@ fn user_ignore_files(listing: &[u8]) -> Vec<String> {
     files
 }
 
+/// `value` of `blame.ignoreRevsFile` expanded as Git expands paths in its
+/// configuration, such as a leading `~/`; `None` for an optional file that
+/// is missing. Git reads no configuration for this, so the repository's
+/// cannot interfere.
+fn expanded_path(
+    git: &Git,
+    repo: &Path,
+    value: &str,
+    cancel: &CancelToken,
+) -> Result<Option<String>, Error> {
+    let args = [
+        "config",
+        "--file",
+        "/dev/null",
+        "--type=path",
+        "--default",
+        value,
+        "-z",
+        "--get",
+        "blame.ignoreRevsFile",
+    ];
+    match git.run_cancellable(repo, &[], args, cancel) {
+        Ok(output) => {
+            let path = output.strip_suffix(b"\0").unwrap_or(&output);
+            Ok(Some(String::from_utf8_lossy(path).into_owned()))
+        }
+        // Git prints nothing for `:(optional)` and a missing file.
+        Err(Error::CommandFailed { code: Some(1), .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Whether the configuration makes the repository a partial clone, whose
 /// content may be missing locally.
 fn is_partial_clone(listing: &[u8]) -> bool {
-    config_entries(listing).any(|(_, key, value)| {
+    config::entries(listing).any(|(_, key, value)| {
         key == b"extensions.partialclone"
             || (key.starts_with(b"remote.") && key.ends_with(b".promisor") && value == b"true")
-    })
-}
-
-/// The scope, key and value of each entry of a configuration listing, whose
-/// entries read `scope NUL origin NUL key [LF value] NUL`.
-fn config_entries(listing: &[u8]) -> impl Iterator<Item = (&[u8], &[u8], &[u8])> {
-    let mut fields = listing.split(|&b| b == 0);
-    std::iter::from_fn(move || {
-        let (scope, _origin, entry) = (fields.next()?, fields.next()?, fields.next()?);
-        let (key, value) = match entry.iter().position(|&b| b == b'\n') {
-            Some(newline) => (&entry[..newline], &entry[newline + 1..]),
-            None => (entry, &[][..]),
-        };
-        Some((scope, key, value))
     })
 }
 
@@ -215,18 +230,18 @@ pub fn blame(
     path: &RepoPath,
     cancel: &CancelToken,
 ) -> Result<BlameStream, Error> {
-    let listing = git.run_cancellable(repo, &[], CONFIG_LIST, cancel)?;
+    let listing = git.run_cancellable(repo, &[], config::LIST, cancel)?;
     let mut args: Vec<OsString> = ["blame"]
         .iter()
         .chain(flags::BLAME)
         .map(OsString::from)
         .collect();
     // After `--no-ignore-revs-file`, which clears the files named before.
-    args.extend(
-        user_ignore_files(&listing)
-            .into_iter()
-            .map(|file| OsString::from(format!("--ignore-revs-file={file}"))),
-    );
+    for value in user_ignore_files(&listing) {
+        if let Some(file) = expanded_path(git, repo, &value, cancel)? {
+            args.push(OsString::from(format!("--ignore-revs-file={file}")));
+        }
+    }
     args.extend([revision, "--"].map(OsString::from));
     args.push(path.to_os_string());
     let process = git.spawn(repo, &[], args, false)?;
@@ -271,7 +286,7 @@ pub fn file_content(
     match blob::blob(git, repo, &blob_id, u64::MAX, cancel) {
         Ok(content) => Ok(content.unwrap_or_default()),
         Err(error) => {
-            let listing = git.run_cancellable(repo, &[], CONFIG_LIST, cancel)?;
+            let listing = git.run_cancellable(repo, &[], config::LIST, cancel)?;
             Err(missing_in(is_partial_clone(&listing), error))
         }
     }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use gitbull_git::Git;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::{ChangeKind, FileChange, changed_files};
-use gitbull_git::diff::{Content, FileDiff, LineKind, file_diff};
+use gitbull_git::diff::{Content, FileDiff, LINE_LIMIT, LineKind, file_diff};
 use gitbull_git::locate::{Os, SystemProbe, locate_git};
 use gitbull_git::object_id::ObjectId;
 use gitbull_testkit::TestRepo;
@@ -276,6 +276,57 @@ fn line_count(diff: &FileDiff) -> usize {
         Content::Text(hunks) => hunks.iter().map(|hunk| hunk.lines.len()).sum(),
         other => panic!("not text: {other:?}"),
     }
+}
+
+#[test]
+fn a_short_copy_next_to_a_long_diff_of_its_source_is_whole() {
+    let mut repo = TestRepo::new();
+    repo.write("b.txt", &lines(30));
+    let first = repo.commit("First");
+    // a.txt comes before its source in Git's output, which the limit cuts
+    // in the diff of the source.
+    let copy: String = (1..=30)
+        .map(|n| match n {
+            1..=10 => format!("copy {n}\n"),
+            _ => format!("line {n}\n"),
+        })
+        .collect();
+    repo.write("a.txt", &copy);
+    repo.write("b.txt", &lines(15_030));
+    let second = repo.commit("Copy and grow");
+    let cancel = CancelToken::new();
+    let changes = changed_files(
+        &git(),
+        repo.path(),
+        &id(&second),
+        Some(&id(&first)),
+        &cancel,
+    )
+    .unwrap();
+    let limited = |path: &str| {
+        let change = changes
+            .iter()
+            .find(|change| change.path.to_string() == path)
+            .unwrap_or_else(|| panic!("{path} is not in the file list"));
+        file_diff(
+            &git(),
+            repo.path(),
+            &id(&second),
+            Some(&id(&first)),
+            change,
+            Some(LINE_LIMIT),
+            &cancel,
+        )
+        .unwrap()
+    };
+
+    let copied = limited("a.txt");
+    assert_eq!(copied.old_path, Some("b.txt".into()), "a.txt is a copy");
+    assert_eq!(texts(&copied, LineKind::Removed).len(), 10);
+    assert!(!copied.truncated, "the diff of the copy is whole");
+    let source = limited("b.txt");
+    assert_eq!(line_count(&source), LINE_LIMIT);
+    assert!(source.truncated);
 }
 
 #[test]

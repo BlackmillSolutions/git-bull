@@ -221,18 +221,18 @@ fn shown(session: &Session, pane: Pane) -> Option<(&DiffState, Option<&Highlight
     match pane {
         Pane::Commit => {
             let details = session.details();
-            let key = DiffKey::Commit(details.commit()?, details.file()?);
+            let key = DiffKey::Commit(details.commit()?, details.file()?, details.diff_version());
             Some((details.diff(), details.highlighting(), key))
         }
         Pane::FileStatus => {
             let status = session.file_status()?;
             let (group, index) = status.chosen()?;
-            let key = DiffKey::Status(group, index);
+            let key = DiffKey::Status(group, index, status.diff_version());
             Some((status.diff(), status.highlighting(), key))
         }
         Pane::FileHistory => {
             let history = session.file_history()?;
-            let key = DiffKey::FileHistory(history.chosen()?);
+            let key = DiffKey::FileHistory(history.chosen()?, history.diff_version());
             Some((history.diff(), history.highlighting(), key))
         }
     }
@@ -350,9 +350,10 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
         state.selection = Some((row, row));
     }
     let selected_text = |state: &DiffView| {
-        state.selection.map(|(anchor, end)| {
+        state.selection.and_then(|(anchor, end)| {
             let range = anchor.min(end)..=anchor.max(end);
-            copied_rows(hunks, &all[range])
+            // Rows that are gone copy nothing.
+            all.get(range).map(|rows| copied_rows(hunks, rows))
         })
     };
     if copy && let Some(text) = selected_text(state) {

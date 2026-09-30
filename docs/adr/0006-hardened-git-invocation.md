@@ -50,7 +50,14 @@ The list is read again on every refresh.
 **Ignore files for blame.** `--no-ignore-revs-file` clears every ignore file
 named so far, including those from configuration. Files given after it take
 effect; files given before it are cleared too. The user's ignore files are
-therefore passed after it, read from the same configuration list.
+therefore passed after it: the values of the system and global scope, read
+from the same configuration list. On the command line Git does not expand a
+path such as `~/.blame-ignore` as it does in configuration, so each value is
+expanded first with
+`git config --file /dev/null --type=path --default <value> --get blame.ignoreRevsFile`,
+which reads no configuration at all. A value the repository sets is still
+read by `git blame` itself; one Git cannot expand fails the blame, as it
+fails plain `git blame`.
 
 git-bull never bypasses Git's ownership check (`safe.directory`).
 

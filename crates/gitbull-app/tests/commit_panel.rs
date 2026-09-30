@@ -462,3 +462,34 @@ fn a_commit_with_many_references_shows_the_first_and_counts_the_rest() {
     assert_eq!(badges, 20, "{texts:?}");
     assert!(texts.iter().any(|t| t == "+80"), "{texts:?}");
 }
+
+#[test]
+fn choosing_another_commit_closes_the_context_menu_of_a_file() {
+    let mut harness = open(backend().with_changes(
+        fake_id("b"),
+        vec![
+            change(ChangeKind::Added, "one.txt", None),
+            change(ChangeKind::Added, "two.txt", None),
+        ],
+    ));
+    select(&mut harness, "Fix the parser");
+    wait_until(&mut harness, has_files);
+    let at = file(&harness, "Renamed: src/a.rs → src/b.rs")
+        .rect()
+        .center();
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(harness.query_by_label("Copy path").is_some());
+
+    // With the menu open, the keyboard moves the selection of the commit
+    // list to the next commit. Its files load afresh, so the menu cannot
+    // act on a file of the other commit.
+    harness.key_press_modifiers(Modifiers::SHIFT, eframe::egui::Key::Tab);
+    harness.run();
+    harness.key_press(eframe::egui::Key::ArrowDown);
+    harness.run();
+    wait_until(&mut harness, |h| {
+        h.query_all_by_role(Role::ListItem)
+            .any(|node| node.accesskit_node().label().as_deref() == Some("Added: two.txt"))
+    });
+    assert!(harness.query_by_label("Copy path").is_none());
+}

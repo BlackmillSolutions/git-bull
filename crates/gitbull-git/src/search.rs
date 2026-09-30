@@ -1,9 +1,9 @@
 //! Searching commits: by hash, and as a stream of matches by message,
 //! author or path.
 
-use std::io::{Read, Write};
 use std::path::Path;
 
+use crate::batch_check::batch_check;
 use crate::cancel::CancelToken;
 use crate::error::Error;
 use crate::history::{Revisions, WalkLines, walk_lines};
@@ -99,30 +99,7 @@ fn object_types(
     objects: &[String],
     cancel: &CancelToken,
 ) -> Result<Vec<(String, String)>, Error> {
-    let args = ["cat-file", "--batch-check=%(objectname) %(objecttype)"];
-    let mut process = git.spawn(repo, &[], args, true)?;
-    let command = process.command().to_owned();
-    let canceller = process.canceller();
-    let registration = cancel.on_cancel(move || canceller.cancel());
-    let mut stdin = process.take_stdin().expect("standard input is piped");
-    let requests: String = objects.iter().map(|object| format!("{object}\n")).collect();
-    let written = stdin.write_all(requests.as_bytes());
-    // Closing the input tells Git that no more requests come.
-    drop(stdin);
-    let mut output = Vec::new();
-    let read = process
-        .take_stdout()
-        .expect("standard output is piped")
-        .read_to_end(&mut output);
-    let result = process.wait();
-    cancel.forget(registration);
-    result?;
-    let io = |source| Error::Io {
-        command: command.clone(),
-        source,
-    };
-    written.map_err(io)?;
-    read.map_err(io)?;
+    let output = batch_check(git, repo, "%(objectname) %(objecttype)", objects, cancel)?;
     Ok(String::from_utf8_lossy(&output)
         .lines()
         .filter_map(|line| line.split_once(' '))

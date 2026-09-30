@@ -20,9 +20,11 @@ design:
 - `git config --global --get-all` reads only `~/.gitconfig` when
   `$XDG_CONFIG_HOME/git/config` exists as well; the listing of all scopes
   reads both.
-- `git config --type=path --get-all` over all scopes fails as a whole when
-  the repository's configuration holds a value that Git cannot expand, such
-  as `~nosuchuser/list`.
+- A value of `blame.ignoreRevsFile` in the repository's configuration that
+  Git cannot expand, such as `~nosuchuser/list`, fails `git blame` itself,
+  also with `--no-ignore-revs-file` and with `-c blame.ignoreRevsFile=`:
+  Git expands it while it reads the configuration. `git config --type=path
+  --get-all` over all scopes fails on it too.
 - `git commit-graph write --progress` takes its lock file right before it
   reports the phase `Writing out commit graph in <n> passes`; every earlier
   phase (loading, expanding, generation numbers, Bloom filters) runs without
@@ -80,7 +82,6 @@ once and keeps it in `TabView` for as long as the menu is open:
 | List | Identity kept |
 |---|---|
 | Commit list | the `ObjectId` of the commit |
-| Commit panel | the commit shown and the `FileChange` |
 | File status | the group and the `StatusEntry` |
 | Sidebar | the full name of the branch or remote branch |
 
@@ -89,10 +90,16 @@ The sidebar already resolves its row through `row_at` with `get`, so it
 cannot panic; it only needs the capture so that a refresh that adds or
 removes references cannot turn the menu to another branch.
 
-An entry can disappear while its menu is open. The commit list, the commit
-panel and the File status view still act on the kept entry: a commit and its
-files do not change, and File history, Blame and Copy path need only the
-commit or the path. The sidebar closes the menu without an action when the
+The commit panel keeps acting on `menu_row`. Its rows change only when
+another commit is shown, and then its files load afresh: while the list is
+not drawn, egui closes the menu. A UI test holds that, so that a later cache
+of the files, which would keep the list drawn, cannot bring the defect in
+unnoticed.
+
+An entry can disappear while its menu is open. The commit list and the File
+status view still act on the kept entry: a commit does not change, and File
+history, Blame and Copy path need only the commit or the path. The sidebar
+closes the menu without an action when the
 kept branch is no longer among its rows, because "Show only this branch"
 would restrict the graph to a branch that does not exist.
 
@@ -107,9 +114,11 @@ entry Git lists as copied (it detects renames too), `-M` for every other
 entry. `-C` without `--find-copies-harder` considers only modified files as
 sources, as `git status` does, and the pathspec already names the source.
 
-Alternative: always pass `-M -C`, as the commit diffs do. Rejected because a
-staged file that status lists as added would then appear as a copy of some
-modified file, which contradicts the list.
+Alternative: always pass `-M -C`, as the commit diffs do. Rejected because
+the pathspec of an added entry names only that file, so `-C` finds nothing
+there anyway, and for a path that Git cannot be given, which leaves out the
+pathspec, `-C` could show a file that status lists as added as a copy of
+another modified file, which contradicts the list.
 
 ### 4. The user's ignore files for blame are expanded by Git
 
@@ -120,11 +129,16 @@ includes that apply to the repository. Each remaining value is then
 expanded on its own with
 `git config --file /dev/null --type=path --default <value> --get blame.ignoreRevsFile`,
 so that `~/` and `%(prefix)/` mean what they mean to Git. This call reads no
-configuration, so the repository's own values are never expanded. When it
-prints nothing and exits with 1, the value names an optional file that is
-missing and is skipped. When it fails otherwise, the blame shows that error,
-as plain `git blame` would. It costs one Git process per value; users name
-one file or none.
+configuration. When it prints nothing and exits with 1, the value names an
+optional file that is missing and is skipped. When it fails otherwise, the
+blame shows that error, as plain `git blame` would. It costs one Git process
+per value; users name one file or none, so most blames start no extra
+process.
+
+A value in the repository's own configuration that Git cannot expand still
+fails the blame: `git blame` expands it while reading its configuration,
+before any option or override applies (see Context). git-bull shows Git's
+error, which names the value.
 
 ADR 0006 says the files are "read from the same configuration list"; that
 paragraph is updated to describe the expansion.
@@ -133,9 +147,9 @@ Alternative: expand `~` in git-bull. Rejected because Git's rules also cover
 `~user/` and `%(prefix)/`, and copying them invites drift.
 
 Alternative: one call `git config --show-scope --type=path --get-all -z
-blame.ignoreRevsFile` over all scopes. Rejected because Git expands the
-repository's values too, and one it cannot expand fails the whole call: the
-repository's configuration could break every blame.
+blame.ignoreRevsFile` over all scopes. Rejected because it starts a Git
+process for every blame, while the listing that blame reads anyway already
+holds the values, and most users have none.
 
 Alternative: one call each with `--system` and `--global`. Rejected because
 `--global` reads only `~/.gitconfig` when both global files exist, and would
@@ -229,6 +243,10 @@ Behaviour does not change; the existing tests of both modules keep passing.
 - [A value of the user's `blame.ignoreRevsFile` that Git cannot expand now
   fails every blame] → This is also what plain `git blame` does with that
   configuration, and the error names the problem.
+- [A value of the repository's `blame.ignoreRevsFile` that Git cannot
+  expand fails every blame of that repository] → git-bull cannot prevent it
+  without giving up `git blame`; plain `git blame` fails the same way, and
+  the error names the value. The value is never used as an ignore file.
 - [Loading the full diff replaces it with other content] → The selection is
   cleared and the diff starts at the top after "Load all". Acceptable: the
   user asked for another diff.

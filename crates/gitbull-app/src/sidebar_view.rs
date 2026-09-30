@@ -74,6 +74,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         sidebar_list,
         sidebar_rows,
         sidebar_key,
+        sidebar_menu,
         ..
     } = view;
 
@@ -127,13 +128,26 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         activate(&row, sidebar, &mut actions, true);
     }
     // Only branches and remote branches have a menu, so that other rows do
-    // not open an empty one.
-    if let Some(SidebarRow::Reference {
-        section: Section::Branches | Section::Remotes,
-        name,
-        ..
-    }) = sidebar_list.menu_row().and_then(row_at)
+    // not open an empty one. The menu acts on the branch it was opened
+    // for, and closes when a refresh removed it.
+    let branch = |row: &SidebarRow| match row {
+        SidebarRow::Reference {
+            section: Section::Branches | Section::Remotes,
+            name,
+            ..
+        } => Some(name.clone()),
+        _ => None,
+    };
+    if let Some(row) = output.menu_opened {
+        *sidebar_menu = row_at(row).as_ref().and_then(branch);
+    }
+    if sidebar_menu
+        .as_ref()
+        .is_some_and(|name| !rows.iter().any(|row| branch(row).as_ref() == Some(name)))
     {
+        *sidebar_menu = None;
+    }
+    if let Some(name) = sidebar_menu.clone() {
         output.response.context_menu(|ui| {
             if ui.button(&texts.show_only).clicked() {
                 actions.push(SidebarAction::ShowOnly(name.clone()));
