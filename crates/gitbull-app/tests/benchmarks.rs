@@ -471,3 +471,53 @@ fn wide_commit() {
     assert!(shown(&harness).is_disjoint(&top), "the file list moved");
     assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
 }
+
+/// Commits from the top of the current branch whose details are measured.
+const DETAILS_COMMITS: usize = 100;
+/// The target of `commit-details` for a commit with fewer than 100 files.
+const DETAILS_TARGET: Duration = Duration::from_millis(200);
+
+#[test]
+#[ignore]
+fn details() {
+    let repo = repository();
+    eprintln!("repository: {}, {}", repo.display(), git_version());
+    let (_, _, rows, mut session) = load(BranchFilter::Current);
+    // Time from selecting a commit until its message, names and changed
+    // files are there, as the commit panel shows them.
+    let (mut small, mut large) = (Vec::new(), Vec::new());
+    for row in 0..DETAILS_COMMITS.min(rows) {
+        let row = row as gitbull_core::store::Row;
+        let id = session.history().store.id(row);
+        let started = Instant::now();
+        session.show_details(Some(row));
+        let files = loop {
+            session.poll();
+            let files = match session.details().files() {
+                gitbull_core::details::ChangedFiles::Loaded(files) => Some(files.len()),
+                gitbull_core::details::ChangedFiles::Failed(failure) => panic!("{failure:?}"),
+                gitbull_core::details::ChangedFiles::Loading => None,
+            };
+            if let Some(files) = files
+                && session.content(&id).is_some()
+            {
+                break files;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        };
+        let took = started.elapsed();
+        if files < 100 {
+            small.push(took);
+        } else {
+            large.push(took);
+        }
+    }
+    eprintln!();
+    eprintln!("| Details and files | Commits | Median | 99th percentile | Slowest |");
+    eprintln!("|---|---|---|---|---|");
+    let slowest = summary("Fewer than 100 files", small);
+    if !large.is_empty() {
+        summary("100 files or more", large);
+    }
+    assert!(slowest < DETAILS_TARGET, "details took {slowest:?}");
+}

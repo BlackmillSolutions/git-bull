@@ -79,7 +79,7 @@ after each stage.
 - [x] 5.7 Show details, changed files and diff of a selected stash, listing its untracked files as added; verify tests for all three stash scenarios of `repository-sidebar`
 - [x] 5.8 Add integration tests with a configured external diff tool, text conversion in diff and blame, and a partial clone with missing content; verify no tool is executed, no connection is made, and the notice for missing content appears
 - [x] 5.9 Add integration tests for a file whose path is not valid UTF-8 and for the files `a[1].txt` and `a1.txt`; verify the first path shows replacement characters and its diff loads, and the diff of `a[1].txt` contains only that file
-- [ ] 5.10 Measure details and file list on the Linux kernel repository and the frame time for a commit with 50,000 files; verify the results are recorded in `docs/benchmarks.md`
+- [x] 5.10 Measure details and file list on the Linux kernel repository and the frame time for a commit with 50,000 files; verify the results are recorded in `docs/benchmarks.md`
 
 ## 6. Working-copy status
 

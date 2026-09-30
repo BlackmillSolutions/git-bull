@@ -156,8 +156,8 @@ folders.
 | File list, Page Down and wheel in turn | 400 | 0.4 ms | 0.7 ms | 0.8 ms |
 
 The file list is a virtual list, as the commit list is, so it costs the same
-for fifty files as for fifty thousand. The measurement on the Linux kernel,
-the second part of task 5.10, is still open.
+for fifty files as for fifty thousand. The second part of task 5.10, the
+details on the Linux kernel, is in the section below.
 
 The `scrolling` benchmark of task 4.21, run again now that selecting a
 commit loads its details, files, diff and highlighting, stays within the
@@ -165,3 +165,61 @@ target: the slowest frame took 9.9 ms while loading and 5.0 ms after it,
 against 7.6 ms and 3.2 ms before. Page Down selects another commit in each
 frame there; the work for the commit selected before is cancelled, but
 every selection still starts Git.
+
+## Linux kernel (tasks 4.22 and 5.10)
+
+Measured on 2026-09-30 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, NVMe SSD, Git 2.55.0.windows.5, release build,
+against a clone of `torvalds/linux` from git.kernel.org made with
+`git clone --no-checkout`: 1,484,125 commits, 948 tags, 3.7 GB, with
+`GITBULL_BENCH_REPO` set to it. Writing its commit-graph file with
+`git commit-graph write --reachable --changed-paths` took 149 s and gave
+110 MB.
+
+| Measure | Without commit-graph | With commit-graph | Target | Met |
+|---|---|---|---|---|
+| First rows, all branches and tags | 14.0 s | 1.51 s | under 1 s | no |
+| First rows, current branch | 15.1 s | 0.17 s | under 1 s | yes |
+| Whole history, all branches | 23.0 s | 10.1 s | none | |
+| Memory of the loaded history | 94.0 MB | 93.7 MB | none | |
+| Memory of the process | 101.1 MB | 100.8 MB | under 250 MB | yes |
+
+With the commit-graph file, four runs gave 1.486 s to 1.547 s to the first
+rows with all branches and tags and 0.165 s to 0.184 s with the current
+branch; the table gives the medians.
+
+| Scrolling, with commit-graph | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| While loading | 10,660 | 0.1 ms | 0.2 ms | 284.9 ms | no |
+| After loading | 400 | 3.8 ms | 9.4 ms | 255.7 ms | no |
+| Scrollbar from top to bottom | 200 | 0.8 ms | 10.7 ms | 11.9 ms | yes |
+
+| Details and files, 100 commits from HEAD | Commits | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Fewer than 100 files | 99 | 53.4 ms | 75.8 ms | 84.2 ms | yes, under 200 ms |
+| 100 files or more | 1 | 54.7 ms | 54.7 ms | 54.7 ms | |
+
+Three targets are missed. The causes, found with timings of the parts of a
+frame:
+
+- **First rows with all branches and tags.** Git itself needs 1,435 ms to
+  its first line with `--branches --tags --remotes` and 87 ms with
+  `--branches --remotes`: with tags its walk has to reach the generation
+  of the oldest tag, and the kernel has tags back to its first commits.
+  All 948 tags are reachable from `master`, so they add no commits.
+  Finding the tags that no branch reaches, with
+  `git for-each-ref --no-merged=<branch>... refs/tags`, took 178 ms. The
+  remedy of design decision 5, leaving those tags out, would give about
+  0.3 s.
+- **Frames while loading.** The loader appends 4,096 commits at a time to
+  the store and the graph layout while it holds the lock of the history,
+  which the UI needs in each frame. On the kernel, with its many parallel
+  lanes, a batch held the lock for 20 ms to 36 ms, over 90 % of it for the
+  graph layout; on the generated repository it took a few milliseconds.
+  Frames waited for it, up to 70 ms, and longer where batches followed each
+  other.
+- **Frames after loading, on Windows.** Page Down selects another commit;
+  when the Git process for the details of the one before is still
+  running, it is stopped. On Windows this runs `taskkill /T /F` and waits
+  for it on the UI thread, which took about 230 ms each time. On Linux and
+  macOS stopping is a signal.

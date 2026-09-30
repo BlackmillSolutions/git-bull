@@ -520,17 +520,22 @@ fn a_long_diff_offers_to_load_the_rest_and_a_long_line_is_marked() {
 
     test.harness.get_by_label("Load full diff").click();
     test.harness.run();
+    let limits = |probe: &Probe| -> Vec<Option<usize>> {
+        probe
+            .diffs()
+            .into_iter()
+            .filter(|(_, path, _)| path == "long.txt")
+            .map(|(_, _, limit)| limit)
+            .collect()
+    };
+    // The button goes as soon as the diff loads again; the worker asks
+    // for the whole diff a moment later, and the diff arrives after that.
+    let probe = test.probe.clone();
     wait_until(&mut test.harness, |h| {
-        h.query_by_label("Load full diff").is_none()
+        limits(&probe).len() == 2 && !diff_rows(h).is_empty()
     });
-    let limits: Vec<_> = test
-        .probe
-        .diffs()
-        .into_iter()
-        .filter(|(_, path, _)| path == "long.txt")
-        .map(|(_, _, limit)| limit)
-        .collect();
-    assert_eq!(limits, [Some(10_000), None]);
+    assert_eq!(limits(&test.probe), [Some(10_000), None]);
+    assert!(test.harness.query_by_label("Load full diff").is_none());
 }
 
 #[test]
