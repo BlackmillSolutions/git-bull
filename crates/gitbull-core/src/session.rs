@@ -32,6 +32,7 @@ use crate::file_status::FileStatus;
 use crate::graph::{Checkpoint, Graph, GraphBuilder};
 use crate::highlight::HighlightTheme;
 use crate::opening::OpenedRepository;
+use crate::search::{HashOutcome, Search, SearchMode};
 use crate::store::{CommitStore, Parent, Row};
 use crate::workspace::{Failure, Notify, View, panic_message};
 
@@ -163,6 +164,7 @@ pub struct Session {
     file_status: Option<FileStatus>,
     /// The commit HEAD points to, once the references are known.
     head_commit: Option<ObjectId>,
+    search: Search,
 }
 
 impl fmt::Debug for Session {
@@ -179,6 +181,11 @@ impl Session {
     pub fn new(opened: OpenedRepository, backend: Arc<dyn Backend>, notify: Notify) -> Session {
         let history = empty_history();
         let details = Details::new(
+            Arc::clone(&backend),
+            opened.root.clone(),
+            Arc::clone(&notify),
+        );
+        let search = Search::new(
             Arc::clone(&backend),
             opened.root.clone(),
             Arc::clone(&notify),
@@ -228,6 +235,7 @@ impl Session {
             details,
             file_status,
             head_commit: None,
+            search,
         }
     }
 
@@ -284,11 +292,7 @@ impl Session {
             self.count_result = None;
             return;
         }
-        let revisions = match &self.filter {
-            BranchFilter::All => Revisions::all(&self.opened.head),
-            BranchFilter::Current => Revisions::current(),
-            BranchFilter::Selected(names) => Revisions::selected(names.clone()),
-        };
+        let revisions = self.revisions();
         lock(&self.history).state = LoadState::Loading;
 
         let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
@@ -330,8 +334,22 @@ impl Session {
         });
     }
 
+    /// The start points of the history the branch filter shows.
+    fn revisions(&self) -> Revisions {
+        match &self.filter {
+            BranchFilter::All => Revisions::all(&self.opened.head),
+            BranchFilter::Current => Revisions::current(),
+            BranchFilter::Selected(names) => Revisions::selected(names.clone()),
+        }
+    }
+
     /// Applies finished background work. Returns whether anything changed.
     pub fn poll(&mut self) -> bool {
+        self.poll_at(Instant::now())
+    }
+
+    /// Like [`Session::poll`], with the clock at `now`.
+    pub fn poll_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if let Some(present) = take(&mut self.graph_check) {
             self.commit_graph = match present {
@@ -422,7 +440,9 @@ impl Session {
             }
             changed = true;
         }
-        changed |= self.details.poll();
+        changed |= self.details.poll_at(now);
+        let revisions = self.revisions();
+        changed |= self.search.poll_at(now, &revisions);
         if let Some(status) = &mut self.file_status {
             changed |= status.poll();
         }
@@ -492,6 +512,8 @@ impl Session {
         if self.started {
             self.start_history();
         }
+        // The matches were those of the other branches.
+        self.search.restart(Instant::now());
     }
 
     /// Finds the commit of the reference with the full `name` in the graph.
@@ -786,6 +808,49 @@ impl Session {
         &self.details
     }
 
+    /// The search of the tab.
+    pub fn search(&self) -> &Search {
+        &self.search
+    }
+
+    /// Searches for `text` in `mode` once it has not changed for a moment;
+    /// an empty text ends the search.
+    pub fn set_search(&mut self, mode: SearchMode, text: &str) {
+        self.set_search_at(mode, text, Instant::now());
+    }
+
+    /// Like [`Session::set_search`], with the clock at `now`.
+    pub fn set_search_at(&mut self, mode: SearchMode, text: &str, now: Instant) {
+        self.search.set(mode, text, now);
+    }
+
+    /// Moves to the next match; the caller navigates to it.
+    pub fn next_match(&mut self) -> Option<ObjectId> {
+        self.search.next()
+    }
+
+    /// Moves to the match before; the caller navigates to it.
+    pub fn previous_match(&mut self) -> Option<ObjectId> {
+        self.search.previous()
+    }
+
+    /// Moves to the match at `index` of the matches; the caller navigates
+    /// to it.
+    pub fn choose_match(&mut self, index: usize) -> Option<ObjectId> {
+        self.search.choose(index)
+    }
+
+    /// Asks for the content of `ids`, such as matches that may not be
+    /// loaded yet.
+    pub fn request_commits(&mut self, ids: Vec<ObjectId>) {
+        self.request_ids(ids);
+    }
+
+    /// What a search by hash found, once.
+    pub fn take_hash_outcome(&mut self) -> Option<HashOutcome> {
+        self.search.take_hash()
+    }
+
     /// The views the Workspace section offers: File status only for a
     /// repository with a working copy.
     pub fn views(&self) -> &'static [View] {
@@ -1003,7 +1068,9 @@ mod tests {
     use super::*;
     use crate::details::ChangedFiles;
     use crate::file_status::StatusState;
+    use crate::search::{SEARCH_DELAY, SearchState};
     use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
+    use gitbull_git::search::{HashMatch, SearchKind};
     use gitbull_git::status::{Group, WorkingStatus};
     use gitbull_testkit::{FakeBackend, Gate, HistoryFeed, LiveRepo, commit_line, fake_id};
     use std::path::PathBuf;
@@ -1197,6 +1264,103 @@ mod tests {
                 && !s.file_status().unwrap().is_refreshing()
         });
         assert_eq!(session.uncommitted_row(), Some(0));
+    }
+
+    /// Polls with the clock at `now` until `done` holds.
+    fn wait_at(session: &mut Session, now: Instant, done: impl Fn(&mut Session) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done(session) {
+            assert!(Instant::now() < deadline, "timed out");
+            session.poll_at(now);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn search_done(session: &mut Session) -> bool {
+        matches!(session.search().state(), SearchState::Done)
+    }
+
+    #[test]
+    fn a_search_starts_once_its_text_has_settled() {
+        let backend = backend().with_history(root(), five_lines()).with_matches(
+            SearchKind::Message,
+            "fix",
+            vec![fake_id("c")],
+        );
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        let start = Instant::now();
+        session.set_search_at(SearchMode::Message, "fi", start);
+        session.set_search_at(
+            SearchMode::Message,
+            "fix",
+            start + Duration::from_millis(250),
+        );
+        session.poll_at(start + Duration::from_millis(500));
+        assert!(probe.searches().is_empty());
+        wait_at(
+            &mut session,
+            start + Duration::from_millis(550),
+            search_done,
+        );
+        assert_eq!(probe.searches(), [(SearchKind::Message, "fix".to_owned())]);
+        assert!(session.search().is_match(&fake_id("c")));
+    }
+
+    #[test]
+    fn a_match_beyond_the_loaded_history_is_selected_once_it_has_loaded() {
+        let feed = HistoryFeed::new();
+        let backend = backend().with_history_feed(root(), &feed).with_matches(
+            SearchKind::Message,
+            "old",
+            vec![fake_id("a")],
+        );
+        let mut session = session(backend);
+        session.show();
+        feed.send(five_lines().into_iter().take(2));
+        wait_until(&mut session, |s| rows(s) == 2);
+        let start = Instant::now();
+        session.set_search_at(SearchMode::Message, "old", start);
+        wait_at(&mut session, start + SEARCH_DELAY, search_done);
+
+        let first = session.next_match().expect("a match");
+        assert_eq!(session.navigate_to_commit(first), Navigation::Waiting);
+        feed.send(five_lines().into_iter().skip(2));
+        feed.finish();
+        wait_until(&mut session, loaded);
+        wait_until(&mut session, |s| s.navigation.is_some());
+        assert_eq!(session.take_navigation(), Some(Navigation::Selected(4)));
+    }
+
+    #[test]
+    fn another_branch_filter_searches_again() {
+        let backend = branched().with_matches(SearchKind::Message, "work", vec![fake_id("x")]);
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        let start = Instant::now();
+        session.set_search_at(SearchMode::Message, "work", start);
+        wait_at(&mut session, start + SEARCH_DELAY, search_done);
+
+        session.set_filter(BranchFilter::Current);
+        wait_until(&mut session, |s| {
+            probe.searches().len() == 2 && search_done(s)
+        });
+    }
+
+    #[test]
+    fn a_search_by_hash_tells_what_it_found_once() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_hash("abcd", HashMatch::Found(fake_id("c")));
+        let mut session = ready(backend);
+        let start = Instant::now();
+        session.set_search_at(SearchMode::Hash, "abcd", start);
+        wait_at(&mut session, start + SEARCH_DELAY, search_done);
+        assert_eq!(
+            session.take_hash_outcome(),
+            Some(HashOutcome::Found(fake_id("c")))
+        );
+        assert_eq!(session.take_hash_outcome(), None);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use gitbull_git::backend::{CommitStream, ContentSource};
+use gitbull_git::backend::{CommitStream, ContentSource, MatchStream};
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::FileChange;
 use gitbull_git::commit_graph::GraphProgress;
@@ -17,6 +17,7 @@ use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
 use gitbull_git::refs::Reference;
 use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
+use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
 use gitbull_git::{Backend, Error};
@@ -66,6 +67,9 @@ pub struct FakeBackend {
     status_gates: Vec<(PathBuf, Gate)>,
     working_diffs: HashMap<(Group, String), FileDiff>,
     working_files: HashMap<String, Vec<u8>>,
+    hashes: HashMap<String, HashMatch>,
+    locations: HashMap<ObjectId, Location>,
+    searches: Vec<(SearchKind, String, Answer)>,
     inspect_delay: Option<std::time::Duration>,
     probe: Probe,
 }
@@ -76,6 +80,14 @@ enum Failure {
     Command { command: String, stderr: String },
     Panic(String),
     Refused,
+}
+
+/// What a search delivers.
+#[derive(Clone)]
+enum Answer {
+    Matches(Vec<ObjectId>),
+    /// The ids of the lines fed.
+    Feed(HistoryFeed),
 }
 
 /// What the structure stream of a repository delivers.
@@ -312,6 +324,45 @@ impl FakeBackend {
     /// The content of `path` in the working copy.
     pub fn with_working_file(mut self, path: &str, content: &[u8]) -> FakeBackend {
         self.working_files.insert(path.to_owned(), content.to_vec());
+        self
+    }
+
+    /// A search by hash for `text` finds `found`; without, it finds nothing.
+    pub fn with_hash(mut self, text: &str, found: HashMatch) -> FakeBackend {
+        self.hashes.insert(text.to_owned(), found);
+        self
+    }
+
+    /// Where `commit` is when the history does not hold it; without, it is
+    /// in the history.
+    pub fn with_location(mut self, commit: ObjectId, location: Location) -> FakeBackend {
+        self.locations.insert(commit, location);
+        self
+    }
+
+    /// A search of `kind` for `text` finds `matches`; any other finds
+    /// nothing.
+    pub fn with_matches(
+        mut self,
+        kind: SearchKind,
+        text: &str,
+        matches: Vec<ObjectId>,
+    ) -> FakeBackend {
+        self.searches
+            .push((kind, text.to_owned(), Answer::Matches(matches)));
+        self
+    }
+
+    /// A search of `kind` for `text` finds the ids of the lines the test
+    /// feeds.
+    pub fn with_search_feed(
+        mut self,
+        kind: SearchKind,
+        text: &str,
+        feed: &HistoryFeed,
+    ) -> FakeBackend {
+        self.searches
+            .push((kind, text.to_owned(), Answer::Feed(feed.clone())));
         self
     }
 
@@ -727,6 +778,66 @@ impl Backend for FakeBackend {
             .unwrap_or_default())
     }
 
+    fn find_hash(
+        &self,
+        repo: &Path,
+        text: &str,
+        _cancel: &CancelToken,
+    ) -> Result<HashMatch, Error> {
+        self.probe.record("find-hash", repo);
+        Ok(self.hashes.get(text).copied().unwrap_or(HashMatch::Unknown))
+    }
+
+    fn locate_commit(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        _revisions: &Revisions,
+        _cancel: &CancelToken,
+    ) -> Result<Location, Error> {
+        self.probe.record("locate-commit", repo);
+        Ok(self
+            .locations
+            .get(commit)
+            .copied()
+            .unwrap_or(Location::InHistory))
+    }
+
+    fn search(
+        &self,
+        repo: &Path,
+        _revisions: &Revisions,
+        kind: SearchKind,
+        text: &str,
+        cancel: &CancelToken,
+    ) -> Result<Box<dyn MatchStream>, Error> {
+        self.probe.record("search", repo);
+        self.probe.lock().searches.push((kind, text.to_owned()));
+        let answer = self
+            .searches
+            .iter()
+            .find(|(k, t, _)| *k == kind && t == text)
+            .map(|(_, _, answer)| answer.clone());
+        Ok(match answer {
+            None => Box::new(FedMatches(Box::new(Lines(VecDeque::new())))),
+            Some(Answer::Matches(ids)) => Box::new(FedMatches(Box::new(Lines(
+                ids.into_iter()
+                    .map(|id| CommitLine {
+                        timestamp: 0,
+                        id,
+                        parents: Vec::new(),
+                    })
+                    .collect(),
+            )))),
+            Some(Answer::Feed(feed)) => {
+                let watched = feed.clone();
+                cancel.on_cancel(move || watched.cancel());
+                feed.started();
+                Box::new(FedMatches(Box::new(feed)))
+            }
+        })
+    }
+
     fn working_diff(
         &self,
         repo: &Path,
@@ -775,6 +886,15 @@ impl Backend for FakeBackend {
 
 /// A stream of lines given in advance.
 struct Lines(VecDeque<CommitLine>);
+
+/// The ids of the lines of a stream, as matches.
+struct FedMatches(Box<dyn CommitStream>);
+
+impl MatchStream for FedMatches {
+    fn next_match(&mut self) -> Result<Option<ObjectId>, Error> {
+        Ok(self.0.next_commit()?.map(|line| line.id))
+    }
+}
 
 impl CommitStream for Lines {
     fn next_commit(&mut self) -> Result<Option<CommitLine>, Error> {
@@ -1029,6 +1149,7 @@ struct ProbeLog {
     compared: Vec<(ObjectId, Option<ObjectId>)>,
     diffs: Vec<(ObjectId, String, Option<usize>)>,
     working_diffs: Vec<(Group, String, Option<usize>)>,
+    searches: Vec<(SearchKind, String)>,
 }
 
 impl Probe {
@@ -1062,6 +1183,11 @@ impl Probe {
     /// the line limit.
     pub fn working_diffs(&self) -> Vec<(Group, String, Option<usize>)> {
         self.lock().working_diffs.clone()
+    }
+
+    /// Every search started: its kind and its text.
+    pub fn searches(&self) -> Vec<(SearchKind, String)> {
+        self.lock().searches.clone()
     }
 
     /// Content sources that have been started and not dropped.

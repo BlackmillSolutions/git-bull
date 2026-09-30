@@ -524,3 +524,149 @@ fn details() {
     }
     assert!(slowest < DETAILS_TARGET, "details took {slowest:?}");
 }
+
+/// The search of the active tab.
+fn active_search(harness: &Harness<'_, App>) -> (bool, usize, bool) {
+    let session = harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .expect("an open tab");
+    let search = session.search();
+    let running = matches!(search.state(), gitbull_core::search::SearchState::Running);
+    let done = matches!(search.state(), gitbull_core::search::SearchState::Done);
+    (running, search.matches().len(), done)
+}
+
+/// How a search went: after it started, the time to its first match and
+/// to its end, its matches, and the frames drawn while it ran.
+struct Searched {
+    first: Option<Duration>,
+    total: Duration,
+    matches: usize,
+    frames: Vec<Duration>,
+}
+
+/// Types `text` into the search field, and while the search runs scrolls
+/// the commit list and selects a commit every 20 frames, which loads its
+/// details and diff.
+fn search_for(harness: &mut Harness<'_, App>, text: &str) -> Searched {
+    for (key, modifiers) in [(Key::F, Modifiers::COMMAND), (Key::A, Modifiers::COMMAND)] {
+        harness.input_mut().events.push(Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        harness.step();
+    }
+    harness.event(Event::Text(text.to_owned()));
+    harness.step();
+    while !active_search(harness).0 {
+        harness.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let started = Instant::now();
+    let (mut first, mut frames) = (None, Vec::new());
+    let center = eframe::egui::pos2(700.0, 300.0);
+    for frame in 0.. {
+        let (running, matches, done) = active_search(harness);
+        if first.is_none() && matches > 0 {
+            first = Some(started.elapsed());
+        }
+        if done {
+            return Searched {
+                first,
+                total: started.elapsed(),
+                matches,
+                frames,
+            };
+        }
+        assert!(running, "the search failed");
+        if frame % 20 == 10 {
+            let row = harness
+                .query_all_by_role(Role::Row)
+                .nth(3)
+                .map(|node| node.rect().center());
+            if let Some(row) = row {
+                harness.hover_at(row);
+                for pressed in [true, false] {
+                    harness.input_mut().events.push(Event::PointerButton {
+                        pos: row,
+                        button: PointerButton::Primary,
+                        pressed,
+                        modifiers: Modifiers::NONE,
+                    });
+                }
+            }
+        } else {
+            harness.hover_at(center);
+            harness.input_mut().events.push(Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: vec2(0.0, -240.0),
+                phase: TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        let at = Instant::now();
+        harness.step();
+        frames.push(at.elapsed());
+    }
+    unreachable!()
+}
+
+#[test]
+#[ignore]
+fn searching() {
+    let repo = repository();
+    eprintln!(
+        "repository: {}, {}, {}",
+        repo.display(),
+        commit_graph(&repo),
+        git_version()
+    );
+    let hooks = hooks();
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![repo],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        checker: Some(Box::new(move |configured| {
+            App::git_parts(check_git(configured, hooks.clone(), None))
+        })),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    while !loaded(&harness) {
+        harness.step();
+    }
+    // A text in one commit, found only at the end of a walk through all of
+    // them, and one in a tenth of them.
+    let rare = search_for(&mut harness, "commit 424242");
+    let frequent = search_for(&mut harness, "commit 7");
+    eprintln!();
+    eprintln!("| Search by message | Matches | First match | Whole search |");
+    eprintln!("|---|---|---|---|");
+    for (text, searched) in [("commit 424242", &rare), ("commit 7", &frequent)] {
+        eprintln!(
+            "| `{text}` | {} | {:.2} s | {:.2} s |",
+            searched.matches,
+            searched.first.unwrap_or_default().as_secs_f64(),
+            searched.total.as_secs_f64()
+        );
+    }
+    eprintln!();
+    eprintln!("| Frames while searching | Frames | Median | 99th percentile | Slowest |");
+    eprintln!("|---|---|---|---|---|");
+    let slowest = [
+        summary("`commit 424242`", rare.frames),
+        summary("`commit 7`", frequent.frames),
+    ];
+    assert!(rare.matches >= 1 && frequent.matches > 100_000);
+    for slowest in slowest {
+        assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
+    }
+}

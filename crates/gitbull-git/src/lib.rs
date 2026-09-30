@@ -24,6 +24,7 @@ pub mod process;
 pub mod records;
 pub mod refs;
 pub mod repository;
+pub mod search;
 pub mod shallow;
 pub mod stashes;
 pub mod status;

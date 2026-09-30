@@ -84,6 +84,13 @@ benchmark prints a table in the form used below.
   the bottom. It measures the time egui needs per frame; drawing on the
   graphics adapter is not included, so the frame times of the real window
   are somewhat higher.
+- `searching` opens the repository in the window, waits until the history
+  has loaded and searches by message twice, typing into the search field.
+  While each search runs it scrolls with the mouse wheel and selects a
+  commit every 20 frames, which loads its details and its diff. It measures
+  the time to the first match and to the end of the search, counted from
+  its start after the 300 ms that it waits for the text to settle, and the
+  time per frame meanwhile.
 
 The benchmarks print their numbers first and then fail if a target of
 `commit-history` is missed: a frame of 16.7 ms or more, or 250 MB of memory
@@ -298,3 +305,26 @@ after it gave the range above. The slowest frame while loading varies from
 run to run: without reading the status it was 6.8 ms and 10.3 ms, so the
 status is not its cause. Median and 99th percentile stayed at 0.9 ms and
 3.9 ms.
+
+## Search by message (task 7.5)
+
+Measured on 2026-09-30 on the same machine, release build, on the
+generated history of task 4.21 with its commit-graph file: one million
+commits with the messages `Commit 1` to `Commit 1000000`.
+
+| Search by message | Matches | First match | Whole search |
+|---|---|---|---|
+| `commit 424242`, in one commit | 1 | 4.09 s | 7.05 s |
+| `commit 7`, in a ninth of the commits | 111,111 | 1.43 s | 5.27 s |
+
+| Frames while searching | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| `commit 424242` | 7,396 | 0.8 ms | 2.0 ms | 5.2 ms | yes, under 16.7 ms |
+| `commit 7` | 5,616 | 0.8 ms | 2.1 ms | 10.8 ms | yes, under 16.7 ms |
+
+The interface stays responsive while a search reads every commit: frames
+stay as fast as without a search, also while 111,111 matches arrive and are
+marked. The search itself takes seconds, as ADR 0004 accepts: Git reads the
+message of every commit. The first match comes when the walk reaches it;
+the newest commit with `commit 7` in its message is about 200,000 commits
+down.

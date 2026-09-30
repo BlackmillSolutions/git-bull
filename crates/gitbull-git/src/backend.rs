@@ -21,6 +21,7 @@ use crate::object_id::ObjectId;
 use crate::path::RepoPath;
 use crate::refs::{self, Reference};
 use crate::repository::{self, RepositoryInfo};
+use crate::search::{self, HashMatch, Location, SearchKind, SearchStream};
 use crate::shallow;
 use crate::stashes::{self, Stash, Submodule};
 use crate::status::{self, Group, StatusEntry, WorkingStatus};
@@ -30,6 +31,12 @@ use crate::working_copy;
 pub trait CommitStream: Send {
     /// The next commit, or `None` at the end of the history.
     fn next_commit(&mut self) -> Result<Option<CommitLine>, Error>;
+}
+
+/// The matches of a search, newest first. Dropping it stops the search.
+pub trait MatchStream: Send {
+    /// The next match, or `None` when the search has ended.
+    fn next_match(&mut self) -> Result<Option<ObjectId>, Error>;
 }
 
 /// Answers requests for commit content in the background. Dropping it stops
@@ -126,6 +133,29 @@ pub trait Backend: Send + Sync {
 
     /// The uncommitted changes of the working copy.
     fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error>;
+
+    /// The commit whose hash starts with `text`.
+    fn find_hash(&self, repo: &Path, text: &str, cancel: &CancelToken) -> Result<HashMatch, Error>;
+
+    /// Where `commit` is, compared with the history `revisions` show.
+    fn locate_commit(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        revisions: &Revisions,
+        cancel: &CancelToken,
+    ) -> Result<Location, Error>;
+
+    /// Starts a search for `text` among the commits reachable from
+    /// `revisions`.
+    fn search(
+        &self,
+        repo: &Path,
+        revisions: &Revisions,
+        kind: SearchKind,
+        text: &str,
+        cancel: &CancelToken,
+    ) -> Result<Box<dyn MatchStream>, Error>;
 
     /// The diff of `entry` of the file status, as `group` compares it; with
     /// a `limit`, up to that many lines of hunks.
@@ -261,6 +291,33 @@ impl Backend for CliBackend {
         status::status(&self.git, repo, cancel)
     }
 
+    fn find_hash(&self, repo: &Path, text: &str, cancel: &CancelToken) -> Result<HashMatch, Error> {
+        search::find_hash(&self.git, repo, text, cancel)
+    }
+
+    fn locate_commit(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        revisions: &Revisions,
+        cancel: &CancelToken,
+    ) -> Result<Location, Error> {
+        search::locate_commit(&self.git, repo, commit, revisions, cancel)
+    }
+
+    fn search(
+        &self,
+        repo: &Path,
+        revisions: &Revisions,
+        kind: SearchKind,
+        text: &str,
+        cancel: &CancelToken,
+    ) -> Result<Box<dyn MatchStream>, Error> {
+        Ok(Box::new(search::search(
+            &self.git, repo, revisions, kind, text, cancel,
+        )?))
+    }
+
     fn working_diff(
         &self,
         repo: &Path,
@@ -285,6 +342,12 @@ impl Backend for CliBackend {
 impl CommitStream for HistoryStream {
     fn next_commit(&mut self) -> Result<Option<CommitLine>, Error> {
         HistoryStream::next_commit(self)
+    }
+}
+
+impl MatchStream for SearchStream {
+    fn next_match(&mut self) -> Result<Option<ObjectId>, Error> {
+        SearchStream::next_match(self)
     }
 }
 

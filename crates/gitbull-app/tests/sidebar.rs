@@ -269,8 +269,17 @@ fn checked_out(harness: &Harness<'_, App>) -> Vec<String> {
         .collect()
 }
 
+/// The filter field of the sidebar, below the search field of the toolbar.
 fn filter_field<'a>(harness: &'a Harness<'_, App>) -> egui_kittest::Node<'a> {
-    harness.get_by_role(Role::TextInput)
+    lowest(harness, Role::TextInput)
+}
+
+/// The node of `role` that is lowest in the window.
+fn lowest<'a>(harness: &'a Harness<'_, App>, role: Role) -> egui_kittest::Node<'a> {
+    harness
+        .query_all_by_role(role)
+        .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("a node of the role")
 }
 
 #[test]
@@ -490,8 +499,9 @@ fn per_filter() -> FakeBackend {
         .with_history_for(root(), &DIFF_VIEW, lines().into_iter().skip(2).collect())
 }
 
+/// The branch filter, below the mode of the search in the toolbar.
 fn branch_filter<'a>(harness: &'a Harness<'_, App>) -> egui_kittest::Node<'a> {
-    harness.get_by_role(Role::ComboBox)
+    lowest(harness, Role::ComboBox)
 }
 
 fn choose_filter(harness: &mut Harness<'_, App>, option: &str) {

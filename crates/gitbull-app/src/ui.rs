@@ -30,9 +30,15 @@ use crate::file_status_view::{self, STATUS_LIST};
 use crate::i18n;
 use crate::i18n::Msg;
 use crate::paths::System;
+use crate::search_view;
 use crate::sidebar_view::{self, SidebarAction};
 use crate::theme::{Appearance, Palette, Rgb};
+use gitbull_core::search::{Search, SearchMode, SearchState};
 use gitbull_core::session::{BranchFilter, LoadState, Session};
+use gitbull_git::object_id::ObjectId;
+use std::time::Duration;
+
+use crate::commit_list::SHORT_HASH;
 
 /// The areas of the History view, in the order Tab moves through them.
 /// Each is one focusable widget, found by these ids.
@@ -77,7 +83,20 @@ enum Action {
     ShowAllBranches(String),
     /// Look for changes made outside git-bull in the tab shown.
     Refresh,
+    /// Search the tab shown in this mode for this text.
+    Search(SearchMode, String),
+    NextMatch,
+    PreviousMatch,
+    /// Give the search field the keyboard focus.
+    FocusSearch,
 }
+
+/// The id of the search field in the toolbar.
+pub const SEARCH_FIELD: &str = "search-field";
+
+/// While a search waits for its text to settle or runs, the window looks
+/// for its matches this often.
+const SEARCH_REPAINT: Duration = Duration::from_millis(50);
 
 /// Draws the whole window.
 pub fn show(app: &mut App, ui: &mut Ui) {
@@ -92,8 +111,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     actions.extend(dropped_folders(ui));
     actions.extend(shortcuts(ui));
+    let focus_search = actions
+        .iter()
+        .any(|action| matches!(action, Action::FocusSearch));
     Panel::top("tab_bar").show(ui, |ui| tab_bar(app, ui, &mut actions));
-    Panel::top("toolbar").show(ui, |ui| toolbar(app, ui, &mut actions));
+    Panel::top("toolbar").show(ui, |ui| toolbar(app, ui, focus_search, &mut actions));
     if app.dialog.is_some() {
         settings_dialog(app, ui, &mut actions);
     }
@@ -166,6 +188,15 @@ fn apply(app: &mut App, actions: Vec<Action>) {
                     workspace.refresh_active();
                 }
             }
+            Action::Search(mode, text) => {
+                if let Some((session, _)) = app.active_view() {
+                    session.set_search(mode, &text);
+                }
+            }
+            Action::NextMatch => app.next_match(),
+            Action::PreviousMatch => app.previous_match(),
+            // The toolbar has taken it.
+            Action::FocusSearch => {}
             Action::CheckGitAgain => app.check_again(),
             Action::ChooseGit => app.choose_git(),
             Action::SetTheme(theme) => app.set_theme(theme),
@@ -359,6 +390,9 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
         {
             actions.push(Action::Refresh);
         }
+        if input.consume_key(Modifiers::COMMAND, Key::F) {
+            actions.push(Action::FocusSearch);
+        }
         // Returning to the window may follow work in a terminal.
         if input
             .events
@@ -444,13 +478,33 @@ fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>
             }
             Notice::HiddenByFilter(reference) => {
                 let mut args = FluentArgs::new();
-                let short = reference
-                    .strip_prefix("refs/heads/")
-                    .or_else(|| reference.strip_prefix("refs/remotes/"))
-                    .or_else(|| reference.strip_prefix("refs/tags/"))
-                    .unwrap_or(reference);
-                args.set("reference", short.to_owned());
+                // A reference by its short name, a commit by its short hash.
+                let short = match ObjectId::from_hex(reference.as_bytes()) {
+                    Some(id) => id.short(SHORT_HASH),
+                    None => reference
+                        .strip_prefix("refs/heads/")
+                        .or_else(|| reference.strip_prefix("refs/remotes/"))
+                        .or_else(|| reference.strip_prefix("refs/tags/"))
+                        .unwrap_or(reference)
+                        .to_owned(),
+                };
+                args.set("reference", short);
                 app.texts.text_with(Msg::NoticeHiddenByFilter, Some(&args))
+            }
+            Notice::HashUnknown(hash) => {
+                let mut args = FluentArgs::new();
+                args.set("hash", hash.clone());
+                app.texts.text_with(Msg::NoticeHashUnknown, Some(&args))
+            }
+            Notice::HashAmbiguous(hash) => {
+                let mut args = FluentArgs::new();
+                args.set("hash", hash.clone());
+                app.texts.text_with(Msg::NoticeHashAmbiguous, Some(&args))
+            }
+            Notice::NotInHistory(commit) => {
+                let mut args = FluentArgs::new();
+                args.set("commit", commit.clone());
+                app.texts.text_with(Msg::NoticeNotInHistory, Some(&args))
             }
             Notice::NotACommit(tag) => {
                 let mut args = FluentArgs::new();
@@ -507,13 +561,22 @@ fn tab_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     });
 }
 
-fn toolbar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         if ui.button(app.texts.text(Msg::ToolbarOpen)).clicked() {
             actions.push(Action::ShowChooser);
         }
         if ui.button(app.texts.text(Msg::ToolbarRefresh)).clicked() {
             actions.push(Action::Refresh);
+        }
+        let search = app
+            .workspace()
+            .and_then(|workspace| workspace.active())
+            .and_then(|tab| tab.session())
+            .map(|session| session.search());
+        if let Some(search) = search {
+            ui.separator();
+            search_bar(app, ui, search, focus_search, actions);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button(app.texts.text(Msg::ToolbarSettings)).clicked() {
@@ -524,6 +587,77 @@ fn toolbar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
             });
         });
     });
+}
+
+/// The search field with its mode, Previous and Next, and the number of
+/// matches.
+fn search_bar(app: &App, ui: &mut Ui, search: &Search, focus: bool, actions: &mut Vec<Action>) {
+    let modes = [
+        (SearchMode::Message, Msg::SearchModeMessage),
+        (SearchMode::Author, Msg::SearchModeAuthor),
+        (SearchMode::Path, Msg::SearchModePath),
+        (SearchMode::Hash, Msg::SearchModeHash),
+    ];
+    let mut mode = search.mode();
+    let shown = modes
+        .iter()
+        .find(|(m, _)| *m == mode)
+        .map(|(_, msg)| app.texts.text(*msg))
+        .unwrap_or_default();
+    egui::ComboBox::from_id_salt("search-mode")
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for (value, msg) in modes {
+                ui.selectable_value(&mut mode, value, app.texts.text(msg));
+            }
+        });
+    let mut text = search.text().to_owned();
+    let field = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id(Id::new(SEARCH_FIELD))
+            .hint_text(app.texts.text(Msg::SearchHint))
+            .desired_width(260.0),
+    );
+    if focus {
+        field.request_focus();
+    }
+    if mode != search.mode() || text != search.text() {
+        actions.push(Action::Search(mode, text));
+    }
+    // Enter in the field goes to the next match.
+    if field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
+        actions.push(Action::NextMatch);
+    }
+    let found = !search.matches().is_empty();
+    if ui
+        .add_enabled(
+            found,
+            egui::Button::new(app.texts.text(Msg::SearchPrevious)),
+        )
+        .clicked()
+    {
+        actions.push(Action::PreviousMatch);
+    }
+    if ui
+        .add_enabled(found, egui::Button::new(app.texts.text(Msg::SearchNext)))
+        .clicked()
+    {
+        actions.push(Action::NextMatch);
+    }
+    if search.mode() != SearchMode::Hash && !search.text().trim().is_empty() {
+        let mut args = FluentArgs::new();
+        args.set("count", search.matches().len());
+        match search.state() {
+            SearchState::Waiting | SearchState::Running => {
+                ui.spinner();
+                ui.weak(app.texts.text_with(Msg::SearchRunning, Some(&args)));
+            }
+            SearchState::Done => {
+                ui.weak(app.texts.text_with(Msg::SearchCount, Some(&args)));
+            }
+            SearchState::Idle | SearchState::Failed(_) => {}
+        }
+    }
 }
 
 /// Radio buttons for the theme, used by the toolbar and the dialog.
@@ -663,6 +797,15 @@ fn history(app: &mut App, ui: &mut Ui) {
     let layout = app.settings().layout;
     let palette = palette(app, ui);
     app.poll_navigation();
+    app.poll_search();
+    // The search starts once its text has settled, and its matches arrive
+    // meanwhile; nothing else may wake the window for them.
+    if app
+        .active_view()
+        .is_some_and(|(session, _)| session.search().is_busy())
+    {
+        ui.ctx().request_repaint_after(SEARCH_REPAINT);
+    }
 
     let mut sidebar_actions = Vec::new();
     let sidebar = Panel::left("sidebar")
@@ -712,8 +855,7 @@ fn history(app: &mut App, ui: &mut Ui) {
             });
         }
         View::Search => {
-            let title = app.texts.text(Msg::ViewSearch);
-            CentralPanel::default().show(ui, |ui| view_placeholder(ui, title));
+            CentralPanel::default().show(ui, |ui| search_view::show(app, ui, palette));
         }
     }
     if shown == View::History {
@@ -760,18 +902,6 @@ fn history(app: &mut App, ui: &mut Ui) {
         layout.sidebar_width = Some(sidebar_width);
         layout.details_height = Some(details_height);
         layout.commit_panel_width = Some(commit_panel_width);
-    });
-}
-
-/// Makes a panel take the full size it was given. A panel in egui 0.36 is
-/// only as large as its contents, which would make stored divider positions
-/// meaningless.
-/// The main area of a view that has no content yet.
-fn view_placeholder(ui: &mut Ui, title: String) {
-    let response = ui.heading(&title);
-    ui.ctx().accesskit_node_builder(response.id, |node| {
-        node.set_role(egui::accesskit::Role::Heading);
-        node.set_label(title);
     });
 }
 
@@ -865,6 +995,9 @@ pub(crate) fn appearance(app: &App, ui: &Ui) -> Appearance {
     app.appearance(reported)
 }
 
+/// Makes a panel take the full size it was given. A panel in egui 0.36 is
+/// only as large as its contents, which would make stored divider positions
+/// meaningless.
 fn fill(ui: &mut Ui) {
     let size = ui.available_size();
     ui.set_min_size(size);

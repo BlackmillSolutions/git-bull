@@ -127,7 +127,7 @@ fn past_title(rows: &[StatusRow], row: usize, before: Option<u64>) -> Option<usi
 fn entry_marker(kind: StatusKind, palette: &Palette) -> (&'static str, Color32) {
     match kind {
         StatusKind::Changed(kind) => (marker(kind), marker_color(kind, palette)),
-        StatusKind::Conflicted => ("!", color(palette.status_deleted)),
+        StatusKind::Conflicted => ("!", color(palette.status_conflict)),
         StatusKind::Untracked => ("?", color(palette.status_added)),
     }
 }

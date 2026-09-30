@@ -88,13 +88,15 @@ const BADGE_HEIGHT: f32 = 17.0;
 const BADGE_PADDING: f32 = 5.0;
 const BADGE_GAP: f32 = 4.0;
 /// Digits of the abbreviated hash.
-const SHORT_HASH: usize = 7;
+pub(crate) const SHORT_HASH: usize = 7;
 
 /// What one row shows, collected before drawing so that the history is
 /// locked only briefly.
 struct RowData {
     /// The row "Uncommitted changes", not a commit.
     uncommitted: bool,
+    /// The commit is a match of the search.
+    matched: bool,
     date: String,
     /// The date with its original offset, once the content has arrived.
     tooltip: Option<String>,
@@ -145,7 +147,10 @@ pub(crate) fn list_row(uncommitted: Option<u64>, commit: u64) -> u64 {
 
 /// Draws the column headers and the list of the active tab.
 pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
-    let loading = app.texts.text(Msg::RowLoading);
+    let row_texts = RowTexts {
+        loading: app.texts.text(Msg::RowLoading),
+        matched: app.texts.text(Msg::SearchMatch),
+    };
     let uncommitted_text = app.texts.text(Msg::HistoryUncommitted);
     let empty = app.texts.text(Msg::HistoryEmpty);
     let copy_label = app.texts.text(Msg::CopyFullHash);
@@ -269,7 +274,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
                 .checked_sub(gathered.start)
                 .and_then(|i| data.get(i as usize))
             {
-                draw_row(ui, data, selected, palette, &loading, graph_width, lanes);
+                draw_row(ui, data, selected, palette, &row_texts, graph_width, lanes);
             }
         },
     );
@@ -530,6 +535,7 @@ fn gather(
         let Some(commit) = list.commit(row) else {
             data.push(RowData {
                 uncommitted: true,
+                matched: false,
                 date: String::new(),
                 tooltip: None,
                 summary: Some(uncommitted_text.to_owned()),
@@ -585,6 +591,7 @@ fn commit_data(
     };
     RowData {
         uncommitted: false,
+        matched: session.search().is_match(&id),
         date: local_date(timestamp, zone),
         tooltip,
         summary,
@@ -614,16 +621,32 @@ fn columns(rect: Rect, graph_width: f32) -> [Rect; 5] {
     [graph, description, date, author, commit]
 }
 
+/// The texts a row may show, read before the tab is borrowed.
+struct RowTexts {
+    loading: String,
+    /// For assistive technology, on the row of a match.
+    matched: String,
+}
+
 fn draw_row(
     ui: &mut Ui,
     data: &RowData,
     selected: bool,
     palette: &Palette,
-    loading: &str,
+    texts: &RowTexts,
     graph_width: f32,
     lanes: usize,
 ) {
+    let loading = texts.loading.as_str();
     let rect = ui.max_rect();
+    if data.matched {
+        // A bar at the left edge and a tint mark the matches of a search.
+        let accent = color(palette.accent);
+        ui.painter()
+            .rect_filled(rect, 0.0, accent.gamma_multiply(0.14));
+        let bar = Rect::from_min_size(rect.min, vec2(3.0, rect.height()));
+        ui.painter().rect_filled(bar, 0.0, accent);
+    }
     let [graph, description, date, author, commit] = columns(rect, graph_width);
     let shapes = graph_view::shapes(&data.graph, lanes, graph.height(), data.boundary);
     paint_graph(ui, graph, &shapes, palette);
@@ -644,6 +667,9 @@ fn draw_row(
     ui.ctx().accesskit_node_builder(row.id, |node| {
         node.set_role(Role::Row);
         node.set_selected(selected);
+        if data.matched {
+            node.set_description(texts.matched.as_str());
+        }
     });
 
     let summary_left = draw_badges(ui, description, &data.badges, palette);

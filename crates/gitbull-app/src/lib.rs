@@ -10,6 +10,7 @@ pub mod graph_view;
 pub mod i18n;
 pub mod native;
 pub mod paths;
+pub mod search_view;
 pub mod sidebar_view;
 pub mod theme;
 pub mod ui;

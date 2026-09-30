@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gitbull_core::git_setup::GitCheck;
+use gitbull_core::search::HashOutcome;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
 use gitbull_core::settings::{
     Layout, Loaded, Settings, SettingsFile, ThemeSetting, WindowGeometry,
@@ -19,7 +20,7 @@ use gitbull_git::version::GitVersion;
 use gitbull_git::{Backend, CliBackend};
 use jiff::tz::TimeZone;
 
-use crate::commit_list::list_row;
+use crate::commit_list::{SHORT_HASH, list_row};
 use crate::i18n::Translations;
 use crate::theme::{Appearance, ThemeFollower};
 use crate::virtual_list::ListState;
@@ -67,11 +68,17 @@ pub type GitChecker = Box<dyn Fn(Option<&Path>) -> (GitStatus, Option<Arc<dyn Ba
 pub enum Notice {
     /// The folder the user opened is not inside a Git repository.
     NotARepository(PathBuf),
-    /// The commit of the reference with this full name is not in the graph
-    /// the branch filter shows.
+    /// The commit of the reference with this full name, or with this full
+    /// hash, is not in the graph the branch filter shows.
     HiddenByFilter(String),
     /// The tag with this name points to a tree or a file.
     NotACommit(String),
+    /// No commit has a hash that starts with this text.
+    HashUnknown(String),
+    /// Several commits have a hash that starts with this text.
+    HashAmbiguous(String),
+    /// No reference leads to the commit with this hash.
+    NotInHistory(String),
 }
 
 /// The settings dialog while it is open.
@@ -124,6 +131,8 @@ pub(crate) struct TabView {
     /// The commit whose files `files` lists, to select the first file of
     /// the next one.
     pub(crate) files_for: Option<ObjectId>,
+    /// The matches of the Search view.
+    pub(crate) search_results: ListState,
     /// The files of the File status view.
     pub(crate) status_files: ListState,
     /// The version of the status `status_files` shows, to select the file
@@ -560,11 +569,70 @@ impl App {
         }
     }
 
-    /// Shows all branches and goes to the reference again.
+    /// Shows all branches and goes to the reference, or to the commit with
+    /// this full hash, again.
     pub(crate) fn show_all_branches(&mut self, name: &str) {
         self.notice = None;
         self.set_branch_filter(BranchFilter::All);
-        self.navigate(name);
+        match ObjectId::from_hex(name.as_bytes()) {
+            Some(id) => self.navigate_to_commit(id),
+            None => self.navigate(name),
+        }
+    }
+
+    /// Selects the next match of the search in the History view.
+    pub(crate) fn next_match(&mut self) {
+        let found = self
+            .active_view()
+            .and_then(|(session, _)| session.next_match());
+        self.go_to_match(found);
+    }
+
+    /// Selects the match before in the History view.
+    pub(crate) fn previous_match(&mut self) {
+        let found = self
+            .active_view()
+            .and_then(|(session, _)| session.previous_match());
+        self.go_to_match(found);
+    }
+
+    /// Selects the match at `index`, chosen in the Search view, in the
+    /// History view.
+    pub(crate) fn choose_match(&mut self, index: usize) {
+        let found = self
+            .active_view()
+            .and_then(|(session, _)| session.choose_match(index));
+        self.go_to_match(found);
+    }
+
+    fn go_to_match(&mut self, found: Option<ObjectId>) {
+        if let Some(id) = found {
+            self.show_view(View::History);
+            self.navigate_to_commit(id);
+        }
+    }
+
+    /// Acts on what a search by hash found: selects the commit, or says why
+    /// it cannot.
+    pub(crate) fn poll_search(&mut self) {
+        let Some((session, _)) = self.active_view() else {
+            return;
+        };
+        let text = session.search().text().trim().to_owned();
+        let Some(outcome) = session.take_hash_outcome() else {
+            return;
+        };
+        match outcome {
+            HashOutcome::Found(id) => self.go_to_match(Some(id)),
+            HashOutcome::HiddenByFilter(id) => {
+                self.notice = Some(Notice::HiddenByFilter(id.to_string()));
+            }
+            HashOutcome::NotInHistory(id) => {
+                self.notice = Some(Notice::NotInHistory(id.short(SHORT_HASH)));
+            }
+            HashOutcome::Unknown => self.notice = Some(Notice::HashUnknown(text)),
+            HashOutcome::Ambiguous => self.notice = Some(Notice::HashAmbiguous(text)),
+        }
     }
 
     /// Forgets what the UI kept for tabs that are closed.

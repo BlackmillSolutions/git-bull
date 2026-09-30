@@ -139,9 +139,10 @@ literally, and it passes the neutralised filter drivers of the repository.
 | Diff of one file | `git diff-tree -r -p -M -C --full-index -U3` restricted to the paths of that file; for a binary file the sizes of both blobs from `git cat-file --batch-check` |
 | Working-copy status | `git status --porcelain=v2 -z --untracked-files=all --ignore-submodules=dirty` |
 | Working-copy diff | `git diff` and `git diff --cached -M`, restricted to the paths of one file; `git diff HEAD` for a conflicted file; `git diff --no-index -- /dev/null <path>` for an untracked file, whose exit code 1 means that the files differ |
-| Search by hash | `git rev-parse --verify --quiet <prefix>^{commit}` |
-| Search by message or author | `git rev-list -i --fixed-strings --grep=<text> <revisions>`, or the same with `--author=<text>` |
-| Search by path | `git rev-list <revisions> -- <path>` |
+| Search by hash | `git rev-parse --disambiguate=<prefix>`, and the types of the objects it names from `git cat-file --batch-check`; only commits count |
+| Where a found commit is | `git for-each-ref --contains=<commit> refs/heads refs/remotes refs/tags`, and `git merge-base --is-ancestor <commit> <revision>` for the revisions of the filter and for a detached HEAD |
+| Search by message or author | `git rev-list --date-order -i --fixed-strings --grep=<text> <revisions>`, or the same with `--author=<text>` |
+| Search by path | `git rev-list --date-order <revisions> -- <path>` |
 | File history | `git log --follow -M --format=<format> --name-status -- <path>` |
 | Blame | `git blame --incremental --no-textconv --no-ignore-revs-file [--ignore-revs-file=<trusted path>...] <revision> -- <path>` |
 | Generate commit-graph | `git commit-graph write --reachable --changed-paths --progress` |
@@ -442,6 +443,12 @@ choice:
 | Groups of the File status view | Only groups that have files are listed, under a title with their number of files. Titles are not selected: the selection moves on to the file next to them in the direction it moved. The first file is chosen when none is. The list shares its width with the commit panel |
 | New version of a working-copy diff | The file in the working copy, read directly for highlighting and for the size of a binary file. A symbolic link reads as its target and is not followed. Git names the working copy by the hash of its content, which is no blob of the object database |
 | Filters and the size of a file | Git counts a file whose size differs from the index as modified without running a filter; a filter of the repository matters only for files of the same size |
+| Search by hash | The commits among the objects whose name starts with the text. `git rev-parse --verify <prefix>^{commit}` reported a prefix that only a file has as an error, not as unknown |
+| Searches and the tags | A search walks the same revisions as the history, with the tags that no branch reaches |
+| Matches of a search | In the order of the commit list. The UI takes at most 10,000 in a frame, and the search wakes it at most every 50 ms; while a search waits for its text or runs, the window looks for its matches every 50 ms as well |
+| Next and Previous | Move on from the match moved to last, or chosen in the Search view. Enter in the search field goes to the next match. A match that has not loaded yet is selected once it has |
+| A match chosen in the Search view, or a hash found | Selected in the History view. A hash hidden by the branch filter gets the notice that offers all branches, as a reference does |
+| Another branch filter | The search runs again, as its matches were those of the other branches |
 | Growing the commit store | Columns grow by chunks of 65,536 rows, and the id index moves its rows into a table of twice the size two per appended commit. Commits are appended on the UI thread, and growing everything at once took 33 ms at 900,000 commits |
 
 ## Risks / Trade-offs

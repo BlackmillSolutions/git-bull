@@ -92,11 +92,11 @@ after each stage.
 
 ## 7. Commit search
 
-- [ ] 7.1 Implement search by hash for full, abbreviated, unknown and ambiguous hashes, for a commit hidden by the branch filter and for a commit that no branch leads to; verify integration tests for each
-- [ ] 7.2 Implement streaming search within the branch filter: by message and author, literal and without regard to case, and by exact file or folder path; verify integration tests including the text `a.b`, a file name without its folder and the path `a[1].txt`
-- [ ] 7.3 Implement the search state: start after 300 ms, cancel on new input, clear, and select a match once it has loaded; verify session tests with a controlled clock
-- [ ] 7.4 Build the search field with mode selector, marks in the commit list, the Search view, Next and Previous, and the note for no matches, with Ctrl+F focusing the search field; verify UI tests for every scenario of `commit-search`, and a UI test for Ctrl+F
-- [ ] 7.5 Measure responsiveness during a search by message on the generated repository; verify the result is recorded in `docs/benchmarks.md`
+- [x] 7.1 Implement search by hash for full, abbreviated, unknown and ambiguous hashes, for a commit hidden by the branch filter and for a commit that no branch leads to; verify integration tests for each
+- [x] 7.2 Implement streaming search within the branch filter: by message and author, literal and without regard to case, and by exact file or folder path; verify integration tests including the text `a.b`, a file name without its folder and the path `a[1].txt`
+- [x] 7.3 Implement the search state: start after 300 ms, cancel on new input, clear, and select a match once it has loaded; verify session tests with a controlled clock
+- [x] 7.4 Build the search field with mode selector, marks in the commit list, the Search view, Next and Previous, and the note for no matches, with Ctrl+F focusing the search field; verify UI tests for every scenario of `commit-search`, and a UI test for Ctrl+F
+- [x] 7.5 Measure responsiveness during a search by message on the generated repository; verify the result is recorded in `docs/benchmarks.md`
 
 ## 8. File history and blame
 

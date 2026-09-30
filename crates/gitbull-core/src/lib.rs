@@ -14,6 +14,7 @@ pub mod graph;
 pub mod highlight;
 pub mod opening;
 mod pending;
+pub mod search;
 pub mod session;
 pub mod settings;
 pub mod sidebar_tree;

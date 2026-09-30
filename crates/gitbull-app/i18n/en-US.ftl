@@ -33,6 +33,32 @@ notice-dismiss = Dismiss
 notice-hidden-by-filter = The commit of { $reference } is hidden by the branch filter.
 notice-show-all-branches = Show all branches
 notice-not-a-commit = The tag { $tag } does not point to a commit.
+notice-hash-unknown = No commit was found for { $hash }.
+notice-hash-ambiguous = The hash { $hash } is ambiguous: several commits start with it.
+notice-not-in-history = The commit { $commit } exists but is not part of the displayed history.
+
+## Search
+
+search-hint = Search commits…
+search-mode-hash = Hash
+search-mode-message = Message
+search-mode-author = Author
+search-mode-path = File path
+search-next = Next
+search-previous = Previous
+search-running = Searching… { $count ->
+    [one] { $count } match
+   *[other] { $count } matches
+}
+search-count = { $count ->
+    [one] { $count } match
+   *[other] { $count } matches
+}
+search-none = Nothing was found.
+search-empty = Type in the search field above to search the commits.
+search-hash-hint = A search by hash selects the commit in the History view.
+search-failed = The search failed: { $error }
+search-match = Search match
 
 ## Toolbar
 

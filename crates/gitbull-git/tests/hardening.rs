@@ -62,6 +62,16 @@ fn design_commands() -> Vec<Vec<String>> {
         ),
         with(&["rev-list", "-i", "--fixed-strings", "--author=ada"], &all),
         with(&["rev-list", "HEAD", "--"], &["file.txt"]),
+        // Search by hash, and where a found commit is.
+        with(&["rev-parse", "--disambiguate=abcd"], &[]),
+        with(
+            &["for-each-ref", "--format=%(refname)", "--contains=HEAD"],
+            &["refs/heads", "refs/remotes", "refs/tags"],
+        ),
+        with(
+            &["merge-base", "--is-ancestor", "--end-of-options"],
+            &["HEAD~1", "HEAD"],
+        ),
         with(
             &[
                 "diff-tree",

@@ -218,12 +218,7 @@ impl Details {
         self.pane.show(None);
     }
 
-    /// Applies what has loaded. Returns whether anything changed.
-    pub(crate) fn poll(&mut self) -> bool {
-        self.poll_at(Instant::now())
-    }
-
-    /// Like [`Details::poll`], at `now`.
+    /// Applies what has loaded by `now`. Returns whether anything changed.
     pub(crate) fn poll_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if let Some(since) = self.settling
@@ -329,7 +324,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !done(details) {
             assert!(Instant::now() < deadline, "timed out");
-            details.poll();
+            details.poll_at(Instant::now());
             std::thread::sleep(Duration::from_millis(1));
         }
     }
@@ -393,7 +388,7 @@ mod tests {
         wait_until(&mut details, files_loaded);
         assert_eq!(paths(details.files()), ["of-b.txt"]);
         std::thread::sleep(Duration::from_millis(20));
-        details.poll();
+        details.poll_at(Instant::now());
         assert_eq!(paths(details.files()), ["of-b.txt"]);
     }
 
@@ -403,7 +398,7 @@ mod tests {
         details.select(Some(fake_id("a")), None);
         wait_until(&mut details, files_loaded);
         details.select(Some(fake_id("a")), None);
-        details.poll();
+        details.poll_at(Instant::now());
         assert_eq!(probe.compared().len(), 1);
         assert!(matches!(details.files(), ChangedFiles::Loaded(_)));
     }
@@ -469,7 +464,7 @@ mod tests {
         details.select_file(Some(1));
         wait_until(&mut details, diff_loaded);
         std::thread::sleep(Duration::from_millis(20));
-        details.poll();
+        details.poll_at(Instant::now());
         assert_eq!(shown_path(&details), "two.txt");
     }
 

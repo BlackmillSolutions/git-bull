@@ -25,8 +25,8 @@ pub struct CommitLine {
 /// The start points of a history walk, following the branch filter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Revisions {
-    all_references: bool,
-    names: Vec<String>,
+    pub(crate) all_references: bool,
+    pub(crate) names: Vec<String>,
 }
 
 impl Revisions {
@@ -85,6 +85,23 @@ impl Revisions {
 
 /// Commits newest first by commit date, never a parent before its child.
 pub struct HistoryStream {
+    lines: WalkLines,
+}
+
+impl HistoryStream {
+    /// Stops the stream from another thread.
+    pub fn canceller(&self) -> Option<Canceller> {
+        self.lines.canceller()
+    }
+
+    /// The next commit, or `None` at the end of the history.
+    pub fn next_commit(&mut self) -> Result<Option<CommitLine>, Error> {
+        self.lines.next_parsed(parse_line)
+    }
+}
+
+/// The lines of a running `git rev-list`, one commit each.
+pub(crate) struct WalkLines {
     running: Option<Running>,
 }
 
@@ -96,18 +113,41 @@ struct Running {
     registration: Registration,
 }
 
-impl HistoryStream {
-    /// Stops the stream from another thread.
-    pub fn canceller(&self) -> Option<Canceller> {
+impl WalkLines {
+    /// Reads the output of `process`; cancelling `cancel` stops it.
+    pub(crate) fn new(mut process: Process, cancel: &CancelToken) -> WalkLines {
+        let stdout = process.take_stdout().expect("standard output is piped");
+        let canceller = process.canceller();
+        let registration = cancel.on_cancel(move || canceller.cancel());
+        WalkLines {
+            running: Some(Running {
+                command: process.command().to_owned(),
+                process,
+                records: Records::new(stdout, b'\n'),
+                cancel: cancel.clone(),
+                registration,
+            }),
+        }
+    }
+
+    /// A walk that has nothing to walk.
+    pub(crate) fn empty() -> WalkLines {
+        WalkLines { running: None }
+    }
+
+    fn canceller(&self) -> Option<Canceller> {
         self.running.as_ref().map(|r| r.process.canceller())
     }
 
-    /// The next commit, or `None` at the end of the history.
-    pub fn next_commit(&mut self) -> Result<Option<CommitLine>, Error> {
+    /// The next line read with `parse`, or `None` at the end of the walk.
+    pub(crate) fn next_parsed<T>(
+        &mut self,
+        parse: impl FnOnce(&[u8]) -> Result<T, String>,
+    ) -> Result<Option<T>, Error> {
         let Some(running) = self.running.as_mut() else {
             return Ok(None);
         };
-        // A cancelled stream ends at once; dropping the process stops Git
+        // A cancelled walk ends at once; dropping the process stops Git
         // in the background.
         if running.cancel.is_cancelled() {
             if let Some(running) = self.running.take() {
@@ -120,7 +160,7 @@ impl HistoryStream {
             source,
         })?;
         match record {
-            Some(line) => parse_line(line).map(Some).map_err(|message| Error::Parse {
+            Some(line) => parse(line).map(Some).map_err(|message| Error::Parse {
                 command: running.command.clone(),
                 message,
                 bytes: line.to_vec(),
@@ -146,38 +186,49 @@ pub fn history(
     revisions: &Revisions,
     cancel: &CancelToken,
 ) -> Result<HistoryStream, Error> {
+    let lines = walk_lines(
+        git,
+        repo,
+        revisions,
+        &["--parents", "--timestamp"],
+        &[],
+        cancel,
+    )?;
+    Ok(HistoryStream { lines })
+}
+
+/// Starts `git rev-list --date-order <options>` for `revisions`, limited to
+/// `paths` when there are any, and reads its lines.
+pub(crate) fn walk_lines(
+    git: &Git,
+    repo: &Path,
+    revisions: &Revisions,
+    options: &[&str],
+    paths: &[String],
+    cancel: &CancelToken,
+) -> Result<WalkLines, Error> {
     if revisions.is_empty() {
-        return Ok(HistoryStream { running: None });
+        return Ok(WalkLines::empty());
     }
-    let mut process = if revisions.all_references {
+    let walk = |tags| walk(git, repo, revisions, tags, options, paths);
+    let process = if revisions.all_references {
         // All branches take only the tags that no branch reaches; the
         // others add no commits. Finding them can take as long as the walk
         // itself, so the walk without tags starts at once, and it is kept
         // when every tag is reached, as usual.
-        let started = walk(git, repo, revisions, Some(&[]))?;
+        let started = walk(Some(&[]))?;
         match unreached_tags(git, repo, cancel)? {
             Some(tags) if tags.is_empty() => started,
             tags => {
                 // Dropping it stops Git.
                 drop(started);
-                walk(git, repo, revisions, tags.as_deref())?
+                walk(tags.as_deref())?
             }
         }
     } else {
-        walk(git, repo, revisions, None)?
+        walk(None)?
     };
-    let stdout = process.take_stdout().expect("standard output is piped");
-    let canceller = process.canceller();
-    let registration = cancel.on_cancel(move || canceller.cancel());
-    Ok(HistoryStream {
-        running: Some(Running {
-            command: process.command().to_owned(),
-            process,
-            records: Records::new(stdout, b'\n'),
-            cancel: cancel.clone(),
-            registration,
-        }),
-    })
+    Ok(WalkLines::new(process, cancel))
 }
 
 /// Starts `git rev-list` for `revisions`. With `tags`, all branches take
@@ -188,15 +239,17 @@ fn walk(
     repo: &Path,
     revisions: &Revisions,
     tags: Option<&[String]>,
+    options: &[&str],
+    paths: &[String],
 ) -> Result<Process, Error> {
-    let mut args = ["rev-list", "--date-order", "--parents", "--timestamp"]
-        .map(str::to_owned)
-        .to_vec();
+    let mut args = vec!["rev-list".to_owned(), "--date-order".to_owned()];
+    args.extend(options.iter().map(|option| (*option).to_owned()));
     match tags {
         Some(_) => revisions.push_args_without_tags(&mut args),
         None => revisions.push_args(&mut args),
     }
     args.push("--".to_owned());
+    args.extend(paths.iter().cloned());
     let mut process = git.spawn(repo, &[], &args, tags.is_some())?;
     if let Some(tags) = tags {
         let mut stdin = process.take_stdin().expect("standard input is piped");
