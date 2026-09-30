@@ -143,8 +143,9 @@ literally, and it passes the neutralised filter drivers of the repository.
 | Where a found commit is | `git for-each-ref --contains=<commit> refs/heads refs/remotes refs/tags`, and `git merge-base --is-ancestor <commit> <revision>` for the revisions of the filter and for a detached HEAD |
 | Search by message or author | `git rev-list --date-order -i --fixed-strings --grep=<text> <revisions>`, or the same with `--author=<text>` |
 | Search by path | `git rev-list --date-order <revisions> -- <path>` |
-| File history | `git log --follow -M --format=<format> --name-status -- <path>` |
+| File history | `git log --follow -M --no-ext-diff --no-textconv --format=%x01%H %P --name-status -z --end-of-options <start> -- <path>` |
 | Blame | `git blame --incremental --no-textconv --no-ignore-revs-file [--ignore-revs-file=<trusted path>...] <revision> -- <path>` |
+| Content for blame | `git ls-tree -z <revision> -- <path>` for the blob, and its content from `git cat-file --batch` |
 | Generate commit-graph | `git commit-graph write --reachable --changed-paths --progress` |
 | Filter drivers of the repository | `git config --list --show-scope --show-origin -z` |
 
@@ -449,6 +450,13 @@ choice:
 | Next and Previous | Move on from the match moved to last, or chosen in the Search view. Enter in the search field goes to the next match. A match that has not loaded yet is selected once it has |
 | A match chosen in the Search view, or a hash found | Selected in the History view. A hash hidden by the branch filter gets the notice that offers all branches, as a reference does |
 | Another branch filter | The search runs again, as its matches were those of the other branches |
+| File history and blame in the tab | They take the place of the view of the sidebar; Back returns to it with its selection and scroll position. Choosing a view or a reference in the sidebar returns as well. A new one replaces the one open |
+| Offering file history and blame | For every file of a commit; blame not for a file the commit deleted. In File status for every file the last commit has, a renamed or copied one under its old path; not for untracked or added files |
+| Commits of a file history | Their header is marked with the byte 0x01, which no status starts with. A commit that lists no change, such as a merge, shows the path followed so far. Its diff is against its first parent |
+| Content of blame | Read at once, while Git finds the commits; a NUL among the first 8,000 bytes makes it binary, as Git decides. Lines longer than 10,000 characters are cut, as in the diff |
+| Colour of a block in blame | One of the lane colours, picked by the first byte of the hash of the commit, so that every block of a commit has the same |
+| Missing content in blame | git-bull tells a partial clone from its configuration, a promisor remote or `extensions.partialClone`, and then reports a failed blame or content as missing content |
+| Ignore files of the user for blame | An empty `blame.ignoreRevsFile` clears the files named before it, as in Git |
 | Growing the commit store | Columns grow by chunks of 65,536 rows, and the id index moves its rows into a table of twice the size two per appended commit. Commits are appended on the UI thread, and growing everything at once took 33 ms at 900,000 commits |
 
 ## Risks / Trade-offs

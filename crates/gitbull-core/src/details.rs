@@ -268,6 +268,15 @@ impl Details {
         &self.files
     }
 
+    /// The commit that holds the file at `index` of the files: the commit
+    /// shown, or for an untracked file of a stash the commit that saved it.
+    pub fn file_commit(&self, index: usize) -> Option<ObjectId> {
+        match (self.untracked, self.untracked_from) {
+            (Some(untracked), Some(from)) if index >= from => Some(untracked),
+            _ => self.commit,
+        }
+    }
+
     /// The index of the file chosen among the files, if any.
     pub fn file(&self) -> Option<usize> {
         self.file

@@ -22,10 +22,12 @@ use gitbull_git::version::GitVersion;
 
 use gitbull_core::settings::ThemeSetting;
 
-use crate::app::{App, GitMessage, GitStatus, Notice};
+use crate::app::{App, GitMessage, GitStatus, Notice, Overlay};
+use crate::blame_view;
 use crate::commit_list;
 use crate::commit_panel;
 use crate::diff_view::{self, Pane};
+use crate::file_history_view::{self, FILE_HISTORY_LIST};
 use crate::file_status_view::{self, STATUS_LIST};
 use crate::i18n;
 use crate::i18n::Msg;
@@ -49,6 +51,10 @@ pub const AREA_DIFF: &str = "area-diff";
 const AREAS: [&str; 4] = [AREA_SIDEBAR, COMMIT_LIST, AREA_COMMIT_PANEL, AREA_DIFF];
 /// The areas of the File status view.
 const STATUS_AREAS: [&str; 3] = [AREA_SIDEBAR, STATUS_LIST, AREA_DIFF];
+/// The areas of the file history.
+const FILE_HISTORY_AREAS: [&str; 3] = [AREA_SIDEBAR, FILE_HISTORY_LIST, AREA_DIFF];
+/// The areas of blame, whose content scrolls without a focus.
+const BLAME_AREAS: [&str; 1] = [AREA_SIDEBAR];
 
 /// Sizes the UI starts with when the settings have none.
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -800,10 +806,14 @@ fn history(app: &mut App, ui: &mut Ui) {
     app.poll_search();
     // The search starts once its text has settled, and its matches arrive
     // meanwhile; nothing else may wake the window for them.
-    if app
-        .active_view()
-        .is_some_and(|(session, _)| session.search().is_busy())
-    {
+    let busy = |session: &Session| {
+        session.search().is_busy()
+            || session
+                .file_history()
+                .is_some_and(|history| history.is_loading())
+            || session.blame().is_some_and(|blame| blame.is_loading())
+    };
+    if app.active_view().is_some_and(|(session, _)| busy(session)) {
         ui.ctx().request_repaint_after(SEARCH_REPAINT);
     }
 
@@ -825,9 +835,18 @@ fn history(app: &mut App, ui: &mut Ui) {
         .unwrap_or_default();
     let mut details_height = layout.details_height.unwrap_or(DETAILS_HEIGHT);
     let mut commit_panel_width = layout.commit_panel_width.unwrap_or(COMMIT_PANEL_WIDTH);
-    match shown {
-        View::History => {}
-        View::FileStatus => {
+    // A file history or blame takes the place of the view until the user
+    // goes back.
+    let overlay = app.active_view().and_then(|(_, view)| view.overlay);
+    match (overlay, shown) {
+        (Some(Overlay::FileHistory), _) => {
+            CentralPanel::default().show(ui, |ui| file_history_view::show(app, ui, palette));
+        }
+        (Some(Overlay::Blame), _) => {
+            CentralPanel::default().show(ui, |ui| blame_view::show(app, ui, palette));
+        }
+        (None, View::History) => {}
+        (None, View::FileStatus) => {
             let (files_title, diff_title) = (
                 app.texts.text(Msg::PanelFiles),
                 app.texts.text(Msg::PanelDiff),
@@ -854,11 +873,11 @@ fn history(app: &mut App, ui: &mut Ui) {
                 });
             });
         }
-        View::Search => {
+        (None, View::Search) => {
             CentralPanel::default().show(ui, |ui| search_view::show(app, ui, palette));
         }
     }
-    if shown == View::History {
+    if overlay.is_none() && shown == View::History {
         CentralPanel::default().show(ui, |ui| {
             // The commit list keeps room for a few rows in any window.
             let details_max = (ui.available_height() - MIN_LIST_HEIGHT).max(MIN_DETAILS_HEIGHT);
@@ -891,9 +910,11 @@ fn history(app: &mut App, ui: &mut Ui) {
             CentralPanel::default().show(ui, |ui| commit_list::show(app, ui, palette));
         });
     }
-    let areas: &[&str] = match shown {
-        View::FileStatus => &STATUS_AREAS,
-        _ => &AREAS,
+    let areas: &[&str] = match (overlay, shown) {
+        (Some(Overlay::FileHistory), _) => &FILE_HISTORY_AREAS,
+        (Some(Overlay::Blame), _) => &BLAME_AREAS,
+        (None, View::FileStatus) => &STATUS_AREAS,
+        (None, _) => &AREAS,
     };
     move_between_areas(ui, areas);
     apply_sidebar(app, sidebar_actions);
@@ -931,7 +952,7 @@ fn apply_sidebar(app: &mut App, actions: Vec<SidebarAction>) {
 /// Makes the rest of the panel a focusable area until its real content
 /// arrives; clicking it focuses it. It covers only the space left, so that
 /// it does not take the clicks meant for what the panel shows above it.
-fn focus_area(ui: &mut Ui, id: &str) {
+pub(crate) fn focus_area(ui: &mut Ui, id: &str) {
     let rect = ui.available_rect_before_wrap();
     let response = ui.interact(rect, Id::new(id), Sense::click());
     if response.clicked() {
@@ -1003,7 +1024,7 @@ fn fill(ui: &mut Ui) {
     ui.set_min_size(size);
 }
 
-fn section_title(ui: &mut Ui, text: String) {
+pub(crate) fn section_title(ui: &mut Ui, text: String) {
     ui.label(RichText::new(text).small().strong());
 }
 

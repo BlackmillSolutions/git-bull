@@ -10,9 +10,11 @@ use eframe::egui::{
 use fluent_bundle::FluentArgs;
 use gitbull_core::file_status::StatusState;
 use gitbull_core::workspace::Failure;
+use gitbull_git::changes::ChangeKind;
+use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 
-use crate::app::App;
+use crate::app::{App, FileAction};
 use crate::commit_list::{color, take_copy};
 use crate::commit_panel::{kind_index, marker, marker_color, path_job};
 use crate::i18n::Msg;
@@ -239,11 +241,25 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         ui.ctx().copy_text(path);
     }
     let menu_row = view.status_files.menu_row();
+    let mut opened = None;
     output.response.context_menu(|ui| {
-        // Both arrive with the file history and blame views. Nothing here
-        // changes the index, the working copy or the repository.
-        ui.add_enabled(false, egui::Button::new(&texts.file_history));
-        ui.add_enabled(false, egui::Button::new(&texts.blame));
+        // Nothing here changes the index, the working copy or the
+        // repository. The history and blame show the file as of the last
+        // commit, which a file new to it does not have.
+        let in_last_commit = menu_row
+            .and_then(entry_at)
+            .map(|(group, index)| &status.group(group)[index])
+            .and_then(last_commit_path);
+        if let Some(path) = &in_last_commit {
+            if ui.button(&texts.file_history).clicked() {
+                opened = Some(FileAction::History("HEAD".to_owned(), path.clone()));
+                ui.close();
+            }
+            if ui.button(&texts.blame).clicked() {
+                opened = Some(FileAction::Blame("HEAD".to_owned(), path.clone()));
+                ui.close();
+            }
+        }
         if ui.button(&texts.copy_path).clicked() {
             if let Some(path) = menu_row.and_then(path_of) {
                 ui.ctx().copy_text(path);
@@ -253,7 +269,21 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     });
     let chosen = view.status_files.selected().and_then(entry_at);
     session.choose_status_file(chosen);
+    if let Some(action) = opened {
+        app.open_file_action(action);
+    }
     true
+}
+
+/// The path `entry` has in the last commit; `None` for a file the last
+/// commit does not have, such as an untracked or an added one.
+fn last_commit_path(entry: &StatusEntry) -> Option<RepoPath> {
+    match entry.kind {
+        StatusKind::Untracked | StatusKind::Changed(ChangeKind::Added) => None,
+        // A renamed or copied file was in the last commit under its old path.
+        StatusKind::Changed(ChangeKind::Renamed | ChangeKind::Copied) => entry.old_path.clone(),
+        _ => Some(entry.path.clone()),
+    }
 }
 
 fn title_row(ui: &mut Ui, title: &str) {

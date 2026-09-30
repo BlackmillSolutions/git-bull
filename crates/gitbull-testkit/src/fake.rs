@@ -5,12 +5,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use gitbull_git::backend::{CommitStream, ContentSource, MatchStream};
+use gitbull_git::backend::{
+    BlameEntries, CommitStream, ContentSource, FileCommitStream, MatchStream,
+};
+use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::FileChange;
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
+use gitbull_git::file_history::FileCommit;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
 use gitbull_git::object_id::ObjectId;
@@ -70,6 +74,14 @@ pub struct FakeBackend {
     hashes: HashMap<String, HashMatch>,
     locations: HashMap<ObjectId, Location>,
     searches: Vec<(SearchKind, String, Answer)>,
+    /// By path, from any start.
+    file_histories: HashMap<String, Vec<FileCommit>>,
+    /// By path, as of any revision.
+    blames: HashMap<String, Vec<BlameEntry>>,
+    /// Holds what comes after the first entry of a file history or blame.
+    rest_gate: Option<Gate>,
+    /// By revision and path.
+    file_contents: HashMap<(String, String), Vec<u8>>,
     inspect_delay: Option<std::time::Duration>,
     probe: Probe,
 }
@@ -363,6 +375,32 @@ impl FakeBackend {
     ) -> FakeBackend {
         self.searches
             .push((kind, text.to_owned(), Answer::Feed(feed.clone())));
+        self
+    }
+
+    /// The history of the file at `path`, from any start.
+    pub fn with_file_history(mut self, path: &str, commits: Vec<FileCommit>) -> FakeBackend {
+        self.file_histories.insert(path.to_owned(), commits);
+        self
+    }
+
+    /// The blame of the file at `path`, as of any revision.
+    pub fn with_blame(mut self, path: &str, entries: Vec<BlameEntry>) -> FakeBackend {
+        self.blames.insert(path.to_owned(), entries);
+        self
+    }
+
+    /// File histories and blames deliver their first entry at once and the
+    /// rest once the test opens `gate`.
+    pub fn with_rest_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.rest_gate = Some(gate.clone());
+        self
+    }
+
+    /// The content of the file at `path` as of `revision`.
+    pub fn with_file_content(mut self, revision: &str, path: &str, content: &[u8]) -> FakeBackend {
+        self.file_contents
+            .insert((revision.to_owned(), path.to_owned()), content.to_vec());
         self
     }
 
@@ -838,6 +876,73 @@ impl Backend for FakeBackend {
         })
     }
 
+    fn file_history(
+        &self,
+        repo: &Path,
+        start: &str,
+        path: &RepoPath,
+        cancel: &CancelToken,
+    ) -> Result<Box<dyn FileCommitStream>, Error> {
+        self.probe.record("file-history", repo);
+        self.probe.lock().opened.push((
+            "file-history".to_owned(),
+            start.to_owned(),
+            path.to_string(),
+        ));
+        let commits = self
+            .file_histories
+            .get(&path.to_string())
+            .cloned()
+            .unwrap_or_default();
+        Ok(Box::new(Gated::new(
+            commits,
+            self.rest_gate.clone(),
+            cancel,
+        )))
+    }
+
+    fn blame(
+        &self,
+        repo: &Path,
+        revision: &str,
+        path: &RepoPath,
+        cancel: &CancelToken,
+    ) -> Result<Box<dyn BlameEntries>, Error> {
+        self.probe.record("blame", repo);
+        self.probe
+            .lock()
+            .opened
+            .push(("blame".to_owned(), revision.to_owned(), path.to_string()));
+        let entries = self
+            .blames
+            .get(&path.to_string())
+            .cloned()
+            .unwrap_or_default();
+        Ok(Box::new(Gated::new(
+            entries,
+            self.rest_gate.clone(),
+            cancel,
+        )))
+    }
+
+    fn file_content(
+        &self,
+        repo: &Path,
+        revision: &str,
+        path: &RepoPath,
+        _cancel: &CancelToken,
+    ) -> Result<Vec<u8>, Error> {
+        self.probe.record("file-content", repo);
+        self.file_contents
+            .get(&(revision.to_owned(), path.to_string()))
+            .cloned()
+            .ok_or_else(|| Error::Parse {
+                command: "git ls-tree".to_owned(),
+                message: format!("{path} is not a file in {revision}"),
+                bytes: Vec::new(),
+            })
+    }
+
     fn working_diff(
         &self,
         repo: &Path,
@@ -886,6 +991,50 @@ impl Backend for FakeBackend {
 
 /// A stream of lines given in advance.
 struct Lines(VecDeque<CommitLine>);
+
+/// Items given in advance: the first at once, the rest once a gate, if
+/// any, is open.
+struct Gated<T> {
+    items: VecDeque<T>,
+    gate: Option<Gate>,
+    first: bool,
+}
+
+impl<T> Gated<T> {
+    fn new(items: Vec<T>, gate: Option<Gate>, cancel: &CancelToken) -> Gated<T> {
+        if let Some(gate) = &gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+        }
+        Gated {
+            items: items.into(),
+            gate,
+            first: true,
+        }
+    }
+
+    fn next(&mut self) -> Result<Option<T>, Error> {
+        if !std::mem::take(&mut self.first)
+            && let Some(gate) = self.gate.take()
+            && !gate.wait()
+        {
+            return Err(Error::Cancelled);
+        }
+        Ok(self.items.pop_front())
+    }
+}
+
+impl FileCommitStream for Gated<FileCommit> {
+    fn next_commit(&mut self) -> Result<Option<FileCommit>, Error> {
+        self.next()
+    }
+}
+
+impl BlameEntries for Gated<BlameEntry> {
+    fn next_entry(&mut self) -> Result<Option<BlameEntry>, Error> {
+        self.next()
+    }
+}
 
 /// The ids of the lines of a stream, as matches.
 struct FedMatches(Box<dyn CommitStream>);
@@ -1150,6 +1299,8 @@ struct ProbeLog {
     diffs: Vec<(ObjectId, String, Option<usize>)>,
     working_diffs: Vec<(Group, String, Option<usize>)>,
     searches: Vec<(SearchKind, String)>,
+    /// File histories and blames: which, from where, and the path.
+    opened: Vec<(String, String, String)>,
 }
 
 impl Probe {
@@ -1183,6 +1334,12 @@ impl Probe {
     /// the line limit.
     pub fn working_diffs(&self) -> Vec<(Group, String, Option<usize>)> {
         self.lock().working_diffs.clone()
+    }
+
+    /// Every file history and blame started: `"file-history"` or
+    /// `"blame"`, the revision it starts at, and the path.
+    pub fn opened(&self) -> Vec<(String, String, String)> {
+        self.lock().opened.clone()
     }
 
     /// Every search started: its kind and its text.

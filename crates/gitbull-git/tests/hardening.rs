@@ -62,6 +62,8 @@ fn design_commands() -> Vec<Vec<String>> {
         ),
         with(&["rev-list", "-i", "--fixed-strings", "--author=ada"], &all),
         with(&["rev-list", "HEAD", "--"], &["file.txt"]),
+        // The content blame shows.
+        with(&["ls-tree", "-z", "HEAD", "--"], &["file.txt"]),
         // Search by hash, and where a found commit is.
         with(&["rev-parse", "--disambiguate=abcd"], &[]),
         with(
@@ -97,8 +99,17 @@ fn design_commands() -> Vec<Vec<String>> {
         diff(&["diff"], &["--", "sub"]),
         diff(&["diff", "HEAD"], &["--", "sub"]),
         with(
-            &["log", "--follow", "-M", "--format=%H", "--name-status"],
-            &["--", "file.txt"],
+            &[
+                "log",
+                "--follow",
+                "-M",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--format=%x01%H %P",
+                "--name-status",
+                "-z",
+            ],
+            &["--end-of-options", "HEAD", "--", "file.txt"],
         ),
         with(&["blame"], flags::BLAME)
             .into_iter()

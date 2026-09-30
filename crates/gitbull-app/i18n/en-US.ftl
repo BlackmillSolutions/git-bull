@@ -133,6 +133,7 @@ files-failed = The changed files could not be read: { $error }
 file-history = File history
 file-blame = Blame
 copy-path = Copy path
+
 change-added = Added
 change-modified = Modified
 change-deleted = Deleted
@@ -162,6 +163,16 @@ diff-line-removed = Removed
 diff-line-context = Unchanged
 copy-lines = Copy lines
 copy-hunk = Copy hunk
+
+## File history and blame
+
+back = Back
+file-history-title = File history of { $path }
+file-history-none = No commit changed this file.
+file-history-failed = The file history could not be read: { $error }
+blame-title = Blame of { $path } at { $revision }
+blame-binary = Blame is not available for binary files.
+blame-failed = The commits of the lines could not be found: { $error }
 
 ## Errors in a tab
 

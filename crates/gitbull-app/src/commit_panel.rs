@@ -16,7 +16,7 @@ use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
 use jiff::tz::TimeZone;
 
-use crate::app::App;
+use crate::app::{App, FileAction};
 use crate::commit_list::{badge_color, color, local_date, original_date, take_copy};
 use crate::i18n::Msg;
 use crate::theme::Palette;
@@ -189,7 +189,20 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         view.files.select((!files.is_empty()).then_some(0));
         view.files_for = Some(commit);
     }
-    let has_list = files(ui, files_shown, view, &texts, palette);
+    let (has_list, action) = files(ui, files_shown, view, &texts, palette);
+    // The revision that holds each file: the commit, or for an untracked
+    // file of a stash the commit that saved it.
+    let action = action.and_then(|(index, blame)| {
+        let ChangedFiles::Loaded(files) = session.details().files() else {
+            return None;
+        };
+        let change = files.get(index)?;
+        let revision = session.details().file_commit(index)?.to_string();
+        Some(match blame {
+            true => FileAction::Blame(revision, change.path.clone()),
+            false => FileAction::History(revision, change.path.clone()),
+        })
+    });
     // The diff panel shows the file selected here.
     let chosen = has_list
         .then(|| view.files.selected())
@@ -198,6 +211,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     session.show_file(chosen);
     if let Some(parent) = parent_chosen {
         app.navigate_to_commit(parent);
+    }
+    if let Some(action) = action {
+        app.open_file_action(action);
     }
     has_list
 }
@@ -308,18 +324,19 @@ fn signature(ui: &mut Ui, person: &Signature, zone: &TimeZone) {
 }
 
 /// The list of changed files, or why there is none. Returns whether the
-/// list was drawn.
+/// list was drawn, and the index of the file whose history, or with
+/// `true` whose blame, the context menu opened.
 fn files(
     ui: &mut Ui,
     files: &ChangedFiles,
     view: &mut crate::app::TabView,
     texts: &Texts,
     palette: &Palette,
-) -> bool {
+) -> (bool, Option<(usize, bool)>) {
     let files = match files {
         ChangedFiles::Loading => {
             ui.weak(&texts.loading);
-            return false;
+            return (false, None);
         }
         ChangedFiles::Failed(failure) => {
             let error = match failure {
@@ -327,11 +344,11 @@ fn files(
                 Failure::Panic(message) => message.clone(),
             };
             ui.colored_label(color(palette.status_deleted), error);
-            return false;
+            return (false, None);
         }
         ChangedFiles::Loaded(files) if files.is_empty() => {
             ui.weak(&texts.none);
-            return false;
+            return (false, None);
         }
         ChangedFiles::Loaded(files) => files,
     };
@@ -358,18 +375,31 @@ fn files(
         ui.ctx().copy_text(path);
     }
     let menu_row = view.files.menu_row();
+    let mut opened = None;
     output.response.context_menu(|ui| {
-        // Both arrive with the file history and blame views.
-        ui.add_enabled(false, egui::Button::new(&texts.file_history));
-        ui.add_enabled(false, egui::Button::new(&texts.blame));
+        let Some(index) = menu_row.map(|row| row as usize) else {
+            return;
+        };
+        if ui.button(&texts.file_history).clicked() {
+            opened = Some((index, false));
+            ui.close();
+        }
+        // A file the commit deleted is not in it.
+        let deleted = files
+            .get(index)
+            .is_some_and(|change| change.kind == ChangeKind::Deleted);
+        if !deleted && ui.button(&texts.blame).clicked() {
+            opened = Some((index, true));
+            ui.close();
+        }
         if ui.button(&texts.copy_path).clicked() {
-            if let Some(path) = menu_row.and_then(path_of) {
+            if let Some(path) = path_of(index as u64) {
                 ui.ctx().copy_text(path);
             }
             ui.close();
         }
     });
-    true
+    (true, opened)
 }
 
 fn path_text(change: &FileChange, ui: &Ui) -> egui::text::LayoutJob {

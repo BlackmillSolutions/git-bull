@@ -20,14 +20,17 @@ use gitbull_git::content::CommitContent;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
 use gitbull_git::object_id::ObjectId;
+use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::Group;
 use gitbull_git::{Backend, Error};
 
 use crate::badges::{self, Badge};
+use crate::blame::Blame;
 use crate::content_cache::ContentCache;
 use crate::details::Details;
+use crate::file_history::FileHistory;
 use crate::file_status::FileStatus;
 use crate::graph::{Checkpoint, Graph, GraphBuilder};
 use crate::highlight::HighlightTheme;
@@ -165,6 +168,11 @@ pub struct Session {
     /// The commit HEAD points to, once the references are known.
     head_commit: Option<ObjectId>,
     search: Search,
+    /// Opened from the context menu of a file, inside the tab.
+    file_history: Option<FileHistory>,
+    blame: Option<Blame>,
+    /// The colours diffs and blame are highlighted with.
+    theme: HighlightTheme,
 }
 
 impl fmt::Debug for Session {
@@ -236,6 +244,9 @@ impl Session {
             file_status,
             head_commit: None,
             search,
+            file_history: None,
+            blame: None,
+            theme: HighlightTheme::Light,
         }
     }
 
@@ -443,6 +454,12 @@ impl Session {
         changed |= self.details.poll_at(now);
         let revisions = self.revisions();
         changed |= self.search.poll_at(now, &revisions);
+        if let Some(history) = &mut self.file_history {
+            changed |= history.poll();
+        }
+        if let Some(blame) = &mut self.blame {
+            changed |= blame.poll();
+        }
         if let Some(status) = &mut self.file_status {
             changed |= status.poll();
         }
@@ -791,9 +808,16 @@ impl Session {
     /// Highlights diffs with the colours of `theme`, which follows the
     /// appearance of the window.
     pub fn set_highlight_theme(&mut self, theme: HighlightTheme) {
+        self.theme = theme;
         self.details.set_theme(theme);
         if let Some(status) = &mut self.file_status {
             status.set_theme(theme);
+        }
+        if let Some(history) = &mut self.file_history {
+            history.set_theme(theme);
+        }
+        if let Some(blame) = &mut self.blame {
+            blame.set_theme(theme);
         }
     }
 
@@ -806,6 +830,68 @@ impl Session {
     /// of the file chosen.
     pub fn details(&self) -> &Details {
         &self.details
+    }
+
+    /// Opens the history of the file at `path` in the revision `start`,
+    /// such as a commit or `HEAD`; the one open before closes.
+    pub fn open_file_history(&mut self, start: String, path: RepoPath) {
+        let mut history = FileHistory::new(
+            Arc::clone(&self.backend),
+            self.opened.root.clone(),
+            Arc::clone(&self.notify),
+            start,
+            path,
+        );
+        history.set_theme(self.theme);
+        self.file_history = Some(history);
+    }
+
+    /// Closes the file history and stops it.
+    pub fn close_file_history(&mut self) {
+        self.file_history = None;
+    }
+
+    /// The file history, while it is open.
+    pub fn file_history(&self) -> Option<&FileHistory> {
+        self.file_history.as_ref()
+    }
+
+    /// Chooses the commit at `index` of the file history, and loads the
+    /// diff of the file in it.
+    pub fn choose_file_history_commit(&mut self, index: Option<usize>) {
+        if let Some(history) = &mut self.file_history {
+            history.choose(index);
+        }
+    }
+
+    /// Loads all of a diff of the file history that stopped at its limit.
+    pub fn load_whole_file_history_diff(&mut self) {
+        if let Some(history) = &mut self.file_history {
+            history.load_whole_diff();
+        }
+    }
+
+    /// Opens the blame of the file at `path` as of `revision`; the one open
+    /// before closes.
+    pub fn open_blame(&mut self, revision: String, path: RepoPath) {
+        self.blame = Some(Blame::new(
+            Arc::clone(&self.backend),
+            self.opened.root.clone(),
+            Arc::clone(&self.notify),
+            revision,
+            path,
+            self.theme,
+        ));
+    }
+
+    /// Closes the blame and stops it.
+    pub fn close_blame(&mut self) {
+        self.blame = None;
+    }
+
+    /// The blame, while it is open.
+    pub fn blame(&self) -> Option<&Blame> {
+        self.blame.as_ref()
     }
 
     /// The search of the tab.
@@ -2139,7 +2225,9 @@ mod tests {
         });
         assert_eq!(probe.compared(), [(fake_id("m"), Some(fake_id("c")))]);
         // The panel shows its message and names, so its content is read.
-        assert!(probe.requested().contains(&fake_id("m")));
+        // The content source starts on a thread of its own, which may come
+        // after the files: the request waits for it.
+        wait_until(&mut session, |_| probe.requested().contains(&fake_id("m")));
     }
 
     #[test]
@@ -2211,6 +2299,7 @@ mod tests {
             probe.compared(),
             [(fake_id("s"), Some(fake_id("e"))), (fake_id("u"), None)]
         );
-        assert!(probe.requested().contains(&fake_id("s")));
+        // The content source may start after the files have loaded.
+        wait_until(&mut session, |_| probe.requested().contains(&fake_id("s")));
     }
 }

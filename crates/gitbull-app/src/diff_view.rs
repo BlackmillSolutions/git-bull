@@ -22,10 +22,10 @@ use crate::i18n::Msg;
 use crate::theme::{Appearance, Palette};
 use crate::ui::{AREA_DIFF, appearance, lock_tab};
 
-/// The height of a row of the diff.
-const ROW_HEIGHT: f32 = 18.0;
-/// The size of the monospace font of the diff.
-const FONT_SIZE: f32 = 12.5;
+/// The height of a row of the diff, and of blame.
+pub(crate) const ROW_HEIGHT: f32 = 18.0;
+/// The size of the monospace font of the diff, and of blame.
+pub(crate) const FONT_SIZE: f32 = 12.5;
 
 /// The texts of the panel, read before the tab is borrowed.
 struct Texts {
@@ -212,6 +212,8 @@ pub(crate) enum Pane {
     Commit,
     /// Of the file chosen in the File status view.
     FileStatus,
+    /// Of the file in the commit chosen in the file history.
+    FileHistory,
 }
 
 /// The diff `pane` shows, its colours and what it belongs to.
@@ -227,6 +229,11 @@ fn shown(session: &Session, pane: Pane) -> Option<(&DiffState, Option<&Highlight
             let (group, index) = status.chosen()?;
             let key = DiffKey::Status(group, index);
             Some((status.diff(), status.highlighting(), key))
+        }
+        Pane::FileHistory => {
+            let history = session.file_history()?;
+            let key = DiffKey::FileHistory(history.chosen()?);
+            Some((history.diff(), history.highlighting(), key))
         }
     }
 }
@@ -256,6 +263,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
     let state = match pane {
         Pane::Commit => &mut view.commit_diff,
         Pane::FileStatus => &mut view.status_diff,
+        Pane::FileHistory => &mut view.history_diff,
     };
     let Some((diff, highlighting, key)) = shown(session, pane) else {
         return false;
@@ -378,6 +386,7 @@ fn load_whole(session: &mut Session, pane: Pane) {
     match pane {
         Pane::Commit => session.load_whole_diff(),
         Pane::FileStatus => session.load_whole_status_diff(),
+        Pane::FileHistory => session.load_whole_file_history_diff(),
     }
 }
 
@@ -655,7 +664,12 @@ fn path_job(old: Option<&RepoPath>, new: &RepoPath, ui: &Ui) -> LayoutJob {
 
 /// The text of a line of the diff laid out in the monospace font, with the
 /// colours of `spans` where it is highlighted.
-fn line_job(text: &str, spans: Option<&[Span]>, font: &FontId, default: Color32) -> LayoutJob {
+pub(crate) fn line_job(
+    text: &str,
+    spans: Option<&[Span]>,
+    font: &FontId,
+    default: Color32,
+) -> LayoutJob {
     let mut job = LayoutJob::default();
     let format = |color| TextFormat::simple(font.clone(), color);
     // Spans are bytes of the version of the file; the line may be cut.

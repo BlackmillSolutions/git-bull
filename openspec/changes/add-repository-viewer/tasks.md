@@ -100,10 +100,10 @@ after each stage.
 
 ## 8. File history and blame
 
-- [ ] 8.1 Implement the file history stream from a starting commit, with the path per commit across renames; verify parser and integration tests including a renamed file and a later commit that must not appear
-- [ ] 8.2 Build the file history view inside the tab with back navigation, diff on selection, and the context menu entry that is absent for untracked files; verify UI tests for every scenario of `file-history`
-- [ ] 8.3 Implement parsing of incremental blame output; verify parser tests with recorded output
-- [ ] 8.4 Build the blame view: content with line numbers, margin, colour bands, progressive fill, highlighting with its limit, the notice for binary files, navigation to the commit including the notice when it is hidden by the branch filter, and the context menu entry that is absent for deleted and untracked files; verify UI tests for every scenario of `blame`
+- [x] 8.1 Implement the file history stream from a starting commit, with the path per commit across renames; verify parser and integration tests including a renamed file and a later commit that must not appear
+- [x] 8.2 Build the file history view inside the tab with back navigation, diff on selection, and the context menu entry that is absent for untracked files; verify UI tests for every scenario of `file-history`
+- [x] 8.3 Implement parsing of incremental blame output; verify parser tests with recorded output
+- [x] 8.4 Build the blame view: content with line numbers, margin, colour bands, progressive fill, highlighting with its limit, the notice for binary files, navigation to the commit including the notice when it is hidden by the branch filter, and the context menu entry that is absent for deleted and untracked files; verify UI tests for every scenario of `blame`
 
 ## 9. Release
 

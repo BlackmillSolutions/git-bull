@@ -15,6 +15,7 @@ use gitbull_core::settings::{
 use gitbull_core::sidebar_tree::{SidebarRow, SidebarState};
 use gitbull_core::workspace::{Event, Notify, TabId, View, Workspace};
 use gitbull_git::object_id::ObjectId;
+use gitbull_git::path::RepoPath;
 use gitbull_git::status::Group;
 use gitbull_git::version::GitVersion;
 use gitbull_git::{Backend, CliBackend};
@@ -133,6 +134,13 @@ pub(crate) struct TabView {
     pub(crate) files_for: Option<ObjectId>,
     /// The matches of the Search view.
     pub(crate) search_results: ListState,
+    /// A view opened from the context menu of a file, shown instead of the
+    /// view of the sidebar until the user goes back.
+    pub(crate) overlay: Option<Overlay>,
+    /// The commits of the file history.
+    pub(crate) file_commits: ListState,
+    /// The diff of the commit chosen in the file history.
+    pub(crate) history_diff: DiffView,
     /// The files of the File status view.
     pub(crate) status_files: ListState,
     /// The version of the status `status_files` shows, to select the file
@@ -158,6 +166,22 @@ impl TabView {
     }
 }
 
+/// A view opened from the context menu of a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Overlay {
+    FileHistory,
+    Blame,
+}
+
+/// What the context menu of a file opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FileAction {
+    /// The history of the file at this path, from this revision.
+    History(String, RepoPath),
+    /// The blame of the file at this path, as of this revision.
+    Blame(String, RepoPath),
+}
+
 /// What a diff panel keeps for the diff it shows.
 #[derive(Default)]
 pub(crate) struct DiffView {
@@ -174,6 +198,8 @@ pub(crate) enum DiffKey {
     Commit(ObjectId, usize),
     /// Of the file at an index of a group of the file status.
     Status(Group, usize),
+    /// Of the file in the commit at an index of the file history.
+    FileHistory(usize),
 }
 
 /// Everything the window shows.
@@ -463,6 +489,8 @@ impl App {
     /// Selects the commit of the reference with the full `name`, or tells
     /// why it cannot.
     pub(crate) fn navigate(&mut self, name: &str) {
+        // The commit shows in the History view.
+        self.close_overlay();
         let Some((session, view)) = self.active_view() else {
             return;
         };
@@ -496,8 +524,41 @@ impl App {
         }
     }
 
-    /// Shows `view` in the active tab.
+    /// Opens what the context menu of a file offers, inside the active tab.
+    pub(crate) fn open_file_action(&mut self, action: FileAction) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        match action {
+            FileAction::History(start, path) => {
+                session.open_file_history(start, path);
+                view.file_commits = ListState::default();
+                view.history_diff = DiffView::default();
+                view.overlay = Some(Overlay::FileHistory);
+            }
+            FileAction::Blame(revision, path) => {
+                session.open_blame(revision, path);
+                view.overlay = Some(Overlay::Blame);
+            }
+        }
+    }
+
+    /// Goes back from the file history or blame to the view it was opened
+    /// from, as it was.
+    pub(crate) fn close_overlay(&mut self) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        match view.overlay.take() {
+            Some(Overlay::FileHistory) => session.close_file_history(),
+            Some(Overlay::Blame) => session.close_blame(),
+            None => {}
+        }
+    }
+
+    /// Shows `view` in the active tab, instead of a file history or blame.
     pub(crate) fn show_view(&mut self, view: View) {
+        self.close_overlay();
         if let Some(workspace) = self.workspace_mut()
             && let Some(id) = workspace.active().map(|tab| tab.id())
         {

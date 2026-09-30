@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use crate::blame::{self, BlameEntry, BlameStream};
 use crate::blob;
 use crate::cancel::CancelToken;
 use crate::changes::{self, FileChange};
@@ -14,6 +15,7 @@ use crate::commit_graph::{self, GraphProgress};
 use crate::content::{Content, ContentReader};
 use crate::diff::{self, FileDiff};
 use crate::error::Error;
+use crate::file_history::{self, FileCommit, FileHistoryStream};
 use crate::head::{self, Head};
 use crate::history::{self, CommitLine, HistoryStream, Revisions};
 use crate::invoke::Git;
@@ -31,6 +33,18 @@ use crate::working_copy;
 pub trait CommitStream: Send {
     /// The next commit, or `None` at the end of the history.
     fn next_commit(&mut self) -> Result<Option<CommitLine>, Error>;
+}
+
+/// The commits that changed a file, newest first. Dropping it stops Git.
+pub trait FileCommitStream: Send {
+    /// The next commit, or `None` at the end of the history of the file.
+    fn next_commit(&mut self) -> Result<Option<FileCommit>, Error>;
+}
+
+/// The entries of a blame as Git finds them. Dropping it stops Git.
+pub trait BlameEntries: Send {
+    /// The next entry, or `None` when every line is known.
+    fn next_entry(&mut self) -> Result<Option<BlameEntry>, Error>;
 }
 
 /// The matches of a search, newest first. Dropping it stops the search.
@@ -156,6 +170,34 @@ pub trait Backend: Send + Sync {
         text: &str,
         cancel: &CancelToken,
     ) -> Result<Box<dyn MatchStream>, Error>;
+
+    /// Starts the history of the file at `path` in the revision `start`,
+    /// across renames.
+    fn file_history(
+        &self,
+        repo: &Path,
+        start: &str,
+        path: &RepoPath,
+        cancel: &CancelToken,
+    ) -> Result<Box<dyn FileCommitStream>, Error>;
+
+    /// Starts the blame of the file at `path` as of `revision`.
+    fn blame(
+        &self,
+        repo: &Path,
+        revision: &str,
+        path: &RepoPath,
+        cancel: &CancelToken,
+    ) -> Result<Box<dyn BlameEntries>, Error>;
+
+    /// The content of the file at `path` as of `revision`.
+    fn file_content(
+        &self,
+        repo: &Path,
+        revision: &str,
+        path: &RepoPath,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, Error>;
 
     /// The diff of `entry` of the file status, as `group` compares it; with
     /// a `limit`, up to that many lines of hunks.
@@ -318,6 +360,40 @@ impl Backend for CliBackend {
         )?))
     }
 
+    fn file_history(
+        &self,
+        repo: &Path,
+        start: &str,
+        path: &RepoPath,
+        cancel: &CancelToken,
+    ) -> Result<Box<dyn FileCommitStream>, Error> {
+        Ok(Box::new(file_history::file_history(
+            &self.git, repo, start, path, cancel,
+        )?))
+    }
+
+    fn blame(
+        &self,
+        repo: &Path,
+        revision: &str,
+        path: &RepoPath,
+        cancel: &CancelToken,
+    ) -> Result<Box<dyn BlameEntries>, Error> {
+        Ok(Box::new(blame::blame(
+            &self.git, repo, revision, path, cancel,
+        )?))
+    }
+
+    fn file_content(
+        &self,
+        repo: &Path,
+        revision: &str,
+        path: &RepoPath,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, Error> {
+        blame::file_content(&self.git, repo, revision, path, cancel)
+    }
+
     fn working_diff(
         &self,
         repo: &Path,
@@ -342,6 +418,18 @@ impl Backend for CliBackend {
 impl CommitStream for HistoryStream {
     fn next_commit(&mut self) -> Result<Option<CommitLine>, Error> {
         HistoryStream::next_commit(self)
+    }
+}
+
+impl FileCommitStream for FileHistoryStream {
+    fn next_commit(&mut self) -> Result<Option<FileCommit>, Error> {
+        FileHistoryStream::next_commit(self)
+    }
+}
+
+impl BlameEntries for BlameStream {
+    fn next_entry(&mut self) -> Result<Option<BlameEntry>, Error> {
+        BlameStream::next_entry(self)
     }
 }
 
