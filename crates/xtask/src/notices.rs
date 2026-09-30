@@ -161,7 +161,9 @@ pub fn release_crates() -> Result<Vec<Crate>, String> {
     for target in TARGETS {
         let output = Command::new(&cargo)
             .current_dir(root())
-            .args(["tree", "--locked", "-p", PACKAGE, "-e", "normal"])
+            .args([
+                "tree", "--locked", "--color", "never", "-p", PACKAGE, "-e", "normal",
+            ])
             .args(["--target", target, "--prefix", "none", "-f", "{p}|{l}"])
             .output()
             .map_err(|error| format!("cargo tree: {error}"))?;
@@ -199,10 +201,13 @@ pub fn parse_tree_line(line: &str) -> Option<Crate> {
     if local || name.is_empty() {
         return None;
     }
+    // Cargo marks a crate listed before with `(*)` at the end of the line.
+    let license = license.trim();
+    let license = license.strip_suffix("(*)").unwrap_or(license).trim_end();
     Some(Crate {
         name: name.to_owned(),
         version: version.to_owned(),
-        license: license.trim().to_owned(),
+        license: license.to_owned(),
     })
 }
 
@@ -463,6 +468,10 @@ mod tests {
             Some(krate("serde_derive", "1.0.228", "MIT OR Apache-2.0"))
         );
         assert_eq!(
+            parse_tree_line("accesskit v0.24.1|MIT OR Apache-2.0 (*)"),
+            Some(krate("accesskit", "0.24.1", "MIT OR Apache-2.0"))
+        );
+        assert_eq!(
             parse_tree_line("ndk-sys v0.6.0+11769913|MIT OR Apache-2.0"),
             Some(krate("ndk-sys", "0.6.0+11769913", "MIT OR Apache-2.0"))
         );
@@ -582,11 +591,11 @@ mod tests {
         }
     }
 
-    /// Run by hand with `cargo test -p xtask -- --ignored`: in CI the file
-    /// generated there differs from the committed one in a way not yet
-    /// found, and licence work comes last.
+    /// Run by hand with `cargo test -p xtask -- --ignored` before a
+    /// release; out of CI, so that an update of a dependency does not block
+    /// it, as licence work comes last.
     #[test]
-    #[ignore = "differs in CI for a reason not yet found"]
+    #[ignore = "run by hand before a release"]
     fn the_notices_are_up_to_date() {
         if let Some(difference) = difference(&committed(), &generate().unwrap()) {
             panic!("{FILE} is out of date; run `cargo xtask notices` and commit it.\n{difference}");

@@ -64,10 +64,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The C runtime linked in, so that a clean Windows 10 without the
+          # Visual C++ Redistributable runs it.
           - kind: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: git-bull.exe
+            rustflags: -C target-feature=+crt-static
           - kind: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
@@ -117,6 +120,8 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked -p gitbull-app --target ${{ matrix.target }}
 
       - name: Package
