@@ -159,7 +159,9 @@ fn confirming_shows_progress_and_the_hint_goes_when_done() {
     harness
         .get_by_role_and_label(Role::Button, "Generate")
         .click();
-    harness.run();
+    // Frame by frame: until Git reports a percentage, the progress bar
+    // animates and keeps asking for frames.
+    harness.step();
 
     wait_for(&mut harness, |h| {
         h.query_by_role(Role::ProgressIndicator).is_some()
@@ -189,7 +191,9 @@ fn cancelling_the_generation_brings_the_hint_back() {
     harness
         .get_by_role_and_label(Role::Button, "Generate")
         .click();
-    harness.run();
+    // Frame by frame: until Git reports a percentage, the progress bar
+    // animates and keeps asking for frames.
+    harness.step();
     wait_for(&mut harness, |h| {
         h.query_by_role(Role::ProgressIndicator).is_some()
     });
@@ -197,7 +201,7 @@ fn cancelling_the_generation_brings_the_hint_back() {
     harness
         .get_by_role_and_label(Role::Button, "Cancel")
         .click();
-    harness.run();
+    harness.step();
     wait_for(&mut harness, |h| has_button(h, GENERATE));
     assert!(gate.was_cancelled());
 }
