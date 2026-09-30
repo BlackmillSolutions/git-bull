@@ -46,8 +46,9 @@ Visible lines of the diff SHALL be selectable and copyable. The context menu
 SHALL offer to copy a whole hunk.
 
 A selection SHALL belong to the diff it was made in. When the diff shown is
-replaced, for example because a refresh read the file again, the selection
-SHALL be cleared.
+replaced by one with other content, for example because a refresh read a
+changed file, the selection SHALL be cleared. A refresh that reads the same
+diff again SHALL keep the selection and the scroll position.
 
 #### Scenario: Copy selected lines
 - **WHEN** the user selects lines of the diff and copies them
@@ -61,3 +62,7 @@ SHALL be cleared.
 - **WHEN** the user has selected lines 40 to 60 in the diff of an unstaged file, shortens the file in an editor so that its diff has 20 lines, and returns to git-bull
 - **THEN** the new diff is shown with no lines selected
 - **AND** copying with the keyboard shortcut or from the context menu does not copy lines of the previous diff and git-bull keeps running
+
+#### Scenario: Refresh without changes
+- **WHEN** the user has selected lines of the diff and scrolled it, and git-bull refreshes the tab while the file is unchanged, for example because the window gained focus
+- **THEN** the same lines are still selected and the diff keeps its scroll position
