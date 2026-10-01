@@ -40,6 +40,11 @@ choose the Git executable.
 
 git-bull draws with Vulkan, Metal, DirectX 12 or OpenGL, whichever the system
 offers; the graphics drivers that come with the systems above are enough.
+It asks for the power-saving graphics adapter. On a computer with an
+integrated and a dedicated adapter, such as many laptops, that is the
+integrated one where the system lets an application choose. To draw with
+the dedicated adapter instead, start git-bull with the environment variable
+`WGPU_POWER_PREF=high`.
 
 ### Windows
 

@@ -12,7 +12,7 @@ group 3 needs both. Each task names the test that shows it works.
 
 ## 2. Graphics adapter
 
-- [ ] 2.1 Set the power preference of wgpu in `main.rs` to `LowPower`, unless `WGPU_POWER_PREF` chooses another (design, decision 4), and say in the README, below the graphics interfaces git-bull draws with, that it asks for the power-saving adapter, which is the integrated one on a computer with two where the system lets it choose, and how `WGPU_POWER_PREF=high` chooses the dedicated one; verify a unit test of the function that chooses the preference, with and without a value from the environment, for the scenarios "Laptop with two graphics adapters" and "Dedicated adapter on request" of `application-shell`
+- [x] 2.1 Set the power preference of wgpu in `main.rs` to `LowPower`, unless `WGPU_POWER_PREF` chooses another (design, decision 4), and say in the README, below the graphics interfaces git-bull draws with, that it asks for the power-saving adapter, which is the integrated one on a computer with two where the system lets it choose, and how `WGPU_POWER_PREF=high` chooses the dedicated one; verify a unit test of the function that chooses the preference, with and without a value from the environment, for the scenarios "Laptop with two graphics adapters" and "Dedicated adapter on request" of `application-shell`
 
 ## 3. Manual check
 
