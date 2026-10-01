@@ -16,7 +16,7 @@ group 3 needs both. Each task names the test that shows it works.
 
 ## 3. Manual check
 
-- [ ] 3.1 The user scrolls the commit list on Windows with the touchpad, quickly up and down, including turning back during a fast motion (design, decision 1), and with a mouse wheel, and Task Manager shows git-bull on the integrated graphics adapter, and on the dedicated one when started with `WGPU_POWER_PREF=high`; verify that the result and the date are recorded in this task.
+- [x] 3.1 The user scrolls the commit list on Windows with the touchpad, quickly up and down, including turning back during a fast motion (design, decision 1), and with a mouse wheel, and Task Manager shows git-bull on the integrated graphics adapter, and on the dedicated one when started with `WGPU_POWER_PREF=high`; verify that the result and the date are recorded in this task. Checked by the user on Windows on 2026-10-01 with a release build: scrolling the commit list with the touchpad, quickly up and down and turning back during a motion, and with the mouse wheel felt right, and Task Manager showed the expected adapter both without `WGPU_POWER_PREF` and with `WGPU_POWER_PREF=high`.
 
 ## 4. Final check
 
