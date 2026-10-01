@@ -874,3 +874,59 @@ fn input_the_commit_list_took_does_not_scroll_the_diff_when_the_pointer_moves_on
     let moved = commit_list_scroll(&harness) - start;
     assert!((moved - 681.0).abs() < 0.5, "{moved}");
 }
+
+/// The top of line `n` of the diff of `added_lines`.
+fn line_top(harness: &Harness<'_, App>, n: u32) -> f32 {
+    row_of(harness, Role::Code, &format!("Added, –, {n}:"))
+        .unwrap_or_else(|| panic!("line {n} is not shown"))
+        .top()
+}
+
+/// Scrolls the diff by `points` at once, as a touchpad gesture does, with
+/// the pointer over line 20.
+fn swipe(harness: &mut Harness<'_, App>, points: f32) {
+    let at = row_of(harness, Role::Code, "Added, –, 20:").expect("line 20");
+    harness.hover_at(at.center());
+    for (phase, delta) in [
+        (TouchPhase::Start, 0.0),
+        (TouchPhase::Move, -points),
+        (TouchPhase::End, 0.0),
+    ] {
+        harness.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, delta),
+            phase,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
+#[test]
+fn scrolling_the_diff_moves_every_line_by_as_much() {
+    let live = LiveRepo::new();
+    live.set_working_diff(Group::Unstaged, "edit.txt", added_lines(99));
+    let (mut harness, _probe) = open_status(&live);
+    let before = line_top(&harness, 20);
+    swipe(&mut harness, 100.0);
+    assert_eq!(line_top(&harness, 20), before - 100.0);
+    swipe(&mut harness, 37.0);
+    assert_eq!(line_top(&harness, 20), before - 137.0);
+}
+
+#[test]
+fn the_lines_of_a_long_diff_fill_it_down_to_its_bottom() {
+    let live = LiveRepo::new();
+    live.set_working_diff(Group::Unstaged, "edit.txt", added_lines(99));
+    let (mut harness, _probe) = open_status(&live);
+    swipe(&mut harness, 300.0);
+    let lowest = harness
+        .query_all_by_role(Role::Code)
+        .map(|node| node.rect().bottom())
+        .fold(f32::MIN, f32::max);
+    let status_bar = harness.get_by_label("Git 2.55.0").rect().top();
+    assert!(
+        lowest >= status_bar - 2.0 * 18.0,
+        "the lines end at {lowest}, the status bar begins at {status_bar}"
+    );
+}

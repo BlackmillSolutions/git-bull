@@ -8,7 +8,7 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Modifiers, PointerButton, Pos2};
+use eframe::egui::{Event, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
@@ -398,4 +398,58 @@ fn back_leaves_blame_for_the_history() {
             .iter()
             .all(|label| !label.starts_with("1: one"))
     );
+}
+
+/// The top of line `n` of the blame of `long.rs`.
+fn line_top(harness: &Harness<'_, App>, n: u32) -> f32 {
+    harness
+        .query_all_by_role(Role::Code)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label == format!("{n}: line {n}"))
+        })
+        .unwrap_or_else(|| panic!("line {n} is not shown"))
+        .rect()
+        .top()
+}
+
+#[test]
+fn scrolling_blame_moves_every_line_by_as_much() {
+    let c = fake_id("c").to_string();
+    let content: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+    let summary = |text: &str| CommitContent {
+        message: format!("{text}\n"),
+        ..CommitContent::default()
+    };
+    let backend = FakeBackend::default()
+        .with_repository(root())
+        .with_history(root(), history())
+        .with_changes(fake_id("c"), vec![change(ChangeKind::Modified, "long.rs")])
+        .with_blame("long.rs", vec![entry("c", 1, 100, true)])
+        .with_file_content(&c, "long.rs", content.as_bytes())
+        .with_content(fake_id("c"), summary("Change b"))
+        .with_content(fake_id("a"), summary("Add a"));
+    let mut harness = open_with(backend);
+    open_blame(&mut harness, "Modified: long.rs");
+    // Until the margin has filled in, which asks for frames meanwhile.
+    wait_until(&mut harness, |h| {
+        labels(h, Role::Code).len() > 20 && margin(h).len() == 1
+    });
+    let before = line_top(&harness, 20);
+    harness.hover_at(Pos2::new(600.0, before + 9.0));
+    for (phase, delta) in [
+        (TouchPhase::Start, 0.0),
+        (TouchPhase::Move, -100.0),
+        (TouchPhase::End, 0.0),
+    ] {
+        harness.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, delta),
+            phase,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.step();
+    assert_eq!(line_top(&harness, 20), before - 100.0);
 }

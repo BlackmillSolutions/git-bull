@@ -1,7 +1,8 @@
 # Tasks
 
 Group 1 comes first; group 2 does not depend on it. The manual check of
-group 3 needs both. Each task names the test that shows it works.
+group 3 needs both. Group 4 fixes a fault the user found in the diff after
+the manual check. Each task names the test that shows it works.
 
 ## 1. Spring
 
@@ -18,6 +19,10 @@ group 3 needs both. Each task names the test that shows it works.
 
 - [x] 3.1 The user scrolls the commit list on Windows with the touchpad, quickly up and down, including turning back during a fast motion (design, decision 1), and with a mouse wheel, and Task Manager shows git-bull on the integrated graphics adapter, and on the dedicated one when started with `WGPU_POWER_PREF=high`; verify that the result and the date are recorded in this task. Checked by the user on Windows on 2026-10-01 with a release build: scrolling the commit list with the touchpad, quickly up and down and turning back during a motion, and with the mouse wheel felt right, and Task Manager showed the expected adapter both without `WGPU_POWER_PREF` and with `WGPU_POWER_PREF=high`.
 
-## 4. Final check
+## 4. Rows of the diff and blame
 
-- [ ] 4.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate smooth-scrolling --strict`; verify all succeed and CI is green on Linux, Windows and macOS
+- [x] 4.1 Plan the rows of the diff and of blame without the spacing of the `Ui` around them: `ScrollArea::show_rows` adds it to the height of each row, and since the design system it is 8 points, so egui planned 26 points for rows of 18, which left the bottom of the diff empty, made its lines jump by 8 points while scrolling and let it scroll past its end; and know the rows of the diff by their diff and index instead of their place on the screen, so that a row of a new diff at the same place does not take over the open context menu of the one before; verify UI tests that scrolling the diff and blame by 100 points moves every line by as much and that the lines of a long diff fill it down to its bottom, each failing without the fix, and that the existing tests of `tests/diff_view.rs` and `tests/blame.rs` pass. Found by the user on 2026-10-01: the diff scrolled unevenly and left its bottom empty.
+
+## 5. Final check
+
+- [ ] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate smooth-scrolling --strict`; verify all succeed and CI is green on Linux, Windows and macOS
