@@ -187,6 +187,35 @@ fn scroll(harness: &mut Harness<'_, App>, frames: usize) -> Vec<Duration> {
     times
 }
 
+/// Frame times while scrolling with the mouse wheel alone, one notch every
+/// fourth frame, so that the spring of the list keeps moving it and the
+/// frames between the notches are measured as well.
+fn wheel_alone(harness: &mut Harness<'_, App>, frames: usize) -> Vec<Duration> {
+    let center = eframe::egui::pos2(700.0, 300.0);
+    harness.hover_at(center);
+    harness.step();
+    let top = hashes(harness);
+    let mut times = Vec::with_capacity(frames);
+    for frame in 0..frames {
+        if frame % 4 == 0 {
+            harness.input_mut().events.push(Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: vec2(0.0, -1.0),
+                phase: TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        let started = Instant::now();
+        harness.step();
+        times.push(started.elapsed());
+    }
+    assert!(
+        hashes(harness).is_disjoint(&top),
+        "the wheel moved the list"
+    );
+    times
+}
+
 /// Frame times while dragging the scrollbar thumb of the commit list from
 /// the top to the bottom in `frames` steps.
 fn drag_scrollbar(harness: &mut Harness<'_, App>, frames: usize) -> Vec<Duration> {
@@ -315,6 +344,7 @@ fn scrolling() {
         while_loading.extend(scroll(&mut harness, 2));
     }
     let after = scroll(&mut harness, 400);
+    let wheel = wheel_alone(&mut harness, 400);
     let dragged = drag_scrollbar(&mut harness, 200);
     eprintln!();
     eprintln!("| Scrolling | Frames | Median | 99th percentile | Slowest |");
@@ -322,6 +352,7 @@ fn scrolling() {
     let slowest = [
         summary("While loading", while_loading),
         summary("After loading", after),
+        summary("Mouse wheel alone, after loading", wheel),
         summary("Scrollbar from top to bottom", dragged),
     ];
     for slowest in slowest {
