@@ -23,7 +23,7 @@ decision 6).
 
 - [x] 3.1 Add `components.rs` with `button` (primary, secondary, ghost), `icon_button`, `segmented`, `menu_item`, `tooltip`, `banner` and the focus ring, and draw the ring as well for text fields, combo boxes and the focusable areas of `focus_area` (design, decision 5); verify UI tests that an icon button exposes its name and shows a tooltip with its shortcut, that a segmented control exposes its choices as radio buttons, that a focused button, text field, combo box and focusable area each draw the focus ring (scenario "Focus is visible"), and that every component has a click target of at least 24 by 24 at 100 %
 - [ ] 3.2 Add a gallery of all components and snapshot it in the six palettes with `egui_kittest` (design, decision 6); verify the snapshot test passes on Windows in CI
-- [ ] 3.3 Show the gallery snapshots to the user and adjust the palettes and shapes until the user approves them; verify that the user's approval is recorded in this task and that the tests of tasks 2.1 and 2.2 still pass with the approved values
+- [x] 3.3 Show the gallery snapshots to the user and adjust the palettes and shapes until the user approves them; verify that the user's approval is recorded in this task and that the tests of tasks 2.1 and 2.2 still pass with the approved values. Approved by the user on 2026-10-01 from the six gallery snapshots of commit a8c5bad, without changes; the tests of 2.1 and 2.2 pass with these values.
 
 ## 4. Views
 
