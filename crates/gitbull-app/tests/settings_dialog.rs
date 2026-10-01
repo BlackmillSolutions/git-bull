@@ -4,15 +4,15 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
-use eframe::egui::Key;
 use eframe::egui::accesskit::Role;
+use eframe::egui::{Event, Key, Modifiers, MouseWheelUnit, Popup, TouchPhase, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
 use gitbull_core::settings::{ColourVision, InterfaceSize, Settings, SettingsFile, ThemeSetting};
 use gitbull_core::workspace::View;
 use gitbull_testkit::FakeBackend;
-use support::{Answer, Scripted, Setup, build, path, settle_window, window};
+use support::{Answer, Scripted, Setup, build, path, settle_window, sized_window, window};
 
 fn open_dialog(harness: &mut Harness<'_, App>) {
     harness
@@ -258,6 +258,115 @@ fn the_dialog_is_modal() {
         "the window took the click"
     );
     harness.get_by_label("Appearance");
+}
+
+#[test]
+fn shortcuts_of_the_window_do_nothing_while_the_dialog_is_open() {
+    let root = path(&["work", "git-bull"]);
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root.clone()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: FakeBackend::default().with_repository(root),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    open_dialog(&mut harness);
+
+    for key in [Key::W, Key::O] {
+        harness.key_press_modifiers(Modifiers::COMMAND, key);
+        harness.run();
+    }
+
+    let tabs = harness
+        .state()
+        .workspace()
+        .map(|workspace| workspace.tabs().len());
+    assert_eq!(tabs, Some(1), "Ctrl+W closed the tab behind the dialog");
+    assert!(
+        harness.query_by_label("Open a repository").is_none(),
+        "Ctrl+O showed the chooser behind the dialog"
+    );
+    harness.get_by_label("Appearance");
+}
+
+#[test]
+fn escape_closes_an_open_list_before_the_dialog() {
+    let test = build(Setup::default());
+    let mut harness = window(test.app);
+    harness.run();
+    open_dialog(&mut harness);
+    harness.get_by_role(Role::ComboBox).click();
+    harness.run();
+    assert!(Popup::is_any_open(&harness.ctx), "the list did not open");
+
+    harness.key_press(Key::Escape);
+    harness.run();
+    assert!(!Popup::is_any_open(&harness.ctx), "the list stayed open");
+    harness.get_by_label("Appearance");
+
+    harness.key_press(Key::Escape);
+    harness.run();
+    assert!(harness.query_by_label("Appearance").is_none());
+}
+
+#[test]
+fn the_dialog_fits_a_narrow_window() {
+    let test = build(Setup::default());
+    let mut harness = sized_window((420.0, 600.0), test.app);
+    harness.run();
+    open_dialog(&mut harness);
+
+    for (role, label) in [
+        (Role::Button, "Close settings"),
+        (Role::RadioButton, "Blue-yellow"),
+        (Role::RadioButton, "150 %"),
+        (Role::TextInput, ""),
+    ] {
+        let node = match label {
+            "" => harness.get_by_role(role),
+            label => harness.get_by_role_and_label(role, label),
+        };
+        let rect = node.rect();
+        assert!(
+            rect.left() >= 0.0 && rect.right() <= 420.0,
+            "{role:?} {label} {rect:?}"
+        );
+    }
+}
+
+#[test]
+fn the_end_of_the_dialog_scrolls_into_the_smallest_window_at_150_percent() {
+    // The smallest window, 640 by 400 logical pixels, in points at 150 %.
+    let (width, height) = (640.0 / 1.5, 400.0 / 1.5);
+    let test = build(Setup::default());
+    let mut harness = sized_window((width, height), test.app);
+    harness.run();
+    open_dialog(&mut harness);
+
+    let close = harness
+        .get_by_role_and_label(Role::Button, "Close settings")
+        .rect();
+    assert!(close.top() >= 0.0, "{close:?}");
+    harness.hover_at(close.center() + vec2(0.0, 80.0));
+    harness.event(Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: vec2(0.0, -1000.0),
+        phase: TouchPhase::Move,
+        modifiers: Modifiers::NONE,
+    });
+    harness.run();
+
+    let apply = harness
+        .get_by_role_and_label(Role::Button, "Use this Git")
+        .rect();
+    assert!(
+        apply.bottom() <= height && apply.right() <= width,
+        "{apply:?}"
+    );
 }
 
 #[test]

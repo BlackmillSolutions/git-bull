@@ -195,8 +195,25 @@ pub fn window(app: App) -> Harness<'static, App> {
 
 /// Like [`window`], with egui behaving as on `os`.
 pub fn window_on(os: eframe::egui::os::OperatingSystem, app: App) -> Harness<'static, App> {
+    sized_window_on(os, (1280.0, 800.0), app)
+}
+
+/// Like [`window`], in a window of `size` logical pixels.
+pub fn sized_window(size: (f32, f32), app: App) -> Harness<'static, App> {
+    sized_window_on(
+        eframe::egui::os::OperatingSystem::from_target_os(),
+        size,
+        app,
+    )
+}
+
+fn sized_window_on(
+    os: eframe::egui::os::OperatingSystem,
+    size: (f32, f32),
+    app: App,
+) -> Harness<'static, App> {
     let harness = Harness::builder()
-        .with_size((1280.0, 800.0))
+        .with_size(size)
         .with_os(os)
         .build_ui_state(
             |ui, app: &mut App| {
@@ -350,6 +367,34 @@ pub fn texts_in_row(output: &eframe::egui::FullOutput, rect: eframe::egui::Rect)
         (rect.top() - 8.0)..=(rect.bottom() + 8.0),
     );
     texts_in(output, row)
+}
+
+/// The font families `text` is drawn in, wherever it is drawn.
+pub fn text_families(
+    output: &eframe::egui::FullOutput,
+    text: &str,
+) -> Vec<eframe::egui::FontFamily> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, text: &str, found: &mut Vec<eframe::egui::FontFamily>) {
+        match shape {
+            Shape::Text(shape) if shape.galley.text() == text => {
+                if let Some(section) = shape.galley.job.sections.first() {
+                    found.push(section.format.font_id.family.clone());
+                }
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, text, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, text, &mut found);
+    }
+    found
 }
 
 /// The colours `text` is drawn in, wherever it is drawn.

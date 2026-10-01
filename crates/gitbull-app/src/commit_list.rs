@@ -775,7 +775,8 @@ fn draw_badges(ui: &mut Ui, cell: Rect, badges: &[Badge], palette: &Palette) -> 
     let count_width = |rest: usize| badge_size(ui, &format!("+{rest}"), false).x;
     let shown = badges_that_fit(&widths, cell.width() / 2.0, BADGE_GAP, count_width);
     let rest = badges.len() - shown;
-    let rest_width = count_width(rest);
+    // The badge that counts the rest, when some do not fit.
+    let rest_width = (rest > 0).then(|| count_width(rest));
 
     let mut x = cell.left();
     let top = cell.center().y - BADGE_HEIGHT / 2.0;
@@ -796,7 +797,7 @@ fn draw_badges(ui: &mut Ui, cell: Rect, badges: &[Badge], palette: &Palette) -> 
             BadgeLook::of(badge.kind, palette),
         );
     }
-    if rest > 0 {
+    if let Some(rest_width) = rest_width {
         let all: Vec<&str> = badges.iter().map(|badge| badge.name.as_str()).collect();
         let look = BadgeLook {
             colour: color(palette.text_muted),

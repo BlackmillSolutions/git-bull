@@ -2,9 +2,14 @@
 
 mod support;
 
+use std::slice;
+
+use eframe::egui::FontFamily;
 use eframe::egui::accesskit::Role;
+use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use gitbull_app::icons;
+use gitbull_app::app::App;
+use gitbull_app::{fonts, icons};
 use gitbull_core::settings::{Layout, Settings};
 use support::{app_with_open_repository, window};
 
@@ -182,6 +187,35 @@ fn divider_positions_are_restored_from_the_settings() {
     let workspace = harness.get_by_label("WORKSPACE").rect();
     let description = harness.get_by_label("Description").rect();
     assert!(workspace.right() < 333.0 && description.left() > 333.0);
+}
+
+#[test]
+fn headings_are_semibold_and_section_titles_medium() {
+    let test = support::build(support::Setup::default());
+    let mut harness = window(test.app);
+    harness.run();
+    let semibold = FontFamily::Name(fonts::SEMIBOLD.into());
+    let medium = FontFamily::Name(fonts::MEDIUM.into());
+    let families =
+        |harness: &Harness<'_, App>, text| support::text_families(harness.output(), text);
+
+    assert_eq!(
+        families(&harness, "Open a repository"),
+        slice::from_ref(&semibold)
+    );
+    assert_eq!(families(&harness, "Recent repositories"), [medium]);
+
+    harness
+        .get_by_role_and_label(Role::Button, "Settings")
+        .click();
+    harness.run();
+    for title in ["Settings", "Appearance", "Language", "Git"] {
+        assert_eq!(
+            families(&harness, title),
+            slice::from_ref(&semibold),
+            "{title}"
+        );
+    }
 }
 
 #[test]

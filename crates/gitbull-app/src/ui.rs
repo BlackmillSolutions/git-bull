@@ -22,7 +22,7 @@ use gitbull_git::version::GitVersion;
 
 use gitbull_core::settings::{ColourVision, InterfaceSize, ThemeSetting};
 
-use crate::app::{App, GitMessage, GitStatus, Notice, Overlay};
+use crate::app::{App, GitMessage, GitStatus, Notice, Overlay, SettingsDialog};
 use crate::blame_view;
 use crate::commit_list;
 use crate::commit_panel;
@@ -140,7 +140,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
 
     actions.extend(dropped_folders(ui));
-    actions.extend(shortcuts(ui));
+    actions.extend(returned_to_window(ui));
+    // The window behind the settings dialog takes no keys, as it takes no
+    // clicks.
+    if app.dialog.is_none() {
+        actions.extend(shortcuts(ui));
+    }
     let focus_search = actions
         .iter()
         .any(|action| matches!(action, Action::FocusSearch));
@@ -452,14 +457,6 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
         if input.consume_shortcut(&FIND) {
             actions.push(Action::FocusSearch);
         }
-        // Returning to the window may follow work in a terminal.
-        if input
-            .events
-            .iter()
-            .any(|event| matches!(event, egui::Event::WindowFocused(true)))
-        {
-            actions.push(Action::Refresh);
-        }
         // The variant with Shift first, as Ctrl+Tab would also match it.
         if input.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) {
             actions.push(Action::PreviousTab);
@@ -479,6 +476,18 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
         ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
     }
     actions
+}
+
+/// Returning to the window may follow work in a terminal, so it refreshes.
+fn returned_to_window(ui: &Ui) -> Option<Action> {
+    ui.ctx()
+        .input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::WindowFocused(true)))
+        })
+        .then_some(Action::Refresh)
 }
 
 /// Folders dropped onto the window this frame. A dropped file opens the
@@ -848,11 +857,19 @@ fn settings_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
         return;
     };
     let texts = &app.texts;
-    let settings = app.settings();
+    // Escape closes an open list of the dialog first, and the dialog only
+    // with the next press.
+    let list_open = egui::Popup::is_any_open(ui.ctx());
+    // The dialog keeps a margin to the edges of the window, which may be
+    // small at a large interface size; what does not fit scrolls.
+    let room = ui.ctx().content_rect().size() - egui::Vec2::splat(4.0 * SHAPE.space[3]);
     // Modal: the window behind takes no input. A click beside the dialog
     // does not close it either; Escape and the close button do.
     let modal = egui::Modal::new(Id::new("settings")).show(ui.ctx(), |ui| {
-        ui.set_width(540.0);
+        ui.set_width(room.x.min(540.0));
+        // egui offers a modal the height it had in the last frame, at first
+        // 400 points; the scroll area below may grow to the room.
+        ui.set_max_height(room.y);
         let mut close = false;
         ui.horizontal(|ui| {
             let title = RichText::new(texts.text(Msg::SettingsTitle))
@@ -863,136 +880,148 @@ fn settings_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
                 close = components::icon_button(ui, icons::CLOSE, &name, None).clicked();
             });
         });
-
-        settings_section(ui, texts.text(Msg::SettingsAppearance));
-        egui::Grid::new("appearance")
-            .num_columns(2)
-            .spacing(egui::vec2(SHAPE.space[3], SHAPE.space[1]))
-            .show(ui, |ui| {
-                ui.label(texts.text(Msg::SettingsTheme));
-                let mut theme = settings.theme;
-                let (system, light, dark) = (
-                    texts.text(Msg::ThemeSystem),
-                    texts.text(Msg::ThemeLight),
-                    texts.text(Msg::ThemeDark),
-                );
-                components::segmented(
-                    ui,
-                    &mut theme,
-                    &[
-                        (ThemeSetting::System, system.as_str()),
-                        (ThemeSetting::Light, light.as_str()),
-                        (ThemeSetting::Dark, dark.as_str()),
-                    ],
-                );
-                if theme != settings.theme {
-                    actions.push(Action::SetTheme(theme));
-                }
-                ui.end_row();
-
-                ui.label(texts.text(Msg::SettingsColourVision));
-                let mut vision = settings.colour_vision;
-                let (standard, red_green, blue_yellow) = (
-                    texts.text(Msg::ColourVisionStandard),
-                    texts.text(Msg::ColourVisionRedGreen),
-                    texts.text(Msg::ColourVisionBlueYellow),
-                );
-                components::segmented(
-                    ui,
-                    &mut vision,
-                    &[
-                        (ColourVision::Standard, standard.as_str()),
-                        (ColourVision::RedGreen, red_green.as_str()),
-                        (ColourVision::BlueYellow, blue_yellow.as_str()),
-                    ],
-                );
-                if vision != settings.colour_vision {
-                    actions.push(Action::SetColourVision(vision));
-                }
-                ui.end_row();
-
-                ui.label(texts.text(Msg::SettingsInterfaceSize));
-                let mut size = settings.interface_size;
-                let labels: Vec<String> = InterfaceSize::ALL
-                    .iter()
-                    .map(|size| {
-                        let mut args = FluentArgs::new();
-                        args.set("percent", size.percent());
-                        texts.text_with(Msg::InterfaceSizePercent, Some(&args))
-                    })
-                    .collect();
-                let choices: Vec<(InterfaceSize, &str)> = InterfaceSize::ALL
-                    .into_iter()
-                    .zip(labels.iter().map(String::as_str))
-                    .collect();
-                components::segmented(ui, &mut size, &choices);
-                if size != settings.interface_size {
-                    actions.push(Action::SetInterfaceSize(size));
-                }
-                ui.end_row();
-            });
-
-        let language_title = settings_section(ui, texts.text(Msg::SettingsLanguage));
-        let mut language = settings.language.clone();
-        let combo = egui::ComboBox::from_id_salt("language")
-            .selected_text(language.clone())
-            .show_ui(ui, |ui| {
-                for tag in i18n::languages() {
-                    ui.selectable_value(&mut language, tag.to_owned(), tag);
-                }
-            });
-        focus_ring(ui, &combo.response);
-        combo.response.labelled_by(language_title.id);
-        if language != settings.language {
-            actions.push(Action::SetLanguage(language));
-        }
-
-        settings_section(ui, texts.text(Msg::SettingsSectionGit));
-        let label = ui.label(texts.text(Msg::SettingsGit));
-        let mut input = dialog.git_input.clone();
-        let hint = texts.text(Msg::SettingsGitAutomatic);
-        components::text_field(ui, &mut input, &hint, 420.0).labelled_by(label.id);
-        if input != dialog.git_input {
-            actions.push(Action::SetGitInput(input));
-        }
-        ui.horizontal(|ui| {
-            if Button::new(&texts.text(Msg::SettingsGitBrowse))
-                .show(ui)
-                .clicked()
-            {
-                actions.push(Action::BrowseGit);
-            }
-            if Button::new(&texts.text(Msg::SettingsGitApply))
-                .kind(Kind::Primary)
-                .show(ui)
-                .clicked()
-            {
-                actions.push(Action::ApplyGit);
-            }
-        });
-        match &dialog.git_message {
-            Some(GitMessage::Applied) => {
-                ui.label(texts.text(Msg::SettingsGitApplied));
-            }
-            Some(GitMessage::Problem(problem)) => {
-                components::error_text(ui, git_problem(app, problem));
-            }
-            None => {}
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("settings")
+            .max_height(room.y - ui.min_rect().height())
+            .auto_shrink([false, true])
+            .show(ui, |ui| settings_sections(app, dialog, ui, actions));
         close
     });
-    let escape = ui
-        .ctx()
-        .input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
+    let escape = !list_open
+        && ui
+            .ctx()
+            .input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
     if modal.inner || escape {
         actions.push(Action::CloseSettings);
+    }
+}
+
+/// The sections of the settings dialog below its title.
+fn settings_sections(app: &App, dialog: &SettingsDialog, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let texts = &app.texts;
+    let settings = app.settings();
+    settings_section(ui, texts.text(Msg::SettingsAppearance));
+    egui::Grid::new("appearance")
+        .num_columns(2)
+        .spacing(egui::vec2(SHAPE.space[3], SHAPE.space[1]))
+        .show(ui, |ui| {
+            ui.label(texts.text(Msg::SettingsTheme));
+            let mut theme = settings.theme;
+            let (system, light, dark) = (
+                texts.text(Msg::ThemeSystem),
+                texts.text(Msg::ThemeLight),
+                texts.text(Msg::ThemeDark),
+            );
+            components::segmented(
+                ui,
+                &mut theme,
+                &[
+                    (ThemeSetting::System, system.as_str()),
+                    (ThemeSetting::Light, light.as_str()),
+                    (ThemeSetting::Dark, dark.as_str()),
+                ],
+            );
+            if theme != settings.theme {
+                actions.push(Action::SetTheme(theme));
+            }
+            ui.end_row();
+
+            ui.label(texts.text(Msg::SettingsColourVision));
+            let mut vision = settings.colour_vision;
+            let (standard, red_green, blue_yellow) = (
+                texts.text(Msg::ColourVisionStandard),
+                texts.text(Msg::ColourVisionRedGreen),
+                texts.text(Msg::ColourVisionBlueYellow),
+            );
+            components::segmented(
+                ui,
+                &mut vision,
+                &[
+                    (ColourVision::Standard, standard.as_str()),
+                    (ColourVision::RedGreen, red_green.as_str()),
+                    (ColourVision::BlueYellow, blue_yellow.as_str()),
+                ],
+            );
+            if vision != settings.colour_vision {
+                actions.push(Action::SetColourVision(vision));
+            }
+            ui.end_row();
+
+            ui.label(texts.text(Msg::SettingsInterfaceSize));
+            let mut size = settings.interface_size;
+            let labels: Vec<String> = InterfaceSize::ALL
+                .iter()
+                .map(|size| {
+                    let mut args = FluentArgs::new();
+                    args.set("percent", size.percent());
+                    texts.text_with(Msg::InterfaceSizePercent, Some(&args))
+                })
+                .collect();
+            let choices: Vec<(InterfaceSize, &str)> = InterfaceSize::ALL
+                .into_iter()
+                .zip(labels.iter().map(String::as_str))
+                .collect();
+            components::segmented(ui, &mut size, &choices);
+            if size != settings.interface_size {
+                actions.push(Action::SetInterfaceSize(size));
+            }
+            ui.end_row();
+        });
+
+    let language_title = settings_section(ui, texts.text(Msg::SettingsLanguage));
+    let mut language = settings.language.clone();
+    let combo = egui::ComboBox::from_id_salt("language")
+        .selected_text(language.clone())
+        .show_ui(ui, |ui| {
+            for tag in i18n::languages() {
+                ui.selectable_value(&mut language, tag.to_owned(), tag);
+            }
+        });
+    focus_ring(ui, &combo.response);
+    combo.response.labelled_by(language_title.id);
+    if language != settings.language {
+        actions.push(Action::SetLanguage(language));
+    }
+
+    settings_section(ui, texts.text(Msg::SettingsSectionGit));
+    let label = ui.label(texts.text(Msg::SettingsGit));
+    let mut input = dialog.git_input.clone();
+    let hint = texts.text(Msg::SettingsGitAutomatic);
+    let width = ui.available_width().min(420.0);
+    components::text_field(ui, &mut input, &hint, width).labelled_by(label.id);
+    if input != dialog.git_input {
+        actions.push(Action::SetGitInput(input));
+    }
+    ui.horizontal(|ui| {
+        if Button::new(&texts.text(Msg::SettingsGitBrowse))
+            .show(ui)
+            .clicked()
+        {
+            actions.push(Action::BrowseGit);
+        }
+        if Button::new(&texts.text(Msg::SettingsGitApply))
+            .kind(Kind::Primary)
+            .show(ui)
+            .clicked()
+        {
+            actions.push(Action::ApplyGit);
+        }
+    });
+    match &dialog.git_message {
+        Some(GitMessage::Applied) => {
+            ui.label(texts.text(Msg::SettingsGitApplied));
+        }
+        Some(GitMessage::Problem(problem)) => {
+            components::error_text(ui, git_problem(app, problem));
+        }
+        None => {}
     }
 }
 
 /// The title of a section of the settings dialog.
 fn settings_section(ui: &mut Ui, title: String) -> egui::Response {
     ui.add_space(SHAPE.space[2]);
-    let title = ui.label(RichText::new(title).strong());
+    let title = ui.label(RichText::new(title).heading());
     ui.add_space(SHAPE.space[0]);
     title
 }
@@ -1275,7 +1304,14 @@ fn fill(ui: &mut Ui) {
 }
 
 pub(crate) fn section_title(ui: &mut Ui, text: String) {
-    ui.label(RichText::new(text).small().strong());
+    ui.label(section_text(text));
+}
+
+/// `text` as the title of a section.
+pub(crate) fn section_text(text: impl Into<String>) -> RichText {
+    RichText::new(text)
+        .text_style(egui::TextStyle::Name(style::SECTION.into()))
+        .strong()
 }
 
 pub fn color(rgb: Rgb) -> Color32 {

@@ -23,6 +23,14 @@ pub const SEMIBOLD: &str = "semibold";
 static INTER: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
 static JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 
+/// Whether the bundled fonts are loaded, which at start-up happens before
+/// the first frame. Until then egui knows only its own fonts. Valid from
+/// the first pass of `ctx` on, when egui has fonts.
+pub fn loaded(ctx: &egui::Context) -> bool {
+    let semibold = FontFamily::Name(SEMIBOLD.into());
+    ctx.fonts(|fonts| fonts.definitions().families.contains_key(&semibold))
+}
+
 /// egui's emoji fonts, in their order.
 const EMOJI: [&str; 2] = ["NotoEmoji-Regular", "emoji-icon-font"];
 

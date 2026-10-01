@@ -4,8 +4,8 @@
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    self, Align, Color32, Id, Label, Layout, RichText, Sense, Ui, UiBuilder, WidgetInfo,
-    WidgetType, pos2, vec2,
+    self, Align, Color32, Id, Label, Layout, Sense, Ui, UiBuilder, WidgetInfo, WidgetType, pos2,
+    vec2,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::file_status::StatusState;
@@ -20,6 +20,7 @@ use crate::commit_panel::{kind_index, marker, marker_color, path_job};
 use crate::components;
 use crate::i18n::Msg;
 use crate::theme::Palette;
+use crate::ui::section_text;
 use crate::virtual_list::VirtualList;
 
 /// The id of the file list, which takes the focus of its area.
@@ -318,11 +319,7 @@ fn title_row(ui: &mut Ui, title: &str) {
             .max_rect(rect.shrink2(vec2(6.0, 0.0)))
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            ui.add(
-                Label::new(RichText::new(title).small().strong())
-                    .truncate()
-                    .selectable(false),
-            );
+            ui.add(Label::new(section_text(title)).truncate().selectable(false));
         },
     );
 }

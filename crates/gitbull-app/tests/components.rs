@@ -312,6 +312,62 @@ fn menu_items_follow_each_other_without_a_gap() {
     assert_eq!(second.top(), first.bottom());
 }
 
+#[test]
+fn a_context_menu_is_as_wide_as_its_longest_entry() {
+    let mut harness = harness((), |ui, _| {
+        let commit = ui.add(egui::Label::new("Commit").sense(egui::Sense::click()));
+        commit.context_menu(|ui| {
+            components::menu(ui, |ui| {
+                components::menu_item(ui, None, "Copy", None);
+                components::menu_item(ui, None, "Copy the full hash", None);
+            });
+        });
+    });
+    harness.run();
+    let at = harness.get_by_label("Commit").rect().center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+
+    let short = harness.get_by_role_and_label(Role::Button, "Copy").rect();
+    let long = harness
+        .get_by_role_and_label(Role::Button, "Copy the full hash")
+        .rect();
+    assert_eq!(short.width(), long.width(), "the entries fill the menu");
+    assert!(long.width() < 250.0, "the menu is {} wide", long.width());
+}
+
+#[test]
+fn a_long_banner_text_wraps_beside_its_buttons() {
+    const TEXT: &str = "C:\\Users\\someone\\Projects\\clients\\a-long-name\\deep\\down\\the\\tree is not inside a Git repository.";
+    let mut harness = harness((), |ui, _| {
+        components::banner(
+            ui,
+            BannerKind::Warning,
+            TEXT,
+            &["Show all branches"],
+            "Dismiss",
+        );
+    });
+    harness.run();
+
+    let text = harness.get_by_label(TEXT).rect();
+    let width = harness.ctx.content_rect().width();
+    assert!(text.right() <= width, "the text runs to {}", text.right());
+    for button in ["Show all branches", "Dismiss"] {
+        let rect = harness.get_by_role_and_label(Role::Button, button).rect();
+        assert!(!rect.intersects(text), "{button} {rect:?} lies on {text:?}");
+        assert!(rect.right() <= width, "{button} {rect:?}");
+    }
+}
+
 /// Whether any node offers `text` to assistive technology.
 fn offered<State>(harness: &Harness<'_, State>, text: &str) -> bool {
     harness

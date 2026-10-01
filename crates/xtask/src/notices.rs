@@ -408,8 +408,6 @@ This file is generated with `cargo xtask notices`. Do not edit it by hand.
     Ok(out)
 }
 
-/// The syntax definitions and themes of two-face, and the acknowledgements
-/// their licences ask for.
 /// A font git-bull bundles, with its licence text.
 #[derive(Debug)]
 pub struct Font {
@@ -461,6 +459,8 @@ fn render_fonts(out: &mut String) -> Result<(), String> {
     Ok(())
 }
 
+/// The syntax definitions and themes of two-face, and the acknowledgements
+/// their licences ask for.
 fn render_assets(out: &mut String) {
     let mut syntaxes: Vec<String> = two_face::syntax::extra_newlines()
         .syntaxes()

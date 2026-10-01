@@ -8,27 +8,41 @@ use eframe::egui::{
 };
 use gitbull_core::settings::ColourVision;
 
+use crate::fonts;
 use crate::theme::{self, Appearance, Palette, SHAPE, TYPE};
 use crate::ui::color;
 
 /// The text style of titles, next to egui's own styles.
 pub const TITLE: &str = "title";
+/// The text style of the titles of sections, such as of a panel.
+pub const SECTION: &str = "section";
 
-/// Where the appearance and colour vision of the applied style are kept.
+/// Where what the applied style was built from is kept.
 const APPLIED: &str = "gitbull-style";
+
+/// What a style is built from.
+#[derive(Clone, Copy, PartialEq)]
+struct Applied {
+    appearance: Appearance,
+    vision: ColourVision,
+    bundled_fonts: bool,
+}
 
 /// The palette the style was last built from, for the colours egui's style
 /// has no place for, such as the accent fill and the colours of notices.
 /// Before any style is applied, the dark Standard palette.
 pub fn active_palette(ctx: &Context) -> &'static Palette {
-    ctx.data(|data| data.get_temp::<(Appearance, ColourVision)>(Id::new(APPLIED)))
-        .map_or(&theme::DARK, |(appearance, vision)| {
-            theme::palette(appearance, vision)
+    ctx.data(|data| data.get_temp::<Applied>(Id::new(APPLIED)))
+        .map_or(&theme::DARK, |applied| {
+            theme::palette(applied.appearance, applied.vision)
         })
 }
 
-/// egui's whole style for `palette`.
-pub fn style(palette: &Palette, appearance: Appearance) -> egui::Style {
+/// egui's whole style for `palette`. Headings and titles take the semibold
+/// weight and the titles of sections the medium one once `bundled_fonts`
+/// are loaded, and the proportional family before, as egui cannot draw a
+/// family it does not know.
+pub fn style(palette: &Palette, appearance: Appearance, bundled_fonts: bool) -> egui::Style {
     let c = |rgb| color(rgb);
     let radius = CornerRadius::same(SHAPE.radius as u8);
     let large = CornerRadius::same(SHAPE.radius_large as u8);
@@ -104,15 +118,26 @@ pub fn style(palette: &Palette, appearance: Appearance) -> egui::Style {
     style.spacing.window_margin = Margin::same(medium as i8);
     style.spacing.menu_margin = Margin::same(small as i8);
     style.spacing.scroll = ScrollStyle::floating();
+    let weight = |family: &str| match bundled_fonts {
+        true => FontFamily::Name(family.into()),
+        false => FontFamily::Proportional,
+    };
     style.text_styles = [
         (TextStyle::Small, FontId::proportional(TYPE.small)),
         (TextStyle::Body, FontId::proportional(TYPE.body)),
         (TextStyle::Button, FontId::proportional(TYPE.body)),
         (TextStyle::Monospace, FontId::monospace(TYPE.body)),
-        (TextStyle::Heading, FontId::proportional(TYPE.heading)),
+        (
+            TextStyle::Heading,
+            FontId::new(TYPE.heading, weight(fonts::SEMIBOLD)),
+        ),
         (
             TextStyle::Name(TITLE.into()),
-            FontId::new(TYPE.title, FontFamily::Proportional),
+            FontId::new(TYPE.title, weight(fonts::SEMIBOLD)),
+        ),
+        (
+            TextStyle::Name(SECTION.into()),
+            FontId::new(TYPE.small, weight(fonts::MEDIUM)),
         ),
     ]
     .into();
@@ -127,15 +152,21 @@ pub fn use_style(ui: &mut egui::Ui, appearance: Appearance, vision: ColourVision
 }
 
 /// Sets egui's style when the appearance or the colour vision changed
-/// since the last call, and not otherwise. The interface size does not
-/// enter: the zoom factor scales the points the style is measured in.
+/// since the last call, or the bundled fonts arrived, and not otherwise.
+/// The interface size does not enter: the zoom factor scales the points the
+/// style is measured in. Valid from the first pass of `ctx` on, when egui
+/// has fonts.
 ///
 /// egui's own choice between its light and dark style is fixed to the
 /// appearance, so that egui does not switch to its default style of the
 /// other theme when the system changes its theme.
 pub fn apply_style(ctx: &Context, appearance: Appearance, vision: ColourVision) {
     let applied = Id::new(APPLIED);
-    let wanted = (appearance, vision);
+    let wanted = Applied {
+        appearance,
+        vision,
+        bundled_fonts: fonts::loaded(ctx),
+    };
     if ctx.data(|data| data.get_temp(applied)) == Some(wanted) {
         return;
     }
@@ -143,7 +174,8 @@ pub fn apply_style(ctx: &Context, appearance: Appearance, vision: ColourVision) 
         Appearance::Light => egui::Theme::Light,
         Appearance::Dark => egui::Theme::Dark,
     };
-    let mut style = style(theme::palette(appearance, vision), appearance);
+    let palette = theme::palette(appearance, vision);
+    let mut style = style(palette, appearance, wanted.bundled_fonts);
     // Animation and the blinking of the cursor are behaviour, not look:
     // they stay as they were, such as switched off in tests.
     let previous = ctx.style_of(theme);
@@ -165,7 +197,7 @@ mod tests {
     #[test]
     fn style_takes_its_colours_from_the_palette() {
         for (appearance, palette) in [(Appearance::Light, &LIGHT), (Appearance::Dark, &DARK)] {
-            let style = style(palette, appearance);
+            let style = style(palette, appearance, true);
             let visuals = &style.visuals;
             let widgets = &visuals.widgets;
             assert_eq!(visuals.dark_mode, appearance == Appearance::Dark);
@@ -198,7 +230,7 @@ mod tests {
 
     #[test]
     fn style_takes_its_sizes_from_the_shape_and_the_type_scale() {
-        let style = style(&LIGHT, Appearance::Light);
+        let style = style(&LIGHT, Appearance::Light, true);
         let radius = CornerRadius::same(SHAPE.radius as u8);
         for widget in [
             &style.visuals.widgets.inactive,
@@ -237,6 +269,42 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn headings_take_the_heavier_weights_once_the_bundled_fonts_are_loaded() {
+        let family = |style: &egui::Style, text_style: TextStyle| {
+            style
+                .text_styles
+                .get(&text_style)
+                .map(|font| font.family.clone())
+        };
+        let semibold = FontFamily::Name(crate::fonts::SEMIBOLD.into());
+        let medium = FontFamily::Name(crate::fonts::MEDIUM.into());
+        let loaded = style(&LIGHT, Appearance::Light, true);
+        assert_eq!(family(&loaded, TextStyle::Heading), Some(semibold.clone()));
+        assert_eq!(
+            family(&loaded, TextStyle::Name(TITLE.into())),
+            Some(semibold)
+        );
+        assert_eq!(
+            family(&loaded, TextStyle::Name(SECTION.into())),
+            Some(medium)
+        );
+
+        // egui cannot draw a family it does not know.
+        let before = style(&LIGHT, Appearance::Light, false);
+        for text_style in [
+            TextStyle::Heading,
+            TextStyle::Name(TITLE.into()),
+            TextStyle::Name(SECTION.into()),
+        ] {
+            assert_eq!(
+                family(&before, text_style.clone()),
+                Some(FontFamily::Proportional),
+                "{text_style:?}"
+            );
+        }
+    }
+
     /// A mark on the active style that a newly built style does not have.
     fn mark(ctx: &Context) {
         ctx.all_styles_mut(|style| style.spacing.indent = 99.0);
@@ -246,9 +314,18 @@ mod tests {
         ctx.global_style().spacing.indent == 99.0
     }
 
+    /// A context after its first pass, when egui has fonts.
+    fn context() -> Context {
+        let ctx = Context::default();
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        ctx
+    }
+
     #[test]
     fn style_is_set_only_when_the_appearance_or_the_colour_vision_changes() {
-        let ctx = Context::default();
+        let ctx = context();
         apply_style(&ctx, Appearance::Dark, ColourVision::Standard);
         assert_eq!(ctx.global_style().visuals.panel_fill, color(DARK.panel));
 
@@ -270,6 +347,26 @@ mod tests {
         assert_eq!(
             ctx.global_style().visuals.panel_fill,
             color(LIGHT_RED_GREEN.panel)
+        );
+    }
+
+    #[test]
+    fn style_is_built_again_when_the_bundled_fonts_arrive() {
+        let ctx = context();
+        apply_style(&ctx, Appearance::Dark, ColourVision::Standard);
+        mark(&ctx);
+
+        ctx.set_fonts(crate::fonts::definitions());
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        apply_style(&ctx, Appearance::Dark, ColourVision::Standard);
+
+        assert!(!marked(&ctx), "the style kept the families of egui's fonts");
+        let heading = ctx.global_style().text_styles[&TextStyle::Heading].clone();
+        assert_eq!(
+            heading.family,
+            FontFamily::Name(crate::fonts::SEMIBOLD.into())
         );
     }
 
@@ -296,7 +393,7 @@ mod tests {
 
     #[test]
     fn style_keeps_the_options_of_animation_and_the_cursor() {
-        let ctx = Context::default();
+        let ctx = context();
         ctx.all_styles_mut(|style| {
             style.animation_time = 0.0;
             style.scroll_animation = egui::style::ScrollAnimation::none();

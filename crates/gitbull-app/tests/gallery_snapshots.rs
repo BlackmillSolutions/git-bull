@@ -12,7 +12,7 @@ use egui_kittest::{Harness, SnapshotOptions, image_snapshot_options};
 use gitbull_app::components::{self, BannerKind, Button, Kind};
 use gitbull_app::fonts;
 use gitbull_app::icons;
-use gitbull_app::style::{TITLE, active_palette, use_style};
+use gitbull_app::style::{SECTION, TITLE, active_palette, use_style};
 use gitbull_app::theme::{Appearance, Palette, Rgb, SHAPE};
 use gitbull_app::ui::color;
 use gitbull_core::settings::ColourVision;
@@ -27,7 +27,11 @@ struct Gallery {
 
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(SHAPE.space[2]);
-    ui.label(RichText::new(title).small().strong());
+    ui.label(
+        RichText::new(title)
+            .text_style(TextStyle::Name(SECTION.into()))
+            .strong(),
+    );
 }
 
 /// A row of a diff, with its marker in the marker colour.

@@ -4,10 +4,12 @@
 //! click target of at least [`SHAPE`]`.target` on each side.
 
 use eframe::egui::os::OperatingSystem;
+use std::sync::Arc;
+
 use eframe::egui::{
-    self, Align2, Color32, Context, CornerRadius, Event, Frame, Id, KeyboardShortcut, Margin,
-    ModifierNames, Response, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo,
-    WidgetType, vec2,
+    self, Align, Align2, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
+    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Response, RichText, Sense, Stroke,
+    StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
 };
 
 use crate::icons;
@@ -63,8 +65,13 @@ impl<'a> Button<'a> {
         self
     }
 
-    pub fn show(self, ui: &mut Ui) -> Response {
-        let palette = active_palette(ui.ctx());
+    /// How wide the button is drawn in `ui`.
+    pub fn width(&self, ui: &Ui) -> f32 {
+        self.layout(ui).1
+    }
+
+    /// The label laid out, and the width of the button.
+    fn layout(&self, ui: &Ui) -> (Arc<Galley>, f32) {
         let font = TextStyle::Button.resolve(ui.style());
         let galley = ui
             .painter()
@@ -76,6 +83,13 @@ impl<'a> Button<'a> {
             0.0
         };
         let width = (2.0 * padding + icon_width + galley.size().x).max(SHAPE.target);
+        (galley, width)
+    }
+
+    pub fn show(self, ui: &mut Ui) -> Response {
+        let palette = active_palette(ui.ctx());
+        let (galley, width) = self.layout(ui);
+        let [_, gap, padding, _] = SHAPE.space;
         let (rect, response) =
             ui.allocate_exact_size(vec2(width, SHAPE.control_height), Sense::click());
         response
@@ -116,7 +130,7 @@ impl<'a> Button<'a> {
                     icons::font(ui.ctx(), ICON_SIZE),
                     content,
                 );
-                x += icon_width;
+                x += ICON_SIZE + gap;
             }
             let at = egui::pos2(x, rect.center().y - galley.size().y / 2.0);
             painter.galley(at, galley, content);
@@ -283,9 +297,10 @@ pub fn text_edit<'t>(text: &'t mut String, hint: &str, width: f32) -> egui::Text
         .desired_width(width - margin.sum().x)
 }
 
-/// The entries of a menu, which follow each other without a gap.
+/// The entries of a menu, which follow each other without a gap and share
+/// the width of the widest.
 pub fn menu<R>(ui: &mut Ui, add_entries: impl FnOnce(&mut Ui) -> R) -> R {
-    ui.scope(|ui| {
+    ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         add_entries(ui)
     })
@@ -322,9 +337,18 @@ pub fn menu_item(
             .as_ref()
             .map_or(0.0, |keys| 2.0 * padding + keys.size().x)
         + padding;
-    let width = content.max(ui.available_width()).max(SHAPE.target);
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(width, SHAPE.control_height), Sense::click());
+    // In a menu, an entry fills the width that the widest entry sets. egui
+    // measures a menu with justification off first, so that the entries
+    // report the width of their content then.
+    let width = if ui.layout().horizontal_justify() {
+        content.max(ui.available_width())
+    } else {
+        content
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(width.max(SHAPE.target), SHAPE.control_height),
+        Sense::click(),
+    );
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -400,8 +424,20 @@ pub fn banner(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 self::icon(ui, icon, 18.0, color(foreground));
-                ui.label(RichText::new(text).size(TYPE.body).color(color(foreground)));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The buttons keep their room; the text wraps in the rest.
+                let gap = ui.spacing().item_spacing.x;
+                let buttons: f32 = actions
+                    .iter()
+                    .map(|action| Button::new(action).width(ui) + gap)
+                    .sum::<f32>()
+                    + SHAPE.control_height
+                    + gap;
+                ui.scope(|ui| {
+                    ui.set_max_width((ui.available_width() - buttons).max(0.0));
+                    let text = RichText::new(text).size(TYPE.body).color(color(foreground));
+                    ui.add(Label::new(text).wrap());
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if icon_button(ui, icons::CLOSE, dismiss, None).clicked() {
                         clicked = Some(BannerAction::Dismiss);
                     }
