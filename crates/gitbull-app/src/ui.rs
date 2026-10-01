@@ -6,7 +6,8 @@
 //! view shows the uncommitted files beside the diff panel.
 
 use eframe::egui::{
-    self, CentralPanel, Color32, EventFilter, Id, Key, Modifiers, Panel, RichText, Sense, Ui,
+    self, CentralPanel, Color32, EventFilter, Id, Key, KeyboardShortcut, Modifiers, Panel,
+    RichText, Sense, Ui,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::workspace::{Failure, Tab, TabId, TabState, View};
@@ -25,12 +26,13 @@ use crate::app::{App, GitMessage, GitStatus, Notice, Overlay};
 use crate::blame_view;
 use crate::commit_list;
 use crate::commit_panel;
-use crate::components::focus_ring;
+use crate::components::{self, Button, Kind, focus_ring};
 use crate::diff_view::{self, Pane};
 use crate::file_history_view::{self, FILE_HISTORY_LIST};
 use crate::file_status_view::{self, STATUS_LIST};
 use crate::i18n;
 use crate::i18n::Msg;
+use crate::icons;
 use crate::paths::System;
 use crate::search_view;
 use crate::sidebar_view::{self, SidebarAction};
@@ -56,6 +58,14 @@ const STATUS_AREAS: [&str; 3] = [AREA_SIDEBAR, STATUS_LIST, AREA_DIFF];
 const FILE_HISTORY_AREAS: [&str; 3] = [AREA_SIDEBAR, FILE_HISTORY_LIST, AREA_DIFF];
 /// The areas of blame, whose content scrolls without a focus.
 const BLAME_AREAS: [&str; 1] = [AREA_SIDEBAR];
+
+/// Shortcuts of the window, for the keys and the tooltips alike. `COMMAND`
+/// is Ctrl, and Cmd on macOS.
+const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+const NEW_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
+const CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
+const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
+const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 
 /// Sizes the UI starts with when the settings have none.
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -382,23 +392,18 @@ fn start_screen(app: &App, problem: &GitCheck, ui: &mut Ui, actions: &mut Vec<Ac
 /// Keyboard shortcuts of the window. `COMMAND` is Ctrl, and Cmd on macOS;
 /// switching tabs uses Ctrl everywhere, because Cmd+Tab belongs to macOS.
 fn shortcuts(ui: &Ui) -> Vec<Action> {
-    use egui::{Key, Modifiers};
     let actions = ui.ctx().input_mut(|input| {
         let mut actions = Vec::new();
-        if input.consume_key(Modifiers::COMMAND, Key::O)
-            || input.consume_key(Modifiers::COMMAND, Key::T)
-        {
+        if input.consume_shortcut(&OPEN) || input.consume_shortcut(&NEW_TAB) {
             actions.push(Action::ShowChooser);
         }
-        if input.consume_key(Modifiers::COMMAND, Key::W) {
+        if input.consume_shortcut(&CLOSE_TAB) {
             actions.push(Action::CloseActive);
         }
-        if input.consume_key(Modifiers::NONE, Key::F5)
-            || input.consume_key(Modifiers::COMMAND, Key::R)
-        {
+        if input.consume_key(Modifiers::NONE, Key::F5) || input.consume_shortcut(&REFRESH) {
             actions.push(Action::Refresh);
         }
-        if input.consume_key(Modifiers::COMMAND, Key::F) {
+        if input.consume_shortcut(&FIND) {
             actions.push(Action::FocusSearch);
         }
         // Returning to the window may follow work in a terminal.
@@ -570,11 +575,22 @@ fn tab_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
 }
 
 fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>) {
+    let appearance = appearance(app, ui);
     ui.horizontal(|ui| {
-        if ui.button(app.texts.text(Msg::ToolbarOpen)).clicked() {
+        let open = app.texts.text(Msg::ToolbarOpen);
+        let open = Button::new(&open)
+            .kind(Kind::Ghost)
+            .icon(icons::FOLDER)
+            .shortcut(OPEN);
+        if open.show(ui).clicked() {
             actions.push(Action::ShowChooser);
         }
-        if ui.button(app.texts.text(Msg::ToolbarRefresh)).clicked() {
+        let refresh = app.texts.text(Msg::ToolbarRefresh);
+        let refresh = Button::new(&refresh)
+            .kind(Kind::Ghost)
+            .icon(icons::REFRESH)
+            .shortcut(REFRESH);
+        if refresh.show(ui).clicked() {
             actions.push(Action::Refresh);
         }
         let search = app
@@ -587,12 +603,18 @@ fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>
             search_bar(app, ui, search, focus_search, actions);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button(app.texts.text(Msg::ToolbarSettings)).clicked() {
+            let settings = app.texts.text(Msg::ToolbarSettings);
+            if components::icon_button(ui, icons::GEAR, &settings, None).clicked() {
                 actions.push(Action::OpenSettings);
             }
-            ui.menu_button(app.texts.text(Msg::ToolbarTheme), |ui| {
-                theme_choice(app, ui, actions);
-            });
+            // The icon of the appearance in use.
+            let icon = match appearance {
+                Appearance::Light => icons::SUN,
+                Appearance::Dark => icons::MOON,
+            };
+            let theme = app.texts.text(Msg::ToolbarTheme);
+            let theme = components::icon_button(ui, icon, &theme, None);
+            egui::Popup::menu(&theme).show(|ui| theme_choice(app, ui, actions));
         });
     });
 }

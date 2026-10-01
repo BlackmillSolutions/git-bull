@@ -304,3 +304,29 @@ pub fn focus_rings(output: &eframe::egui::FullOutput) -> Vec<eframe::egui::Rect>
     }
     found
 }
+
+/// The texts drawn inside `rect`, icons included, in the order drawn.
+pub fn texts_in(output: &eframe::egui::FullOutput, rect: eframe::egui::Rect) -> Vec<String> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, rect: eframe::egui::Rect, found: &mut Vec<String>) {
+        match shape {
+            Shape::Text(text) => {
+                let drawn = text.visual_bounding_rect();
+                if rect.expand(1.0).contains_rect(drawn) {
+                    found.push(text.galley.text().to_owned());
+                }
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, rect, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, rect, &mut found);
+    }
+    found
+}

@@ -4,6 +4,7 @@ mod support;
 
 use eframe::egui::accesskit::Role;
 use egui_kittest::kittest::Queryable;
+use gitbull_app::icons;
 use gitbull_core::settings::{Layout, Settings};
 use support::{app_with_open_repository, window};
 
@@ -68,6 +69,49 @@ fn toolbar_offers_only_working_actions() {
                 .is_none(),
             "toolbar offers {missing}"
         );
+    }
+}
+
+#[test]
+fn open_and_refresh_show_an_icon_and_their_label() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window(test.app);
+    harness.run();
+
+    for (label, icon) in [("Open", icons::FOLDER), ("Refresh", icons::REFRESH)] {
+        let rect = harness.get_by_role_and_label(Role::Button, label).rect();
+        let texts = support::texts_in(harness.output(), rect);
+        assert!(texts.iter().any(|text| text == icon), "{label}: {texts:?}");
+        assert!(texts.iter().any(|text| text == label), "{label}: {texts:?}");
+    }
+}
+
+#[test]
+fn theme_switch_and_settings_show_an_icon_that_names_them_in_a_tooltip() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window(test.app);
+    harness.run();
+
+    for (name, shown) in [
+        ("Theme", &[icons::SUN, icons::MOON][..]),
+        ("Settings", &[icons::GEAR]),
+    ] {
+        let rect = harness.get_by_role_and_label(Role::Button, name).rect();
+        let texts = support::texts_in(harness.output(), rect);
+        assert!(
+            texts.iter().any(|text| shown.contains(&text.as_str())),
+            "{name}: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text == name),
+            "{name} shows its name"
+        );
+
+        harness.get_by_role_and_label(Role::Button, name).hover();
+        harness.run();
+        // The name is on the button for assistive technology and in the
+        // tooltip.
+        assert_eq!(harness.query_all_by_label(name).count(), 2, "{name}");
     }
 }
 
