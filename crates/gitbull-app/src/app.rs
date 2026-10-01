@@ -339,6 +339,15 @@ impl App {
         }
     }
 
+    /// Sets whether to use the system's title bar; the window keeps the
+    /// one it was built with until the next start.
+    pub fn set_system_title_bar(&mut self, system: bool) {
+        if self.settings.system_title_bar != system {
+            self.settings.system_title_bar = system;
+            self.dirty = true;
+        }
+    }
+
     pub fn set_interface_size(&mut self, size: InterfaceSize) {
         if self.settings.interface_size != size {
             self.settings.interface_size = size;

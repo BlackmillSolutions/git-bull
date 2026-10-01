@@ -93,6 +93,7 @@ enum Action {
     SetTheme(ThemeSetting),
     SetColourVision(ColourVision),
     SetInterfaceSize(InterfaceSize),
+    SetSystemTitleBar(bool),
     /// The next larger and smaller interface size.
     Larger,
     Smaller,
@@ -249,6 +250,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::SetTheme(theme) => app.set_theme(theme),
             Action::SetColourVision(vision) => app.set_colour_vision(vision),
             Action::SetInterfaceSize(size) => app.set_interface_size(size),
+            Action::SetSystemTitleBar(system) => app.set_system_title_bar(system),
             Action::Larger => app.set_interface_size(app.settings().interface_size.larger()),
             Action::Smaller => app.set_interface_size(app.settings().interface_size.smaller()),
             Action::SetLanguage(language) => app.set_language(language),
@@ -1466,6 +1468,21 @@ fn settings_sections(app: &App, dialog: &SettingsDialog, ui: &mut Ui, actions: &
             if size != settings.interface_size {
                 actions.push(Action::SetInterfaceSize(size));
             }
+            ui.end_row();
+
+            // The window keeps the title bar it was built with until the
+            // next start (design, decision 6).
+            ui.label(texts.text(Msg::SettingsTitleBar));
+            ui.vertical(|ui| {
+                let mut system = settings.system_title_bar;
+                components::checkbox(ui, &mut system, &texts.text(Msg::SettingsSystemTitleBar));
+                if system != settings.system_title_bar {
+                    actions.push(Action::SetSystemTitleBar(system));
+                }
+                if system != app.system_title_bar() {
+                    ui.label(RichText::new(texts.text(Msg::SettingsAtNextStart)).weak());
+                }
+            });
             ui.end_row();
         });
 
