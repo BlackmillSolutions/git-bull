@@ -7,8 +7,8 @@ use std::slice;
 use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
 use eframe::egui::{
-    Event, FontFamily, Modifiers, PointerButton, Pos2, Rect, ViewportCommand, ViewportId, pos2,
-    vec2,
+    CursorIcon, Event, FontFamily, Modifiers, PointerButton, Pos2, Rect, ResizeDirection,
+    ViewportCommand, ViewportId, pos2, vec2,
 };
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -537,5 +537,109 @@ fn window_buttons_name_their_action_in_a_tooltip() {
         // The name is on the button for assistive technology and in the
         // tooltip.
         assert_eq!(harness.query_all_by_label(name).count(), 2, "{name}");
+    }
+}
+
+/// The window as git-bull draws it: egui_kittest leaves 8 points around it.
+const DRAWN: Rect = Rect {
+    min: Pos2 { x: 8.0, y: 8.0 },
+    max: Pos2 {
+        x: 1272.0,
+        y: 792.0,
+    },
+};
+
+/// The commands sent while pressing and releasing at `at`.
+fn press_at(harness: &mut Harness<'_, App>, at: Pos2) -> Vec<ViewportCommand> {
+    send(
+        harness,
+        vec![Event::PointerMoved(at), button(at, true), button(at, false)],
+    )
+}
+
+#[test]
+fn a_press_on_an_edge_or_a_corner_resizes_the_window() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_at_60_fps_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    for (at, direction) in [
+        (pos2(DRAWN.right() - 2.0, 400.0), ResizeDirection::East),
+        (pos2(DRAWN.left() + 2.0, 400.0), ResizeDirection::West),
+        (pos2(640.0, DRAWN.bottom() - 2.0), ResizeDirection::South),
+        (
+            pos2(DRAWN.right() - 2.0, DRAWN.bottom() - 6.0),
+            ResizeDirection::SouthEast,
+        ),
+        (
+            pos2(DRAWN.right() - 6.0, DRAWN.bottom() - 2.0),
+            ResizeDirection::SouthEast,
+        ),
+    ] {
+        let sent = press_at(&mut harness, at);
+        assert!(
+            sent.contains(&ViewportCommand::BeginResize(direction)),
+            "{at:?}: {sent:?}"
+        );
+    }
+}
+
+#[test]
+fn the_band_at_the_edge_resizes_instead_of_closing_the_window() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_at_60_fps_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    let close = harness
+        .get_by_role_and_label(Role::Button, "Close window")
+        .rect();
+    let at = pos2(DRAWN.right() - 2.0, close.center().y);
+    assert!(close.contains(at), "{close:?}");
+    let sent = press_at(&mut harness, at);
+    assert!(
+        sent.contains(&ViewportCommand::BeginResize(ResizeDirection::East)),
+        "{sent:?}"
+    );
+    assert!(!sent.contains(&ViewportCommand::Close), "{sent:?}");
+}
+
+#[test]
+fn the_pointer_shows_the_direction_of_resizing() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_at_60_fps_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    harness.hover_at(pos2(DRAWN.right() - 2.0, 400.0));
+    harness.step();
+    assert_eq!(
+        harness.output().platform_output.cursor_icon,
+        CursorIcon::ResizeEast
+    );
+}
+
+#[test]
+fn a_maximized_window_macos_and_the_system_title_bar_offer_no_band() {
+    for (os, system_title_bar, maximized) in [
+        (OperatingSystem::Windows, false, true),
+        (OperatingSystem::Mac, false, false),
+        (OperatingSystem::Windows, true, false),
+        (OperatingSystem::Nix, true, false),
+    ] {
+        let test = app_with_open_repository(Settings {
+            system_title_bar,
+            ..Settings::default()
+        });
+        let mut harness = window_at_60_fps_on(os, test.app);
+        harness
+            .input_mut()
+            .viewports
+            .entry(ViewportId::ROOT)
+            .or_default()
+            .maximized = Some(maximized);
+        harness.run();
+        let sent = press_at(&mut harness, pos2(DRAWN.right() - 2.0, 400.0));
+        assert!(
+            !sent
+                .iter()
+                .any(|command| matches!(command, ViewportCommand::BeginResize(_))),
+            "{os:?}, system title bar {system_title_bar}, maximized {maximized}: {sent:?}"
+        );
     }
 }

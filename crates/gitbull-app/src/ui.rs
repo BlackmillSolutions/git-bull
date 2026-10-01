@@ -131,6 +131,8 @@ const SEARCH_REPAINT: Duration = Duration::from_millis(50);
 
 /// Draws the whole window.
 pub fn show(app: &mut App, ui: &mut Ui) {
+    // The window as git-bull draws it, before the panels take its room.
+    let window = ui.max_rect();
     let appearance = appearance(app, ui);
     style::use_style(ui, appearance, app.settings().colour_vision);
     apply_interface_size(app, ui);
@@ -138,6 +140,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     components::focus_visible(ui.ctx());
     // Reads this pass's wheel input before any area scrolls by it.
     virtual_list::read_wheel(ui.ctx());
+
+    resize_bands(app, ui.ctx(), window);
 
     let mut actions = Vec::new();
     if let GitStatus::Problem(problem) = &app.git {
@@ -632,6 +636,137 @@ fn notice_kind(notice: &Notice) -> BannerKind {
         | Notice::NotACommit(_)
         | Notice::HashUnknown(_)
         | Notice::HashAmbiguous(_) => BannerKind::Warning,
+    }
+}
+
+/// How far into the window the band along an edge that resizes it reaches,
+/// and how far along the edges from a corner the band of the corner does,
+/// in points (design, decision 3).
+const RESIZE_BAND: f32 = 4.0;
+const RESIZE_CORNER: f32 = 12.0;
+
+/// Bands along the edges of `window` that resize it, with git-bull's own
+/// title bar on Windows and Linux while the window is not maximized: the
+/// system leaves a window without its frame no border to resize (design,
+/// decision 3). They lie in egui's foreground order, so that a press on
+/// them reaches nothing beneath.
+fn resize_bands(app: &App, ctx: &egui::Context, window: egui::Rect) {
+    let filled = ctx.input(|input| {
+        let viewport = input.viewport();
+        viewport.maximized.unwrap_or(false) || viewport.fullscreen.unwrap_or(false)
+    });
+    if app.system_title_bar() || ctx.os() == egui::os::OperatingSystem::Mac || filled {
+        return;
+    }
+    let id = Id::new("resize-bands");
+    let layer = egui::LayerId::new(egui::Order::Foreground, id);
+    let ui = Ui::new(
+        ctx.clone(),
+        id,
+        egui::UiBuilder::new().layer_id(layer).max_rect(window),
+    );
+    let (band, corner) = (RESIZE_BAND, RESIZE_CORNER);
+    let w = window;
+    let rect = |left: f32, top: f32, right: f32, bottom: f32| {
+        egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
+    };
+    use egui::ResizeDirection::*;
+    let bands = [
+        // The edges between the corners.
+        (
+            rect(
+                w.left() + corner,
+                w.top(),
+                w.right() - corner,
+                w.top() + band,
+            ),
+            North,
+        ),
+        (
+            rect(
+                w.left() + corner,
+                w.bottom() - band,
+                w.right() - corner,
+                w.bottom(),
+            ),
+            South,
+        ),
+        (
+            rect(
+                w.left(),
+                w.top() + corner,
+                w.left() + band,
+                w.bottom() - corner,
+            ),
+            West,
+        ),
+        (
+            rect(
+                w.right() - band,
+                w.top() + corner,
+                w.right(),
+                w.bottom() - corner,
+            ),
+            East,
+        ),
+        // Each corner along both of its edges.
+        (
+            rect(w.left(), w.top(), w.left() + corner, w.top() + band),
+            NorthWest,
+        ),
+        (
+            rect(w.left(), w.top(), w.left() + band, w.top() + corner),
+            NorthWest,
+        ),
+        (
+            rect(w.right() - corner, w.top(), w.right(), w.top() + band),
+            NorthEast,
+        ),
+        (
+            rect(w.right() - band, w.top(), w.right(), w.top() + corner),
+            NorthEast,
+        ),
+        (
+            rect(w.left(), w.bottom() - band, w.left() + corner, w.bottom()),
+            SouthWest,
+        ),
+        (
+            rect(w.left(), w.bottom() - corner, w.left() + band, w.bottom()),
+            SouthWest,
+        ),
+        (
+            rect(w.right() - corner, w.bottom() - band, w.right(), w.bottom()),
+            SouthEast,
+        ),
+        (
+            rect(w.right() - band, w.bottom() - corner, w.right(), w.bottom()),
+            SouthEast,
+        ),
+    ];
+    let pressed = ctx.input(|input| input.pointer.any_pressed());
+    for (index, (rect, direction)) in bands.into_iter().enumerate() {
+        let response = ui
+            .interact(rect, id.with(index), Sense::drag())
+            .on_hover_cursor(resize_cursor(direction));
+        if pressed && response.is_pointer_button_down_on() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+        }
+    }
+}
+
+/// The pointer over a band that resizes the window in `direction`.
+fn resize_cursor(direction: egui::ResizeDirection) -> egui::CursorIcon {
+    use egui::CursorIcon::*;
+    use egui::ResizeDirection::*;
+    match direction {
+        North => ResizeNorth,
+        South => ResizeSouth,
+        East => ResizeEast,
+        West => ResizeWest,
+        NorthEast => ResizeNorthEast,
+        NorthWest => ResizeNorthWest,
+        SouthEast => ResizeSouthEast,
+        SouthWest => ResizeSouthWest,
     }
 }
 
