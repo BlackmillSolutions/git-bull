@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-01
+# Checks the packages against the existing requirements; no requirement changes.
+skip_specs: true
