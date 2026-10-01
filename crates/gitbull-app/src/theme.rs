@@ -87,6 +87,48 @@ pub struct Palette {
     pub lanes: [Rgb; 8],
 }
 
+/// Sizes of the design system, in points at the interface size 100 %.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shape {
+    /// Corners of small controls such as badges and checkboxes.
+    pub radius_small: f32,
+    /// Corners of buttons, fields and list rows.
+    pub radius: f32,
+    /// Corners of menus and dialogs.
+    pub radius_large: f32,
+    /// The steps of spacing, from the smallest.
+    pub space: [f32; 4],
+    /// The height of buttons and fields.
+    pub control_height: f32,
+    /// The least width and height of a click target.
+    pub target: f32,
+}
+
+pub const SHAPE: Shape = Shape {
+    radius_small: 6.0,
+    radius: 8.0,
+    radius_large: 10.0,
+    space: [4.0, 8.0, 12.0, 16.0],
+    control_height: 30.0,
+    target: 24.0,
+};
+
+/// Text sizes in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TypeScale {
+    pub body: f32,
+    pub small: f32,
+    pub heading: f32,
+    pub title: f32,
+}
+
+pub const TYPE: TypeScale = TypeScale {
+    body: 13.0,
+    small: 12.0,
+    heading: 15.0,
+    title: 18.0,
+};
+
 /// Light or dark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Appearance {
@@ -521,6 +563,8 @@ mod tests {
                 ("accent_fill", p.accent_fill),
                 4.5,
             );
+            // egui draws selected text in the colour of the focus.
+            pairs.need(name, ("focus", p.focus), ("selection", p.selection), 4.5);
             for (fg, bg) in [
                 (("info_fg", p.info_fg), ("info_bg", p.info_bg)),
                 (("warning_fg", p.warning_fg), ("warning_bg", p.warning_bg)),

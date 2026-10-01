@@ -34,6 +34,7 @@ use crate::i18n::Msg;
 use crate::paths::System;
 use crate::search_view;
 use crate::sidebar_view::{self, SidebarAction};
+use crate::style;
 use crate::theme::{self, Appearance, Palette, Rgb};
 use gitbull_core::search::{Search, SearchMode, SearchState};
 use gitbull_core::session::{BranchFilter, LoadState, Session};
@@ -106,7 +107,7 @@ const SEARCH_REPAINT: Duration = Duration::from_millis(50);
 
 /// Draws the whole window.
 pub fn show(app: &mut App, ui: &mut Ui) {
-    apply_theme(app, ui);
+    style::apply_style(ui.ctx(), appearance(app, ui), ColourVision::Standard);
 
     let mut actions = Vec::new();
     if let GitStatus::Problem(problem) = &app.git {
@@ -1026,28 +1027,6 @@ fn fill(ui: &mut Ui) {
 
 pub(crate) fn section_title(ui: &mut Ui, text: String) {
     ui.label(RichText::new(text).small().strong());
-}
-
-/// Applies the palette of the current appearance to egui's visuals.
-fn apply_theme(app: &App, ui: &Ui) {
-    let reported = ui.ctx().system_theme().map(|theme| match theme {
-        egui::Theme::Dark => Appearance::Dark,
-        egui::Theme::Light => Appearance::Light,
-    });
-    let appearance = app.appearance(reported);
-    let palette = theme::palette(appearance, ColourVision::Standard);
-    let mut visuals = match appearance {
-        Appearance::Dark => egui::Visuals::dark(),
-        Appearance::Light => egui::Visuals::light(),
-    };
-    visuals.panel_fill = color(palette.panel);
-    visuals.window_fill = color(palette.canvas);
-    visuals.extreme_bg_color = color(palette.list);
-    visuals.faint_bg_color = color(palette.canvas);
-    visuals.selection.bg_fill = color(palette.selection);
-    visuals.hyperlink_color = color(palette.accent);
-    visuals.override_text_color = Some(color(palette.text));
-    ui.ctx().set_visuals(visuals);
 }
 
 pub(crate) fn color(rgb: Rgb) -> Color32 {

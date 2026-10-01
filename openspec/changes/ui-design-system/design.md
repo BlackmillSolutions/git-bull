@@ -205,6 +205,7 @@ six palettes and check these pairs:
 |---|---|---|
 | `text`, `text_muted` | `canvas`, `panel`, `raised`, `list`, `selection`, `hover` | 4.5:1 |
 | `on_accent` | `accent_fill` | 4.5:1 |
+| `focus` (egui draws selected text in the colour of `selection.stroke`, which also borders a focused text field) | `selection` | 4.5:1 |
 | `info_fg`, `warning_fg`, `error_fg` (text and icon of a banner) | `info_bg`, `warning_bg`, `error_bg` | 4.5:1 |
 | `error_fg` (error texts in the views) | `panel`, `list` | 4.5:1 |
 | the kinds of change (letters A, M, D, R, C, T, !, ?) | `list`, `selection`, `hover` | 4.5:1 |

@@ -14,6 +14,7 @@ pub mod native;
 pub mod paths;
 pub mod search_view;
 pub mod sidebar_view;
+pub mod style;
 pub mod theme;
 pub mod ui;
 pub mod virtual_list;
