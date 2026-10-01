@@ -319,6 +319,70 @@ pub fn segmented<T: PartialEq + Copy>(
 
 /// A single-line text field of `width`, as high as a button, with `hint`
 /// while it is empty. Its focus ring comes from the style.
+/// The side of the box of a checkbox, in points.
+const CHECK_BOX: f32 = 16.0;
+
+/// A box that `value` ticks, with `label` beside it, as high as a control
+/// and taking clicks on its label too (design, decision 6). Space toggles
+/// it while it has the keyboard focus.
+pub fn checkbox(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
+    let palette = active_palette(ui.ctx());
+    let font = TextStyle::Body.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
+    let gap = SHAPE.space[1];
+    let size = vec2(
+        CHECK_BOX + gap + galley.size().x,
+        SHAPE.control_height.max(SHAPE.target),
+    );
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *value, label));
+    if ui.is_rect_visible(rect) {
+        let state = State::of(&response);
+        let check = Rect::from_center_size(
+            egui::pos2(rect.left() + CHECK_BOX / 2.0, rect.center().y),
+            vec2(CHECK_BOX, CHECK_BOX),
+        );
+        let (fill, border) = if *value {
+            (color(palette.accent_fill), color(palette.accent_fill))
+        } else {
+            (
+                state.fill(palette, color(palette.canvas)),
+                color(palette.border_strong),
+            )
+        };
+        let painter = ui.painter();
+        painter.rect(
+            check,
+            CornerRadius::same(SHAPE.radius_small as u8 / 2),
+            fill,
+            Stroke::new(1.0, border),
+            StrokeKind::Inside,
+        );
+        if *value {
+            let at = |x: f32, y: f32| {
+                egui::pos2(check.left() + x * CHECK_BOX, check.top() + y * CHECK_BOX)
+            };
+            let tick = Stroke::new(2.0, color(palette.on_accent));
+            painter.line_segment([at(0.22, 0.52), at(0.42, 0.72)], tick);
+            painter.line_segment([at(0.42, 0.72), at(0.78, 0.3)], tick);
+        }
+        painter.galley(
+            egui::pos2(check.right() + gap, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color(palette.text),
+        );
+        focus_ring(ui, &response);
+    }
+    response
+}
+
 pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
     ui.add(text_edit(text, hint, width))
 }

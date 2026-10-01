@@ -23,7 +23,7 @@ shows it works.
 
 ## 3. Setting for the system title bar
 
-- [ ] 3.1 Add `components::checkbox` with the hover state, the focus ring and a click target of at least 24 by 24 points (design, decision 6), and show it in the gallery of controls; verify UI tests in `tests/components.rs` that it toggles on a click and with Space, shows the focus ring after Tab, and has a click target of at least 24 by 24 points, and the updated snapshots of the gallery
+- [x] 3.1 Add `components::checkbox` with the hover state, the focus ring and a click target of at least 24 by 24 points (design, decision 6), and show it in the gallery of controls; verify UI tests in `tests/components.rs` that it toggles on a click and with Space, shows the focus ring after Tab, and has a click target of at least 24 by 24 points, and the updated snapshots of the gallery
 - [ ] 3.2 Offer "Use the system title bar" in the section "Appearance" of the settings dialog, with the note that it takes effect when git-bull starts next while its value differs from the one the window was built with, texts from `crates/gitbull-app/i18n/en-US.ftl` (design, decisions 6 and 7); verify UI tests in `tests/settings_dialog.rs` for the scenarios "Appearance section" and "Title bar changed" of `app-settings`, the latter by building a new window from the saved settings, and that the existing tests of the dialog pass
 
 ## 4. Manual check
