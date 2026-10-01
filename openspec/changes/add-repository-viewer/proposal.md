@@ -83,3 +83,7 @@ None. The project has no existing specs.
   numbers 0001 to 0006. This change supersedes
   `docs/superpowers/specs/2026-09-29-git-bull-viewer-design.md`, which is
   removed.
+- **Release checks:** The checks of the packages on macOS, on Linux and on
+  clean installations of the oldest supported systems moved to the change
+  `verify-release-0-1-0`, which the release `v0.1.0` waits for; the
+  hardware for them was not at hand when this change was finished.
