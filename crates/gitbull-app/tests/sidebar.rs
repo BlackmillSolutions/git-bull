@@ -7,6 +7,7 @@ use eframe::egui::{Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_app::icons;
 use gitbull_core::session::BranchFilter;
 use gitbull_core::settings::Settings;
 use gitbull_git::content::CommitContent;
@@ -406,6 +407,47 @@ fn a_branch_outside_the_filtered_graph_offers_to_show_all_branches() {
             .query_by_label_contains("hidden by the branch filter")
             .is_none()
     );
+}
+
+#[test]
+fn a_commit_hidden_by_the_branch_filter_is_announced_in_an_information_banner() {
+    let backend = backend().with_history_for(
+        root(),
+        &["--end-of-options", "HEAD"],
+        lines().into_iter().skip(1).collect(),
+    );
+    let mut harness = open(backend);
+    harness
+        .state_mut()
+        .workspace_mut()
+        .unwrap()
+        .active_mut()
+        .unwrap()
+        .session_mut()
+        .unwrap()
+        .set_filter(BranchFilter::Current);
+    wait_for(&mut harness, |h| {
+        h.query_by_label("Side work").is_none() && h.query_by_label("Fifth").is_some()
+    });
+
+    click(&mut harness, "side");
+    wait_for(&mut harness, |h| {
+        h.query_by_label_contains("hidden by the branch filter")
+            .is_some()
+    });
+
+    let notice = harness
+        .get_by_label_contains("hidden by the branch filter")
+        .rect();
+    let toolbar = harness.get_by_role_and_label(Role::Button, "Open").rect();
+    assert!(
+        notice.top() > toolbar.bottom(),
+        "{notice:?} below {toolbar:?}"
+    );
+    let row = support::texts_in_row(harness.output(), notice);
+    assert!(row.iter().any(|text| text == icons::INFO), "{row:?}");
+    harness.get_by_role_and_label(Role::Button, "Show all branches");
+    harness.get_by_role_and_label(Role::Button, "Dismiss");
 }
 
 #[test]

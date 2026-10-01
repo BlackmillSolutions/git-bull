@@ -330,3 +330,12 @@ pub fn texts_in(output: &eframe::egui::FullOutput, rect: eframe::egui::Rect) -> 
     }
     found
 }
+
+/// The texts drawn in the row of `rect`, across the whole width.
+pub fn texts_in_row(output: &eframe::egui::FullOutput, rect: eframe::egui::Rect) -> Vec<String> {
+    let row = eframe::egui::Rect::from_x_y_ranges(
+        f32::NEG_INFINITY..=f32::INFINITY,
+        (rect.top() - 8.0)..=(rect.bottom() + 8.0),
+    );
+    texts_in(output, row)
+}

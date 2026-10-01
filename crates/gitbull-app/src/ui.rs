@@ -26,7 +26,7 @@ use crate::app::{App, GitMessage, GitStatus, Notice, Overlay};
 use crate::blame_view;
 use crate::commit_list;
 use crate::commit_panel;
-use crate::components::{self, Button, Kind, focus_ring};
+use crate::components::{self, BannerAction, BannerKind, Button, Kind, focus_ring};
 use crate::diff_view::{self, Pane};
 use crate::file_history_view::{self, FILE_HISTORY_LIST};
 use crate::file_status_view::{self, STATUS_LIST};
@@ -482,61 +482,76 @@ fn chooser(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
 }
 
 fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>) {
-    ui.horizontal(|ui| {
-        let text = match notice {
-            Notice::NotARepository(path) => {
-                let mut args = FluentArgs::new();
-                args.set("folder", path.display().to_string());
-                app.texts.text_with(Msg::NoticeNotARepository, Some(&args))
-            }
-            Notice::HiddenByFilter(reference) => {
-                let mut args = FluentArgs::new();
-                // A reference by its short name, a commit by its short hash.
-                let short = match ObjectId::from_hex(reference.as_bytes()) {
-                    Some(id) => id.short(SHORT_HASH),
-                    None => reference
-                        .strip_prefix("refs/heads/")
-                        .or_else(|| reference.strip_prefix("refs/remotes/"))
-                        .or_else(|| reference.strip_prefix("refs/tags/"))
-                        .unwrap_or(reference)
-                        .to_owned(),
-                };
-                args.set("reference", short);
-                app.texts.text_with(Msg::NoticeHiddenByFilter, Some(&args))
-            }
-            Notice::HashUnknown(hash) => {
-                let mut args = FluentArgs::new();
-                args.set("hash", hash.clone());
-                app.texts.text_with(Msg::NoticeHashUnknown, Some(&args))
-            }
-            Notice::HashAmbiguous(hash) => {
-                let mut args = FluentArgs::new();
-                args.set("hash", hash.clone());
-                app.texts.text_with(Msg::NoticeHashAmbiguous, Some(&args))
-            }
-            Notice::NotInHistory(commit) => {
-                let mut args = FluentArgs::new();
-                args.set("commit", commit.clone());
-                app.texts.text_with(Msg::NoticeNotInHistory, Some(&args))
-            }
-            Notice::NotACommit(tag) => {
-                let mut args = FluentArgs::new();
-                args.set("tag", tag.clone());
-                app.texts.text_with(Msg::NoticeNotACommit, Some(&args))
-            }
-        };
-        ui.label(text);
-        if let Notice::HiddenByFilter(reference) = notice
-            && ui
-                .button(app.texts.text(Msg::NoticeShowAllBranches))
-                .clicked()
-        {
-            actions.push(Action::ShowAllBranches(reference.clone()));
+    let text = match notice {
+        Notice::NotARepository(path) => {
+            let mut args = FluentArgs::new();
+            args.set("folder", path.display().to_string());
+            app.texts.text_with(Msg::NoticeNotARepository, Some(&args))
         }
-        if ui.button(app.texts.text(Msg::NoticeDismiss)).clicked() {
-            actions.push(Action::DismissNotice);
+        Notice::HiddenByFilter(reference) => {
+            let mut args = FluentArgs::new();
+            // A reference by its short name, a commit by its short hash.
+            let short = match ObjectId::from_hex(reference.as_bytes()) {
+                Some(id) => id.short(SHORT_HASH),
+                None => reference
+                    .strip_prefix("refs/heads/")
+                    .or_else(|| reference.strip_prefix("refs/remotes/"))
+                    .or_else(|| reference.strip_prefix("refs/tags/"))
+                    .unwrap_or(reference)
+                    .to_owned(),
+            };
+            args.set("reference", short);
+            app.texts.text_with(Msg::NoticeHiddenByFilter, Some(&args))
         }
-    });
+        Notice::HashUnknown(hash) => {
+            let mut args = FluentArgs::new();
+            args.set("hash", hash.clone());
+            app.texts.text_with(Msg::NoticeHashUnknown, Some(&args))
+        }
+        Notice::HashAmbiguous(hash) => {
+            let mut args = FluentArgs::new();
+            args.set("hash", hash.clone());
+            app.texts.text_with(Msg::NoticeHashAmbiguous, Some(&args))
+        }
+        Notice::NotInHistory(commit) => {
+            let mut args = FluentArgs::new();
+            args.set("commit", commit.clone());
+            app.texts.text_with(Msg::NoticeNotInHistory, Some(&args))
+        }
+        Notice::NotACommit(tag) => {
+            let mut args = FluentArgs::new();
+            args.set("tag", tag.clone());
+            app.texts.text_with(Msg::NoticeNotACommit, Some(&args))
+        }
+    };
+    let show_all = app.texts.text(Msg::NoticeShowAllBranches);
+    let offered: &[&str] = match notice {
+        Notice::HiddenByFilter(_) => &[&show_all],
+        _ => &[],
+    };
+    let dismiss = app.texts.text(Msg::NoticeDismiss);
+    match components::banner(ui, notice_kind(notice), &text, offered, &dismiss) {
+        Some(BannerAction::Action(_)) => {
+            if let Notice::HiddenByFilter(reference) = notice {
+                actions.push(Action::ShowAllBranches(reference.clone()));
+            }
+        }
+        Some(BannerAction::Dismiss) => actions.push(Action::DismissNotice),
+        None => {}
+    }
+}
+
+/// The kind of a notice, which gives its banner colours and icon (design,
+/// decision 9): what could not be done warns, what is merely hidden
+/// informs.
+fn notice_kind(notice: &Notice) -> BannerKind {
+    match notice {
+        Notice::HiddenByFilter(_) | Notice::NotInHistory(_) => BannerKind::Information,
+        Notice::NotARepository(_)
+        | Notice::NotACommit(_)
+        | Notice::HashUnknown(_)
+        | Notice::HashAmbiguous(_) => BannerKind::Warning,
+    }
 }
 
 fn tab_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
