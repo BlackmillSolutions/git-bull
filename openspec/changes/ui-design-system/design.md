@@ -196,12 +196,23 @@ choice as a radio button with its label, so the tests that find "Light" and
 close button becomes an `icon_button` with an X that shows on the active tab
 and on hover, and the selected tab a raised surface with an accent line.
 
-The focus ring is drawn for every control that can take keyboard focus, not
-only for the components: each component draws it when its response has
-focus; text fields get it through the `Style` (their focused border in
-`focus`); the combo boxes of the search mode and the language and the
-focusable areas of `focus_area` call `focus_ring` on their response, which
-replaces the selection stroke `focus_area` draws today.
+The focus ring shows when the keyboard or assistive technology moved the
+focus, not after a click with the pointer, in the manner of `:focus-visible`
+in browsers: a frame that sees a key pressed or an action of assistive
+technology shows rings from then on, a frame that sees a pointer button
+pressed hides them, until the next such frame. egui itself does not tell
+the two apart, so the rings showed after every click, around the whole
+commit list as well. Text fields keep their focused border from the
+`Style` after a click too, as in browsers, because it shows where typing
+goes.
+
+The ring is drawn for every control that can take keyboard focus, not only
+for the components. Controls draw a ring of 2 points with `focus_ring`:
+each component when its response has focus, and the combo boxes of the
+search mode, the branch filter and the language on their response. Areas
+that take the focus draw a ring of 1 point with `area_focus_ring`, because
+they are large: the virtual lists, the diff and the areas of `focus_area`,
+which drew the selection stroke before.
 
 Badges get an icon for their kind (branch, remote branch, tag, HEAD); a
 remote branch is outlined instead of filled.

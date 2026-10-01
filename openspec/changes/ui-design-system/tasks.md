@@ -32,6 +32,7 @@ decision 6).
 - [x] 4.3 Show notices as banners below the toolbar with the colour and icon of their kind as decision 9 assigns them (issue #13); verify UI tests for the scenarios "Banner for a folder that is not a repository" and "Banner for a commit hidden by the branch filter" of `visual-design`, and a snapshot of a banner of each kind
 - [x] 4.4 Give badges an icon for their kind and outline remote branches; verify UI tests that each kind of reference shows its icon, and the scenario "Interface seen without colour" with a snapshot rendered in shades of grey
 - [x] 4.5 Use the components in every other view: sidebar, commit list and its header, commit panel, diff, File status, file history, blame, search, start screen and error views; draw the markers `+` and `-` of the diff in their marker colours and error texts in `error_fg` (design, decision 1); verify that every existing UI test passes, unit tests that the markers and the error texts take these tokens, and snapshots of the main window in the light and the dark palette
+- [ ] 4.6 Show the focus ring only after the keyboard or assistive technology moved the focus, and draw the ring of areas 1 point wide (design, decision 5); verify UI tests for the scenarios "No focus ring after a click" and "Focus ring after a key" of `visual-design`, that Tab and an action of assistive technology still show the ring on buttons, text fields, combo boxes and areas, and that a text field shows its focused border after a click
 
 ## 5. Settings dialog, interface size and colour vision
 

@@ -81,7 +81,11 @@ with git-bull.
 ### Requirement: Controls
 Every control SHALL show that the pointer is over it. Every control that
 can take keyboard focus, including text fields and combo boxes, SHALL show a
-focus ring while it has the focus. At the interface size 100 %, every
+focus ring while it has the focus and the keyboard or assistive technology
+moved the focus there. After a click with the pointer, the ring SHALL stay
+hidden until the keyboard is used again, except that a text field SHALL
+show where typing goes. A list or another area that takes the focus SHALL
+show a thinner ring than a control. At the interface size 100 %, every
 control SHALL have a click target of at least 24 by 24 logical pixels. A
 button that shows only an icon SHALL have a tooltip that names its action,
 with its keyboard shortcut if it has one, and SHALL expose that name to
@@ -90,6 +94,14 @@ assistive technology.
 #### Scenario: Focus is visible
 - **WHEN** the user moves the focus with Tab onto a button, a text field or a combo box
 - **THEN** that control shows a focus ring
+
+#### Scenario: No focus ring after a click
+- **WHEN** the user clicks a row of the commit list
+- **THEN** the commit list takes the focus and shows no focus ring
+
+#### Scenario: Focus ring after a key
+- **WHEN** the commit list took the focus with a click and the user then presses Down
+- **THEN** the commit list shows a focus ring
 
 #### Scenario: Icon button explains itself
 - **WHEN** the pointer rests on the Settings button of the toolbar
