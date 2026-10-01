@@ -159,6 +159,13 @@ four text families instead of only `Proportional` and `Monospace`; otherwise
 a tab title in `semibold` would show Japanese as placeholder boxes. Phosphor
 has a family of its own (decision 4).
 
+Headings (`TextStyle::Heading`) and the titles of dialogs (the text style
+`title`) take `semibold`, the titles of sections such as COMMIT and DIFF
+(the text style `section`) take `medium`; body text and buttons stay at 400.
+egui cannot draw a family it does not know, so until the bundled fonts are
+loaded, in tests the first frame of a harness, these text styles take
+`Proportional`, and `apply_style` builds the style again once they are.
+
 Alternative: keep egui's Ubuntu Light and Hack. Rejected: they read as
 dated, and Ubuntu Light is thin at small sizes.
 
@@ -216,6 +223,13 @@ which drew the selection stroke before.
 
 Badges get an icon for their kind (branch, remote branch, tag, HEAD); a
 remote branch is outlined instead of filled.
+
+`menu` lays its entries out justified, as egui's menus do, and `menu_item`
+fills the width only in such a layout: egui measures a popup first with
+justification off, and an entry that took the available width then would
+make every menu as wide as egui's default area, 600 points. A banner keeps
+the room of its buttons and wraps its text in the rest, so that a long
+notice, such as one with a deep path, does not run under its buttons.
 
 ### 6. Tests for contrast and colour vision
 
@@ -291,6 +305,13 @@ colour vision and interface size as segmented controls), "Language" and
 Escape or its close button closes it; today it is a free window and the main
 window stays usable. The theme switch in the toolbar becomes an icon button
 (sun or moon) that opens the same three choices as today's menu.
+
+egui's modal keeps clicks from the window behind it, not keys, so the
+shortcuts of the window are off while the dialog is open. Escape closes an
+open list of the dialog, such as the languages, before the dialog itself.
+The dialog is at most 540 points wide and keeps a margin to the edges of
+the window; at a large interface size in a small window, its sections
+scroll below its title.
 
 ### 9. Kinds of the notices
 

@@ -104,7 +104,9 @@ every other setting SHALL be kept.
 The settings dialog SHALL offer, in a section "Appearance", the theme, the
 colour vision and the interface size, and further the language and the path
 to the Git executable. While the dialog is open, the main window SHALL take
-no input. All other settings SHALL be saved without user action. When
+no input. The dialog SHALL fit the window at every interface size; what
+does not fit SHALL scroll. All other settings SHALL be saved without user
+action. When
 another Git executable is applied while tabs are open, the tabs SHALL open
 again with it, each in its initial state.
 
@@ -115,6 +117,18 @@ again with it, each in its initial state.
 #### Scenario: Dialog is modal
 - **WHEN** the settings dialog is open and the user clicks Refresh in the toolbar
 - **THEN** nothing is refreshed and the dialog stays open
+
+#### Scenario: Shortcut while the dialog is open
+- **WHEN** the settings dialog is open and the user presses Ctrl+W
+- **THEN** no tab is closed and the dialog stays open
+
+#### Scenario: Escape with an open list
+- **WHEN** the list of languages in the settings dialog is open and the user presses Escape
+- **THEN** the list closes and the dialog stays open
+
+#### Scenario: Dialog in a small window
+- **WHEN** the window has its smallest size, the interface size is 150 % and the user opens the settings dialog
+- **THEN** every control of the dialog can be reached, by scrolling where the dialog does not fit
 
 #### Scenario: Valid Git path
 - **WHEN** the user enters the path to a Git executable of a supported version

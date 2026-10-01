@@ -67,12 +67,17 @@ as diffs and blame, in a monospace font, both bundled with git-bull, so that
 it looks the same on every platform. In every weight of these fonts that the
 interface uses, characters that the bundled fonts lack SHALL be shown with
 fonts of the system, as the requirement "Text rendering" of
-application-shell describes. Every icon SHALL come from one icon set bundled
-with git-bull.
+application-shell describes. Headings and titles SHALL be shown in a
+heavier weight than body text. Every icon SHALL come from one icon set
+bundled with git-bull.
 
 #### Scenario: Same fonts on every platform
 - **WHEN** git-bull starts on Windows, on macOS and on Linux
 - **THEN** labels are shown in the same bundled proportional font, and diffs in the same bundled monospace font
+
+#### Scenario: Headings stand out
+- **WHEN** the window shows a heading, the title of a dialog or the title of a section
+- **THEN** it is shown in a heavier weight than body text
 
 #### Scenario: Japanese in a heavier weight
 - **WHEN** text shown in a heavier weight than body text contains Japanese characters and the system has a font that covers them
@@ -128,3 +133,7 @@ button that dismisses it. When and why a notice goes away stays as it is.
 #### Scenario: Banner for a commit hidden by the branch filter
 - **WHEN** the user selects a branch in the sidebar whose commit is not part of the filtered graph
 - **THEN** a banner with an information icon below the toolbar offers to show all branches and to dismiss it
+
+#### Scenario: Long notice
+- **WHEN** the text of a notice is longer than its banner is wide
+- **THEN** the text wraps, and the buttons of the banner stay visible beside it

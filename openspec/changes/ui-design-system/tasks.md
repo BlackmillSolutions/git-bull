@@ -47,3 +47,11 @@ decision 6).
 ## 7. Final check
 
 - [x] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate ui-design-system --strict`; verify all succeed and CI is green on Linux, Windows and macOS. All succeed here, and CI run 36870012524 of commit 919e1c8 is green on Linux, Windows and macOS.
+
+## 8. Fixes from the review of PR #15
+
+- [x] 8.1 Lay the entries of a menu out justified and let `menu_item` fill the width only in a justified layout (design, decision 5); verify a UI test that a context menu is as wide as its longest entry and its entries share that width, and that the menu of the gallery keeps its look
+- [x] 8.2 Let a banner keep the room of its buttons and wrap its text in the rest (design, decision 5); verify a UI test that a long text wraps and that neither button lies on it or outside the window (scenario "Long notice" of `visual-design`)
+- [x] 8.3 Turn off the shortcuts of the window while the settings dialog is open, let Escape close an open list of the dialog first, and fit the dialog to the window with its sections scrolling below its title (design, decision 8); verify UI tests for the scenarios "Shortcut while the dialog is open", "Escape with an open list" and "Dialog in a small window" of `app-settings`, and that the other tests of `settings_dialog.rs` still pass
+- [x] 8.4 Show headings and the titles of dialogs in `semibold` and the titles of sections in `medium`, in `Proportional` until the bundled fonts are loaded (design, decision 3); verify unit tests of the text styles before and after the fonts arrive and that `apply_style` builds the style again when they arrive, a UI test for the scenario "Headings stand out" of `visual-design`, and the gallery and window snapshots regenerated
+- [ ] 8.5 Run the checks of task 7.1 again; verify all succeed and CI is green on Linux, Windows and macOS
