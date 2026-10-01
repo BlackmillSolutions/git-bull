@@ -12,6 +12,7 @@ use eframe::egui::{Event, Key, Modifiers, OutputCommand, PointerButton, Pos2, Re
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_app::virtual_list::ROW_HEIGHT;
 use gitbull_core::settings::Settings;
 use gitbull_git::changes::ChangeKind;
 use gitbull_git::content::CommitContent;
@@ -21,7 +22,7 @@ use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, Gate, LiveRepo, Probe, commit_line, fake_id};
-use support::{Setup, build, path, settle_window, window};
+use support::{Setup, build, path, settle_window, turn_wheel, window, window_at_60_fps};
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -512,6 +513,77 @@ fn a_file_edited_elsewhere_appears_after_refresh() {
         listed(&mut harness),
         ["Untracked files (1)", "Untracked: notes.txt"]
     );
+}
+
+/// How far the file list is scrolled, in points, up to a constant: the
+/// files of [`many_files`] follow their title in the order of their names.
+fn file_list_scroll(harness: &Harness<'_, App>) -> f32 {
+    harness
+        .query_all_by_role(Role::ListItem)
+        .filter_map(|node| {
+            let label = node.accesskit_node().label()?;
+            let number: u16 = label
+                .strip_prefix("Modified: f")?
+                .strip_suffix(".txt")?
+                .parse()
+                .ok()?;
+            Some((node.rect().top(), f32::from(number) * ROW_HEIGHT))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(top, below_first)| below_first - top)
+        .expect("a file of the list")
+}
+
+/// 100 modified files, `f000.txt` to `f099.txt`.
+fn many_files() -> WorkingStatus {
+    WorkingStatus {
+        unstaged: (0..100)
+            .map(|i| changed(MODIFIED, &format!("f{i:03}.txt")))
+            .collect(),
+        ..WorkingStatus::default()
+    }
+}
+
+#[test]
+fn a_status_read_during_a_motion_lets_the_file_list_rest_where_the_wheel_asked() {
+    let live = LiveRepo::new();
+    live.set_status(many_files());
+    let backend = backend().with_live(root(), &live);
+    let probe = backend.probe();
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window_at_60_fps(test.app);
+    settle_window(&mut harness);
+    wait_until(&mut harness, |h| has_row(h, "Base"));
+    show_file_status(&mut harness);
+    wait_until(&mut harness, |h| {
+        labels(h, Role::ListItem).contains(&"Modified: f002.txt".to_owned())
+    });
+    let start = file_list_scroll(&harness);
+
+    harness.hover_at(file(&harness, "Modified: f002.txt"));
+    harness.step();
+    turn_wheel(&mut harness, -5.0, Modifiers::NONE);
+    for _ in 0..5 {
+        harness.step();
+    }
+    // The same files, read again as when the window gains focus.
+    harness.event(Event::WindowFocused(true));
+    for _ in 0..120 {
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    assert_eq!(status_reads(&probe), 2);
+    let moved = file_list_scroll(&harness) - start;
+    assert!((moved - 200.0).abs() < 0.5, "{moved}");
 }
 
 fn status_reads(probe: &Probe) -> usize {

@@ -3,6 +3,8 @@
 use std::sync::mpsc::Receiver;
 
 use eframe::egui::{self, Pos2, Vec2, ViewportBuilder};
+use eframe::egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
+use eframe::wgpu::PowerPreference;
 use gitbull_core::settings::{Settings, WindowGeometry};
 
 use crate::app::App;
@@ -27,6 +29,23 @@ pub fn viewport(settings: &Settings) -> ViewportBuilder {
         viewport = viewport.with_position(Pos2::new(x, y));
     }
     viewport
+}
+
+/// How eframe sets up wgpu: with the power-saving graphics adapter, unless
+/// `WGPU_POWER_PREF` chooses another (design, decision 4).
+pub fn wgpu_setup() -> WgpuSetup {
+    WgpuSetup::CreateNew(WgpuSetupCreateNew {
+        power_preference: power_preference(PowerPreference::from_env()),
+        ..WgpuSetupCreateNew::without_display_handle()
+    })
+}
+
+/// The adapter `WGPU_POWER_PREF` chose, as `from_env`, or the power-saving
+/// one. On a computer with an integrated and a dedicated adapter that is
+/// the integrated one, where the system lets an application choose; eframe
+/// on its own prefers the dedicated one.
+pub fn power_preference(from_env: Option<PowerPreference>) -> PowerPreference {
+    from_env.unwrap_or(PowerPreference::LowPower)
 }
 
 /// The geometry to remember, from what the window reports. The position is
@@ -172,6 +191,22 @@ mod tests {
         let viewport = viewport(&settings);
         assert_eq!(viewport.inner_size, Some(vec2(1200.0, 750.0)));
         assert_eq!(viewport.position, Some(pos2(30.0, 60.0)));
+    }
+
+    #[test]
+    fn without_a_choice_git_bull_asks_for_the_power_saving_adapter() {
+        assert_eq!(power_preference(None), PowerPreference::LowPower);
+    }
+
+    #[test]
+    fn wgpu_power_pref_chooses_another_adapter() {
+        for chosen in [
+            PowerPreference::HighPerformance,
+            PowerPreference::None,
+            PowerPreference::LowPower,
+        ] {
+            assert_eq!(power_preference(Some(chosen)), chosen);
+        }
     }
 
     #[test]

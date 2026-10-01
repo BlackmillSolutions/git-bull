@@ -4,7 +4,7 @@
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    Align2, Color32, FontId, Id, Rect, ScrollArea, Sense, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    Align2, Color32, FontId, Id, Rect, Sense, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::blame::{BlameContent, BlameState};
@@ -137,11 +137,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let text_color = ui.visuals().text_color();
     let weak = ui.visuals().weak_text_color();
     let mut chosen = None;
-    ScrollArea::both()
-        .id_salt(Id::new(BLAME_AREA))
-        .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, lines.len(), |ui, range| {
-            ui.spacing_mut().item_spacing.y = 0.0;
+    components::rows_area(
+        ui,
+        Id::new(BLAME_AREA),
+        ROW_HEIGHT,
+        lines.len(),
+        |ui, range| {
             for index in range {
                 let commit = blame.line_commit(index);
                 // A block begins where the commit of the line above differs.
@@ -222,7 +223,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
                 ui.ctx()
                     .accesskit_node_builder(line.id, |node| node.set_role(Role::Code));
             }
-        });
+        },
+    );
     if let Some(commit) = chosen {
         // The History view shows the commit, or tells why it cannot.
         app.show_view(gitbull_core::workspace::View::History);

@@ -4,12 +4,13 @@
 //! click target of at least [`SHAPE`]`.target` on each side.
 
 use eframe::egui::os::OperatingSystem;
+use std::ops::Range;
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Align, Align2, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
-    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Response, RichText, Sense, Stroke,
-    StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
+    self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
+    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Response, RichText, ScrollArea, Sense,
+    Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
 };
 
 use crate::icons;
@@ -509,6 +510,27 @@ pub fn area_focus_ring(ui: &Ui, rect: egui::Rect, focused: bool) {
         ui.painter()
             .rect_stroke(rect, 0.0, Stroke::new(1.0, colour), StrokeKind::Inside);
     }
+}
+
+/// A scroll area in both directions over `total` rows, each exactly
+/// `row_height` points high, which draws the rows in view with `add_rows`.
+/// `ScrollArea::show_rows` plans each row as high as `row_height` plus the
+/// spacing of the `Ui` it is given; the rows have no spacing, so neither
+/// has that.
+pub fn rows_area(
+    ui: &mut Ui,
+    id_salt: impl AsIdSalt,
+    row_height: f32,
+    total: usize,
+    add_rows: impl FnOnce(&mut Ui, Range<usize>),
+) {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ScrollArea::both()
+            .id_salt(id_salt)
+            .auto_shrink([false, false])
+            .show_rows(ui, row_height, total, add_rows);
+    });
 }
 
 fn radius() -> CornerRadius {

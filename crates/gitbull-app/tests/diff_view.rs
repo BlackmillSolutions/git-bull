@@ -18,7 +18,10 @@ use gitbull_git::history::CommitLine;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, LiveRepo, Probe, fake_id};
-use support::{Setup, build, path, settle_window, window};
+use support::{
+    BURST, Setup, build, commit_list_scroll, find_row, long_history, path, settle_window,
+    turn_wheel, wait_for_row, window, window_at_60_fps,
+};
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -817,5 +820,143 @@ fn a_refresh_that_reads_the_same_diff_keeps_the_selection_and_the_scroll_positio
             "Added, –, 41: line 41",
             "Added, –, 42: line 42"
         ]
+    );
+}
+
+/// A window at 60 frames per second with "Commit 0" of a long history
+/// chosen, whose diff adds 200 lines. Returns where its row is.
+fn first_of_a_long_history() -> (Harness<'static, App>, Pos2) {
+    let backend = long_history(FakeBackend::default().with_repository(root()), &root(), 200)
+        .with_changes(
+            fake_id("n0"),
+            vec![change(ChangeKind::Modified, "edit.txt", None)],
+        )
+        .with_diff(fake_id("n0"), "edit.txt", added_lines(200));
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window_at_60_fps(test.app);
+    settle_window(&mut harness);
+    wait_for_row(&mut harness, "Commit 0, ");
+    let in_list = find_row(&harness, "Commit 0, ").unwrap().center();
+    click(&mut harness, in_list, PointerButton::Primary);
+    wait_until(&mut harness, |h| {
+        row_of(h, Role::Code, "Added, –, 10:").is_some()
+    });
+    (harness, in_list)
+}
+
+#[test]
+fn input_the_commit_list_took_does_not_scroll_the_diff_when_the_pointer_moves_onto_it() {
+    let (mut harness, in_list) = first_of_a_long_history();
+    let on_diff = row_of(&harness, Role::Code, "Added, –, 3:")
+        .unwrap()
+        .center();
+    let line = top_line(&harness);
+    let start = commit_list_scroll(&harness);
+
+    // A burst of the touchpad over the commit list, as Windows reports it.
+    harness.hover_at(in_list);
+    harness.step();
+    turn_wheel(&mut harness, -BURST / 40.0, Modifiers::NONE);
+    harness.step();
+    // The pointer moves on to the diff while the list still moves.
+    harness.hover_at(on_diff);
+    for _ in 0..90 {
+        harness.step();
+    }
+
+    assert_eq!(top_line(&harness), line, "the diff scrolled");
+    let moved = commit_list_scroll(&harness) - start;
+    assert!((moved - BURST).abs() < 0.5, "{moved}");
+}
+
+#[test]
+fn after_a_zoom_right_after_a_motion_the_diff_scrolls_by_all_of_its_input() {
+    let (mut harness, in_list) = first_of_a_long_history();
+    let on_diff = row_of(&harness, Role::Code, "Added, –, 10:")
+        .unwrap()
+        .center();
+
+    harness.hover_at(in_list);
+    harness.step();
+    turn_wheel(&mut harness, -3.0, Modifiers::NONE);
+    harness.step();
+    // A pinch on a Windows touchpad arrives as the wheel with Ctrl.
+    turn_wheel(&mut harness, -3.0, Modifiers::CTRL | Modifiers::COMMAND);
+    for _ in 0..91 {
+        harness.step();
+    }
+    let before = line_top(&harness, 10);
+    harness.hover_at(on_diff);
+    harness.step();
+    turn_wheel(&mut harness, -3.0, Modifiers::NONE);
+    for _ in 0..91 {
+        harness.step();
+    }
+
+    let moved = before - line_top(&harness, 10);
+    assert!((moved - 120.0).abs() < 0.5, "{moved}");
+}
+
+/// The top of line `n` of the diff of `added_lines`.
+fn line_top(harness: &Harness<'_, App>, n: u32) -> f32 {
+    row_of(harness, Role::Code, &format!("Added, –, {n}:"))
+        .unwrap_or_else(|| panic!("line {n} is not shown"))
+        .top()
+}
+
+/// Scrolls the diff by `points` at once, as a touchpad gesture does, with
+/// the pointer over line 20.
+fn swipe(harness: &mut Harness<'_, App>, points: f32) {
+    let at = row_of(harness, Role::Code, "Added, –, 20:").expect("line 20");
+    harness.hover_at(at.center());
+    for (phase, delta) in [
+        (TouchPhase::Start, 0.0),
+        (TouchPhase::Move, -points),
+        (TouchPhase::End, 0.0),
+    ] {
+        harness.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, delta),
+            phase,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
+#[test]
+fn scrolling_the_diff_moves_every_line_by_as_much() {
+    let live = LiveRepo::new();
+    live.set_working_diff(Group::Unstaged, "edit.txt", added_lines(99));
+    let (mut harness, _probe) = open_status(&live);
+    let before = line_top(&harness, 20);
+    swipe(&mut harness, 100.0);
+    assert_eq!(line_top(&harness, 20), before - 100.0);
+    swipe(&mut harness, 37.0);
+    assert_eq!(line_top(&harness, 20), before - 137.0);
+}
+
+#[test]
+fn the_lines_of_a_long_diff_fill_it_down_to_its_bottom() {
+    let live = LiveRepo::new();
+    live.set_working_diff(Group::Unstaged, "edit.txt", added_lines(99));
+    let (mut harness, _probe) = open_status(&live);
+    swipe(&mut harness, 300.0);
+    let lowest = harness
+        .query_all_by_role(Role::Code)
+        .map(|node| node.rect().bottom())
+        .fold(f32::MIN, f32::max);
+    let status_bar = harness.get_by_label("Git 2.55.0").rect().top();
+    assert!(
+        lowest >= status_bar - 2.0 * 18.0,
+        "the lines end at {lowest}, the status bar begins at {status_bar}"
     );
 }

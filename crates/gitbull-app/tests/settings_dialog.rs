@@ -12,7 +12,10 @@ use gitbull_app::app::App;
 use gitbull_core::settings::{ColourVision, InterfaceSize, Settings, SettingsFile, ThemeSetting};
 use gitbull_core::workspace::View;
 use gitbull_testkit::FakeBackend;
-use support::{Answer, Scripted, Setup, build, path, settle_window, sized_window, window};
+use support::{
+    Answer, Scripted, Setup, build, commit_list_scroll, find_row, long_history, path,
+    settle_window, sized_window, turn_wheel, wait_for_row, window, window_at_60_fps,
+};
 
 fn open_dialog(harness: &mut Harness<'_, App>) {
     harness
@@ -389,4 +392,34 @@ fn escape_and_the_close_button_close_the_dialog() {
         harness.query_by_label("Appearance").is_none(),
         "close button"
     );
+}
+
+#[test]
+fn the_wheel_does_not_scroll_the_commit_list_behind_the_dialog() {
+    let root = path(&["work", "git-bull"]);
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root.clone()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: long_history(FakeBackend::default().with_repository(&root), &root, 200),
+        ..Setup::default()
+    });
+    let mut harness = window_at_60_fps(test.app);
+    settle_window(&mut harness);
+    wait_for_row(&mut harness, "Commit 0, ");
+    let row = find_row(&harness, "Commit 3, ").expect("the row of Commit 3");
+    let start = commit_list_scroll(&harness);
+    open_dialog(&mut harness);
+
+    harness.hover_at(row.left_center() + vec2(20.0, 0.0));
+    harness.step();
+    turn_wheel(&mut harness, -3.0, Modifiers::NONE);
+    for _ in 0..90 {
+        harness.step();
+    }
+
+    assert!(harness.query_by_label("Appearance").is_some(), "the dialog");
+    assert_eq!(commit_list_scroll(&harness), start);
 }

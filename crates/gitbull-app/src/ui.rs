@@ -38,6 +38,7 @@ use crate::search_view;
 use crate::sidebar_view::{self, SidebarAction};
 use crate::style;
 use crate::theme::{self, Appearance, Palette, Rgb, SHAPE};
+use crate::virtual_list;
 use gitbull_core::search::{Search, SearchMode, SearchState};
 use gitbull_core::session::{BranchFilter, LoadState, Session};
 use gitbull_git::object_id::ObjectId;
@@ -131,6 +132,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     apply_interface_size(app, ui);
     // Reads this pass's keys and clicks before the widgets consume them.
     components::focus_visible(ui.ctx());
+    // Reads this pass's wheel input before any area scrolls by it.
+    virtual_list::read_wheel(ui.ctx());
 
     let mut actions = Vec::new();
     if let GitStatus::Problem(problem) = &app.git {

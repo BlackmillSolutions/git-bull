@@ -6,17 +6,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use egui_kittest::Harness;
+use eframe::egui::accesskit::Role;
+use eframe::egui::{Event, Modifiers, MouseWheelUnit, Rect, TouchPhase, vec2};
+use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::{Harness, HarnessBuilder};
 use gitbull_app::app::{App, GitChecker, GitStatus, Parts, Picker};
 use gitbull_app::theme::ThemeFollower;
 use gitbull_app::ui;
+use gitbull_app::virtual_list::ROW_HEIGHT;
 use gitbull_core::git_setup::GitCheck;
 use gitbull_core::settings::{Loaded, Settings, SettingsFile};
 use gitbull_core::workspace::TabState;
 use gitbull_git::Error;
+use gitbull_git::content::{CommitContent, Signature};
+use gitbull_git::history::CommitLine;
 use gitbull_git::locate::LocateError;
 use gitbull_git::version::GitVersion;
-use gitbull_testkit::FakeBackend;
+use gitbull_testkit::{FakeBackend, fake_id};
 use tempfile::TempDir;
 
 pub const GIT_VERSION: GitVersion = GitVersion {
@@ -212,19 +218,123 @@ fn sized_window_on(
     size: (f32, f32),
     app: App,
 ) -> Harness<'static, App> {
-    let harness = Harness::builder()
-        .with_size(size)
-        .with_os(os)
-        .build_ui_state(
-            |ui, app: &mut App| {
-                app.logic();
-                ui::show(app, ui);
-            },
-            app,
-        );
+    build_window(Harness::builder().with_size(size).with_os(os), app)
+}
+
+/// Like [`window`], at 60 frames per second as on a common display, with
+/// room for the spring of the lists to come to rest after the wheel.
+pub fn window_at_60_fps(app: App) -> Harness<'static, App> {
+    let builder = Harness::builder()
+        .with_size((1280.0, 800.0))
+        .with_os(eframe::egui::os::OperatingSystem::from_target_os())
+        .with_step_dt(1.0 / 60.0)
+        .with_max_steps(120);
+    build_window(builder, app)
+}
+
+fn build_window(builder: HarnessBuilder<App>, app: App) -> Harness<'static, App> {
+    let harness = builder.build_ui_state(
+        |ui, app: &mut App| {
+            app.logic();
+            ui::show(app, ui);
+        },
+        app,
+    );
     // The fonts git-bull bundles, as at start-up.
     harness.ctx.set_fonts(gitbull_app::fonts::definitions());
     harness
+}
+
+/// Adds `count` commits to the history of `root`: "Commit 0" on top of
+/// "Commit 1" and so on, named `n0`, `n1` and so on for [`fake_id`].
+pub fn long_history(backend: FakeBackend, root: &Path, count: usize) -> FakeBackend {
+    let name = |i: usize| fake_id(&format!("n{i}"));
+    let lines = (0..count)
+        .map(|i| CommitLine {
+            timestamp: 1_767_268_800 - i as i64,
+            id: name(i),
+            parents: if i + 1 < count {
+                vec![name(i + 1)]
+            } else {
+                Vec::new()
+            },
+        })
+        .collect();
+    let author = Signature {
+        name: "Ada Lovelace".to_owned(),
+        email: "ada@example.com".to_owned(),
+        time: 1_767_268_800,
+        offset_minutes: 0,
+    };
+    (0..count).fold(backend.with_history(root, lines), |backend, i| {
+        backend.with_content(
+            name(i),
+            CommitContent {
+                author: author.clone(),
+                committer: author.clone(),
+                message: format!("Commit {i}\n"),
+            },
+        )
+    })
+}
+
+/// How far the commit list of [`long_history`] is scrolled, in points, up
+/// to a constant: the row of "Commit N" is N rows below the first. The
+/// lowest row counts, whose top no clipping moves.
+pub fn commit_list_scroll(harness: &Harness<'_, App>) -> f32 {
+    harness
+        .query_all_by_role(Role::Row)
+        .filter_map(|node| {
+            let label = node.accesskit_node().label()?;
+            let number: u16 = label
+                .strip_prefix("Commit ")?
+                .split(',')
+                .next()?
+                .parse()
+                .ok()?;
+            Some((node.rect().top(), f32::from(number) * ROW_HEIGHT))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(top, below_first)| below_first - top)
+        .expect("a row of the commit list")
+}
+
+/// Where the first row of the commit list whose label starts with `prefix`
+/// is drawn.
+pub fn find_row(harness: &Harness<'_, App>, prefix: &str) -> Option<Rect> {
+    harness
+        .query_all_by_role(Role::Row)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(prefix))
+        })
+        .map(|node| node.rect())
+}
+
+/// Steps the window until a row of the commit list starts with `prefix`.
+pub fn wait_for_row(harness: &mut Harness<'_, App>, prefix: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while find_row(harness, prefix).is_none() {
+        assert!(Instant::now() < deadline, "no row {prefix}");
+        harness.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// The largest burst of the touchpad the probe recorded, in points.
+pub const BURST: f32 = 681.0;
+
+/// Turns the mouse wheel by `lines` of 40 points with `modifiers` held, in
+/// the next frame; negative values scroll towards later rows, as egui
+/// counts them. Windows reports a touchpad as such lines too.
+pub fn turn_wheel(harness: &mut Harness<'_, App>, lines: f32, modifiers: Modifiers) {
+    harness.input_mut().events.push(Event::MouseWheel {
+        unit: MouseWheelUnit::Line,
+        delta: vec2(0.0, lines),
+        phase: TouchPhase::Move,
+        modifiers,
+    });
 }
 
 /// A checker whose answer depends on the path it is asked about and can be
