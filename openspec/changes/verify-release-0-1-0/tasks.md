@@ -7,7 +7,7 @@ by the task that found it, and the check is repeated.
 
 ## 1. Packages to check
 
-- [ ] 1.1 Once `dev` is merged into `master` (pull request #2), tag `v0.1.0-rc.2` on `master`; verify that the release workflow publishes the five packages as a pre-release
+- [x] 1.1 Once `dev` is merged into `master` (pull request #2), tag `v0.1.0-rc.2` on `master`; verify that the release workflow publishes the five packages as a pre-release
 
 ## 2. Installation steps of the README
 
