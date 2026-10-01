@@ -6,8 +6,7 @@
 //! view shows the uncommitted files beside the diff panel.
 
 use eframe::egui::{
-    self, CentralPanel, Color32, EventFilter, Id, Key, Modifiers, Panel, RichText, Sense,
-    StrokeKind, Ui,
+    self, CentralPanel, Color32, EventFilter, Id, Key, Modifiers, Panel, RichText, Sense, Ui,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::workspace::{Failure, Tab, TabId, TabState, View};
@@ -26,6 +25,7 @@ use crate::app::{App, GitMessage, GitStatus, Notice, Overlay};
 use crate::blame_view;
 use crate::commit_list;
 use crate::commit_panel;
+use crate::components::focus_ring;
 use crate::diff_view::{self, Pane};
 use crate::file_history_view::{self, FILE_HISTORY_LIST};
 use crate::file_status_view::{self, STATUS_LIST};
@@ -611,13 +611,14 @@ fn search_bar(app: &App, ui: &mut Ui, search: &Search, focus: bool, actions: &mu
         .find(|(m, _)| *m == mode)
         .map(|(_, msg)| app.texts.text(*msg))
         .unwrap_or_default();
-    egui::ComboBox::from_id_salt("search-mode")
+    let combo = egui::ComboBox::from_id_salt("search-mode")
         .selected_text(shown)
         .show_ui(ui, |ui| {
             for (value, msg) in modes {
                 ui.selectable_value(&mut mode, value, app.texts.text(msg));
             }
         });
+    focus_ring(ui, &combo.response);
     let mut text = search.text().to_owned();
     let field = ui.add(
         egui::TextEdit::singleline(&mut text)
@@ -698,13 +699,14 @@ fn settings_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
 
             ui.label(RichText::new(app.texts.text(Msg::SettingsLanguage)).strong());
             let mut language = app.settings().language.clone();
-            egui::ComboBox::from_id_salt("language")
+            let combo = egui::ComboBox::from_id_salt("language")
                 .selected_text(language.clone())
                 .show_ui(ui, |ui| {
                     for tag in i18n::languages() {
                         ui.selectable_value(&mut language, tag.to_owned(), tag);
                     }
                 });
+            focus_ring(ui, &combo.response);
             if language != app.settings().language {
                 actions.push(Action::SetLanguage(language));
             }
@@ -961,13 +963,8 @@ pub(crate) fn focus_area(ui: &mut Ui, id: &str) {
     }
     if response.has_focus() {
         lock_tab(ui, response.id);
-        ui.painter().rect_stroke(
-            rect.shrink(1.0),
-            0.0,
-            ui.visuals().selection.stroke,
-            StrokeKind::Inside,
-        );
     }
+    focus_ring(ui, &response);
 }
 
 /// Keeps egui from moving the focus on Tab, which `move_between_areas`
@@ -1029,6 +1026,6 @@ pub(crate) fn section_title(ui: &mut Ui, text: String) {
     ui.label(RichText::new(text).small().strong());
 }
 
-pub(crate) fn color(rgb: Rgb) -> Color32 {
+pub fn color(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.0, rgb.1, rgb.2)
 }

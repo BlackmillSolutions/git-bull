@@ -173,15 +173,14 @@ fn the_icon_family_draws_every_icon_from_phosphor() {
 
 #[test]
 fn an_icon_is_drawn_in_the_icon_family() {
-    let font = gitbull_app::icons::font(14.0);
-    assert_eq!(
-        font.family,
-        FontFamily::Name(gitbull_app::icons::FAMILY.into())
-    );
+    let icons = FontFamily::Name(gitbull_app::icons::FAMILY.into());
+    let mut families = Vec::new();
     let mut drawable = None;
     let mut frame = 0;
     let mut harness = Harness::new_ui(|ui| {
         let ctx = ui.ctx().clone();
+        let font = gitbull_app::icons::font(&ctx, 14.0);
+        families.push(font.family.clone());
         if frame == 0 {
             ctx.set_fonts(definitions());
         } else {
@@ -195,6 +194,12 @@ fn an_icon_is_drawn_in_the_icon_family() {
     });
     harness.run();
     drop(harness);
+    assert_eq!(
+        families.first(),
+        Some(&FontFamily::Proportional),
+        "before the fonts"
+    );
+    assert_eq!(families.last(), Some(&icons), "with the fonts");
     assert_eq!(drawable, Some(true));
 }
 

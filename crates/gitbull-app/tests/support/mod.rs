@@ -276,3 +276,31 @@ impl Scripted {
         })
     }
 }
+
+/// Every rectangle drawn with the focus ring of either appearance: a stroke
+/// of 2 points in the focus colour.
+pub fn focus_rings(output: &eframe::egui::FullOutput) -> Vec<eframe::egui::Rect> {
+    use eframe::egui::epaint::{RectShape, Shape};
+    use gitbull_app::theme::{DARK, LIGHT};
+    let colours = [LIGHT.focus, DARK.focus].map(gitbull_app::ui::color);
+    fn walk(shape: &Shape, colours: &[eframe::egui::Color32], found: &mut Vec<eframe::egui::Rect>) {
+        match shape {
+            Shape::Rect(RectShape { rect, stroke, .. })
+                if stroke.width == 2.0 && colours.contains(&stroke.color) =>
+            {
+                found.push(*rect);
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, colours, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &colours, &mut found);
+    }
+    found
+}

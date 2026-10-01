@@ -4,20 +4,31 @@
 //! own on some of these code points. Views name icons here, not by the
 //! crate's constants.
 
-use eframe::egui::{FontFamily, FontId, RichText};
+use eframe::egui::{Context, FontFamily, FontId, RichText};
 use egui_phosphor::regular as phosphor;
 
 /// The font family that holds Phosphor alone.
 pub const FAMILY: &str = "icons";
 
-/// The font of an icon of `size` points.
-pub fn font(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name(FAMILY.into()))
+/// The font of an icon of `size` points. Until the bundled fonts are loaded,
+/// which at start-up happens before the first frame, the proportional
+/// family stands in, because egui cannot draw a family it does not know.
+pub fn font(ctx: &Context, size: f32) -> FontId {
+    let family = FontFamily::Name(FAMILY.into());
+    let known = ctx.fonts(|fonts| fonts.definitions().families.contains_key(&family));
+    FontId::new(
+        size,
+        if known {
+            family
+        } else {
+            FontFamily::Proportional
+        },
+    )
 }
 
 /// `icon` as text in its family, at `size` points.
-pub fn text(icon: &str, size: f32) -> RichText {
-    RichText::new(icon).font(font(size))
+pub fn text(ctx: &Context, icon: &str, size: f32) -> RichText {
+    RichText::new(icon).font(font(ctx, size))
 }
 
 pub const FOLDER: &str = phosphor::FOLDER_OPEN;

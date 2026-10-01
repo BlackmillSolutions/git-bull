@@ -577,6 +577,20 @@ fn tab_moves_focus_through_the_areas() {
 }
 
 #[test]
+fn each_area_shows_the_focus_ring_when_tab_reaches_it() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    for area in [COMMIT_LIST, AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR] {
+        assert_eq!(focused(&harness), Some(Id::new(area)));
+        assert!(
+            !support::focus_rings(harness.output()).is_empty(),
+            "no ring in {area}"
+        );
+        press(&mut harness, Modifiers::NONE);
+    }
+}
+
+#[test]
 fn shift_tab_moves_focus_back_through_the_areas() {
     let mut harness = open(backend());
     click_row(&mut harness, "Fix the parser", PointerButton::Primary);

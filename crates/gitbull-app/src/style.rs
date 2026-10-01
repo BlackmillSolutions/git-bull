@@ -14,6 +14,19 @@ use crate::ui::color;
 /// The text style of titles, next to egui's own styles.
 pub const TITLE: &str = "title";
 
+/// Where the appearance and colour vision of the applied style are kept.
+const APPLIED: &str = "gitbull-style";
+
+/// The palette the style was last built from, for the colours egui's style
+/// has no place for, such as the accent fill and the colours of notices.
+/// Before any style is applied, the dark Standard palette.
+pub fn active_palette(ctx: &Context) -> &'static Palette {
+    ctx.data(|data| data.get_temp::<(Appearance, ColourVision)>(Id::new(APPLIED)))
+        .map_or(&theme::DARK, |(appearance, vision)| {
+            theme::palette(appearance, vision)
+        })
+}
+
 /// egui's whole style for `palette`.
 pub fn style(palette: &Palette, appearance: Appearance) -> egui::Style {
     let c = |rgb| color(rgb);
@@ -114,7 +127,7 @@ pub fn style(palette: &Palette, appearance: Appearance) -> egui::Style {
 /// appearance, so that egui does not switch to its default style of the
 /// other theme when the system changes its theme.
 pub fn apply_style(ctx: &Context, appearance: Appearance, vision: ColourVision) {
-    let applied = Id::new("gitbull-style");
+    let applied = Id::new(APPLIED);
     let wanted = (appearance, vision);
     if ctx.data(|data| data.get_temp(applied)) == Some(wanted) {
         return;
@@ -123,8 +136,15 @@ pub fn apply_style(ctx: &Context, appearance: Appearance, vision: ColourVision) 
         Appearance::Light => egui::Theme::Light,
         Appearance::Dark => egui::Theme::Dark,
     };
+    let mut style = style(theme::palette(appearance, vision), appearance);
+    // Animation and the blinking of the cursor are behaviour, not look:
+    // they stay as they were, such as switched off in tests.
+    let previous = ctx.style_of(theme);
+    style.animation_time = previous.animation_time;
+    style.scroll_animation = previous.scroll_animation;
+    style.visuals.text_cursor = previous.visuals.text_cursor.clone();
     ctx.set_theme(theme);
-    ctx.set_style_of(theme, style(theme::palette(appearance, vision), appearance));
+    ctx.set_style_of(theme, style);
     ctx.data_mut(|data| data.insert_temp(applied, wanted));
 }
 
@@ -239,6 +259,21 @@ mod tests {
             ctx.global_style().visuals.panel_fill,
             color(LIGHT_RED_GREEN.panel)
         );
+    }
+
+    #[test]
+    fn style_keeps_the_options_of_animation_and_the_cursor() {
+        let ctx = Context::default();
+        ctx.all_styles_mut(|style| {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+            style.visuals.text_cursor.blink = false;
+        });
+        apply_style(&ctx, Appearance::Dark, ColourVision::Standard);
+        let style = ctx.global_style();
+        assert_eq!(style.animation_time, 0.0);
+        assert_eq!(style.scroll_animation, egui::style::ScrollAnimation::none());
+        assert!(!style.visuals.text_cursor.blink);
     }
 
     #[test]

@@ -19,6 +19,7 @@ use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 
 use crate::app::{App, TabView};
+use crate::components::focus_ring;
 use crate::graph_view::{self, LANE_WIDTH, Shape as GraphShape};
 use crate::i18n::Msg;
 use crate::theme::{Palette, Rgb};
@@ -461,7 +462,7 @@ fn filter_switch(ui: &mut Ui, filter: &BranchFilter, texts: &[String; 2]) -> Opt
             .join(", "),
     };
     let mut chosen = None;
-    ComboBox::from_id_salt("branch-filter")
+    let combo = ComboBox::from_id_salt("branch-filter")
         .selected_text(shown)
         .show_ui(ui, |ui| {
             for (option, text) in [(BranchFilter::All, all), (BranchFilter::Current, current)] {
@@ -470,6 +471,7 @@ fn filter_switch(ui: &mut Ui, filter: &BranchFilter, texts: &[String; 2]) -> Opt
                 }
             }
         });
+    focus_ring(ui, &combo.response);
     chosen
 }
 
