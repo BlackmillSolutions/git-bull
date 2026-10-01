@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 eframe = "0.36.2"
+egui-phosphor = { version = "0.14.0", default-features = false, features = ["regular"] }
 fluent-bundle = "0.16.0"
 fluent-syntax = "0.12.0"
 fontdb = "0.24"

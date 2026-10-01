@@ -146,6 +146,58 @@ fn each_family_has_the_chain_of_the_design() {
     );
 }
 
+/// The first font of the chain of `family` that contains `character`.
+fn first_font_with(family: &FontFamily, character: char) -> Option<String> {
+    use skrifa::MetadataProvider;
+    let definitions = definitions();
+    definitions.families[family].iter().find_map(|name| {
+        let data = &definitions.font_data[name];
+        let font = skrifa::FontRef::from_index(&data.font, data.index).ok()?;
+        font.charmap().map(character).map(|_| name.clone())
+    })
+}
+
+#[test]
+fn the_icon_family_draws_every_icon_from_phosphor() {
+    let icons = FontFamily::Name(gitbull_app::icons::FAMILY.into());
+    assert_eq!(family_names(icons.clone()), ["Phosphor"]);
+    for (name, icon) in gitbull_app::icons::ALL {
+        let character = icon.chars().next().expect("an icon");
+        assert_eq!(
+            first_font_with(&icons, character).as_deref(),
+            Some("Phosphor"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_icon_is_drawn_in_the_icon_family() {
+    let font = gitbull_app::icons::font(14.0);
+    assert_eq!(
+        font.family,
+        FontFamily::Name(gitbull_app::icons::FAMILY.into())
+    );
+    let mut drawable = None;
+    let mut frame = 0;
+    let mut harness = Harness::new_ui(|ui| {
+        let ctx = ui.ctx().clone();
+        if frame == 0 {
+            ctx.set_fonts(definitions());
+        } else {
+            let all: String = gitbull_app::icons::ALL
+                .iter()
+                .map(|(_, icon)| *icon)
+                .collect();
+            drawable = Some(ctx.fonts_mut(|fonts| fonts.has_glyphs(&font, &all)));
+        }
+        frame += 1;
+    });
+    harness.run();
+    drop(harness);
+    assert_eq!(drawable, Some(true));
+}
+
 /// The width of `text` in `family` at 14 points, with the bundled fonts.
 fn width(family: FontFamily, text: &str) -> f32 {
     let mut found = None;

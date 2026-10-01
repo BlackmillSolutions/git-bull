@@ -27,6 +27,11 @@ design:
   the Phosphor icons themselves are MIT. Its icons lie in the Private Use
   Area, from U+E000 on. The regular weight is about 0.5 MB; the optional
   feature `subset` cuts it down at compile time to the icons named.
+- Found while bundling: Inter 4.1 has glyphs of its own on some of these
+  code points, among them the folder, the refresh arrows, the gear, info
+  and the branch of Phosphor; and Phosphor maps the lower-case letters and
+  the space to blank glyphs, which its ligatures such as "gear" need. In
+  one chain, either font hides the other.
 - `Context::set_zoom_factor` scales every size of the interface, on top of
   the scale factor of the operating system.
 - egui-winit reports `inner_rect` and `outer_rect` of a window in points that
@@ -141,31 +146,36 @@ Every family gets the whole chain, so that no weight lacks a fallback:
 
 | Family | Chain |
 |---|---|
-| `Proportional` | Inter 400, Phosphor, egui's emoji fonts, system fonts for Chinese, Japanese and Korean |
-| `medium` | Inter 500, Phosphor, egui's emoji fonts, system fonts for Chinese, Japanese and Korean |
-| `semibold` | Inter 600, Phosphor, egui's emoji fonts, system fonts for Chinese, Japanese and Korean |
+| `Proportional` | Inter 400, egui's emoji fonts, system fonts for Chinese, Japanese and Korean |
+| `medium` | Inter 500, egui's emoji fonts, system fonts for Chinese, Japanese and Korean |
+| `semibold` | Inter 600, egui's emoji fonts, system fonts for Chinese, Japanese and Korean |
 | `Monospace` | JetBrains Mono, Inter 400, egui's emoji fonts, system fonts for Chinese, Japanese and Korean |
+| `icons` | Phosphor alone |
 
 The order behind the bundled fonts is today's: egui's monochrome emoji fonts
 before the system fonts, so that emoji keep coming from them and not from a
-font for Chinese or Japanese. `fonts::install` adds the system fonts to all
-four families instead of only `Proportional` and `Monospace`; otherwise a tab
-title in `semibold` would show Japanese as placeholder boxes. Phosphor comes
-right after Inter, before the emoji fonts, so that no other font answers for
-the code point of an icon.
+font for Chinese or Japanese. `fonts::install` adds the system fonts to the
+four text families instead of only `Proportional` and `Monospace`; otherwise
+a tab title in `semibold` would show Japanese as placeholder boxes. Phosphor
+has a family of its own (decision 4).
 
 Alternative: keep egui's Ubuntu Light and Hack. Rejected: they read as
 dated, and Ubuntu Light is thin at small sizes.
 
 ### 4. Icons from Phosphor as a font
 
-`egui-phosphor` adds the regular weight of Phosphor as a font, placed in the
-chains of decision 3, so an icon is a character in a label. A small module
-`icons.rs` names the icons the interface uses (folder, refresh, sun, moon,
-gear, X, plus, warning, info, branch, cloud, tag, target) so that views do not
-depend on the crate's constants. A test checks for every icon of `icons.rs`
-that the first font of the proportional chains that contains its code point
-is Phosphor. Every button that shows only an icon gets its accessible name
+`egui-phosphor` provides the regular weight of Phosphor, which git-bull
+registers as the family `icons`, holding Phosphor alone. An icon is a
+character drawn in that family, never inside ordinary text: Inter would
+answer for some of the icons' code points, and Phosphor before Inter would
+blank the lower-case letters (see Context). A control with an icon and a
+label draws them as two pieces, the icon in `icons` and the label in a text
+family. A small module `icons.rs` names the icons the interface uses
+(folder, refresh, sun, moon, gear, X, plus, info, warning, error, branch,
+cloud, tag, target) and gives the text of an icon in its family, so that
+views depend neither on the crate's constants nor on the family. A test
+checks that Phosphor contains every icon of `icons.rs` and that the
+family `icons` draws it from Phosphor. Every button that shows only an icon gets its accessible name
 through `widget_info`; the names stay "Open", "Refresh", "Theme" and
 "Settings", the button for a new tab is named "New tab" and the button that
 closes a tab "Close <title>".

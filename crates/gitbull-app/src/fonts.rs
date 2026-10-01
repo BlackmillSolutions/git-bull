@@ -2,9 +2,10 @@
 //!
 //! Inter is the proportional font, registered once per weight because egui
 //! chooses fonts by family, and JetBrains Mono the monospace font (design,
-//! decision 3). Every family gets the whole chain behind its font: egui's
-//! monochrome emoji fonts, then the system fonts for Chinese, Japanese and
-//! Korean.
+//! decision 3). Every family of text gets the whole chain behind its font:
+//! egui's monochrome emoji fonts, then the system fonts for Chinese,
+//! Japanese and Korean. The icons of Phosphor have a family of their own
+//! (see [`crate::icons`]).
 //!
 //! egui keeps every registered font completely in memory, so git-bull loads
 //! at most one system font per script group, and only one that really
@@ -25,7 +26,7 @@ static JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Reg
 /// egui's emoji fonts, in their order.
 const EMOJI: [&str; 2] = ["NotoEmoji-Regular", "emoji-icon-font"];
 
-/// Every family the interface uses.
+/// Every family of text, which the fallbacks join.
 fn families() -> [FontFamily; 4] {
     [
         FontFamily::Proportional,
@@ -53,6 +54,10 @@ pub fn definitions() -> FontDefinitions {
         ("Inter Medium", inter(500.0)),
         ("Inter Semibold", inter(600.0)),
         ("JetBrains Mono", FontData::from_static(JETBRAINS_MONO)),
+        (
+            "Phosphor",
+            FontData::from_static(egui_phosphor::Variant::Regular.font_bytes()),
+        ),
     ] {
         definitions.font_data.insert(name.to_owned(), data.into());
     }
@@ -66,6 +71,12 @@ pub fn definitions() -> FontDefinitions {
         let chain = first.iter().chain(&EMOJI).map(|name| name.to_string());
         definitions.families.insert(family, chain.collect());
     }
+    // Icons have a family of their own: in a chain with Inter, either font
+    // hides glyphs of the other.
+    definitions.families.insert(
+        FontFamily::Name(crate::icons::FAMILY.into()),
+        vec!["Phosphor".to_owned()],
+    );
     definitions
 }
 
@@ -167,7 +178,7 @@ pub fn choose(db: &fontdb::Database) -> Vec<Fallback> {
         .collect()
 }
 
-/// Registers `fallbacks` last in the chain of every family.
+/// Registers `fallbacks` last in the chain of every family of text.
 pub fn install(ctx: &egui::Context, fallbacks: &[Fallback]) {
     for fallback in fallbacks {
         let mut data = FontData::from_owned(fallback.data.clone());

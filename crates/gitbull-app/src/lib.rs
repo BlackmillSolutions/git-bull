@@ -10,6 +10,7 @@ pub mod file_status_view;
 pub mod fonts;
 pub mod graph_view;
 pub mod i18n;
+pub mod icons;
 pub mod native;
 pub mod paths;
 pub mod search_view;
