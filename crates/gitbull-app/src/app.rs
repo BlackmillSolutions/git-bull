@@ -10,7 +10,8 @@ use gitbull_core::git_setup::GitCheck;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
 use gitbull_core::settings::{
-    Layout, Loaded, Settings, SettingsFile, ThemeSetting, WindowGeometry,
+    ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
+    WindowGeometry,
 };
 use gitbull_core::sidebar_tree::{SidebarRow, SidebarState};
 use gitbull_core::workspace::{Event, Notify, TabId, View, Workspace};
@@ -322,6 +323,20 @@ impl App {
     pub fn set_theme(&mut self, theme: ThemeSetting) {
         if self.settings.theme != theme {
             self.settings.theme = theme;
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_colour_vision(&mut self, vision: ColourVision) {
+        if self.settings.colour_vision != vision {
+            self.settings.colour_vision = vision;
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_interface_size(&mut self, size: InterfaceSize) {
+        if self.settings.interface_size != size {
+            self.settings.interface_size = size;
             self.dirty = true;
         }
     }

@@ -20,6 +20,7 @@ start-details = Details
 ## Tab bar
 
 tab-new = New tab
+tab-close = Close { $title }
 tab-opening = Opening { $folder }…
 
 ## Repository chooser
@@ -187,6 +188,15 @@ error-close = Close
 ## Settings dialog
 
 settings-title = Settings
+settings-close = Close settings
+settings-appearance = Appearance
+settings-colour-vision = Colour vision
+settings-interface-size = Interface size
+settings-section-git = Git
+colour-vision-standard = Standard
+colour-vision-red-green = Red-green
+colour-vision-blue-yellow = Blue-yellow
+interface-size = { $percent } %
 settings-theme = Theme
 settings-language = Language
 settings-git = Git executable

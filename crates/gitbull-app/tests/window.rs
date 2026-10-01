@@ -2,8 +2,14 @@
 
 mod support;
 
+use std::slice;
+
+use eframe::egui::FontFamily;
 use eframe::egui::accesskit::Role;
+use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use gitbull_app::app::App;
+use gitbull_app::{fonts, icons};
 use gitbull_core::settings::{Layout, Settings};
 use support::{app_with_open_repository, window};
 
@@ -68,6 +74,49 @@ fn toolbar_offers_only_working_actions() {
                 .is_none(),
             "toolbar offers {missing}"
         );
+    }
+}
+
+#[test]
+fn open_and_refresh_show_an_icon_and_their_label() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window(test.app);
+    harness.run();
+
+    for (label, icon) in [("Open", icons::FOLDER), ("Refresh", icons::REFRESH)] {
+        let rect = harness.get_by_role_and_label(Role::Button, label).rect();
+        let texts = support::texts_in(harness.output(), rect);
+        assert!(texts.iter().any(|text| text == icon), "{label}: {texts:?}");
+        assert!(texts.iter().any(|text| text == label), "{label}: {texts:?}");
+    }
+}
+
+#[test]
+fn theme_switch_and_settings_show_an_icon_that_names_them_in_a_tooltip() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window(test.app);
+    harness.run();
+
+    for (name, shown) in [
+        ("Theme", &[icons::SUN, icons::MOON][..]),
+        ("Settings", &[icons::GEAR]),
+    ] {
+        let rect = harness.get_by_role_and_label(Role::Button, name).rect();
+        let texts = support::texts_in(harness.output(), rect);
+        assert!(
+            texts.iter().any(|text| shown.contains(&text.as_str())),
+            "{name}: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text == name),
+            "{name} shows its name"
+        );
+
+        harness.get_by_role_and_label(Role::Button, name).hover();
+        harness.run();
+        // The name is on the button for assistive technology and in the
+        // tooltip.
+        assert_eq!(harness.query_all_by_label(name).count(), 2, "{name}");
     }
 }
 
@@ -138,6 +187,35 @@ fn divider_positions_are_restored_from_the_settings() {
     let workspace = harness.get_by_label("WORKSPACE").rect();
     let description = harness.get_by_label("Description").rect();
     assert!(workspace.right() < 333.0 && description.left() > 333.0);
+}
+
+#[test]
+fn headings_are_semibold_and_section_titles_medium() {
+    let test = support::build(support::Setup::default());
+    let mut harness = window(test.app);
+    harness.run();
+    let semibold = FontFamily::Name(fonts::SEMIBOLD.into());
+    let medium = FontFamily::Name(fonts::MEDIUM.into());
+    let families =
+        |harness: &Harness<'_, App>, text| support::text_families(harness.output(), text);
+
+    assert_eq!(
+        families(&harness, "Open a repository"),
+        slice::from_ref(&semibold)
+    );
+    assert_eq!(families(&harness, "Recent repositories"), [medium]);
+
+    harness
+        .get_by_role_and_label(Role::Button, "Settings")
+        .click();
+    harness.run();
+    for title in ["Settings", "Appearance", "Language", "Git"] {
+        assert_eq!(
+            families(&harness, title),
+            slice::from_ref(&semibold),
+            "{title}"
+        );
+    }
 }
 
 #[test]

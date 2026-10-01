@@ -31,12 +31,18 @@ pub fn viewport(settings: &Settings) -> ViewportBuilder {
 
 /// The geometry to remember, from what the window reports. The position is
 /// absent where the system does not reveal it, as under Wayland.
-pub fn geometry(info: &egui::ViewportInfo, content_size: Vec2) -> WindowGeometry {
-    let size = info.inner_rect.map_or(content_size, |rect| rect.size());
+///
+/// egui-winit reports the window in points of the zoom factor `zoom`, while
+/// [`viewport`] opens the window in logical pixels before any zoom applies;
+/// the geometry is therefore stored without the zoom (design, decision 7).
+pub fn geometry(info: &egui::ViewportInfo, content_size: Vec2, zoom: f32) -> WindowGeometry {
+    let size = info.inner_rect.map_or(content_size, |rect| rect.size()) * zoom;
     WindowGeometry {
         width: size.x,
         height: size.y,
-        position: info.outer_rect.map(|rect| [rect.min.x, rect.min.y]),
+        position: info
+            .outer_rect
+            .map(|rect| [rect.min.x * zoom, rect.min.y * zoom]),
     }
 }
 
@@ -66,7 +72,8 @@ impl eframe::App for NativeApp {
             fonts::install(ctx, &found);
             self.fonts = None;
         }
-        self.app.record_window(geometry(&info, content.size()));
+        self.app
+            .record_window(geometry(&info, content.size(), ctx.zoom_factor()));
         self.app.logic();
         if let Some(due) = self.app.save_due_in() {
             ctx.request_repaint_after(due);
@@ -133,7 +140,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            geometry(&info, vec2(1.0, 1.0)),
+            geometry(&info, vec2(1.0, 1.0), 1.0),
             WindowGeometry {
                 width: 1100.0,
                 height: 720.0,
@@ -143,10 +150,35 @@ mod tests {
     }
 
     #[test]
+    fn geometry_reported_at_a_larger_interface_size_gives_back_the_same_window() {
+        // A window of 1200 by 750 logical pixels at 30, 60, as egui-winit
+        // reports it in the points of the zoom factor 1.5.
+        let zoom = 1.5;
+        let info = egui::ViewportInfo {
+            inner_rect: Some(Rect::from_min_size(
+                pos2(38.0, 90.0) / zoom,
+                vec2(1200.0, 750.0) / zoom,
+            )),
+            outer_rect: Some(Rect::from_min_size(
+                pos2(30.0, 60.0) / zoom,
+                vec2(1216.0, 788.0) / zoom,
+            )),
+            ..Default::default()
+        };
+        let settings = Settings {
+            window: Some(geometry(&info, vec2(1.0, 1.0), zoom)),
+            ..Settings::default()
+        };
+        let viewport = viewport(&settings);
+        assert_eq!(viewport.inner_size, Some(vec2(1200.0, 750.0)));
+        assert_eq!(viewport.position, Some(pos2(30.0, 60.0)));
+    }
+
+    #[test]
     fn unknown_window_position_is_not_remembered() {
         let info = egui::ViewportInfo::default();
         assert_eq!(
-            geometry(&info, vec2(900.0, 600.0)),
+            geometry(&info, vec2(900.0, 600.0), 1.0),
             WindowGeometry {
                 width: 900.0,
                 height: 600.0,

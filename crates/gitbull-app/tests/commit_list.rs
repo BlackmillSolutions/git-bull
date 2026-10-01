@@ -7,6 +7,7 @@ use eframe::egui::{Event, Id, Key, Modifiers, OutputCommand, PointerButton};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_app::icons;
 use gitbull_app::ui::{AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST};
 use gitbull_core::settings::Settings;
 use gitbull_git::content::{CommitContent, Signature};
@@ -207,6 +208,23 @@ fn head_branch_and_remote_branch_are_badges_before_the_description() {
     badge(&harness, "v1.0", first);
 }
 
+#[test]
+fn each_kind_of_reference_shows_its_icon_in_its_badge() {
+    let harness = open(backend());
+    let top = harness.get_by_label("Fix the parser").rect();
+    let bottom = harness.get_by_label("First commit").rect();
+    for (name, icon, row) in [
+        ("HEAD", icons::HEAD, top),
+        ("main", icons::BRANCH, top),
+        ("origin/main", icons::REMOTE_BRANCH, top),
+        ("v1.0", icons::TAG, bottom),
+    ] {
+        let rect = badge(&harness, name, row);
+        let texts = support::texts_in(harness.output(), rect);
+        assert!(texts.iter().any(|text| text == icon), "{name}: {texts:?}");
+    }
+}
+
 /// Where the badge `name` is drawn, if it is.
 fn badge_node(harness: &Harness<'_, App>, name: &str) -> Option<eframe::egui::Rect> {
     harness
@@ -251,7 +269,7 @@ fn badges_that_do_not_fit_are_counted_and_the_description_stays_visible() {
         harness.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    // The count reads "+<number>"; the tab bar has a "+" button too.
+    // The count reads "+<number>".
     let rest: usize = harness
         .get_all_by_role(Role::Label)
         .filter_map(|node| node.accesskit_node().value())
@@ -574,6 +592,44 @@ fn tab_moves_focus_through_the_areas() {
     assert_eq!(focused(&harness), Some(Id::new(AREA_SIDEBAR)));
     press(&mut harness, Modifiers::NONE);
     assert_eq!(focused(&harness), Some(Id::new(COMMIT_LIST)));
+}
+
+#[test]
+fn each_area_shows_the_focus_ring_when_tab_reaches_it() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    for area in [AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST] {
+        press(&mut harness, Modifiers::NONE);
+        assert_eq!(focused(&harness), Some(Id::new(area)));
+        assert!(
+            !support::focus_rings(harness.output()).is_empty(),
+            "no ring in {area}"
+        );
+    }
+}
+
+/// Scenario "No focus ring after a click".
+#[test]
+fn a_click_focuses_the_list_without_a_focus_ring() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    assert_eq!(focused(&harness), Some(Id::new(COMMIT_LIST)));
+    assert_eq!(support::focus_rings(harness.output()), []);
+}
+
+/// Scenario "Focus ring after a key": the ring of an area is thinner than
+/// that of a control.
+#[test]
+fn a_key_after_a_click_shows_a_thin_focus_ring_on_the_list() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    let widths: Vec<f32> = support::focus_strokes(harness.output())
+        .into_iter()
+        .map(|(_, width)| width)
+        .collect();
+    assert_eq!(widths, [1.0]);
 }
 
 #[test]
