@@ -1,0 +1,32 @@
+# Tasks
+
+Group 1 comes first: the nodes of group 2 need to know merges, and groups 2
+and 3 draw text on lane colours. Group 3 does not depend on group 2. The manual check of group 4 needs groups 2
+and 3. Snapshot tests run on Windows only, like the graph snapshots so far.
+Each task names the test that shows it works.
+
+## 1. Merges and text on lane colours
+
+- [ ] 1.1 Add `merge: bool` to `GraphRow` in `gitbull-core/src/graph.rs`, set by `Layout::next_within` from the number of parents, false for the row "Uncommitted changes" in `uncommitted_rows` and kept for the row of HEAD (design, decision 2); verify unit tests in `graph.rs` that a commit with one parent or none is no merge, one with two or three parents is a merge, also when two of its parents lie in the same lane or in lanes beyond the limit, and that `uncommitted_rows` keeps the flag of HEAD and sets it to false for its own row, and that the existing tests of `gitbull-core` pass
+- [ ] 1.2 Add `theme::text_on(fill)`, which returns white or black, whichever contrasts more (design, decision 6); verify a unit test in `theme.rs` that `text_on` reaches 4.5:1 against every lane of each of the six palettes (scenario "Text on the colours of the lanes" of `visual-design`), and that it returns black for the third lane of `LIGHT_RED_GREEN`
+
+## 2. Graph in the style of GitKraken
+
+- [ ] 2.1 Widen the lanes to `LANE_WIDTH` 22 and the narrowest graph column to `LANE_WIDTH + MORE_WIDTH`, and give `Shape::Node` a `kind` of `Commit`, `Merge` or `Uncommitted` taken from `GraphRow::merge` and from whether the row is the row "Uncommitted changes" (design, decisions 1 and 3); verify unit tests in `graph_view.rs` for each kind of node, that the narrowest column shows one lane and the sign when more are needed (scenario "Narrowest column" of `commit-history`), and the existing tests of `graph_view.rs` with the new distances
+- [ ] 2.2 Replace the geometric `clip` with `Shape::Curve` for lines whose ends lie in different lanes, straight `Shape::Line` for the others, both with their full ends, and the edge of the shown lanes as a value the painter clips at (design, decision 4); verify unit tests in `graph_view.rs` that a lane passing straight is a line, that a branch leaving its parent's lane and a merge joining another lane are curves (scenario "Line changes its lane"), that a line into a hidden lane keeps its far end while the edge lies at the last shown lane, and that a row needing more lanes than shown still gets the sign
+- [ ] 2.3 Add `graph_view::initials` (design, decision 5); verify unit tests for `Ada King Lovelace` giving `AL` and `linus` giving `L` (scenarios "Initials of the author" and "Author with a name of one word"), `ada lovelace` giving `AL`, `dependabot[bot]` giving `D`, `(none)` giving `N`, `山田 太郎` giving `山太`, and an empty name and `123` giving no initials
+- [ ] 2.4 Paint the shapes in `commit_list.rs`: lines of 3 points, curves with epaint's `CubicBezierShape` and a vertical piece of a point at each end, all clipped at the edge of the shown lanes; nodes of each kind as decision 3 describes, with the initials of `RowData::author` in `text_on` the lane colour, 9 points in `semibold`, or `Proportional` until the bundled fonts are loaded, and without initials while the content has not arrived (design, decisions 1, 3, 4 and 5); verify a new snapshot `graph_nodes` in `tests/graph_snapshots.rs` of a commit whose content has arrived, a commit whose content the `FakeBackend` withholds, a merge and the row "Uncommitted changes" (scenarios "Initials of the author", "Merge commit", "Fast scrolling" and "Working copy has changes" of `commit-history`), a UI test in `tests/commit_list.rs` that the row of a commit without content still shows its date and hash with the node drawn, and `graph_topologies` and `graph_clipped` made again, with the cut-out of `graph_image` as wide as the graph column, and shown to the user before they replace the old images
+- [ ] 2.5 Run the benchmark `scrolling` with the new graph; verify that `cargo test --release -p gitbull-app --test benchmarks scrolling -- --ignored --nocapture` passes on Windows against the target "Frame time while scrolling, during and after loading" of `commit-history`, and that its rows, the machine and the date are recorded in `docs/benchmarks.md`
+
+## 3. Badges in the colours of the lanes
+
+- [ ] 3.1 Let `BadgeLook::of` take the colour of the lane: filled badges with icon and name in `text_on` the lane, remote branches outlined with outline and icon in the lane colour and the name in `text`, the count unchanged; draw the badges of the commit list with the lane colour of their row, and remove `badge_head`, `badge_branch`, `badge_remote` and `badge_tag` from every palette, from the contrast tests and from the gallery, which draws its badges with lane colours (design, decision 7); verify unit tests of `BadgeLook::of` for each kind, the contrast tests of `theme.rs` without the four tokens, a UI test in `tests/commit_list.rs` for the scenario "Badges in the colour of their lane" with a branch and a tag on a commit in the second lane, the existing badge tests of `tests/commit_list.rs`, and the gallery snapshots and `window_in_shades_of_grey` made again and shown to the user before they replace the old images (scenario "Interface seen without colour" of `visual-design`)
+- [ ] 3.2 Keep the lane colour of the selected commit in the `TabView` whenever the commit list lays out its row, and draw the badges of the commit panel with it (design, decision 7); verify a UI test in `tests/commit_panel.rs` for the scenario "Badges in the commit details" of `commit-history`, with the selected commit in a lane other than the first, and that the existing tests of `tests/commit_panel.rs` pass
+
+## 4. Manual check
+
+- [ ] 4.1 The user opens the generated repository with one million commits and a repository with several authors in a release build on Windows, scrolls the commit list quickly, and looks at the graph and the badges in the light and the dark theme with each colour vision; verify that the result, the window snapshots made again with the user's approval, and the date are recorded in this task
+
+## 5. Final check
+
+- [ ] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate graph-and-commit-list --strict`; verify all succeed and CI is green on Linux, Windows and macOS
