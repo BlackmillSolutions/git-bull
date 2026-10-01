@@ -32,4 +32,4 @@ shows it works.
 
 ## 5. Final check
 
-- [ ] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate title-bar-and-tabs --strict`; verify all succeed and CI is green on Linux, Windows and macOS
+- [x] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate title-bar-and-tabs --strict`; verify all succeed and CI is green on Linux, Windows and macOS. All succeed here with 1020 tests, and CI runs 36941560723 and 36941824217 of commit 6464b0a are green on Linux, Windows and macOS. The run of 9c28184 failed once on Linux in `workspace::tests::showing_a_tab_again_refreshes_it_but_the_first_showing_does_not`, a test of the first milestone that races the reading of the references against the load of the history; it is left to a change of its own.
