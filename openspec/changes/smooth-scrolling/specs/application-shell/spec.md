@@ -11,9 +11,12 @@ the input asked for without moving past it, also when the input turns back
 during a motion. Input that the system reports as a touchpad gesture with a
 start and an end, or in steps of fewer than 8 points, SHALL move these lists
 at once. Keys, the scrollbar and a jump to a selected row SHALL move them at
-once and end a motion still under way. Input that one of these lists took
+once and end a motion still under way. A press of a mouse button on one of
+these lists SHALL end a motion still under way where the list is, so that a
+click selects the row the user pressed on. Reading the history or the file
+status again SHALL NOT end a motion. Input that one of these lists took
 SHALL NOT scroll anything else, also when the pointer leaves the list during
-the motion.
+the motion, and SHALL NOT keep anything else from scrolling by later input.
 
 #### Scenario: Bursts of a touchpad
 - **WHEN** the commit list is drawn at 60 frames per second and the touchpad sends a burst of 681 points after a pause, as Windows reports it
@@ -42,6 +45,18 @@ the motion.
 #### Scenario: Pointer leaves the list
 - **WHEN** the commit list is still moving after a burst of the touchpad and the user moves the pointer onto the diff
 - **THEN** the list comes to rest at the position the input asked for, and the diff does not scroll
+
+#### Scenario: A click ends the motion
+- **WHEN** the commit list is still moving after a burst of the touchpad and the user clicks a row
+- **THEN** the list stops where it was when the button went down, and the row the user pressed on is selected
+
+#### Scenario: A reload keeps the motion
+- **WHEN** the file list of File status is still moving after a turn of the mouse wheel and the file status is read again
+- **THEN** the list comes to rest at the position the input asked for
+
+#### Scenario: Zoom right after a motion
+- **WHEN** the user turns the mouse wheel over the commit list, turns it with Ctrl held right after, as a pinch on a Windows touchpad does, and later scrolls the diff with the mouse wheel
+- **THEN** the diff scrolls by all of its input
 
 ### Requirement: Graphics adapter
 git-bull SHALL ask the system for its power-saving graphics adapter, unless

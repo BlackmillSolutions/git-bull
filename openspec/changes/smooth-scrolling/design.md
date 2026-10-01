@@ -28,6 +28,14 @@ while writing this design:
   over the passes after the events, for about 0.3 s after a burst of
   681 points, and whichever scroll area is under the pointer then takes it.
   The end of a gesture clears what is left.
+- egui keeps the modifiers of a scrolling: during a gesture those at its
+  start and any pressed since, otherwise those of the latest event. It
+  applies the horizontal and the vertical modifier to each event with them,
+  and decides with them once per pass whether all input of the pass zooms
+  instead of scrolling; while it zooms, what it still smooths of earlier
+  input zooms as well. `InputState::is_scrolling` turns false at the end of
+  a gesture, or once egui passes nothing on and 150 ms have passed since
+  the last event.
 - winit on Windows reports both the mouse wheel and the touchpad as `Line`
   with the phase `Move` only; the touchpad sends fractional lines. All 815
   wheel events the probe recorded were of this kind. The two cannot be told
@@ -141,7 +149,9 @@ Alternatives considered:
 The lists read the `Event::MouseWheel` events of the frame themselves and
 sort each of them as egui does:
 
-- With the zoom modifier, or with the horizontal modifier and without the
+- By the modifiers egui keeps for the scrolling (see Context): with the
+  zoom modifier among them after the last event of the pass, no input of
+  the pass scrolls a list; with the horizontal modifier and without the
   vertical one, the event does not scroll a list.
 - Its vertical points are `Point` as they are, `Line` times
   `line_scroll_speed`, and `Page` times the height of the list.
@@ -150,8 +160,8 @@ sort each of them as egui does:
 - Everything else goes to the spring.
 
 A gesture belongs to the input device, not to a list, so whether one is
-under way is kept in egui's temporary data and updated from all events once
-per pass, as `components::focus_visible` keeps the focus-visible state.
+under way, and the modifiers egui keeps, are kept in egui's temporary data
+and updated from all events once per pass, as `components::focus_visible` keeps the focus-visible state.
 `ui::show` reads this wheel state at the start of every pass, as it reads
 the focus-visible state, so that no start or end of a gesture is missed
 while no list is drawn. The function returns the points to move at once and
@@ -173,7 +183,11 @@ to 0, and `ui::show` takes up to `owed`, in its direction, from
 `smooth_scroll_delta.y` at the start of each pass, before any area reads it.
 `owed` never goes past 0. The end of a gesture, which clears egui's
 smoothing, sets it to 0, and so does a rest of less than one point, which
-egui passes on at once.
+egui passes on at once. So does a pass in which egui no longer scrolls and
+passes nothing on although time has passed: egui then has nothing left to
+pass on, and what is still owed, such as input that egui zoomed by because
+Ctrl was pressed during its smoothing, would only keep another area from
+scrolling by later input.
 
 Alternatives considered:
 
@@ -184,7 +198,7 @@ Alternatives considered:
   `is_scrolling`: the diff would lose its own input as well while the user
   scrolls it, because egui counts that as the same scrolling.
 
-### 3. Keys, the scrollbar and jumps end the motion
+### 3. Keys, the scrollbar, jumps and a press end the motion
 
 `scroll_to`, which the scrollbar uses, `apply`, which the keys use, and
 `reveal`, which a jump to a row uses, set `pending` and `velocity` to 0,
@@ -192,6 +206,22 @@ also when the row is already in view and nothing scrolls. The list goes
 where the user asked and does not move on. `scroll_by` stays a move at once
 and ends the motion as well. The spring moves the list through an inner
 function that keeps them.
+
+A press of a mouse button on a list ends a motion where the list is, before
+the spring steps in that pass, so that the list keeps showing what the user
+pressed on until the button is released, and the click selects that row.
+Otherwise the list would move on by up to 1.4 rows per frame at 60 frames
+per second between press and release, and the click would select a
+neighbour. A tap on a touchpad presses and releases in the same frame,
+after which egui no longer counts a button as down on the list, so the
+list asks whether a button was pressed while the pointer is over it.
+
+Selecting a row again after the history or the file status was read anew
+is no jump: the commit list and File status do it whenever a file changes,
+and ending the motion would stop the list short of where the input asked.
+`ListState::reselect` selects the row and reveals it when the list is drawn
+next only if the wheel does not move the list then; at rest it reveals the
+row as before.
 
 Alternative considered: animating the keys too. Page Down would then show
 the new selection only after half a second, and `reveal` would no longer
@@ -242,6 +272,11 @@ Alternatives considered:
   unmeasured.
 - A unit test of the power preference with and without a value from the
   environment.
+- For the findings of the review: a UI test that a click during a motion
+  selects the row pressed on, UI tests of `reselect` and of a status read
+  during a motion, unit tests of `owed` after zoomed input and of the
+  modifiers egui keeps, and a UI test that the diff scrolls by all of its
+  input after a zoom right after a motion.
 - A manual check on Windows with the touchpad and a mouse wheel, and in
   Task Manager, which adapter git-bull draws with.
 
@@ -257,6 +292,13 @@ Alternatives considered:
 - [egui passes the input a list took on to the diff] → `owed` takes it back
   before any area reads it (decision 2); a UI test moves the pointer onto
   the diff right after a burst.
+- [Input against a burst over the diff, within about 0.3 s] → egui adds it
+  to what it still smooths of the burst, so the diff moves by less than its
+  input then. Once egui stops scrolling, `owed` is cleared, so later input
+  is not affected (decision 2).
+- [A reload during a motion leaves the selected row out of view] → The user
+  moved the list away from it; a key or a jump shows it again
+  (decision 3).
 - [A fast list goes on briefly when the input turns back] → Only when the
   target ends up behind the list; a target still ahead stops the list there
   (decision 1). The manual check scrolls quickly up and down.

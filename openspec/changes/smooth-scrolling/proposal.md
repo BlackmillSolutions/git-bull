@@ -36,7 +36,10 @@ one frame to the next stayed below 3.3 points in 90 % of the frames, against
   or in small steps of points, as macOS and Wayland do, still moves the
   lists at once, as egui does today.
 - Keys, the scrollbar and jumps to a selected row move the lists at once,
-  as today, and end a motion of the spring still under way.
+  as today, and end a motion of the spring still under way. A press on a
+  list ends it too, where the list is, so that a click selects the row the
+  user pressed on. Reading the history or the file status again does not
+  end a motion.
 - Input that a list took scrolls nothing else, also when the pointer moves
   on to the diff while the list still moves.
 - git-bull asks for the power-saving graphics adapter, which on a computer
@@ -66,6 +69,11 @@ None.
   wheel input read from egui's events instead of its smoothed scroll delta.
 - `crates/gitbull-app/src/ui.rs`: reads the wheel state at the start of
   each pass.
+- `crates/gitbull-app/src/commit_list.rs` and `file_status_view.rs`: select
+  the row again after a reload without ending a motion.
+- `crates/gitbull-app/src/diff_view.rs`, `blame_view.rs` and
+  `components.rs`: the rows of the diff and blame planned as high as they
+  are drawn, through one function.
 - `crates/gitbull-app/src/main.rs`: the power preference of wgpu in the
   `NativeOptions`.
 - Tests in `virtual_list.rs` and `tests/virtual_list.rs`, and a pass with

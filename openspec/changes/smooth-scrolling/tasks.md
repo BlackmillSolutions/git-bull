@@ -2,7 +2,8 @@
 
 Group 1 comes first; group 2 does not depend on it. The manual check of
 group 3 needs both. Group 4 fixes a fault the user found in the diff after
-the manual check. Each task names the test that shows it works.
+the manual check, and group 5 the findings of the code review of pull
+request #16. Each task names the test that shows it works.
 
 ## 1. Spring
 
@@ -23,6 +24,15 @@ the manual check. Each task names the test that shows it works.
 
 - [x] 4.1 Plan the rows of the diff and of blame without the spacing of the `Ui` around them: `ScrollArea::show_rows` adds it to the height of each row, and since the design system it is 8 points, so egui planned 26 points for rows of 18, which left the bottom of the diff empty, made its lines jump by 8 points while scrolling and let it scroll past its end; and know the rows of the diff by their diff and index instead of their place on the screen, so that a row of a new diff at the same place does not take over the open context menu of the one before; verify UI tests that scrolling the diff and blame by 100 points moves every line by as much and that the lines of a long diff fill it down to its bottom, each failing without the fix, and that the existing tests of `tests/diff_view.rs` and `tests/blame.rs` pass. Found by the user on 2026-10-01: the diff scrolled unevenly and left its bottom empty.
 
-## 5. Final check
+## 5. Findings of the review
 
-- [x] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate smooth-scrolling --strict`; verify all succeed and CI is green on Linux, Windows and macOS. All succeed here, and CI run 36920694567 of commit c69d784 is green on Linux, Windows and macOS.
+- [ ] 5.1 End a motion where the list is when a mouse button goes down on the list, also when a tap on a touchpad releases it in the same frame, before the spring steps in that pass (design, decision 3); verify UI tests in `tests/virtual_list.rs` for the scenario "A click ends the motion" of `application-shell` with press and release in separate frames and in one frame, and a UI test of the window in `tests/commit_list.rs` for a click and a tap on the commit list, the tap failing without the fix. Found by the user on 2026-10-01 with `cargo run`: clicking during a motion did not stop the list.
+- [ ] 5.2 Add `ListState::reselect`, which selects a row and reveals it when the list is drawn next only if the wheel does not move the list then, and use it where `commit_list.rs` selects the commit again after the history was read anew and where `file_status_view.rs` selects the file again after the status was read anew (design, decision 3); verify UI tests in `tests/virtual_list.rs` that `reselect` during a motion lets the list come to rest at its target with the row selected and at rest scrolls to the row, a UI test of the window in `tests/file_status.rs` for the scenario "A reload keeps the motion", and one in `tests/refresh.rs` for the commit list when a new branch makes the history be read again, each window test failing without its fix
+- [ ] 5.3 Set `owed` to 0 in a pass in which egui no longer scrolls and passes nothing on although time has passed (design, decision 2); verify a unit test in `virtual_list.rs` that input a list took, followed by input with the zoom modifier, does not keep another area from scrolling by all of its input later, and a UI test of the window in `tests/diff_view.rs` for the scenario "Zoom right after a motion", both failing without the fix
+- [ ] 5.4 Keep the modifiers egui keeps for a scrolling in the wheel state and sort the events by them: during a gesture those of its start and any pressed since, otherwise those of the latest event, with the zoom modifier after the last event of a pass dropping all input of the pass (design, decision 2); verify unit tests in `virtual_list.rs` that a gesture started with Shift does not scroll a list after Shift is released, that a pass whose last event has the zoom modifier scrolls no list, and that a pass whose last event has none scrolls by all of its input, each failing without the fix
+- [ ] 5.5 Draw the rows of the diff and of blame through one function in `components.rs` that plans them without the spacing of the `Ui` (task 4.1); verify that the tests of task 4.1 and the existing tests of `tests/diff_view.rs` and `tests/blame.rs` pass
+- [ ] 5.6 Move the lookup of a row of the commit list by its label, the turn of the wheel by lines and the size of the largest burst into `tests/support/mod.rs`, and use them in `tests/diff_view.rs`, `tests/file_status.rs`, `tests/refresh.rs`, `tests/settings_dialog.rs` and `tests/shortcuts.rs`; verify that these tests pass
+
+## 6. Final check
+
+- [ ] 6.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate smooth-scrolling --strict`; verify all succeed and CI is green on Linux, Windows and macOS.
