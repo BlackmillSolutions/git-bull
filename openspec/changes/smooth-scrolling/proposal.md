@@ -30,15 +30,19 @@ one frame to the next stayed below 3.3 points in 90 % of the frames, against
   commit panel and of File status, file history and search results) follow
   the mouse wheel and the touchpad with a critically damped spring. Their
   speed no longer jumps with each burst of input, and they come to rest at
-  the position the input asked for, without overshooting it.
+  the position the input asked for, without overshooting it, also when the
+  input turns back during a motion.
 - A touchpad that the system reports as a gesture with a start and an end,
   or in small steps of points, as macOS and Wayland do, still moves the
   lists at once, as egui does today.
 - Keys, the scrollbar and jumps to a selected row move the lists at once,
   as today, and end a motion of the spring still under way.
-- git-bull prefers the integrated, power-saving graphics adapter on
-  computers that have two. The environment variable `WGPU_POWER_PREF` still
-  chooses another.
+- Input that a list took scrolls nothing else, also when the pointer moves
+  on to the diff while the list still moves.
+- git-bull asks for the power-saving graphics adapter, which on a computer
+  with an integrated and a dedicated one is the integrated adapter, where
+  the system lets an application choose. The environment variable
+  `WGPU_POWER_PREF` still chooses another.
 
 Out of scope: the diff and blame, which scroll with egui's `ScrollArea` and
 keep its smoothing; kinetic scrolling on Windows after the fingers leave the
@@ -60,11 +64,17 @@ None.
 
 - `crates/gitbull-app/src/virtual_list.rs`: the spring in `ListState`, the
   wheel input read from egui's events instead of its smoothed scroll delta.
+- `crates/gitbull-app/src/ui.rs`: reads the wheel state at the start of
+  each pass.
 - `crates/gitbull-app/src/main.rs`: the power preference of wgpu in the
   `NativeOptions`.
-- Tests in `virtual_list.rs` and `tests/virtual_list.rs`.
-- `README.md`: which graphics adapter git-bull uses, and how to choose the
-  other one.
+- Tests in `virtual_list.rs` and `tests/virtual_list.rs`, and a pass with
+  the mouse wheel alone in the benchmark `scrolling`, with its result in
+  `docs/benchmarks.md`.
+- `README.md`: which graphics adapter git-bull asks for, and how to choose
+  the other one.
 - No new dependency: eframe re-exports wgpu.
-- The change builds on `ui-design-system` (pull request #15), whose
-  `virtual_list.rs` and focus-visible state it extends.
+- The change builds on `ui-design-system` (pull request #15). It extends its
+  `virtual_list.rs` and keeps the wheel state for each pass in egui's
+  temporary data, as `components::focus_visible` keeps the focus-visible
+  state.
