@@ -156,6 +156,23 @@ pub fn icon_button(
     tooltip(response, name, shortcut)
 }
 
+/// `icon` of `size` points in `colour`, beside a text that names it. It is
+/// only drawn: assistive technology would read the character of the icon,
+/// which means nothing.
+pub fn icon(ui: &mut Ui, icon: &str, size: f32, colour: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            icon,
+            icons::font(ui.ctx(), size),
+            colour,
+        );
+    }
+    response
+}
+
 /// A tooltip that names an action, and its shortcut as the platform writes
 /// it, such as Ctrl+W, or Cmd+W on macOS.
 pub fn tooltip(response: Response, name: &str, shortcut: Option<KeyboardShortcut>) -> Response {
@@ -371,7 +388,7 @@ pub fn banner(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(icons::text(ui.ctx(), icon, 18.0).color(color(foreground)));
+                self::icon(ui, icon, 18.0, color(foreground));
                 ui.label(RichText::new(text).size(TYPE.body).color(color(foreground)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icon_button(ui, icons::CLOSE, dismiss, None).clicked() {

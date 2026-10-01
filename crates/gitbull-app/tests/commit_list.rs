@@ -7,6 +7,7 @@ use eframe::egui::{Event, Id, Key, Modifiers, OutputCommand, PointerButton};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_app::icons;
 use gitbull_app::ui::{AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST};
 use gitbull_core::settings::Settings;
 use gitbull_git::content::{CommitContent, Signature};
@@ -205,6 +206,23 @@ fn head_branch_and_remote_branch_are_badges_before_the_description() {
     }
     let first = harness.get_by_label("First commit").rect();
     badge(&harness, "v1.0", first);
+}
+
+#[test]
+fn each_kind_of_reference_shows_its_icon_in_its_badge() {
+    let harness = open(backend());
+    let top = harness.get_by_label("Fix the parser").rect();
+    let bottom = harness.get_by_label("First commit").rect();
+    for (name, icon, row) in [
+        ("HEAD", icons::HEAD, top),
+        ("main", icons::BRANCH, top),
+        ("origin/main", icons::REMOTE_BRANCH, top),
+        ("v1.0", icons::TAG, bottom),
+    ] {
+        let rect = badge(&harness, name, row);
+        let texts = support::texts_in(harness.output(), rect);
+        assert!(texts.iter().any(|text| text == icon), "{name}: {texts:?}");
+    }
 }
 
 /// Where the badge `name` is drawn, if it is.

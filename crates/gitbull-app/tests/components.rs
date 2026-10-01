@@ -279,6 +279,30 @@ fn menu_items_follow_each_other_without_a_gap() {
     assert_eq!(second.top(), first.bottom());
 }
 
+/// Whether any node offers `text` to assistive technology.
+fn offered<State>(harness: &Harness<'_, State>, text: &str) -> bool {
+    harness
+        .query_all_by(|node| {
+            node.label().is_some_and(|label| label.contains(text))
+                || node.value().is_some_and(|value| value.contains(text))
+        })
+        .next()
+        .is_some()
+}
+
+#[test]
+fn icons_are_hidden_from_assistive_technology() {
+    let mut harness = harness((), |ui, _| {
+        components::icon(ui, icons::TAG, 12.0, egui::Color32::WHITE);
+        components::banner(ui, BannerKind::Warning, "Careful", &[], "Dismiss");
+    });
+    harness.run();
+    harness.get_by_label("Careful");
+    for icon in [icons::TAG, icons::WARNING] {
+        assert!(!offered(&harness, icon), "{icon:?} is offered");
+    }
+}
+
 #[test]
 fn every_component_has_a_click_target_of_24_by_24() {
     let mut harness = harness(("light", 0), |ui, (chosen, _)| {

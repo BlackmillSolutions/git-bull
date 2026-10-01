@@ -100,7 +100,7 @@ pub fn style(palette: &Palette, appearance: Appearance) -> egui::Style {
     };
     style.spacing.item_spacing = vec2(small, small);
     style.spacing.button_padding = vec2(medium, SHAPE.space[0]);
-    style.spacing.interact_size = vec2(SHAPE.target, SHAPE.control_height);
+    style.spacing.interact_size = vec2(SHAPE.target, SHAPE.target);
     style.spacing.window_margin = Margin::same(medium as i8);
     style.spacing.menu_margin = Margin::same(small as i8);
     style.spacing.scroll = ScrollStyle::floating();
@@ -211,8 +211,13 @@ mod tests {
         let large = CornerRadius::same(SHAPE.radius_large as u8);
         assert_eq!(style.visuals.window_corner_radius, large);
         assert_eq!(style.visuals.menu_corner_radius, large);
-        assert_eq!(style.spacing.interact_size.y, SHAPE.control_height);
-        assert!(style.spacing.interact_size.x >= SHAPE.target);
+        // The least size of egui's own controls, and of the rows of a
+        // horizontal layout: the click target. Components draw themselves
+        // as high as SHAPE.control_height.
+        assert_eq!(
+            style.spacing.interact_size,
+            egui::vec2(SHAPE.target, SHAPE.target)
+        );
         assert_eq!(
             style.spacing.item_spacing,
             egui::vec2(SHAPE.space[1], SHAPE.space[1])
