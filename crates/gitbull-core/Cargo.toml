@@ -1,0 +1,24 @@
+[package]
+name = "gitbull-core"
+description = "Session state, commit store and graph layout of git-bull, independent of the UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+gitbull-git.workspace = true
+hashbrown = { version = "0.17.1", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+# Pure-Rust regular expressions, so the build needs no C toolchain for them
+# (design, decision 7). Syntax definitions and themes come from two-face.
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
+toml = "1.1.6"
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+
+[dev-dependencies]
+fastrand = "2.5.0"
+gitbull-testkit.workspace = true
+tempfile = "3.27.0"

@@ -1,2 +1,12 @@
+# Build output
+/target
+
 # Brainstorming mockups and session state
 .superpowers/
+
+# Personal Claude Code settings; shared settings belong in .claude/settings.json
+.claude/settings.local.json
+# Images kittest writes when a snapshot differs.
+**/tests/snapshots/*.new.png
+**/tests/snapshots/*.diff.png
+**/tests/snapshots/*.old.png
