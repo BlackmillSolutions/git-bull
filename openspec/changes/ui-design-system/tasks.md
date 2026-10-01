@@ -9,7 +9,7 @@ decision 6).
 
 ## 1. Settings
 
-- [ ] 1.1 Add the colour vision (`standard`, `red_green`, `blue_yellow`) and the interface size (100, 115, 130, 150) to `Settings` in `gitbull-core` with the defaults Standard and 100, and read the theme, the colour vision and the interface size through a helper that falls back to the default of that setting alone (design, decision 7); verify unit tests in `settings.rs` that both survive a save and a load, that a settings file of the first milestone loads with the defaults and every other setting kept, that an unknown value or a value of the wrong type of each of the three takes its default, keeps every other setting and leaves the file in place, and that a file that is not valid TOML is still renamed with the suffix `.bak` (scenarios "Settings file of an earlier version", "Unknown value of a later version" and "Corrupted file" of `app-settings`)
+- [x] 1.1 Add the colour vision (`standard`, `red_green`, `blue_yellow`) and the interface size (100, 115, 130, 150) to `Settings` in `gitbull-core` with the defaults Standard and 100, and read the theme, the colour vision and the interface size through a helper that falls back to the default of that setting alone (design, decision 7); verify unit tests in `settings.rs` that both survive a save and a load, that a settings file of the first milestone loads with the defaults and every other setting kept, that an unknown value or a value of the wrong type of each of the three takes its default, keeps every other setting and leaves the file in place, and that a file that is not valid TOML is still renamed with the suffix `.bak` (scenarios "Settings file of an earlier version", "Unknown value of a later version" and "Corrupted file" of `app-settings`)
 
 ## 2. Tokens and style
 
