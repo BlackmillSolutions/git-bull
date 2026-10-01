@@ -28,7 +28,7 @@ shows it works.
 
 ## 4. Manual check
 
-- [ ] 4.1 The user checks on Windows with a release build: moving the window by the free space of the title bar, snapping it by dragging it to the edges of the screen and with Win+arrow keys, double clicking the title bar, the buttons Minimize, Maximize, Restore and Close window, resizing at every edge and corner, clicking right after moving and resizing, Alt+Space, dragging tabs to other places, many tabs, and turning on the system's title bar and back with a restart each (design, decision 8); verify that the result and the date are recorded in this task
+- [x] 4.1 The user checks on Windows with a release build: moving the window by the free space of the title bar, snapping it by dragging it to the edges of the screen and with Win+arrow keys, double clicking the title bar, the buttons Minimize, Maximize, Restore and Close window, resizing at every edge and corner, clicking right after moving and resizing, Alt+Space, dragging tabs to other places, many tabs, and turning on the system's title bar and back with a restart each (design, decision 8); verify that the result and the date are recorded in this task. Checked by the user on Windows on 2026-10-02 with a release build: everything in this list worked.
 
 ## 5. Final check
 
