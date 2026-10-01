@@ -18,7 +18,10 @@ use gitbull_git::history::CommitLine;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, LiveRepo, Probe, fake_id};
-use support::{Setup, build, path, settle_window, window};
+use support::{
+    Setup, build, commit_list_scroll, long_history, path, settle_window, wait_for_row, window,
+    window_at_60_fps,
+};
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -818,4 +821,56 @@ fn a_refresh_that_reads_the_same_diff_keeps_the_selection_and_the_scroll_positio
             "Added, –, 42: line 42"
         ]
     );
+}
+
+#[test]
+fn input_the_commit_list_took_does_not_scroll_the_diff_when_the_pointer_moves_onto_it() {
+    let backend = long_history(FakeBackend::default().with_repository(root()), &root(), 200)
+        .with_changes(
+            fake_id("n0"),
+            vec![change(ChangeKind::Modified, "edit.txt", None)],
+        )
+        .with_diff(fake_id("n0"), "edit.txt", added_lines(200));
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window_at_60_fps(test.app);
+    settle_window(&mut harness);
+    wait_for_row(&mut harness, "Commit 0, ");
+    let in_list = row_of(&harness, Role::Row, "Commit 0, ").unwrap().center();
+    click(&mut harness, in_list, PointerButton::Primary);
+    wait_until(&mut harness, |h| {
+        row_of(h, Role::Code, "Added, –, 3:").is_some()
+    });
+    let on_diff = row_of(&harness, Role::Code, "Added, –, 3:")
+        .unwrap()
+        .center();
+    let line = top_line(&harness);
+    let start = commit_list_scroll(&harness);
+
+    // A burst of the touchpad over the commit list, as Windows reports it.
+    harness.hover_at(in_list);
+    harness.step();
+    harness.input_mut().events.push(Event::MouseWheel {
+        unit: MouseWheelUnit::Line,
+        delta: vec2(0.0, -681.0 / 40.0),
+        phase: TouchPhase::Move,
+        modifiers: Modifiers::NONE,
+    });
+    harness.step();
+    // The pointer moves on to the diff while the list still moves.
+    harness.hover_at(on_diff);
+    for _ in 0..90 {
+        harness.step();
+    }
+
+    assert_eq!(top_line(&harness), line, "the diff scrolled");
+    let moved = commit_list_scroll(&harness) - start;
+    assert!((moved - 681.0).abs() < 0.5, "{moved}");
 }
