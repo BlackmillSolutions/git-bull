@@ -10,7 +10,7 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::{Harness, SnapshotOptions, image_snapshot_options};
 use gitbull_app::app::App;
 use gitbull_app::ui;
-use gitbull_core::settings::{Settings, ThemeSetting};
+use gitbull_core::settings::{InterfaceSize, Settings, ThemeSetting};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
@@ -186,9 +186,15 @@ fn wait_for(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -> 
 
 /// The History view with a commit selected, in `theme`.
 fn history_view(theme: ThemeSetting) -> Harness<'static, App> {
+    history_view_at(theme, InterfaceSize::Percent100)
+}
+
+/// The History view with a commit selected, in `theme` at `size`.
+fn history_view_at(theme: ThemeSetting, size: InterfaceSize) -> Harness<'static, App> {
     let test = build(Setup {
         settings: Settings {
             theme,
+            interface_size: size,
             tabs: vec![path(&["work", "git-bull"])],
             active_tab: Some(0),
             ..Settings::default()
@@ -219,6 +225,15 @@ fn main_window_in_the_dark_palette() {
     let mut harness = history_view(ThemeSetting::Dark);
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "window_dark", &options());
+}
+
+/// At 150 % the areas of a window of 1280 by 800 scroll instead of
+/// overlapping (design, risks).
+#[test]
+fn main_window_at_150_percent() {
+    let mut harness = history_view_at(ThemeSetting::Dark, InterfaceSize::Percent150);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "window_150_percent", &options());
 }
 
 /// Scenario "Interface seen without colour": added and removed lines, the

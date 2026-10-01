@@ -66,6 +66,10 @@ const NEW_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key:
 const CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
 const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const LARGER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
+const LARGER_TOO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals);
+const SMALLER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
+const DEFAULT_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0);
 
 /// Sizes the UI starts with when the settings have none.
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -88,6 +92,9 @@ enum Action {
     SetTheme(ThemeSetting),
     SetColourVision(ColourVision),
     SetInterfaceSize(InterfaceSize),
+    /// The next larger and smaller interface size.
+    Larger,
+    Smaller,
     SetLanguage(String),
     OpenSettings,
     CloseSettings,
@@ -121,6 +128,7 @@ const SEARCH_REPAINT: Duration = Duration::from_millis(50);
 pub fn show(app: &mut App, ui: &mut Ui) {
     let appearance = appearance(app, ui);
     style::use_style(ui, appearance, ColourVision::Standard);
+    apply_interface_size(app, ui);
 
     let mut actions = Vec::new();
     if let GitStatus::Problem(problem) = &app.git {
@@ -222,6 +230,8 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::SetTheme(theme) => app.set_theme(theme),
             Action::SetColourVision(vision) => app.set_colour_vision(vision),
             Action::SetInterfaceSize(size) => app.set_interface_size(size),
+            Action::Larger => app.set_interface_size(app.settings().interface_size.larger()),
+            Action::Smaller => app.set_interface_size(app.settings().interface_size.smaller()),
             Action::SetLanguage(language) => app.set_language(language),
             Action::OpenSettings => app.open_settings(),
             Action::CloseSettings => app.close_settings(),
@@ -401,6 +411,19 @@ fn start_screen(app: &App, problem: &GitCheck, ui: &mut Ui, actions: &mut Vec<Ac
     });
 }
 
+/// Draws the interface at the size of the settings. egui's own zoom with
+/// the keyboard is off: it changes in steps of 10 % and forgets them, while
+/// the same keys move between the sizes of the settings (design, decision
+/// 7).
+fn apply_interface_size(app: &App, ui: &Ui) {
+    let ctx = ui.ctx();
+    ctx.options_mut(|options| options.zoom_with_keyboard = false);
+    let factor = app.settings().interface_size.factor();
+    if ctx.zoom_factor() != factor {
+        ctx.set_zoom_factor(factor);
+    }
+}
+
 /// Keyboard shortcuts of the window. `COMMAND` is Ctrl, and Cmd on macOS;
 /// switching tabs uses Ctrl everywhere, because Cmd+Tab belongs to macOS.
 fn shortcuts(ui: &Ui) -> Vec<Action> {
@@ -414,6 +437,15 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
         }
         if input.consume_key(Modifiers::NONE, Key::F5) || input.consume_shortcut(&REFRESH) {
             actions.push(Action::Refresh);
+        }
+        if input.consume_shortcut(&LARGER) || input.consume_shortcut(&LARGER_TOO) {
+            actions.push(Action::Larger);
+        }
+        if input.consume_shortcut(&SMALLER) {
+            actions.push(Action::Smaller);
+        }
+        if input.consume_shortcut(&DEFAULT_SIZE) {
+            actions.push(Action::SetInterfaceSize(InterfaceSize::default()));
         }
         if input.consume_shortcut(&FIND) {
             actions.push(Action::FocusSearch);

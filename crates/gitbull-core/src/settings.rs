@@ -54,6 +54,23 @@ impl InterfaceSize {
         InterfaceSize::Percent150,
     ];
 
+    /// The next larger size; the largest stays.
+    pub fn larger(self) -> InterfaceSize {
+        let index = Self::ALL.iter().position(|size| *size == self).unwrap_or(0);
+        Self::ALL[(index + 1).min(Self::ALL.len() - 1)]
+    }
+
+    /// The next smaller size; the smallest stays.
+    pub fn smaller(self) -> InterfaceSize {
+        let index = Self::ALL.iter().position(|size| *size == self).unwrap_or(0);
+        Self::ALL[index.saturating_sub(1)]
+    }
+
+    /// How much larger than 100 % the interface is drawn.
+    pub fn factor(self) -> f32 {
+        f32::from(self.percent()) / 100.0
+    }
+
     pub fn percent(self) -> u16 {
         match self {
             InterfaceSize::Percent100 => 100,
@@ -409,6 +426,30 @@ mod tests {
         assert!(text.contains("colour_vision = \"red_green\""), "{text}");
         assert!(text.contains("interface_size = 115"), "{text}");
         assert_eq!(file.load().settings, settings);
+    }
+
+    #[test]
+    fn interface_sizes_step_up_and_down_and_stop_at_the_ends() {
+        use InterfaceSize::*;
+        assert_eq!(Percent100.larger(), Percent115);
+        assert_eq!(Percent115.larger(), Percent130);
+        assert_eq!(Percent130.larger(), Percent150);
+        assert_eq!(Percent150.larger(), Percent150);
+        assert_eq!(Percent150.smaller(), Percent130);
+        assert_eq!(Percent115.smaller(), Percent100);
+        assert_eq!(Percent100.smaller(), Percent100);
+    }
+
+    #[test]
+    fn an_interface_size_scales_by_its_percent() {
+        for (size, factor) in [
+            (InterfaceSize::Percent100, 1.0),
+            (InterfaceSize::Percent115, 1.15),
+            (InterfaceSize::Percent130, 1.3),
+            (InterfaceSize::Percent150, 1.5),
+        ] {
+            assert!((size.factor() - factor).abs() < 1e-6, "{size:?}");
+        }
     }
 
     #[test]
