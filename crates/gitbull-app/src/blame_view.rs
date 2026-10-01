@@ -25,12 +25,15 @@ pub const BLAME_AREA: &str = "blame-area";
 /// The width of the margin with hash, author and date.
 const MARGIN_WIDTH: f32 = 320.0;
 
+/// How strongly a lane colour tints the band of a commit.
+pub(crate) const BAND_TINT: f32 = 0.22;
+
 /// The colour of the band of the lines of `commit`: the same for every
 /// block of one commit.
 pub(crate) fn band_color(commit: &ObjectId, palette: &Palette) -> Color32 {
     let lanes = &palette.lanes;
     let index = commit.as_bytes().first().copied().unwrap_or(0) as usize % lanes.len();
-    color(lanes[index]).gamma_multiply(0.22)
+    color(lanes[index]).gamma_multiply(BAND_TINT)
 }
 
 /// The text of a margin entry.
@@ -229,12 +232,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::Appearance;
+    use crate::theme::LIGHT;
     use gitbull_testkit::fake_id;
 
     #[test]
     fn blocks_of_one_commit_share_their_colour() {
-        let palette = Appearance::Light.palette();
+        let palette = &LIGHT;
         let (a, b) = (fake_id("a"), fake_id("b"));
         assert_eq!(band_color(&a, palette), band_color(&a, palette));
         assert_ne!(band_color(&a, palette), band_color(&b, palette));

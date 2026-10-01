@@ -20,7 +20,7 @@ use gitbull_git::head::Head;
 use gitbull_git::locate::LocateError;
 use gitbull_git::version::GitVersion;
 
-use gitbull_core::settings::ThemeSetting;
+use gitbull_core::settings::{ColourVision, ThemeSetting};
 
 use crate::app::{App, GitMessage, GitStatus, Notice, Overlay};
 use crate::blame_view;
@@ -34,7 +34,7 @@ use crate::i18n::Msg;
 use crate::paths::System;
 use crate::search_view;
 use crate::sidebar_view::{self, SidebarAction};
-use crate::theme::{Appearance, Palette, Rgb};
+use crate::theme::{self, Appearance, Palette, Rgb};
 use gitbull_core::search::{Search, SearchMode, SearchState};
 use gitbull_core::session::{BranchFilter, LoadState, Session};
 use gitbull_git::object_id::ObjectId;
@@ -1004,7 +1004,7 @@ fn move_between_areas(ui: &Ui, areas: &[&str]) {
 
 /// The palette of the appearance the window is drawn with.
 fn palette(app: &App, ui: &Ui) -> &'static Palette {
-    appearance(app, ui).palette()
+    theme::palette(appearance(app, ui), ColourVision::Standard)
 }
 
 /// The appearance the window is drawn with.
@@ -1035,15 +1035,15 @@ fn apply_theme(app: &App, ui: &Ui) {
         egui::Theme::Light => Appearance::Light,
     });
     let appearance = app.appearance(reported);
-    let palette: &Palette = appearance.palette();
+    let palette = theme::palette(appearance, ColourVision::Standard);
     let mut visuals = match appearance {
         Appearance::Dark => egui::Visuals::dark(),
         Appearance::Light => egui::Visuals::light(),
     };
     visuals.panel_fill = color(palette.panel);
-    visuals.window_fill = color(palette.window);
+    visuals.window_fill = color(palette.canvas);
     visuals.extreme_bg_color = color(palette.list);
-    visuals.faint_bg_color = color(palette.window);
+    visuals.faint_bg_color = color(palette.canvas);
     visuals.selection.bg_fill = color(palette.selection);
     visuals.hyperlink_color = color(palette.accent);
     visuals.override_text_color = Some(color(palette.text));

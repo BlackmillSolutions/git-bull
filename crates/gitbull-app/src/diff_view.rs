@@ -514,11 +514,17 @@ fn row_rect(
     (rect, response)
 }
 
+/// The opacity of the selection over a row, out of 255.
+pub(crate) const SELECTION_OVER_DIFF: u8 = 90;
+
 /// Marks a selected row, leaving the colour of its kind visible.
 fn selection_fill(ui: &Ui, rect: egui::Rect, palette: &Palette) {
     let [r, g, b, _] = color(palette.selection).to_array();
-    ui.painter()
-        .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(r, g, b, 90));
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(r, g, b, SELECTION_OVER_DIFF),
+    );
 }
 
 fn header_row(
