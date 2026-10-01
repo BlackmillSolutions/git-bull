@@ -45,4 +45,4 @@ decision 6).
 
 ## 7. Final check
 
-- [ ] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate ui-design-system --strict`; verify all succeed and CI is green on Linux, Windows and macOS
+- [x] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate ui-design-system --strict`; verify all succeed and CI is green on Linux, Windows and macOS. All succeed here, and CI run 36870012524 of commit 919e1c8 is green on Linux, Windows and macOS.
