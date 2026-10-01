@@ -195,7 +195,7 @@ pub fn window(app: App) -> Harness<'static, App> {
 
 /// Like [`window`], with egui behaving as on `os`.
 pub fn window_on(os: eframe::egui::os::OperatingSystem, app: App) -> Harness<'static, App> {
-    Harness::builder()
+    let harness = Harness::builder()
         .with_size((1280.0, 800.0))
         .with_os(os)
         .build_ui_state(
@@ -204,7 +204,10 @@ pub fn window_on(os: eframe::egui::os::OperatingSystem, app: App) -> Harness<'st
                 ui::show(app, ui);
             },
             app,
-        )
+        );
+    // The fonts git-bull bundles, as at start-up.
+    harness.ctx.set_fonts(gitbull_app::fonts::definitions());
+    harness
 }
 
 /// A checker whose answer depends on the path it is asked about and can be
