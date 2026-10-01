@@ -13,6 +13,7 @@ use gitbull_git::object_id::ObjectId;
 
 use crate::app::App;
 use crate::commit_list::{SHORT_HASH, color, local_date};
+use crate::components;
 use crate::diff_view::{self, Pane};
 use crate::i18n::Msg;
 use crate::theme::Palette;
@@ -41,7 +42,10 @@ struct Entry {
 pub(crate) fn header(ui: &mut Ui, back: &str, title: &str) -> bool {
     let mut clicked = false;
     ui.horizontal(|ui| {
-        clicked = ui.button(back).clicked();
+        clicked = components::Button::new(back)
+            .kind(components::Kind::Ghost)
+            .show(ui)
+            .clicked();
         ui.add(Label::new(RichText::new(title).strong()).truncate());
     });
     ui.separator();
@@ -107,7 +111,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         return;
     };
     if let Some(failed) = failed {
-        ui.colored_label(color(palette.status_deleted), failed);
+        components::error_text(ui, failed);
     }
     let count = history.commits().len() as u64;
     if count == 0 {

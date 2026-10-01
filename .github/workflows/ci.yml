@@ -52,5 +52,17 @@ jobs:
       - name: Tests
         run: cargo test --workspace --locked
 
+      # Snapshot tests run on Windows only. When one fails, the image it
+      # rendered and its difference to the committed one are kept.
+      - name: Keep the snapshots that differ
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: snapshot-differences
+          path: |
+            crates/gitbull-app/tests/snapshots/*.new.png
+            crates/gitbull-app/tests/snapshots/*.diff.png
+          if-no-files-found: ignore
+
       - name: Licences and advisories
         run: cargo deny check

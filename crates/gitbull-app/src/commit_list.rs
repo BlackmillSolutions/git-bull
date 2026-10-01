@@ -5,8 +5,8 @@ use std::ops::{Range, RangeInclusive};
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
     Align, Align2, Color32, ComboBox, CursorIcon, Event, Id, InputState, Key, Label, Layout, Modal,
-    Modifiers, Pos2, ProgressBar, Rect, Response, RichText, Sense, Stroke, TextStyle, Ui,
-    UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
+    Modifiers, Pos2, ProgressBar, Rect, Response, RichText, Sense, Stroke, StrokeKind, TextStyle,
+    Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 use gitbull_core::badges::{Badge, BadgeKind};
 use gitbull_core::graph::{GraphRow, uncommitted_rows};
@@ -19,8 +19,10 @@ use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 
 use crate::app::{App, TabView};
+use crate::components::{self, Button, Kind, focus_ring};
 use crate::graph_view::{self, LANE_WIDTH, Shape as GraphShape};
 use crate::i18n::Msg;
+use crate::icons;
 use crate::theme::{Palette, Rgb};
 use crate::ui::COMMIT_LIST;
 use crate::virtual_list::VirtualList;
@@ -87,6 +89,9 @@ const NODE_RADIUS: f32 = 4.0;
 const BADGE_HEIGHT: f32 = 17.0;
 const BADGE_PADDING: f32 = 5.0;
 const BADGE_GAP: f32 = 4.0;
+/// The size of the icon in a badge, and the room between icon and name.
+const BADGE_ICON: f32 = 11.0;
+const BADGE_ICON_GAP: f32 = 3.0;
 /// Digits of the abbreviated hash.
 pub(crate) const SHORT_HASH: usize = 7;
 
@@ -313,12 +318,14 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     }
     let menu_commit = view.commit_menu;
     output.response.context_menu(|ui| {
-        if ui.button(&copy_label).clicked() {
-            if let Some(commit) = menu_commit {
-                ui.ctx().copy_text(commit.to_string());
+        components::menu(ui, |ui| {
+            if components::menu_item(ui, None, &copy_label, None).clicked() {
+                if let Some(commit) = menu_commit {
+                    ui.ctx().copy_text(commit.to_string());
+                }
+                ui.close();
             }
-            ui.close();
-        }
+        });
     });
     if resize.dragged() {
         app.update_layout(|layout| layout.graph_column = Some(graph_width));
@@ -398,7 +405,7 @@ fn commit_graph_bar(ui: &mut Ui, session: &mut Session, view: &mut TabView, text
                     .animate(unknown)
                     .desired_width(ui.available_width() - 90.0),
             );
-            if ui.button(&texts.cancel).clicked() {
+            if Button::new(&texts.cancel).show(ui).clicked() {
                 session.cancel_commit_graph();
             }
         });
@@ -409,7 +416,7 @@ fn commit_graph_bar(ui: &mut Ui, session: &mut Session, view: &mut TabView, text
     }
     ui.horizontal(|ui| {
         ui.label(&texts.hint);
-        if ui.button(&texts.generate).clicked() {
+        if Button::new(&texts.generate).show(ui).clicked() {
             view.confirm_graph = true;
         }
     });
@@ -425,10 +432,14 @@ fn commit_graph_bar(ui: &mut Ui, session: &mut Session, view: &mut TabView, text
             ui.add_space(10.0);
             let mut choice = None;
             ui.horizontal(|ui| {
-                if ui.button(&texts.confirm).clicked() {
+                if Button::new(&texts.confirm)
+                    .kind(Kind::Primary)
+                    .show(ui)
+                    .clicked()
+                {
                     choice = Some(true);
                 }
-                if ui.button(&texts.cancel).clicked() {
+                if Button::new(&texts.cancel).show(ui).clicked() {
                     choice = Some(false);
                 }
             });
@@ -461,7 +472,7 @@ fn filter_switch(ui: &mut Ui, filter: &BranchFilter, texts: &[String; 2]) -> Opt
             .join(", "),
     };
     let mut chosen = None;
-    ComboBox::from_id_salt("branch-filter")
+    let combo = ComboBox::from_id_salt("branch-filter")
         .selected_text(shown)
         .show_ui(ui, |ui| {
             for (option, text) in [(BranchFilter::All, all), (BranchFilter::Current, current)] {
@@ -470,6 +481,7 @@ fn filter_switch(ui: &mut Ui, filter: &BranchFilter, texts: &[String; 2]) -> Opt
                 }
             }
         });
+    focus_ring(ui, &combo.response);
     chosen
 }
 
@@ -756,29 +768,21 @@ fn draw_badges(ui: &mut Ui, cell: Rect, badges: &[Badge], palette: &Palette) -> 
     if badges.is_empty() {
         return cell.left();
     }
-    let font = TextStyle::Small.resolve(ui.style());
-    let text = color(palette.list);
-    let painter = ui.painter().clone();
-    let layout = |name: String| painter.layout_no_wrap(name, font.clone(), text);
-    let galleys: Vec<_> = badges
+    let widths: Vec<f32> = badges
         .iter()
-        .map(|badge| layout(badge.name.clone()))
+        .map(|badge| badge_size(ui, &badge.name, true).x)
         .collect();
-    let widths: Vec<f32> = galleys
-        .iter()
-        .map(|galley| galley.size().x + 2.0 * BADGE_PADDING)
-        .collect();
-    let count_width = |rest: usize| layout(format!("+{rest}")).size().x + 2.0 * BADGE_PADDING;
+    let count_width = |rest: usize| badge_size(ui, &format!("+{rest}"), false).x;
     let shown = badges_that_fit(&widths, cell.width() / 2.0, BADGE_GAP, count_width);
+    let rest = badges.len() - shown;
+    // The badge that counts the rest, when some do not fit.
+    let rest_width = (rest > 0).then(|| count_width(rest));
 
     let mut x = cell.left();
     let top = cell.center().y - BADGE_HEIGHT / 2.0;
-    let mut place = |ui: &mut Ui, index: usize, name: &str, width: f32, fill: Color32| {
+    let mut place = |ui: &mut Ui, index: usize, name: &str, width: f32, look: BadgeLook| {
         let rect = Rect::from_min_size(pos2(x, top), vec2(width, BADGE_HEIGHT));
-        painter.rect_filled(rect, 3.0, fill);
-        let galley = layout(name.to_owned());
-        let at = rect.center() - galley.size() / 2.0;
-        painter.galley(at, galley, text);
+        paint_badge(ui, rect, name, &look, palette);
         x += width + BADGE_GAP;
         let response = ui.interact(rect, ui.id().with(("badge", index)), Sense::hover());
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, name));
@@ -790,17 +794,98 @@ fn draw_badges(ui: &mut Ui, cell: Rect, badges: &[Badge], palette: &Palette) -> 
             index,
             &badge.name,
             *width,
-            color(badge_color(badge.kind, palette)),
+            BadgeLook::of(badge.kind, palette),
         );
     }
-    if shown < badges.len() {
-        let rest = badges.len() - shown;
+    if let Some(rest_width) = rest_width {
         let all: Vec<&str> = badges.iter().map(|badge| badge.name.as_str()).collect();
-        let fill = color(palette.text_muted);
-        place(ui, shown, &format!("+{rest}"), count_width(rest), fill)
-            .on_hover_text(all.join("\n"));
+        let look = BadgeLook {
+            colour: color(palette.text_muted),
+            icon: None,
+            outlined: false,
+        };
+        place(ui, shown, &format!("+{rest}"), rest_width, look).on_hover_text(all.join("\n"));
     }
     x
+}
+
+/// How a badge is drawn.
+pub(crate) struct BadgeLook {
+    colour: Color32,
+    icon: Option<&'static str>,
+    outlined: bool,
+}
+
+impl BadgeLook {
+    /// The colour, icon and outline of a badge of `kind`.
+    pub(crate) fn of(kind: BadgeKind, palette: &Palette) -> BadgeLook {
+        BadgeLook {
+            colour: color(badge_color(kind, palette)),
+            icon: Some(badge_icon(kind)),
+            outlined: badge_outlined(kind),
+        }
+    }
+}
+
+/// The size of a badge that shows `name`, with room for an icon or without.
+pub(crate) fn badge_size(ui: &Ui, name: &str, icon: bool) -> Vec2 {
+    let font = TextStyle::Small.resolve(ui.style());
+    let text = ui
+        .painter()
+        .layout_no_wrap(name.to_owned(), font, Color32::PLACEHOLDER)
+        .size()
+        .x;
+    let icon = if icon {
+        BADGE_ICON + BADGE_ICON_GAP
+    } else {
+        0.0
+    };
+    vec2(text + icon + 2.0 * BADGE_PADDING, BADGE_HEIGHT)
+}
+
+/// Draws a badge that shows `name` into `rect`. A filled badge draws its
+/// icon and name in the colour of the list, an outlined one in its own
+/// colour.
+pub(crate) fn paint_badge(ui: &Ui, rect: Rect, name: &str, look: &BadgeLook, palette: &Palette) {
+    let painter = ui.painter();
+    let content = if look.outlined {
+        painter.rect_stroke(rect, 3.0, Stroke::new(1.0, look.colour), StrokeKind::Inside);
+        look.colour
+    } else {
+        painter.rect_filled(rect, 3.0, look.colour);
+        color(palette.list)
+    };
+    let mut left = rect.left() + BADGE_PADDING;
+    if let Some(icon) = look.icon {
+        painter.text(
+            pos2(left, rect.center().y),
+            Align2::LEFT_CENTER,
+            icon,
+            icons::font(ui.ctx(), BADGE_ICON),
+            content,
+        );
+        left += BADGE_ICON + BADGE_ICON_GAP;
+    }
+    let font = TextStyle::Small.resolve(ui.style());
+    let galley = painter.layout_no_wrap(name.to_owned(), font, content);
+    let at = pos2(left, rect.center().y - galley.size().y / 2.0);
+    painter.galley(at, galley, content);
+}
+
+/// The icon of a kind of reference, which tells the kinds apart without
+/// colour.
+pub(crate) fn badge_icon(kind: BadgeKind) -> &'static str {
+    match kind {
+        BadgeKind::Head => icons::HEAD,
+        BadgeKind::Branch => icons::BRANCH,
+        BadgeKind::RemoteBranch => icons::REMOTE_BRANCH,
+        BadgeKind::Tag => icons::TAG,
+    }
+}
+
+/// A remote branch is outlined, every other badge filled.
+pub(crate) fn badge_outlined(kind: BadgeKind) -> bool {
+    kind == BadgeKind::RemoteBranch
 }
 
 pub(crate) fn badge_color(kind: BadgeKind, palette: &Palette) -> Rgb {

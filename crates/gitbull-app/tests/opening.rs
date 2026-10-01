@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use eframe::egui::accesskit::Role;
 use egui_kittest::kittest::Queryable;
+use gitbull_app::icons;
 use gitbull_core::settings::Settings;
 use gitbull_testkit::FakeBackend;
 use support::{Dropped, Setup, active_title, build, path, settle_window, tab_titles, window};
@@ -157,6 +158,42 @@ fn folder_that_is_no_repository_is_named_in_a_message_and_opens_no_tab() {
 }
 
 #[test]
+fn folder_that_is_no_repository_is_named_in_a_warning_banner_below_the_toolbar() {
+    let test = build(Setup {
+        backend: repositories(),
+        picker: Some(path(&["work", "notes"])),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Choose folder…")
+        .click();
+    settle_window(&mut harness);
+
+    let notice = harness
+        .get_by_label_contains("notes is not inside a Git repository")
+        .rect();
+    let toolbar = harness.get_by_role_and_label(Role::Button, "Open").rect();
+    assert!(
+        notice.top() > toolbar.bottom(),
+        "{notice:?} below {toolbar:?}"
+    );
+    let row = support::texts_in_row(harness.output(), notice);
+    assert!(row.iter().any(|text| text == icons::WARNING), "{row:?}");
+
+    harness
+        .get_by_role_and_label(Role::Button, "Dismiss")
+        .click();
+    harness.run();
+    assert!(
+        harness
+            .query_by_label_contains("notes is not inside a Git repository")
+            .is_none()
+    );
+}
+
+#[test]
 fn new_tab_button_shows_the_chooser_while_a_repository_is_open() {
     let settings = Settings {
         recent: vec![path(&["work", "linux"])],
@@ -171,7 +208,9 @@ fn new_tab_button_shows_the_chooser_while_a_repository_is_open() {
     settle_window(&mut harness);
     assert!(harness.query_by_label("Choose folder…").is_none());
 
-    harness.get_by_role_and_label(Role::Button, "+").click();
+    harness
+        .get_by_role_and_label(Role::Button, "New tab")
+        .click();
     harness.run();
 
     harness.get_by_role_and_label(Role::Button, "Choose folder…");

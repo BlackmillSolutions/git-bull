@@ -7,9 +7,11 @@
 use std::ops::Range;
 
 use eframe::egui::{
-    Align, EventFilter, Id, Key, Layout, Modifiers, Rect, Response, Sense, StrokeKind, Ui,
-    UiBuilder, pos2, vec2,
+    Align, EventFilter, Id, Key, Layout, Modifiers, Rect, Response, Sense, Ui, UiBuilder, pos2,
+    vec2,
 };
+
+use crate::components;
 
 /// The height of every row, in logical pixels.
 pub const ROW_HEIGHT: f32 = 24.0;
@@ -296,10 +298,7 @@ impl VirtualList {
             child.set_clip_rect(clip);
             row(&mut child, index, selected);
         }
-        if response.has_focus() {
-            ui.painter()
-                .rect_stroke(rect, 0.0, visuals.selection.stroke, StrokeKind::Inside);
-        }
+        components::area_focus_ring(ui, rect, response.has_focus());
 
         ListOutput {
             response,

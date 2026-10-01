@@ -47,6 +47,9 @@ fn main() -> eframe::Result {
         "git-bull",
         options,
         Box::new(move |creation| {
+            creation
+                .egui_ctx
+                .set_fonts(gitbull_app::fonts::definitions());
             let context = creation.egui_ctx.clone();
             let fonts_context = creation.egui_ctx.clone();
             let fonts = find_fonts_in_background(move || fonts_context.request_repaint());

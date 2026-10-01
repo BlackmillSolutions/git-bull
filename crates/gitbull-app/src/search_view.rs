@@ -10,6 +10,7 @@ use gitbull_git::object_id::ObjectId;
 
 use crate::app::App;
 use crate::commit_list::{SHORT_HASH, color, local_date};
+use crate::components;
 use crate::i18n::Msg;
 use crate::theme::Palette;
 use crate::virtual_list::VirtualList;
@@ -90,7 +91,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             let mut args = FluentArgs::new();
             args.set("error", error);
             let message = app.texts.text_with(Msg::SearchFailed, Some(&args));
-            ui.colored_label(color(palette.status_deleted), message);
+            components::error_text(ui, message);
             return;
         }
     }

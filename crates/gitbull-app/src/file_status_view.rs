@@ -4,8 +4,8 @@
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    self, Align, Color32, Id, Label, Layout, RichText, Sense, Ui, UiBuilder, WidgetInfo,
-    WidgetType, pos2, vec2,
+    self, Align, Color32, Id, Label, Layout, Sense, Ui, UiBuilder, WidgetInfo, WidgetType, pos2,
+    vec2,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::file_status::StatusState;
@@ -17,8 +17,10 @@ use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use crate::app::{App, FileAction};
 use crate::commit_list::{color, take_copy};
 use crate::commit_panel::{kind_index, marker, marker_color, path_job};
+use crate::components;
 use crate::i18n::Msg;
 use crate::theme::Palette;
+use crate::ui::section_text;
 use crate::virtual_list::VirtualList;
 
 /// The id of the file list, which takes the focus of its area.
@@ -177,7 +179,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
                 Failure::Git(error) => error.to_string(),
                 Failure::Panic(message) => message.clone(),
             };
-            ui.colored_label(color(palette.status_deleted), error);
+            components::error_text(ui, error);
             return false;
         }
         StatusState::Loaded(status) if status.is_clean() => {
@@ -254,25 +256,27 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     };
     let mut opened = None;
     output.response.context_menu(|ui| {
-        // Nothing here changes the index, the working copy or the
-        // repository. The history and blame show the file as of the last
-        // commit, which a file new to it does not have.
-        if let Some(path) = in_last_commit {
-            if ui.button(&texts.file_history).clicked() {
-                opened = Some(FileAction::History("HEAD".to_owned(), path.clone()));
+        components::menu(ui, |ui| {
+            // Nothing here changes the index, the working copy or the
+            // repository. The history and blame show the file as of the last
+            // commit, which a file new to it does not have.
+            if let Some(path) = in_last_commit {
+                if components::menu_item(ui, None, &texts.file_history, None).clicked() {
+                    opened = Some(FileAction::History("HEAD".to_owned(), path.clone()));
+                    ui.close();
+                }
+                if components::menu_item(ui, None, &texts.blame, None).clicked() {
+                    opened = Some(FileAction::Blame("HEAD".to_owned(), path.clone()));
+                    ui.close();
+                }
+            }
+            if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
+                if let Some(entry) = menu_entry {
+                    ui.ctx().copy_text(entry.path.to_string());
+                }
                 ui.close();
             }
-            if ui.button(&texts.blame).clicked() {
-                opened = Some(FileAction::Blame("HEAD".to_owned(), path.clone()));
-                ui.close();
-            }
-        }
-        if ui.button(&texts.copy_path).clicked() {
-            if let Some(entry) = menu_entry {
-                ui.ctx().copy_text(entry.path.to_string());
-            }
-            ui.close();
-        }
+        });
     });
     let chosen = view.status_files.selected().and_then(entry_at);
     session.choose_status_file(chosen);
@@ -315,11 +319,7 @@ fn title_row(ui: &mut Ui, title: &str) {
             .max_rect(rect.shrink2(vec2(6.0, 0.0)))
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            ui.add(
-                Label::new(RichText::new(title).small().strong())
-                    .truncate()
-                    .selectable(false),
-            );
+            ui.add(Label::new(section_text(title)).truncate().selectable(false));
         },
     );
 }

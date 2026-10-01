@@ -3,8 +3,8 @@
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    self, Align, Color32, Frame, Id, Label, Layout, Margin, RichText, ScrollArea, Sense, TextStyle,
-    Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
+    self, Align, Color32, Id, Label, Layout, RichText, ScrollArea, Sense, TextStyle, Ui, UiBuilder,
+    WidgetInfo, WidgetType, pos2, vec2,
 };
 use gitbull_core::badges::Badge;
 use gitbull_core::details::ChangedFiles;
@@ -17,9 +17,12 @@ use gitbull_git::path::RepoPath;
 use jiff::tz::TimeZone;
 
 use crate::app::{App, FileAction};
-use crate::commit_list::{badge_color, color, local_date, original_date, take_copy};
+use crate::commit_list::{
+    BadgeLook, badge_size, color, local_date, original_date, paint_badge, take_copy,
+};
+use crate::components;
 use crate::i18n::Msg;
-use crate::theme::Palette;
+use crate::theme::{Palette, SHAPE};
 use crate::ui::AREA_COMMIT_PANEL;
 use crate::virtual_list::VirtualList;
 
@@ -120,7 +123,10 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     };
     if view.uncommitted_selected() {
         ui.label(RichText::new(uncommitted).italics());
-        if ui.button(open_file_status).clicked() {
+        if components::Button::new(&open_file_status)
+            .show(ui)
+            .clicked()
+        {
             app.show_view(View::FileStatus);
         }
         return false;
@@ -271,6 +277,8 @@ const FIELD_NAME_WIDTH: f32 = 76.0;
 /// wrap within the rest. A grid would size its columns by contents that
 /// wrap by the column size, and never settle.
 fn field(ui: &mut Ui, name: &str, contents: impl FnOnce(&mut Ui)) {
+    // The fields of a commit are read together, so they stand close.
+    ui.spacing_mut().item_spacing.y = SHAPE.space[0];
     ui.horizontal_top(|ui| {
         ui.allocate_ui(vec2(FIELD_NAME_WIDTH, 0.0), |ui| {
             ui.set_width(FIELD_NAME_WIDTH);
@@ -288,17 +296,19 @@ const LISTED_REFERENCES: usize = 50;
 
 fn references(ui: &mut Ui, badges: &[Badge], palette: &Palette) {
     for badge in badges.iter().take(SHOWN_REFERENCES) {
-        Frame::new()
-            .fill(color(badge_color(badge.kind, palette)))
-            .corner_radius(3.0)
-            .inner_margin(Margin::symmetric(4, 1))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(&badge.name)
-                        .small()
-                        .color(color(palette.list)),
-                )
-            });
+        // One widget per badge, so that a row breaks between badges only.
+        let size = badge_size(ui, &badge.name, true);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &badge.name));
+        if ui.is_rect_visible(rect) {
+            paint_badge(
+                ui,
+                rect,
+                &badge.name,
+                &BadgeLook::of(badge.kind, palette),
+                palette,
+            );
+        }
     }
     let rest = &badges[badges.len().min(SHOWN_REFERENCES)..];
     if !rest.is_empty() {
@@ -343,7 +353,7 @@ fn files(
                 Failure::Git(error) => error.to_string(),
                 Failure::Panic(message) => message.clone(),
             };
-            ui.colored_label(color(palette.status_deleted), error);
+            components::error_text(ui, error);
             return (false, None);
         }
         ChangedFiles::Loaded(files) if files.is_empty() => {
@@ -377,27 +387,29 @@ fn files(
     let menu_row = view.files.menu_row();
     let mut opened = None;
     output.response.context_menu(|ui| {
-        let Some(index) = menu_row.map(|row| row as usize) else {
-            return;
-        };
-        if ui.button(&texts.file_history).clicked() {
-            opened = Some((index, false));
-            ui.close();
-        }
-        // A file the commit deleted is not in it.
-        let deleted = files
-            .get(index)
-            .is_some_and(|change| change.kind == ChangeKind::Deleted);
-        if !deleted && ui.button(&texts.blame).clicked() {
-            opened = Some((index, true));
-            ui.close();
-        }
-        if ui.button(&texts.copy_path).clicked() {
-            if let Some(path) = path_of(index as u64) {
-                ui.ctx().copy_text(path);
+        components::menu(ui, |ui| {
+            let Some(index) = menu_row.map(|row| row as usize) else {
+                return;
+            };
+            if components::menu_item(ui, None, &texts.file_history, None).clicked() {
+                opened = Some((index, false));
+                ui.close();
             }
-            ui.close();
-        }
+            // A file the commit deleted is not in it.
+            let deleted = files
+                .get(index)
+                .is_some_and(|change| change.kind == ChangeKind::Deleted);
+            if !deleted && components::menu_item(ui, None, &texts.blame, None).clicked() {
+                opened = Some((index, true));
+                ui.close();
+            }
+            if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
+                if let Some(path) = path_of(index as u64) {
+                    ui.ctx().copy_text(path);
+                }
+                ui.close();
+            }
+        });
     });
     (true, opened)
 }

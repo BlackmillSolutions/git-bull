@@ -65,6 +65,7 @@ fn harness(backend: FakeBackend, graph_column: Option<f32>, last: &str) -> Harne
             },
             test.app,
         );
+    harness.ctx.set_fonts(gitbull_app::fonts::definitions());
     for attempt in 0.. {
         assert!(attempt < 1000, "the content of {last} did not arrive");
         harness.step();
