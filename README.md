@@ -7,8 +7,9 @@ below. It is built to stay fluid on repositories with more than a million
 commits.
 
 git-bull is in early development. The first milestone is a read-only viewer;
-its plan lives in [`openspec/changes/add-repository-viewer`](openspec/changes/add-repository-viewer),
-and the architecture decisions in [`docs/adr`](docs/adr).
+what it does is specified in [`openspec/specs`](openspec/specs), the
+architecture decisions are in [`docs/adr`](docs/adr), and the plan ahead is
+on the [roadmap](https://github.com/users/BlackmillSolutions/projects/1).
 
 ## Installation
 
