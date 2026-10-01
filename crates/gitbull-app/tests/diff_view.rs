@@ -664,9 +664,7 @@ fn open_status(live: &LiveRepo) -> (Harness<'static, App>, Probe) {
             CommitContent {
                 author: person(),
                 committer: person(),
-                message: "Start
-"
-                .to_owned(),
+                message: "Start\n".to_owned(),
             },
         )
         .with_live(root(), live);
@@ -688,7 +686,18 @@ fn open_status(live: &LiveRepo) -> (Harness<'static, App>, Probe) {
         .expect("File status in the sidebar")
         .rect()
         .center();
-    click(&mut harness, at, PointerButton::Primary);
+    // While the status loads, a spinner asks for frame after frame, which
+    // `Harness::run` gives up on: the click is stepped instead.
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.step();
     // The only file is chosen at once.
     wait_until(&mut harness, |h| !diff_rows(h).is_empty());
     (harness, probe)
