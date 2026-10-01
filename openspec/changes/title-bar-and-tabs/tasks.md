@@ -1,0 +1,35 @@
+# Tasks
+
+Group 1 works in today's tab bar and comes first; group 2 moves that row
+into the title bar, and group 3 adds the setting that group 2 reads. The
+manual check of group 4 needs all three. Each task names the test that
+shows it works.
+
+## 1. Reordering tabs
+
+- [ ] 1.1 Add `Workspace::move_tab(id, index)` and `Workspace::move_active(step)` in `crates/gitbull-core/src/workspace.rs` (design, decision 5); verify unit tests that a tab moves to the index, that an index past the end is clamped, that the active tab and the state of every tab stay, that moving the first tab left or the last tab right changes nothing, and that a tab still opening moves like any other
+- [ ] 1.2 Move the active tab with Ctrl+Shift+Page Up and Ctrl+Shift+Page Down on every platform through `Action::MoveActive` in `ui::shortcuts` (design, decision 5); verify UI tests in `tests/shortcuts.rs` for the scenarios "Active tab moved with the keyboard" and "Last tab moved further" of `application-shell`, and "Moving a tab on macOS" with the harness on macOS, and that the existing tests of Page Up and Page Down in the lists pass
+- [ ] 1.3 Let a tab be dragged to another place in the row, following the pointer while the others make room, and move it there with `Action::MoveTab` when the drag ends; a drag activates the tab and Escape ends it without a move (design, decision 5); verify UI tests in `tests/tab_bar.rs` for the scenario "Tab dragged to another place", that Escape leaves the order as it was, that a click still activates a tab, and a test that the settings saved after a drag list the tabs in the new order for the scenario "Order survives a restart"
+- [ ] 1.4 Give the tabs widths between 96 and 240 points, narrow them alike when they do not fit with "…" and the full title as tooltip, and scroll the row sideways beyond that, with the active tab scrolled into view (design, decision 4); verify UI tests in `tests/tab_bar.rs` that 30 tabs in the smallest window keep the button for a new tab and the active tab visible, that a narrowed tab names its full title in its tooltip and to assistive technology, and that the existing tests of `tests/tab_bar.rs` and `tests/opening.rs` pass
+
+## 2. Title bar
+
+- [ ] 2.1 Add `Settings::system_title_bar`, read with `or_default` (design, decision 6); verify unit tests in `crates/gitbull-core/src/settings.rs` that a file without it reads as `false` and keeps every other setting, for the scenario "Settings file without the title bar setting" of `app-settings`, that a wrong value reads as `false` without renaming the file, and that it survives saving and reading
+- [ ] 2.2 Build the window in `native::viewport` without decorations on Windows and Linux and with the full-size content view, a transparent title bar and no title on macOS, unless `system_title_bar` is set, and let `App` keep the value the window was built with (design, decision 1); verify unit tests of `native::viewport` for Windows, Linux and macOS with and without the setting
+- [ ] 2.3 Turn the panel `tab_bar` into `title_bar` with the inset on macOS, the row of tabs and the free space that sends `StartDrag` when dragged and `Maximized` with the opposite state on a double click, at least 48 points of it free, as high as a tab with padding and at least 28 points on macOS; with the system's title bar, draw only the row of tabs (design, decision 2); verify UI tests in `tests/window.rs` that read the commands from `Harness::output` for the scenarios "Moving the window" and "Double click on the title bar" of `application-shell`, for "Title bar on macOS" with the harness on macOS, for "System title bar on request", and for "Areas are present" and "Another view is shown" as they now read
+- [ ] 2.4 Add the window buttons Minimize, Maximize or Restore by `ViewportInfo::maximized`, and Close window, 46 points wide and as high as the title bar, Close window red under the pointer, each with a tooltip and a name for assistive technology from `crates/gitbull-app/i18n/en-US.ftl`, and their icons in `icons.rs` (design, decisions 3 and 7); verify UI tests in `tests/window.rs` for the scenarios "Title bar on Windows and Linux", "Maximize and restore" with `maximized` set in the raw input, and "Window buttons for assistive technology", that Minimize sends `Minimized(true)` and Close window sends `Close`, and that the test of click targets in `tests/tab_bar.rs` covers the window buttons (scenario "Click targets" of `visual-design`)
+- [ ] 2.5 Resize the window on Windows and Linux from a band of 4 points along each edge and 12 points along each side of a corner, in egui's foreground order, with the matching cursor, sending `BeginResize`, and none while maximized, on macOS or with the system's title bar (design, decision 3); verify UI tests in `tests/window.rs` that a press on the right edge sends `BeginResize` to the east and one at the bottom right corner to the south-east, for the scenario "Resizing at an edge", that a press there reaches no widget beneath, and that a maximized window, the harness on macOS and the system's title bar offer no band
+- [ ] 2.6 Update the snapshots of the window, which now show the title bar, and add one of the title bar as on macOS; verify that `tests/window_snapshots.rs` passes with the new images and that the user approves them
+
+## 3. Setting for the system title bar
+
+- [ ] 3.1 Add `components::checkbox` with the hover state, the focus ring and a click target of at least 24 by 24 points (design, decision 6), and show it in the gallery of controls; verify UI tests in `tests/components.rs` that it toggles on a click and with Space, shows the focus ring after Tab, and has a click target of at least 24 by 24 points, and the updated snapshots of the gallery
+- [ ] 3.2 Offer "Use the system title bar" in the section "Appearance" of the settings dialog, with the note that it takes effect when git-bull starts next while its value differs from the one the window was built with, texts from `crates/gitbull-app/i18n/en-US.ftl` (design, decisions 6 and 7); verify UI tests in `tests/settings_dialog.rs` for the scenarios "Appearance section" and "Title bar changed" of `app-settings`, the latter by building a new window from the saved settings, and that the existing tests of the dialog pass
+
+## 4. Manual check
+
+- [ ] 4.1 The user checks on Windows with a release build: moving the window by the free space of the title bar, snapping it by dragging it to the edges of the screen and with Win+arrow keys, double clicking the title bar, the buttons Minimize, Maximize, Restore and Close window, resizing at every edge and corner, clicking right after moving and resizing, Alt+Space, dragging tabs to other places, many tabs, and turning on the system's title bar and back with a restart each (design, decision 8); verify that the result and the date are recorded in this task
+
+## 5. Final check
+
+- [ ] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate title-bar-and-tabs --strict`; verify all succeed and CI is green on Linux, Windows and macOS
