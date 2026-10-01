@@ -43,7 +43,9 @@ fn rendered_window(test: TestApp) -> Harness<'static, App> {
 /// such edges, 969 pixels, differed. The window snapshots serve review and
 /// allow a few such edges; the UI tests check the behaviour.
 fn options() -> SnapshotOptions {
-    SnapshotOptions::new().threshold(2.0).max_failed_pixels(2000)
+    SnapshotOptions::new()
+        .threshold(2.0)
+        .max_failed_pixels(2000)
 }
 
 #[test]
