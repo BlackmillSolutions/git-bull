@@ -20,7 +20,7 @@ use gitbull_git::head::Head;
 use gitbull_git::locate::LocateError;
 use gitbull_git::version::GitVersion;
 
-use gitbull_core::settings::{ColourVision, ThemeSetting};
+use gitbull_core::settings::{ColourVision, InterfaceSize, ThemeSetting};
 
 use crate::app::{App, GitMessage, GitStatus, Notice, Overlay};
 use crate::blame_view;
@@ -86,6 +86,8 @@ enum Action {
     CheckGitAgain,
     ChooseGit,
     SetTheme(ThemeSetting),
+    SetColourVision(ColourVision),
+    SetInterfaceSize(InterfaceSize),
     SetLanguage(String),
     OpenSettings,
     CloseSettings,
@@ -218,6 +220,8 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::CheckGitAgain => app.check_again(),
             Action::ChooseGit => app.choose_git(),
             Action::SetTheme(theme) => app.set_theme(theme),
+            Action::SetColourVision(vision) => app.set_colour_vision(vision),
+            Action::SetInterfaceSize(size) => app.set_interface_size(size),
             Action::SetLanguage(language) => app.set_language(language),
             Action::OpenSettings => app.open_settings(),
             Action::CloseSettings => app.close_settings(),
@@ -809,63 +813,154 @@ fn settings_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let Some(dialog) = &app.dialog else {
         return;
     };
-    let mut open = true;
-    egui::Window::new(app.texts.text(Msg::SettingsTitle))
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .show(ui.ctx(), |ui| {
-            ui.label(RichText::new(app.texts.text(Msg::SettingsTheme)).strong());
-            theme_choice(app, ui, actions);
-            ui.add_space(8.0);
+    let texts = &app.texts;
+    let settings = app.settings();
+    // Modal: the window behind takes no input. A click beside the dialog
+    // does not close it either; Escape and the close button do.
+    let modal = egui::Modal::new(Id::new("settings")).show(ui.ctx(), |ui| {
+        ui.set_width(540.0);
+        let mut close = false;
+        ui.horizontal(|ui| {
+            let title = RichText::new(texts.text(Msg::SettingsTitle))
+                .text_style(egui::TextStyle::Name(style::TITLE.into()));
+            ui.label(title);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let name = texts.text(Msg::SettingsClose);
+                close = components::icon_button(ui, icons::CLOSE, &name, None).clicked();
+            });
+        });
 
-            ui.label(RichText::new(app.texts.text(Msg::SettingsLanguage)).strong());
-            let mut language = app.settings().language.clone();
-            let combo = egui::ComboBox::from_id_salt("language")
-                .selected_text(language.clone())
-                .show_ui(ui, |ui| {
-                    for tag in i18n::languages() {
-                        ui.selectable_value(&mut language, tag.to_owned(), tag);
-                    }
-                });
-            focus_ring(ui, &combo.response);
-            if language != app.settings().language {
-                actions.push(Action::SetLanguage(language));
-            }
-            ui.add_space(8.0);
-
-            let label = ui.label(RichText::new(app.texts.text(Msg::SettingsGit)).strong());
-            let mut input = dialog.git_input.clone();
-            ui.add(
-                egui::TextEdit::singleline(&mut input)
-                    .hint_text(app.texts.text(Msg::SettingsGitAutomatic))
-                    .desired_width(360.0),
-            )
-            .labelled_by(label.id);
-            if input != dialog.git_input {
-                actions.push(Action::SetGitInput(input));
-            }
-            ui.horizontal(|ui| {
-                if ui.button(app.texts.text(Msg::SettingsGitBrowse)).clicked() {
-                    actions.push(Action::BrowseGit);
+        settings_section(ui, texts.text(Msg::SettingsAppearance));
+        egui::Grid::new("appearance")
+            .num_columns(2)
+            .spacing(egui::vec2(SHAPE.space[3], SHAPE.space[1]))
+            .show(ui, |ui| {
+                ui.label(texts.text(Msg::SettingsTheme));
+                let mut theme = settings.theme;
+                let (system, light, dark) = (
+                    texts.text(Msg::ThemeSystem),
+                    texts.text(Msg::ThemeLight),
+                    texts.text(Msg::ThemeDark),
+                );
+                components::segmented(
+                    ui,
+                    &mut theme,
+                    &[
+                        (ThemeSetting::System, system.as_str()),
+                        (ThemeSetting::Light, light.as_str()),
+                        (ThemeSetting::Dark, dark.as_str()),
+                    ],
+                );
+                if theme != settings.theme {
+                    actions.push(Action::SetTheme(theme));
                 }
-                if ui.button(app.texts.text(Msg::SettingsGitApply)).clicked() {
-                    actions.push(Action::ApplyGit);
+                ui.end_row();
+
+                ui.label(texts.text(Msg::SettingsColourVision));
+                let mut vision = settings.colour_vision;
+                let (standard, red_green, blue_yellow) = (
+                    texts.text(Msg::ColourVisionStandard),
+                    texts.text(Msg::ColourVisionRedGreen),
+                    texts.text(Msg::ColourVisionBlueYellow),
+                );
+                components::segmented(
+                    ui,
+                    &mut vision,
+                    &[
+                        (ColourVision::Standard, standard.as_str()),
+                        (ColourVision::RedGreen, red_green.as_str()),
+                        (ColourVision::BlueYellow, blue_yellow.as_str()),
+                    ],
+                );
+                if vision != settings.colour_vision {
+                    actions.push(Action::SetColourVision(vision));
+                }
+                ui.end_row();
+
+                ui.label(texts.text(Msg::SettingsInterfaceSize));
+                let mut size = settings.interface_size;
+                let labels: Vec<String> = InterfaceSize::ALL
+                    .iter()
+                    .map(|size| {
+                        let mut args = FluentArgs::new();
+                        args.set("percent", size.percent());
+                        texts.text_with(Msg::InterfaceSizePercent, Some(&args))
+                    })
+                    .collect();
+                let choices: Vec<(InterfaceSize, &str)> = InterfaceSize::ALL
+                    .into_iter()
+                    .zip(labels.iter().map(String::as_str))
+                    .collect();
+                components::segmented(ui, &mut size, &choices);
+                if size != settings.interface_size {
+                    actions.push(Action::SetInterfaceSize(size));
+                }
+                ui.end_row();
+            });
+
+        let language_title = settings_section(ui, texts.text(Msg::SettingsLanguage));
+        let mut language = settings.language.clone();
+        let combo = egui::ComboBox::from_id_salt("language")
+            .selected_text(language.clone())
+            .show_ui(ui, |ui| {
+                for tag in i18n::languages() {
+                    ui.selectable_value(&mut language, tag.to_owned(), tag);
                 }
             });
-            match &dialog.git_message {
-                Some(GitMessage::Applied) => {
-                    ui.label(app.texts.text(Msg::SettingsGitApplied));
-                }
-                Some(GitMessage::Problem(problem)) => {
-                    ui.label(git_problem(app, problem));
-                }
-                None => {}
+        focus_ring(ui, &combo.response);
+        combo.response.labelled_by(language_title.id);
+        if language != settings.language {
+            actions.push(Action::SetLanguage(language));
+        }
+
+        settings_section(ui, texts.text(Msg::SettingsSectionGit));
+        let label = ui.label(texts.text(Msg::SettingsGit));
+        let mut input = dialog.git_input.clone();
+        let hint = texts.text(Msg::SettingsGitAutomatic);
+        components::text_field(ui, &mut input, &hint, 420.0).labelled_by(label.id);
+        if input != dialog.git_input {
+            actions.push(Action::SetGitInput(input));
+        }
+        ui.horizontal(|ui| {
+            if Button::new(&texts.text(Msg::SettingsGitBrowse))
+                .show(ui)
+                .clicked()
+            {
+                actions.push(Action::BrowseGit);
+            }
+            if Button::new(&texts.text(Msg::SettingsGitApply))
+                .kind(Kind::Primary)
+                .show(ui)
+                .clicked()
+            {
+                actions.push(Action::ApplyGit);
             }
         });
-    if !open {
+        match &dialog.git_message {
+            Some(GitMessage::Applied) => {
+                ui.label(texts.text(Msg::SettingsGitApplied));
+            }
+            Some(GitMessage::Problem(problem)) => {
+                components::error_text(ui, git_problem(app, problem));
+            }
+            None => {}
+        }
+        close
+    });
+    let escape = ui
+        .ctx()
+        .input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
+    if modal.inner || escape {
         actions.push(Action::CloseSettings);
     }
+}
+
+/// The title of a section of the settings dialog.
+fn settings_section(ui: &mut Ui, title: String) -> egui::Response {
+    ui.add_space(SHAPE.space[2]);
+    let title = ui.label(RichText::new(title).strong());
+    ui.add_space(SHAPE.space[0]);
+    title
 }
 
 /// The commits loaded, with the progress while the total is known.
