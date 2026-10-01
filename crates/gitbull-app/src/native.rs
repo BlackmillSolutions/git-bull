@@ -2,6 +2,7 @@
 
 use std::sync::mpsc::Receiver;
 
+use eframe::egui::os::OperatingSystem;
 use eframe::egui::{self, Pos2, Vec2, ViewportBuilder};
 use eframe::egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
 use eframe::wgpu::PowerPreference;
@@ -13,8 +14,11 @@ use crate::fonts::{self, Fallback};
 /// The window size on the first start.
 const FIRST_SIZE: [f32; 2] = [1280.0, 800.0];
 
-/// The window as the settings remember it.
-pub fn viewport(settings: &Settings) -> ViewportBuilder {
+/// The window as the settings remember it, on `os`. Unless the settings ask
+/// for the system's title bar, it has none on Windows and Linux, where
+/// git-bull draws its own, and a transparent one with the system's buttons
+/// on macOS (design, decision 1).
+pub fn viewport(settings: &Settings, os: OperatingSystem) -> ViewportBuilder {
     let (size, position) = match settings.window {
         Some(window) => ([window.width, window.height], window.position),
         None => (FIRST_SIZE, None),
@@ -28,7 +32,16 @@ pub fn viewport(settings: &Settings) -> ViewportBuilder {
     if let Some([x, y]) = position {
         viewport = viewport.with_position(Pos2::new(x, y));
     }
-    viewport
+    if settings.system_title_bar {
+        return viewport;
+    }
+    match os {
+        OperatingSystem::Mac => viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false),
+        _ => viewport.with_decorations(false),
+    }
 }
 
 /// How eframe sets up wgpu: with the power-saving graphics adapter, unless
@@ -114,6 +127,49 @@ mod tests {
     use eframe::egui::{Rect, pos2, vec2};
 
     #[test]
+    fn on_windows_and_linux_the_window_has_no_title_bar_of_the_system() {
+        for os in [OperatingSystem::Windows, OperatingSystem::Nix] {
+            let viewport = viewport(&Settings::default(), os);
+            assert_eq!(viewport.decorations, Some(false), "{os:?}");
+            assert_eq!(viewport.fullsize_content_view, None, "{os:?}");
+        }
+    }
+
+    #[test]
+    fn on_macos_the_title_bar_turns_transparent_and_keeps_the_buttons_of_the_system() {
+        let viewport = viewport(&Settings::default(), OperatingSystem::Mac);
+        assert_eq!(viewport.decorations, None);
+        assert_eq!(viewport.fullsize_content_view, Some(true));
+        assert_eq!(viewport.titlebar_shown, Some(false));
+        assert_eq!(viewport.title_shown, Some(false));
+    }
+
+    #[test]
+    fn with_the_setting_every_platform_keeps_the_title_bar_of_the_system() {
+        let settings = Settings {
+            system_title_bar: true,
+            ..Settings::default()
+        };
+        for os in [
+            OperatingSystem::Windows,
+            OperatingSystem::Nix,
+            OperatingSystem::Mac,
+        ] {
+            let viewport = viewport(&settings, os);
+            assert_eq!(
+                (
+                    viewport.decorations,
+                    viewport.fullsize_content_view,
+                    viewport.titlebar_shown,
+                    viewport.title_shown,
+                ),
+                (None, None, None, None),
+                "{os:?}"
+            );
+        }
+    }
+
+    #[test]
     fn remembered_size_and_position_open_the_window_there() {
         let settings = Settings {
             window: Some(WindowGeometry {
@@ -123,7 +179,7 @@ mod tests {
             }),
             ..Settings::default()
         };
-        let viewport = viewport(&settings);
+        let viewport = viewport(&settings, OperatingSystem::Windows);
         assert_eq!(viewport.inner_size, Some(vec2(1000.0, 700.0)));
         assert_eq!(viewport.position, Some(pos2(40.0, 60.0)));
     }
@@ -138,14 +194,14 @@ mod tests {
             }),
             ..Settings::default()
         };
-        let viewport = viewport(&settings);
+        let viewport = viewport(&settings, OperatingSystem::Windows);
         assert_eq!(viewport.inner_size, Some(vec2(1000.0, 700.0)));
         assert_eq!(viewport.position, None);
     }
 
     #[test]
     fn first_start_opens_a_window_of_the_default_size_anywhere() {
-        let viewport = viewport(&Settings::default());
+        let viewport = viewport(&Settings::default(), OperatingSystem::Windows);
         assert_eq!(viewport.inner_size, Some(vec2(1280.0, 800.0)));
         assert_eq!(viewport.position, None);
         assert_eq!(viewport.drag_and_drop, Some(true));
@@ -188,7 +244,7 @@ mod tests {
             window: Some(geometry(&info, vec2(1.0, 1.0), zoom)),
             ..Settings::default()
         };
-        let viewport = viewport(&settings);
+        let viewport = viewport(&settings, OperatingSystem::Windows);
         assert_eq!(viewport.inner_size, Some(vec2(1200.0, 750.0)));
         assert_eq!(viewport.position, Some(pos2(30.0, 60.0)));
     }
