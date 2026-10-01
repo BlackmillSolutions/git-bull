@@ -93,13 +93,18 @@ fn commit_with_everything() -> FakeBackend {
         no_newline: false,
         cut: false,
     };
+    // Both versions of the file, which highlighting reads whole.
+    let filler: String = (1..40).map(|n| format!("// line {n}\n")).collect();
+    let old_file = format!("{filler}let input = read();\nlet colour = red;\nparse(input)\n");
+    let new_file = format!("{filler}let input = read();\nlet colour = blue;\nparse(input)\n");
+    let (old_blob, new_blob) = (fake_id("o"), fake_id("n"));
     let diff = FileDiff {
         old_path: Some("src/parser.rs".into()),
         new_path: Some("src/parser.rs".into()),
         old_mode: Some("100644".to_owned()),
         new_mode: Some("100644".to_owned()),
-        old_blob: None,
-        new_blob: None,
+        old_blob: Some(old_blob),
+        new_blob: Some(new_blob),
         new_in_working_copy: false,
         content: Content::Text(vec![Hunk {
             header: "@@ -40,3 +40,3 @@ fn parse()".to_owned(),
@@ -169,9 +174,21 @@ fn commit_with_everything() -> FakeBackend {
             ],
         )
         .with_diff(c, "src/parser.rs", diff)
+        .with_blob(old_blob, old_file.as_bytes())
+        .with_blob(new_blob, new_file.as_bytes())
 }
 
 /// Steps until `done`, for content that arrives from background threads.
+/// Whether the diff of the selected commit has its syntax colours.
+fn highlighted(harness: &Harness<'_, App>) -> bool {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| session.details().highlighting().is_some())
+}
+
 fn wait_for(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -> bool) {
     for _ in 0..1000 {
         if done(harness) {
@@ -207,8 +224,10 @@ fn history_view_at(theme: ThemeSetting, size: InterfaceSize) -> Harness<'static,
         h.query_by_label("Change the parser").is_some()
     });
     harness.get_by_label("Change the parser").click();
+    // The diff shows first in plain text; its colours follow from a
+    // background thread.
     wait_for(&mut harness, |h| {
-        h.query_all_by_role(Role::Code).next().is_some()
+        h.query_all_by_role(Role::Code).next().is_some() && highlighted(h)
     });
     harness
 }

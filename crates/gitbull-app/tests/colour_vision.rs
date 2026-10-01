@@ -84,8 +84,8 @@ fn backend() -> FakeBackend {
                 new_path: Some("src/parser.rs".into()),
                 old_mode: Some("100644".to_owned()),
                 new_mode: Some("100644".to_owned()),
-                old_blob: None,
-                new_blob: None,
+                old_blob: Some(fake_id("o")),
+                new_blob: Some(fake_id("n")),
                 new_in_working_copy: false,
                 content: Content::Text(vec![Hunk {
                     header: "@@ -1 +1 @@".to_owned(),
@@ -99,6 +99,9 @@ fn backend() -> FakeBackend {
                 truncated: false,
             },
         )
+        // Both versions of the file, which highlighting reads whole.
+        .with_blob(fake_id("o"), b"let colour = red;\n")
+        .with_blob(fake_id("n"), b"let colour = blue;\n")
 }
 
 fn open(theme: ThemeSetting, colour_vision: ColourVision) -> Harness<'static, App> {
@@ -119,10 +122,22 @@ fn open(theme: ThemeSetting, colour_vision: ColourVision) -> Harness<'static, Ap
         h.query_by_label("Change the parser").is_some()
     });
     harness.get_by_label("Change the parser").click();
+    // The diff shows first in plain text; its colours follow from a
+    // background thread.
     wait_for(&mut harness, |h| {
-        h.query_all_by_role(Role::Code).next().is_some()
+        h.query_all_by_role(Role::Code).next().is_some() && highlighted(h)
     });
     harness
+}
+
+/// Whether the diff of the selected commit has its syntax colours.
+fn highlighted(harness: &Harness<'_, App>) -> bool {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| session.details().highlighting().is_some())
 }
 
 fn wait_for(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -> bool) {
