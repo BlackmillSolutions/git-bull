@@ -206,13 +206,120 @@ pub const DARK: Palette = Palette {
     ],
 };
 
-pub const LIGHT_RED_GREEN: Palette = Palette { ..LIGHT };
+/// For protanopia and deuteranopia, after the palette of Okabe and Ito:
+/// blue for added, orange for removed, and the other meanings told apart
+/// by lightness as well as hue.
+pub const LIGHT_RED_GREEN: Palette = Palette {
+    diff_added: Rgb(0xdc, 0xea, 0xff),
+    diff_removed: Rgb(0xff, 0xe7, 0xcc),
+    diff_added_marker: Rgb(0x0b, 0x5c, 0xad),
+    diff_removed_marker: Rgb(0x9c, 0x45, 0x00),
+    badge_head: Rgb(0x0b, 0x5c, 0xad),
+    badge_branch: Rgb(0x00, 0x70, 0x4f),
+    badge_remote: Rgb(0x9c, 0x45, 0x00),
+    badge_tag: Rgb(0x6a, 0x4f, 0xc0),
+    status_added: Rgb(0x15, 0x5b, 0xdb),
+    status_modified: Rgb(0x83, 0x5c, 0x05),
+    status_deleted: Rgb(0x53, 0x27, 0x0c),
+    status_renamed: Rgb(0x42, 0x14, 0x5d),
+    status_conflict: Rgb(0x84, 0x4e, 0x63),
+    lanes: [
+        Rgb(0x00, 0x72, 0xb2),
+        Rgb(0xb3, 0x59, 0x00),
+        Rgb(0x3b, 0x8f, 0xd0),
+        Rgb(0x8f, 0x44, 0x00),
+        Rgb(0x5b, 0x4b, 0xb5),
+        Rgb(0x8a, 0x73, 0x00),
+        Rgb(0x4a, 0x5f, 0xa8),
+        Rgb(0x9e, 0x6a, 0x3a),
+    ],
+    ..LIGHT
+};
 
-pub const DARK_RED_GREEN: Palette = Palette { ..DARK };
+/// The dark counterpart of [`LIGHT_RED_GREEN`].
+pub const DARK_RED_GREEN: Palette = Palette {
+    diff_added: Rgb(0x0f, 0x2a, 0x4a),
+    diff_removed: Rgb(0x3d, 0x2a, 0x0c),
+    diff_added_marker: Rgb(0x5a, 0xa9, 0xff),
+    diff_removed_marker: Rgb(0xff, 0xa9, 0x4d),
+    badge_head: Rgb(0x5a, 0xa9, 0xff),
+    badge_branch: Rgb(0x56, 0xb4, 0xe9),
+    badge_remote: Rgb(0xe6, 0x9f, 0x00),
+    badge_tag: Rgb(0xb3, 0x9d, 0xff),
+    status_added: Rgb(0xc5, 0xe0, 0xf6),
+    status_modified: Rgb(0xfa, 0xf0, 0xb6),
+    status_deleted: Rgb(0xfb, 0x86, 0x08),
+    status_renamed: Rgb(0xa4, 0x98, 0xee),
+    status_conflict: Rgb(0xbb, 0x98, 0xa6),
+    lanes: [
+        Rgb(0x56, 0xb4, 0xe9),
+        Rgb(0xe6, 0x9f, 0x00),
+        Rgb(0x9f, 0x9b, 0xff),
+        Rgb(0xd9, 0xb4, 0x3a),
+        Rgb(0x3d, 0x8b, 0xff),
+        Rgb(0xff, 0x9e, 0x66),
+        Rgb(0xb8, 0xc0, 0xcc),
+        Rgb(0xf0, 0xe4, 0x42),
+    ],
+    ..DARK
+};
 
-pub const LIGHT_BLUE_YELLOW: Palette = Palette { ..LIGHT };
+/// For tritanopia: blue for added, red for removed, and no blue against
+/// green or yellow against violet.
+pub const LIGHT_BLUE_YELLOW: Palette = Palette {
+    diff_added: Rgb(0xdc, 0xea, 0xff),
+    diff_removed: Rgb(0xff, 0xe3, 0xe3),
+    diff_added_marker: Rgb(0x0b, 0x5c, 0xad),
+    diff_removed_marker: Rgb(0xc4, 0x20, 0x2b),
+    badge_head: Rgb(0x0b, 0x5c, 0xad),
+    badge_branch: Rgb(0x0e, 0x7c, 0x86),
+    badge_remote: Rgb(0xc4, 0x20, 0x2b),
+    badge_tag: Rgb(0x5b, 0x4b, 0xb5),
+    status_added: Rgb(0x07, 0x52, 0xd7),
+    status_modified: Rgb(0x71, 0x68, 0x45),
+    status_deleted: Rgb(0xba, 0x0d, 0x03),
+    status_renamed: Rgb(0x3a, 0x27, 0x66),
+    status_conflict: Rgb(0x80, 0x14, 0x69),
+    lanes: [
+        Rgb(0x09, 0x69, 0xda),
+        Rgb(0xbc, 0x4c, 0x00),
+        Rgb(0x1a, 0x7f, 0x37),
+        Rgb(0x82, 0x50, 0xdf),
+        Rgb(0xcf, 0x22, 0x2e),
+        Rgb(0x0e, 0x7c, 0x86),
+        Rgb(0xbf, 0x39, 0x89),
+        Rgb(0x5c, 0x6f, 0x00),
+    ],
+    ..LIGHT
+};
 
-pub const DARK_BLUE_YELLOW: Palette = Palette { ..DARK };
+/// The dark counterpart of [`LIGHT_BLUE_YELLOW`].
+pub const DARK_BLUE_YELLOW: Palette = Palette {
+    diff_added: Rgb(0x0f, 0x2a, 0x4a),
+    diff_removed: Rgb(0x42, 0x1b, 0x1e),
+    diff_added_marker: Rgb(0x5a, 0xa9, 0xff),
+    diff_removed_marker: Rgb(0xff, 0x8a, 0x80),
+    badge_head: Rgb(0x5a, 0xa9, 0xff),
+    badge_branch: Rgb(0x39, 0xc5, 0xcf),
+    badge_remote: Rgb(0xff, 0x7b, 0x72),
+    badge_tag: Rgb(0xb3, 0x9d, 0xff),
+    status_added: Rgb(0x8a, 0xb8, 0xec),
+    status_modified: Rgb(0xd6, 0xcc, 0xa8),
+    status_deleted: Rgb(0xfc, 0x7d, 0x72),
+    status_renamed: Rgb(0xa8, 0x93, 0xd1),
+    status_conflict: Rgb(0xe0, 0x9b, 0xdd),
+    lanes: [
+        Rgb(0x58, 0xa6, 0xff),
+        Rgb(0xf0, 0x88, 0x3e),
+        Rgb(0x3f, 0xb9, 0x50),
+        Rgb(0xbc, 0x8c, 0xff),
+        Rgb(0xff, 0x7b, 0x72),
+        Rgb(0x39, 0xc5, 0xcf),
+        Rgb(0xf7, 0x78, 0xba),
+        Rgb(0xe3, 0xc7, 0x5a),
+    ],
+    ..DARK
+};
 
 /// Decides the appearance frame by frame.
 ///
@@ -292,6 +399,7 @@ pub fn portal_appearance(reply: &str) -> Option<Appearance> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vision::{Deficiency, seen_difference};
 
     #[test]
     fn portal_reply_asking_for_dark_is_dark() {
@@ -513,6 +621,101 @@ mod tests {
             }
         }
         pairs.assert_none();
+    }
+
+    /// The palettes of each colour vision with the deficiencies they are
+    /// meant for.
+    fn colour_vision_palettes() -> [(&'static str, &'static Palette, &'static [Deficiency]); 4] {
+        const RED_GREEN: &[Deficiency] = &[Deficiency::Protanopia, Deficiency::Deuteranopia];
+        const BLUE_YELLOW: &[Deficiency] = &[Deficiency::Tritanopia];
+        [
+            ("light red-green", &LIGHT_RED_GREEN, RED_GREEN),
+            ("dark red-green", &DARK_RED_GREEN, RED_GREEN),
+            ("light blue-yellow", &LIGHT_BLUE_YELLOW, BLUE_YELLOW),
+            ("dark blue-yellow", &DARK_BLUE_YELLOW, BLUE_YELLOW),
+        ]
+    }
+
+    /// Collects every pair closer than `least` for each of `deficiencies`.
+    fn apart(
+        failures: &mut Vec<String>,
+        palette: &str,
+        deficiencies: &[Deficiency],
+        a: (&str, Rgb),
+        b: (&str, Rgb),
+        least: f64,
+    ) {
+        for deficiency in deficiencies {
+            let found = seen_difference(a.1, b.1, *deficiency);
+            if found < least {
+                failures.push(format!(
+                    "{palette}, {deficiency:?}: {} and {} differ by {found:.1}, need {least}",
+                    a.0, b.0
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn added_and_removed_lines_stay_apart_for_their_colour_vision() {
+        let mut failures = Vec::new();
+        for (name, p, deficiencies) in colour_vision_palettes() {
+            let markers = (
+                ("added marker", p.diff_added_marker),
+                ("removed marker", p.diff_removed_marker),
+            );
+            apart(
+                &mut failures,
+                name,
+                deficiencies,
+                markers.0,
+                markers.1,
+                20.0,
+            );
+            let lines = (
+                ("added line", p.diff_added),
+                ("removed line", p.diff_removed),
+            );
+            apart(&mut failures, name, deficiencies, lines.0, lines.1, 10.0);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn kinds_of_change_stay_apart_for_their_colour_vision() {
+        let mut failures = Vec::new();
+        for (name, p, deficiencies) in colour_vision_palettes() {
+            let kinds = kinds_of_change(p);
+            for (i, a) in kinds.iter().enumerate() {
+                for b in &kinds[i + 1..] {
+                    apart(&mut failures, name, deficiencies, *a, *b, 12.0);
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn graph_colours_that_follow_each_other_stay_apart_for_their_colour_vision() {
+        let mut failures = Vec::new();
+        for (name, p, deficiencies) in colour_vision_palettes() {
+            let count = p.lanes.len();
+            for index in 0..count {
+                // The last colour is followed by the first.
+                let next = (index + 1) % count;
+                let a = (format!("lane {index}"), p.lanes[index]);
+                let b = (format!("lane {next}"), p.lanes[next]);
+                apart(
+                    &mut failures,
+                    name,
+                    deficiencies,
+                    (&a.0, a.1),
+                    (&b.0, b.1),
+                    10.0,
+                );
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

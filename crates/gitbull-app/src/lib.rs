@@ -17,3 +17,5 @@ pub mod sidebar_view;
 pub mod theme;
 pub mod ui;
 pub mod virtual_list;
+#[cfg(test)]
+mod vision;
