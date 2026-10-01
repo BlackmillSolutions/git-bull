@@ -201,7 +201,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             None => past_title(&rows, 0, None),
         };
         match row {
-            Some(row) => view.status_files.select_and_reveal(row as u64),
+            Some(row) => view.status_files.reselect(row as u64),
             None => view.status_files.select(None),
         }
     }

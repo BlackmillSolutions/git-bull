@@ -19,7 +19,10 @@ use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, HistoryFeed, LiveRepo, fake_id};
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
-use support::{Setup, build, path, settle_window, window};
+use support::{
+    BURST, Setup, build, commit_list_scroll, find_row, long_history, path, settle_window,
+    turn_wheel, wait_for_row, window, window_at_60_fps,
+};
 
 fn seconds(text: &str) -> i64 {
     text.parse::<Timestamp>().unwrap().as_second()
@@ -709,4 +712,68 @@ fn arrow_keys_move_the_selection_in_the_focused_commit_list() {
             .is_selected(),
         Some(true)
     );
+}
+
+/// The rows of the commit list that are selected.
+fn selected_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::Row)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+#[test]
+fn a_click_or_a_tap_during_a_motion_stops_the_commit_list_on_the_commit_pressed_on() {
+    for tap in [false, true] {
+        let test = build(Setup {
+            settings: Settings {
+                tabs: vec![root()],
+                active_tab: Some(0),
+                ..Settings::default()
+            },
+            backend: long_history(FakeBackend::default().with_repository(root()), &root(), 200),
+            ..Setup::default()
+        });
+        let mut harness = window_at_60_fps(test.app);
+        settle_window(&mut harness);
+        wait_for_row(&mut harness, "Commit 0, ");
+        let at = find_row(&harness, "Commit 3, ")
+            .expect("the row of Commit 3")
+            .center();
+        harness.hover_at(at);
+        harness.step();
+        turn_wheel(&mut harness, -BURST / 40.0, Modifiers::NONE);
+        for _ in 0..5 {
+            harness.step();
+        }
+        let scroll = commit_list_scroll(&harness);
+        let pressed_on = harness
+            .query_all_by_role(Role::Row)
+            .find(|node| node.rect().contains(at))
+            .and_then(|node| node.accesskit_node().label())
+            .expect("a row under the pointer");
+
+        for pressed in [true, false] {
+            let event = Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            // A tap on a touchpad presses and releases in the same frame.
+            if tap {
+                harness.input_mut().events.push(event);
+            } else {
+                harness.event(event);
+                harness.step();
+            }
+        }
+        for _ in 0..30 {
+            harness.step();
+        }
+
+        assert_eq!(commit_list_scroll(&harness), scroll, "tap: {tap}");
+        assert_eq!(selected_rows(&harness), [pressed_on], "tap: {tap}");
+    }
 }

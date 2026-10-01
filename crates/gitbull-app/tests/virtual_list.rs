@@ -1,7 +1,7 @@
 //! The list for millions of rows, driven like a user would.
 
 use eframe::egui::{
-    Event, Key, Modifiers, MouseWheelUnit, Pos2, Rect, TouchPhase, Vec2, pos2, vec2,
+    Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, TouchPhase, Vec2, pos2, vec2,
 };
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -457,6 +457,98 @@ fn a_key_ends_the_motion_of_the_wheel() {
     let position = list.position();
     let after = frames(&mut harness, 30);
     assert!(after.iter().all(|&p| p == position), "{after:?}");
+}
+
+#[test]
+fn a_click_during_a_motion_selects_the_row_pressed_on_and_ends_the_motion() {
+    let mut harness = harness(ROWS);
+    hover(&mut harness);
+    turn(&mut harness, MouseWheelUnit::Line, -(BURST / 40.0) as f32);
+    frames(&mut harness, 5);
+    // 60 points below the top of the list.
+    let point = in_row(&harness, 2.0 * ROW_HEIGHT);
+    harness.hover_at(point);
+    harness.step();
+    assert!(harness.state().list.is_moving());
+    // As the list was last drawn.
+    let position = harness.state().list.position();
+    let pressed_on = ((position + 60.0) / f64::from(ROW_HEIGHT)).floor() as u64;
+
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: point,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+        assert_eq!(harness.state().list.position(), position, "{pressed}");
+    }
+
+    assert_eq!(harness.state().clicked, [pressed_on]);
+    assert!(!harness.state().list.is_moving());
+    let after = frames(&mut harness, 30);
+    assert!(after.iter().all(|&p| p == position), "{after:?}");
+}
+
+#[test]
+fn a_tap_during_a_motion_selects_the_row_tapped_and_ends_the_motion() {
+    let mut harness = harness(ROWS);
+    hover(&mut harness);
+    turn(&mut harness, MouseWheelUnit::Line, -(BURST / 40.0) as f32);
+    frames(&mut harness, 5);
+    // 60 points below the top of the list.
+    let point = in_row(&harness, 2.0 * ROW_HEIGHT);
+    harness.hover_at(point);
+    harness.step();
+    assert!(harness.state().list.is_moving());
+    // As the list was last drawn.
+    let position = harness.state().list.position();
+    let tapped = ((position + 60.0) / f64::from(ROW_HEIGHT)).floor() as u64;
+
+    // A tap on a touchpad presses and releases in the same frame.
+    for pressed in [true, false] {
+        harness.input_mut().events.push(Event::PointerButton {
+            pos: point,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.step();
+
+    assert_eq!(harness.state().list.position(), position);
+    assert_eq!(harness.state().clicked, [tapped]);
+    assert!(!harness.state().list.is_moving());
+}
+
+#[test]
+fn a_row_selected_again_during_a_motion_lets_the_list_rest_at_its_target() {
+    let mut harness = harness(ROWS);
+    hover(&mut harness);
+    turn(&mut harness, MouseWheelUnit::Line, -(BURST / 40.0) as f32);
+    frames(&mut harness, 5);
+    let target = harness.state().list.target();
+    // Above the rows in view by now.
+    harness.state_mut().list.reselect(1);
+    frames(&mut harness, 120);
+    assert_close(harness.state().list.position(), target);
+    assert_eq!(harness.state().list.selected(), Some(1));
+}
+
+#[test]
+fn a_row_selected_again_at_rest_is_scrolled_into_view() {
+    let mut harness = harness(ROWS);
+    harness.run();
+    harness.state_mut().list.reselect(1_000);
+    harness.run();
+    let list = &harness.state().list;
+    assert_eq!(list.selected(), Some(1_000));
+    let y = list.row_y(1_000);
+    assert!(
+        y >= 0.0 && y + f64::from(ROW_HEIGHT) <= view(&harness),
+        "{y}"
+    );
 }
 
 #[test]

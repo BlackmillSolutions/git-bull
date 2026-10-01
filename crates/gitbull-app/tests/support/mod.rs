@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::accesskit::Role;
+use eframe::egui::{Event, Modifiers, MouseWheelUnit, Rect, TouchPhase, vec2};
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder};
 use gitbull_app::app::{App, GitChecker, GitStatus, Parts, Picker};
@@ -298,18 +299,42 @@ pub fn commit_list_scroll(harness: &Harness<'_, App>) -> f32 {
         .expect("a row of the commit list")
 }
 
+/// Where the first row of the commit list whose label starts with `prefix`
+/// is drawn.
+pub fn find_row(harness: &Harness<'_, App>, prefix: &str) -> Option<Rect> {
+    harness
+        .query_all_by_role(Role::Row)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(prefix))
+        })
+        .map(|node| node.rect())
+}
+
 /// Steps the window until a row of the commit list starts with `prefix`.
 pub fn wait_for_row(harness: &mut Harness<'_, App>, prefix: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !harness.query_all_by_role(Role::Row).any(|node| {
-        node.accesskit_node()
-            .label()
-            .is_some_and(|label| label.starts_with(prefix))
-    }) {
+    while find_row(harness, prefix).is_none() {
         assert!(Instant::now() < deadline, "no row {prefix}");
         harness.step();
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// The largest burst of the touchpad the probe recorded, in points.
+pub const BURST: f32 = 681.0;
+
+/// Turns the mouse wheel by `lines` of 40 points with `modifiers` held, in
+/// the next frame; negative values scroll towards later rows, as egui
+/// counts them. Windows reports a touchpad as such lines too.
+pub fn turn_wheel(harness: &mut Harness<'_, App>, lines: f32, modifiers: Modifiers) {
+    harness.input_mut().events.push(Event::MouseWheel {
+        unit: MouseWheelUnit::Line,
+        delta: vec2(0.0, lines),
+        phase: TouchPhase::Move,
+        modifiers,
+    });
 }
 
 /// A checker whose answer depends on the path it is asked about and can be

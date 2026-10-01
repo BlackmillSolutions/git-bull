@@ -218,9 +218,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             .selected_id
             .and_then(|id| session.history().store.row_of(&id));
         match row {
-            Some(row) => view
-                .commits
-                .select_and_reveal(list.list_row(u64::from(row))),
+            Some(row) => view.commits.reselect(list.list_row(u64::from(row))),
             None => view.commits.select(None),
         }
     }

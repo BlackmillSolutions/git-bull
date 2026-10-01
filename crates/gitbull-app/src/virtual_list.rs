@@ -45,6 +45,16 @@ pub enum Move {
     End,
 }
 
+/// A row to scroll to when a list is drawn next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Reveal {
+    /// A jump the user asked for, which ends a motion of the wheel.
+    Jump(u64),
+    /// A row selected again after the rows were read anew, which scrolls
+    /// only when the wheel does not move the list (design, decision 3).
+    AtRest(u64),
+}
+
 /// The scroll position and selection of one list.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ListState {
@@ -57,7 +67,7 @@ pub struct ListState {
     /// The row whose context menu was opened last.
     menu_row: Option<u64>,
     /// A row to scroll to when the list is drawn next.
-    reveal_next: Option<u64>,
+    reveal_next: Option<Reveal>,
     /// Where the pointer holds the scrollbar thumb, from its top.
     grab: Option<f64>,
     /// The distance the wheel still moves the list, in pixels, positive
@@ -90,7 +100,14 @@ impl ListState {
     /// knows the height of the view.
     pub fn select_and_reveal(&mut self, row: u64) {
         self.selected = Some(row);
-        self.reveal_next = Some(row);
+        self.reveal_next = Some(Reveal::Jump(row));
+    }
+
+    /// Selects `row` again after the rows were read anew, and scrolls to it
+    /// when the list is drawn next, unless the wheel moves the list then.
+    pub fn reselect(&mut self, row: u64) {
+        self.selected = Some(row);
+        self.reveal_next = Some(Reveal::AtRest(row));
     }
 
     /// The row the user right-clicked last, for its context menu.
@@ -303,10 +320,12 @@ impl VirtualList {
         if state.is_moving() && state.drawn.is_none_or(|drawn| drawn + 1 < pass) {
             state.finish(rows, view);
         }
-        if let Some(row) = state.reveal_next.take()
-            && row < rows
-        {
-            state.reveal(row, rows, view);
+        match state.reveal_next.take() {
+            Some(Reveal::Jump(row)) if row < rows => state.reveal(row, rows, view),
+            Some(Reveal::AtRest(row)) if row < rows && !state.is_moving() => {
+                state.reveal(row, rows, view);
+            }
+            _ => {}
         }
         let scrolls = rows as f64 * HEIGHT > view;
         let rows_rect = if scrolls {
@@ -315,6 +334,14 @@ impl VirtualList {
             rect
         };
 
+        // A press on the list ends a motion where the list is, so that it
+        // keeps showing what the user pressed on and the click selects that
+        // row (design, decision 3). A tap on a touchpad also releases in the
+        // same frame, which egui no longer counts as a button down on the
+        // list, so the press is asked of the pointer over it.
+        if response.hovered() && ui.input(|input| input.pointer.any_pressed()) {
+            state.stop();
+        }
         // The list takes the wheel only under the pointer, so that a menu or
         // dialog above it keeps the input; the spring steps in every pass,
         // so that a motion ends at its target when the pointer leaves.
@@ -506,6 +533,10 @@ struct Wheel {
     /// Whether a touchpad gesture is under way, from `Start` to `End` or
     /// `Cancel`.
     gesture: bool,
+    /// The modifiers egui keeps for the scrolling: during a gesture those
+    /// of its start and any pressed since, otherwise those of the latest
+    /// event.
+    modifiers: Modifiers,
     /// The points that lists took and egui has not passed on yet, in the
     /// units and direction of `smooth_scroll_delta.y`.
     owed: f32,
@@ -521,10 +552,10 @@ struct Wheel {
 impl Wheel {
     /// Sorts the wheel events of a pass as egui does: input inside a
     /// touchpad gesture and `Point` steps shorter than 8 points move a list
-    /// at once, the rest goes to the spring. Input with the zoom modifier
-    /// zooms, and input with the horizontal modifier alone scrolls sideways;
-    /// neither scrolls a list. `viewport` is the height egui turns a page
-    /// into.
+    /// at once, the rest goes to the spring. By the modifiers egui keeps,
+    /// input with the horizontal modifier alone scrolls sideways, and all
+    /// input of a pass that ends with the zoom modifier zooms; neither
+    /// scrolls a list. `viewport` is the height egui turns a page into.
     fn sort(&mut self, events: &[Event], options: &InputOptions, viewport: f32) {
         self.now = Scroll::default();
         self.spring = Scroll::default();
@@ -540,19 +571,27 @@ impl Wheel {
                 continue;
             };
             match phase {
-                TouchPhase::Start => self.gesture = true,
+                TouchPhase::Start => {
+                    self.gesture = true;
+                    self.modifiers = modifiers;
+                }
                 TouchPhase::End | TouchPhase::Cancel => {
                     // egui drops what it has not passed on yet.
                     self.gesture = false;
+                    self.modifiers = Modifiers::NONE;
                     self.owed = 0.0;
                     self.passed_on = 0.0;
                 }
                 TouchPhase::Move => {
-                    if modifiers.matches_any(options.zoom_modifier) {
-                        continue;
+                    if self.gesture {
+                        self.modifiers |= modifiers;
+                    } else {
+                        self.modifiers = modifiers;
                     }
-                    let horizontal = modifiers.matches_any(options.horizontal_scroll_modifier);
-                    let vertical = modifiers.matches_any(options.vertical_scroll_modifier);
+                    let horizontal = self
+                        .modifiers
+                        .matches_any(options.horizontal_scroll_modifier);
+                    let vertical = self.modifiers.matches_any(options.vertical_scroll_modifier);
                     let delta = match (horizontal, vertical) {
                         (true, false) => continue,
                         (false, true) => vec2(0.0, delta.x + delta.y),
@@ -581,6 +620,12 @@ impl Wheel {
                     }
                 }
             }
+        }
+        // egui decides once per pass whether all of its input zooms.
+        if self.modifiers.matches_any(options.zoom_modifier) {
+            self.now = Scroll::default();
+            self.spring = Scroll::default();
+            self.passed_on = 0.0;
         }
     }
 }
@@ -622,10 +667,15 @@ fn wheel(ctx: &Context) -> Wheel {
     ctx.input_mut(|input| {
         // egui passes a rest below one point on at once.
         let rest = wheel.owed.abs() < 1.0;
+        // egui has nothing left to pass on once it no longer scrolls and
+        // passes nothing on although time has passed, as after it zoomed by
+        // the rest of the input (design, decision 2).
+        let done =
+            !input.is_scrolling() && input.smooth_scroll_delta.y == 0.0 && input.stable_dt > 0.0;
         let viewport = input.viewport_rect().height();
         wheel.sort(&input.events, &options, viewport);
         repay(&mut wheel.owed, &mut input.smooth_scroll_delta.y);
-        if rest {
+        if rest || done {
             wheel.owed = 0.0;
         }
     });
@@ -1101,6 +1151,51 @@ mod tests {
     }
 
     #[test]
+    fn a_gesture_started_with_shift_does_not_scroll_a_list_after_shift_is_released() {
+        let ctx = Context::default();
+        let gesture = |phase, y, modifiers| wheel_event(MouseWheelUnit::Point, y, phase, modifiers);
+        pass(
+            &ctx,
+            vec![gesture(TouchPhase::Start, 0.0, Modifiers::SHIFT)],
+            false,
+        );
+        let (taken, _) = pass(
+            &ctx,
+            vec![gesture(TouchPhase::Move, -20.0, Modifiers::NONE)],
+            true,
+        );
+        assert_eq!(taken, (0.0, 0.0));
+        assert_eq!(owed(&ctx), 0.0);
+    }
+
+    #[test]
+    fn a_pass_whose_last_event_has_the_zoom_modifier_scrolls_no_list() {
+        let ctx = Context::default();
+        let zoom = wheel_event(
+            MouseWheelUnit::Line,
+            -1.0,
+            TouchPhase::Move,
+            Modifiers::COMMAND,
+        );
+        let (taken, _) = pass(&ctx, vec![moved(MouseWheelUnit::Line, -3.0), zoom], true);
+        assert_eq!(taken, (0.0, 0.0));
+        assert_eq!(owed(&ctx), 0.0);
+    }
+
+    #[test]
+    fn a_pass_whose_last_event_has_no_zoom_modifier_scrolls_by_all_of_it() {
+        let ctx = Context::default();
+        let zoom = wheel_event(
+            MouseWheelUnit::Line,
+            -1.0,
+            TouchPhase::Move,
+            Modifiers::COMMAND,
+        );
+        let (taken, _) = pass(&ctx, vec![zoom, moved(MouseWheelUnit::Line, -3.0)], true);
+        assert_eq!(taken, (0.0, 160.0));
+    }
+
+    #[test]
     fn a_gesture_moves_a_list_at_once_from_its_start_to_its_end() {
         let ctx = Context::default();
         let gesture = |phase, y| wheel_event(MouseWheelUnit::Point, y, phase, Modifiers::NONE);
@@ -1181,6 +1276,30 @@ mod tests {
         for _ in 0..30 {
             assert_eq!(pass(&ctx, Vec::new(), false).1, 0.0);
         }
+    }
+
+    #[test]
+    fn input_egui_zoomed_by_does_not_keep_other_areas_from_scrolling_later() {
+        let ctx = Context::default();
+        pass(&ctx, vec![moved(MouseWheelUnit::Line, -3.0)], true);
+        // Ctrl right after, as a pinch on a Windows touchpad sends it: egui
+        // zooms by what it still smooths of the input the list took.
+        let zoom = wheel_event(
+            MouseWheelUnit::Line,
+            -1.0,
+            TouchPhase::Move,
+            Modifiers::COMMAND,
+        );
+        pass(&ctx, vec![zoom], false);
+        for _ in 0..60 {
+            pass(&ctx, Vec::new(), false);
+        }
+        // Later, the wheel over another area.
+        let (_, mut others) = pass(&ctx, vec![moved(MouseWheelUnit::Line, -3.0)], false);
+        for _ in 0..60 {
+            others += pass(&ctx, Vec::new(), false).1;
+        }
+        assert!((others + 120.0).abs() < 0.01, "{others}");
     }
 
     #[test]
