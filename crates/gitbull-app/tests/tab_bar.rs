@@ -208,6 +208,16 @@ fn with_30_tabs_the_new_tab_button_and_the_active_tab_stay_in_the_window() {
     assert!(window.contains_rect(new_tab), "New tab at {new_tab:?}");
     let active = tab(&harness, "repository-with-a-long-name-29");
     assert!(window.contains_rect(active), "active tab at {active:?}");
+    if harness.ctx.os() != OperatingSystem::Mac {
+        let minimize = harness
+            .get_by_role_and_label(Role::Button, "Minimize")
+            .rect();
+        assert!(window.contains_rect(minimize), "Minimize at {minimize:?}");
+        assert!(
+            minimize.left() - new_tab.right() >= 48.0,
+            "free space between {new_tab:?} and {minimize:?}"
+        );
+    }
     let first = tab(&harness, "repository-with-a-long-name-00");
     assert!(
         first.width() >= 96.0,
@@ -231,9 +241,17 @@ fn a_narrowed_tab_names_its_full_title() {
 
 #[test]
 fn buttons_of_the_tab_bar_have_click_targets_of_at_least_24() {
-    let mut harness = window(build(two_tabs()).app);
+    let mut harness = window_on(OperatingSystem::Windows, build(two_tabs()).app);
     settle_window(&mut harness);
-    for label in ["git-bull", "linux", "Close git-bull", "New tab"] {
+    for label in [
+        "git-bull",
+        "linux",
+        "Close git-bull",
+        "New tab",
+        "Minimize",
+        "Maximize",
+        "Close window",
+    ] {
         let size = harness
             .get_by_role_and_label(Role::Button, label)
             .rect()

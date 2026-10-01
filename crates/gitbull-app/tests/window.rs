@@ -7,7 +7,8 @@ use std::slice;
 use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
 use eframe::egui::{
-    Event, FontFamily, Modifiers, PointerButton, Pos2, ViewportCommand, ViewportId, pos2, vec2,
+    Event, FontFamily, Modifiers, PointerButton, Pos2, Rect, ViewportCommand, ViewportId, pos2,
+    vec2,
 };
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -393,6 +394,9 @@ fn the_start_screen_has_the_title_bar_to_move_the_window() {
     );
     let sent = send(&mut harness, drag_from(pos2(640.0, 16.0)));
     assert!(sent.contains(&ViewportCommand::StartDrag), "{sent:?}");
+    if harness.ctx.os() != OperatingSystem::Mac {
+        harness.get_by_role_and_label(Role::Button, "Close window");
+    }
 }
 
 #[test]
@@ -403,11 +407,135 @@ fn the_title_bar_stays_above_the_toolbar_in_another_view() {
     harness
         .get_by_role_and_label(Role::TreeItem, "File status")
         .click();
-    harness.run();
+    // The status loads in the background with a spinner, which asks for
+    // frame after frame: the frames are stepped instead.
+    for _ in 0..3 {
+        harness.step();
+    }
     let tab = harness
         .get_by_role_and_label(Role::Button, "git-bull")
         .rect();
     let open = harness.get_by_role_and_label(Role::Button, "Open").rect();
     assert!(tab.bottom() <= open.top(), "tab {tab:?}, Open {open:?}");
     harness.get_by_label("Git 2.55.0");
+}
+
+/// The names of the window buttons of a window that is not maximized.
+const WINDOW_BUTTONS: [&str; 3] = ["Minimize", "Maximize", "Close window"];
+
+/// The commands sent while clicking the button named `name`.
+fn click_button(harness: &mut Harness<'_, App>, name: &str) -> Vec<ViewportCommand> {
+    let at = harness
+        .get_by_role_and_label(Role::Button, name)
+        .rect()
+        .center();
+    send(
+        harness,
+        vec![Event::PointerMoved(at), button(at, true), button(at, false)],
+    )
+}
+
+#[test]
+fn on_windows_and_linux_the_title_bar_ends_in_the_window_buttons() {
+    for os in [OperatingSystem::Windows, OperatingSystem::Nix] {
+        let test = app_with_open_repository(Settings::default());
+        let mut harness = window_on(os, test.app);
+        harness.run();
+        let rects: Vec<Rect> = WINDOW_BUTTONS
+            .iter()
+            .map(|name| harness.get_by_role_and_label(Role::Button, name).rect())
+            .collect();
+        assert!(
+            rects
+                .windows(2)
+                .all(|pair| pair[0].right() <= pair[1].left()),
+            "{os:?}: {rects:?}"
+        );
+        // egui_kittest draws the window with 8 points around it.
+        let close = rects[2];
+        assert!(
+            close.right() >= 1280.0 - 8.5 && close.top() <= 8.5,
+            "{os:?}: {close:?}"
+        );
+        let tab = harness
+            .get_by_role_and_label(Role::Button, "git-bull")
+            .rect();
+        assert!(close.bottom() >= tab.bottom(), "{os:?}: {close:?}, {tab:?}");
+    }
+}
+
+#[test]
+fn on_macos_and_with_the_system_title_bar_git_bull_draws_no_window_buttons() {
+    for (os, system_title_bar) in [
+        (OperatingSystem::Mac, false),
+        (OperatingSystem::Windows, true),
+        (OperatingSystem::Nix, true),
+    ] {
+        let test = app_with_open_repository(Settings {
+            system_title_bar,
+            ..Settings::default()
+        });
+        let mut harness = window_on(os, test.app);
+        harness.run();
+        for name in WINDOW_BUTTONS {
+            assert!(
+                harness
+                    .query_by_role_and_label(Role::Button, name)
+                    .is_none(),
+                "{os:?}, system title bar {system_title_bar}: {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn maximize_turns_into_restore_while_the_window_is_maximized() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_at_60_fps_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    let sent = click_button(&mut harness, "Maximize");
+    assert!(sent.contains(&ViewportCommand::Maximized(true)), "{sent:?}");
+
+    harness
+        .input_mut()
+        .viewports
+        .entry(ViewportId::ROOT)
+        .or_default()
+        .maximized = Some(true);
+    harness.run();
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Maximize")
+            .is_none()
+    );
+    let sent = click_button(&mut harness, "Restore");
+    assert!(
+        sent.contains(&ViewportCommand::Maximized(false)),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn minimize_and_close_window_send_their_commands() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_at_60_fps_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    let sent = click_button(&mut harness, "Minimize");
+    assert!(sent.contains(&ViewportCommand::Minimized(true)), "{sent:?}");
+    let sent = click_button(&mut harness, "Close window");
+    assert!(sent.contains(&ViewportCommand::Close), "{sent:?}");
+}
+
+#[test]
+fn window_buttons_name_their_action_in_a_tooltip() {
+    for name in WINDOW_BUTTONS {
+        let test = app_with_open_repository(Settings::default());
+        let mut harness = window_on(OperatingSystem::Windows, test.app);
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, name).hover();
+        harness.run();
+        // The name is on the button for assistive technology and in the
+        // tooltip.
+        assert_eq!(harness.query_all_by_label(name).count(), 2, "{name}");
+    }
 }

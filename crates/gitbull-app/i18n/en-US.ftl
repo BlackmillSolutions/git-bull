@@ -17,11 +17,15 @@ start-check-again = Check again
 start-set-path = Set path to Git…
 start-details = Details
 
-## Tab bar
+## Title bar
 
 tab-new = New tab
 tab-close = Close { $title }
 tab-opening = Opening { $folder }…
+window-minimize = Minimize
+window-maximize = Maximize
+window-restore = Restore
+window-close = Close window
 
 ## Repository chooser
 

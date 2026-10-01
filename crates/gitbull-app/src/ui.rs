@@ -643,17 +643,22 @@ const MAC_TITLE_BAR: f32 = 28.0;
 /// The free space of the title bar that stays whatever the number of tabs,
 /// so that the window can always be moved.
 const FREE_SPACE: f32 = 48.0;
+/// The width of a window button, as on Windows.
+const WINDOW_BUTTON: f32 = 46.0;
 
 /// The panel at the top of the window. With git-bull's own title bar it
-/// holds the tabs, on macOS right of the system's buttons, and free space
-/// that moves the window when dragged and maximizes or restores it on a
-/// double click; with the system's title bar only the tabs (design,
-/// decision 2). Before Git is usable it has no tabs.
+/// holds the tabs, on macOS right of the system's buttons, free space that
+/// moves the window when dragged and maximizes or restores it on a double
+/// click, and on Windows and Linux the window buttons; with the system's
+/// title bar only the tabs (design, decisions 2 and 3). Before Git is
+/// usable it has no tabs.
 fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let own = !app.system_title_bar();
     if !own && app.workspace().is_none() {
         return;
     }
+    let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
+    let buttons = own && !mac;
     let frame = egui::Frame::side_top_panel(ui.style());
     Panel::top("title_bar").frame(frame).show(ui, |ui| {
         if own {
@@ -671,16 +676,74 @@ fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
             }
         }
         ui.horizontal(|ui| {
-            if own && ui.ctx().os() == egui::os::OperatingSystem::Mac {
-                ui.set_min_height(MAC_TITLE_BAR);
+            if own {
+                // As high as a tab, also without tabs, and on macOS at
+                // least as high as the system's title bar.
+                let tab = SHAPE.control_height + SHAPE.space[0];
+                ui.set_min_height(if mac { tab.max(MAC_TITLE_BAR) } else { tab });
+            }
+            if own && mac {
                 ui.add_space(MAC_BUTTONS / ui.ctx().zoom_factor());
             }
             if app.workspace().is_some() {
-                let reserve = if own { FREE_SPACE } else { 0.0 };
+                let reserve = match (own, buttons) {
+                    (false, _) => 0.0,
+                    (true, false) => FREE_SPACE,
+                    (true, true) => FREE_SPACE + 3.0 * WINDOW_BUTTON,
+                };
                 tabs(app, ui, reserve, actions);
             }
         });
+        if buttons {
+            // As high as the bar, up to the edge of the window.
+            let row = ui.min_rect();
+            let bar = egui::Rect::from_min_max(
+                row.left_top(),
+                egui::pos2(ui.max_rect().right(), row.bottom()),
+            ) + frame.inner_margin;
+            window_buttons(app, ui, bar);
+        }
     });
+}
+
+/// Minimize, Maximize or Restore, and Close window at the right end of
+/// `bar` (design, decision 3).
+fn window_buttons(app: &App, ui: &mut Ui, bar: egui::Rect) {
+    let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+    let size = if maximized {
+        (
+            icons::RESTORE,
+            Msg::WindowRestore,
+            egui::ViewportCommand::Maximized(false),
+        )
+    } else {
+        (
+            icons::MAXIMIZE,
+            Msg::WindowMaximize,
+            egui::ViewportCommand::Maximized(true),
+        )
+    };
+    let buttons = [
+        (
+            icons::MINIMIZE,
+            Msg::WindowMinimize,
+            egui::ViewportCommand::Minimized(true),
+        ),
+        size,
+        (icons::CLOSE, Msg::WindowClose, egui::ViewportCommand::Close),
+    ];
+    let count = buttons.len();
+    for (index, (icon, name, command)) in buttons.into_iter().enumerate() {
+        let right = bar.right() - WINDOW_BUTTON * (count - 1 - index) as f32;
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(right - WINDOW_BUTTON, bar.top()),
+            egui::pos2(right, bar.bottom()),
+        );
+        let closes = matches!(command, egui::ViewportCommand::Close);
+        if components::window_button(ui, rect, icon, &app.texts.text(name), closes).clicked() {
+            ui.ctx().send_viewport_cmd(command);
+        }
+    }
 }
 
 /// The tabs and the button for a new tab, leaving `reserve` points free

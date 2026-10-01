@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use eframe::egui::{
     self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
-    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Response, RichText, ScrollArea, Sense,
-    Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
+    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Rect, Response, RichText, ScrollArea,
+    Sense, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
 };
 
 use crate::icons;
@@ -170,6 +170,43 @@ pub fn icon_button(
         focus_ring(ui, &response);
     }
     tooltip(response, name, shortcut)
+}
+
+/// The surface of Close window under the pointer, and its icon there: the
+/// red of Windows, which many Linux themes share. It only marks the button
+/// under the pointer and tells nothing by itself.
+const CLOSE_WINDOW: Color32 = Color32::from_rgb(0xC4, 0x2B, 0x1C);
+const ON_CLOSE_WINDOW: Color32 = Color32::WHITE;
+
+/// A button of the title bar that acts on the window, filling `rect`: an
+/// icon button of a larger size, named `name` and red under the pointer if
+/// it `closes` the window (design, decision 3).
+pub fn window_button(ui: &mut Ui, rect: Rect, icon: &str, name: &str, closes: bool) -> Response {
+    let palette = active_palette(ui.ctx());
+    let response = ui.interact(rect, Id::new(("window-button", icon)), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
+    if ui.is_rect_visible(rect) {
+        let state = State::of(&response);
+        let (fill, ink) = if closes && state != State::Idle {
+            (CLOSE_WINDOW, ON_CLOSE_WINDOW)
+        } else {
+            (
+                state.fill(palette, Color32::TRANSPARENT),
+                color(palette.text),
+            )
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, fill);
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            icon,
+            icons::font(ui.ctx(), ICON_SIZE),
+            ink,
+        );
+        focus_ring(ui, &response);
+    }
+    tooltip(response, name, None)
 }
 
 /// `icon` of `size` points in `colour`, beside a text that names it. It is

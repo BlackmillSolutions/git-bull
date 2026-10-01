@@ -38,6 +38,10 @@ pub const MOON: &str = phosphor::MOON;
 pub const GEAR: &str = phosphor::GEAR;
 pub const CLOSE: &str = phosphor::X;
 pub const PLUS: &str = phosphor::PLUS;
+pub const MINIMIZE: &str = phosphor::MINUS;
+pub const MAXIMIZE: &str = phosphor::SQUARE;
+/// Restores a maximized window: two windows, one behind the other.
+pub const RESTORE: &str = phosphor::COPY;
 pub const INFO: &str = phosphor::INFO;
 pub const WARNING: &str = phosphor::WARNING;
 pub const ERROR: &str = phosphor::WARNING_OCTAGON;
@@ -47,7 +51,7 @@ pub const TAG: &str = phosphor::TAG;
 pub const HEAD: &str = phosphor::TARGET;
 
 /// Every icon with its name.
-pub const ALL: [(&str, &str); 14] = [
+pub const ALL: [(&str, &str); 17] = [
     ("folder", FOLDER),
     ("refresh", REFRESH),
     ("sun", SUN),
@@ -55,6 +59,9 @@ pub const ALL: [(&str, &str); 14] = [
     ("gear", GEAR),
     ("close", CLOSE),
     ("plus", PLUS),
+    ("minimize", MINIMIZE),
+    ("maximize", MAXIMIZE),
+    ("restore", RESTORE),
     ("info", INFO),
     ("warning", WARNING),
     ("error", ERROR),
