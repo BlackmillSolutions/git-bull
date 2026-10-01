@@ -251,7 +251,7 @@ fn badges_that_do_not_fit_are_counted_and_the_description_stays_visible() {
         harness.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    // The count reads "+<number>"; the tab bar has a "+" button too.
+    // The count reads "+<number>".
     let rest: usize = harness
         .get_all_by_role(Role::Label)
         .filter_map(|node| node.accesskit_node().value())

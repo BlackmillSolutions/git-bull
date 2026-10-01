@@ -20,6 +20,7 @@ start-details = Details
 ## Tab bar
 
 tab-new = New tab
+tab-close = Close { $title }
 tab-opening = Opening { $folder }…
 
 ## Repository chooser

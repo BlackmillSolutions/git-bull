@@ -37,7 +37,7 @@ use crate::paths::System;
 use crate::search_view;
 use crate::sidebar_view::{self, SidebarAction};
 use crate::style;
-use crate::theme::{self, Appearance, Palette, Rgb};
+use crate::theme::{self, Appearance, Palette, Rgb, SHAPE};
 use gitbull_core::search::{Search, SearchMode, SearchState};
 use gitbull_core::session::{BranchFilter, LoadState, Session};
 use gitbull_git::object_id::ObjectId;
@@ -540,7 +540,9 @@ fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>
 }
 
 fn tab_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let palette = palette(app, ui);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SHAPE.space[0];
         if let Some(workspace) = app.workspace() {
             let active = workspace.active().map(|tab| tab.id());
             for tab in workspace.tabs() {
@@ -552,26 +554,104 @@ fn tab_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
                     }
                     _ => tab.title(),
                 };
-                if ui
-                    .selectable_label(Some(tab.id()) == active, title)
-                    .clicked()
-                {
-                    actions.push(Action::Activate(tab.id()));
+                let mut args = FluentArgs::new();
+                args.set("title", tab.title());
+                let close = app.texts.text_with(Msg::TabClose, Some(&args));
+                match tab_button(ui, palette, &title, &close, Some(tab.id()) == active) {
+                    Some(TabClick::Activate) => actions.push(Action::Activate(tab.id())),
+                    Some(TabClick::Close) => actions.push(Action::Close(tab.id())),
+                    None => {}
                 }
-                if ui.small_button("×").clicked() {
-                    actions.push(Action::Close(tab.id()));
-                }
-                ui.separator();
             }
         }
-        if ui
-            .button("+")
-            .on_hover_text(app.texts.text(Msg::TabNew))
-            .clicked()
-        {
+        let new_tab = app.texts.text(Msg::TabNew);
+        if components::icon_button(ui, icons::PLUS, &new_tab, Some(NEW_TAB)).clicked() {
             actions.push(Action::ShowChooser);
         }
     });
+}
+
+/// What the user did with a tab.
+enum TabClick {
+    Activate,
+    Close,
+}
+
+/// A tab with its title, and the button named `close` on the active tab
+/// and under the pointer. The active tab is raised and marked with a line
+/// in the accent colour.
+fn tab_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    title: &str,
+    close: &str,
+    active: bool,
+) -> Option<TabClick> {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(title.to_owned(), font, Color32::PLACEHOLDER);
+    let [small, gap, padding, _] = SHAPE.space;
+    let side = SHAPE.control_height;
+    let size = egui::vec2(
+        padding + galley.size().x + gap + side + small,
+        SHAPE.control_height + small,
+    );
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, title)
+    });
+    let under_pointer = ui.rect_contains_pointer(rect);
+    let painter = ui.painter();
+    let fill = if active {
+        color(palette.raised)
+    } else if under_pointer {
+        color(palette.hover)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let radius = SHAPE.radius as u8;
+    let top = egui::CornerRadius {
+        nw: radius,
+        ne: radius,
+        sw: 0,
+        se: 0,
+    };
+    painter.rect_filled(rect, top, fill);
+    if active {
+        let line = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - 2.0),
+            rect.right_bottom(),
+        );
+        painter.rect_filled(line, 0.0, color(palette.accent));
+    }
+    let text = if active {
+        palette.text
+    } else {
+        palette.text_muted
+    };
+    let at = egui::pos2(
+        rect.left() + padding,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    painter.galley(at, galley, color(text));
+    focus_ring(ui, &response);
+
+    let mut clicked = response.clicked().then_some(TabClick::Activate);
+    if active || under_pointer {
+        let centre = egui::pos2(rect.right() - small - side / 2.0, rect.center().y);
+        let place = egui::Rect::from_center_size(centre, egui::vec2(side, side));
+        let shortcut = active.then_some(CLOSE_TAB);
+        let button = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(place), |ui| {
+                components::icon_button(ui, icons::CLOSE, close, shortcut)
+            })
+            .inner;
+        if button.clicked() {
+            clicked = Some(TabClick::Close);
+        }
+    }
+    clicked
 }
 
 fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>) {

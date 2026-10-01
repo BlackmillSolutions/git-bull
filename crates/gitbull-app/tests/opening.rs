@@ -171,7 +171,9 @@ fn new_tab_button_shows_the_chooser_while_a_repository_is_open() {
     settle_window(&mut harness);
     assert!(harness.query_by_label("Choose folder…").is_none());
 
-    harness.get_by_role_and_label(Role::Button, "+").click();
+    harness
+        .get_by_role_and_label(Role::Button, "New tab")
+        .click();
     harness.run();
 
     harness.get_by_role_and_label(Role::Button, "Choose folder…");

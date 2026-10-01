@@ -48,6 +48,7 @@ messages! {
     StartSetPath => "start-set-path",
     StartDetails => "start-details",
     TabNew => "tab-new",
+    TabClose => "tab-close",
     TabOpening => "tab-opening",
     ChooserTitle => "chooser-title",
     ChooserChooseFolder => "chooser-choose-folder",
