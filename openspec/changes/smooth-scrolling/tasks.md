@@ -25,4 +25,4 @@ the manual check. Each task names the test that shows it works.
 
 ## 5. Final check
 
-- [ ] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate smooth-scrolling --strict`; verify all succeed and CI is green on Linux, Windows and macOS
+- [x] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate smooth-scrolling --strict`; verify all succeed and CI is green on Linux, Windows and macOS. All succeed here, and CI run 36920694567 of commit c69d784 is green on Linux, Windows and macOS.
