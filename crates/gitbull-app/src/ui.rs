@@ -105,6 +105,8 @@ enum Action {
     CloseActive,
     NextTab,
     PreviousTab,
+    /// Move the active tab this many places to the right, or to the left.
+    MoveActive(isize),
     Retry(TabId),
     /// Show all branches and go to the reference with this full name.
     ShowAllBranches(String),
@@ -275,6 +277,11 @@ fn apply(app: &mut App, actions: Vec<Action>) {
                 app.choosing = false;
                 if let Some(workspace) = app.workspace_mut() {
                     workspace.activate_previous();
+                }
+            }
+            Action::MoveActive(step) => {
+                if let Some(workspace) = app.workspace_mut() {
+                    workspace.move_active(step);
                 }
             }
         }
@@ -465,6 +472,13 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
             actions.push(Action::PreviousTab);
         } else if input.consume_key(Modifiers::CTRL, Key::Tab) {
             actions.push(Action::NextTab);
+        }
+        // With Ctrl on every platform, like switching tabs.
+        if input.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::PageUp) {
+            actions.push(Action::MoveActive(-1));
+        }
+        if input.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::PageDown) {
+            actions.push(Action::MoveActive(1));
         }
         actions
     });

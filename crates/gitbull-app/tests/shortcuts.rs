@@ -77,6 +77,56 @@ fn control_tab_and_control_shift_tab_switch_tabs() {
 }
 
 #[test]
+fn control_shift_page_down_and_up_move_the_active_tab() {
+    let mut harness = window(build(three_tabs()).app);
+    settle_window(&mut harness);
+
+    harness.key_press_modifiers(Modifiers::CTRL | Modifiers::SHIFT, Key::PageDown);
+    harness.run();
+    assert_eq!(
+        tab_titles(harness.state()),
+        ["git-bull", "chromium", "linux"]
+    );
+    assert_eq!(active_title(harness.state()).as_deref(), Some("linux"));
+
+    harness.key_press_modifiers(Modifiers::CTRL | Modifiers::SHIFT, Key::PageUp);
+    harness.run();
+    assert_eq!(
+        tab_titles(harness.state()),
+        ["git-bull", "linux", "chromium"]
+    );
+    assert_eq!(active_title(harness.state()).as_deref(), Some("linux"));
+}
+
+#[test]
+fn the_last_tab_moves_no_further() {
+    let mut harness = window(build(three_tabs()).app);
+    settle_window(&mut harness);
+    for _ in 0..2 {
+        harness.key_press_modifiers(Modifiers::CTRL | Modifiers::SHIFT, Key::PageDown);
+        harness.run();
+    }
+    assert_eq!(
+        tab_titles(harness.state()),
+        ["git-bull", "chromium", "linux"]
+    );
+    assert_eq!(active_title(harness.state()).as_deref(), Some("linux"));
+}
+
+#[test]
+fn on_macos_tabs_move_with_control_like_they_switch() {
+    let mut harness = window_on(OperatingSystem::Mac, build(three_tabs()).app);
+    settle_window(&mut harness);
+    harness.key_press_modifiers(Modifiers::CTRL | Modifiers::SHIFT, Key::PageUp);
+    harness.run();
+    assert_eq!(
+        tab_titles(harness.state()),
+        ["linux", "git-bull", "chromium"]
+    );
+    assert_eq!(active_title(harness.state()).as_deref(), Some("linux"));
+}
+
+#[test]
 fn on_macos_cmd_w_closes_the_current_tab() {
     let mut harness = window_on(OperatingSystem::Mac, build(three_tabs()).app);
     settle_window(&mut harness);
