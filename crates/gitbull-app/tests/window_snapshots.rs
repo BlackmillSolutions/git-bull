@@ -6,8 +6,9 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
+use eframe::egui::os::OperatingSystem;
 use egui_kittest::kittest::Queryable;
-use egui_kittest::{Harness, SnapshotOptions, image_snapshot_options};
+use egui_kittest::{Harness, HarnessBuilder, SnapshotOptions, image_snapshot_options};
 use gitbull_app::app::App;
 use gitbull_app::ui;
 use gitbull_core::settings::{InterfaceSize, Settings, ThemeSetting};
@@ -22,16 +23,22 @@ use support::{Setup, TestApp, build, path, settle_window};
 /// The main window of `test` at 1280 by 800, rendered with a graphics
 /// adapter.
 fn rendered_window(test: TestApp) -> Harness<'static, App> {
-    let harness = Harness::builder()
-        .with_size((1280.0, 800.0))
-        .wgpu()
-        .build_ui_state(
-            |ui, app: &mut App| {
-                app.logic();
-                ui::show(app, ui);
-            },
-            test.app,
-        );
+    rendered_window_with(Harness::builder(), test)
+}
+
+/// Like [`rendered_window`], with egui behaving as on `os`.
+fn rendered_window_on(os: OperatingSystem, test: TestApp) -> Harness<'static, App> {
+    rendered_window_with(Harness::builder().with_os(os), test)
+}
+
+fn rendered_window_with(builder: HarnessBuilder<App>, test: TestApp) -> Harness<'static, App> {
+    let harness = builder.with_size((1280.0, 800.0)).wgpu().build_ui_state(
+        |ui, app: &mut App| {
+            app.logic();
+            ui::show(app, ui);
+        },
+        test.app,
+    );
     harness.ctx.set_fonts(gitbull_app::fonts::definitions());
     harness
 }
@@ -216,6 +223,15 @@ fn history_view(theme: ThemeSetting) -> Harness<'static, App> {
 
 /// The History view with a commit selected, in `theme` at `size`.
 fn history_view_at(theme: ThemeSetting, size: InterfaceSize) -> Harness<'static, App> {
+    history_view_on(theme, size, None)
+}
+
+/// Like [`history_view_at`], with egui behaving as on `os` if given.
+fn history_view_on(
+    theme: ThemeSetting,
+    size: InterfaceSize,
+    os: Option<OperatingSystem>,
+) -> Harness<'static, App> {
     let test = build(Setup {
         settings: Settings {
             theme,
@@ -227,7 +243,10 @@ fn history_view_at(theme: ThemeSetting, size: InterfaceSize) -> Harness<'static,
         backend: commit_with_everything(),
         ..Setup::default()
     });
-    let mut harness = rendered_window(test);
+    let mut harness = match os {
+        Some(os) => rendered_window_on(os, test),
+        None => rendered_window(test),
+    };
     wait_for(&mut harness, |h| {
         h.query_by_label("Change the parser").is_some()
     });
@@ -252,6 +271,19 @@ fn main_window_in_the_dark_palette() {
     let mut harness = history_view(ThemeSetting::Dark);
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "window_dark", &options());
+}
+
+/// The title bar as on macOS: room left of the tabs for the system's
+/// buttons, and none of git-bull's window buttons.
+#[test]
+fn main_window_with_the_title_bar_as_on_macos() {
+    let mut harness = history_view_on(
+        ThemeSetting::Dark,
+        InterfaceSize::Percent100,
+        Some(OperatingSystem::Mac),
+    );
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "window_macos", &options());
 }
 
 /// At 150 % the areas of a window of 1280 by 800 scroll instead of
