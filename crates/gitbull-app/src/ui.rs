@@ -314,10 +314,14 @@ fn error_view(app: &App, tab: &Tab, failure: &Failure, ui: &mut Ui, actions: &mu
     });
     ui.add_space(12.0);
     ui.horizontal(|ui| {
-        if ui.button(app.texts.text(Msg::ErrorRetry)).clicked() {
+        let retry = app.texts.text(Msg::ErrorRetry);
+        if Button::new(&retry).kind(Kind::Primary).show(ui).clicked() {
             actions.push(Action::Retry(tab.id()));
         }
-        if ui.button(app.texts.text(Msg::ErrorClose)).clicked() {
+        if Button::new(&app.texts.text(Msg::ErrorClose))
+            .show(ui)
+            .clicked()
+        {
             actions.push(Action::Close(tab.id()));
         }
     });
@@ -379,10 +383,14 @@ fn start_screen(app: &App, problem: &GitCheck, ui: &mut Ui, actions: &mut Vec<Ac
         }
         ui.add_space(16.0);
         ui.horizontal(|ui| {
-            if ui.button(app.texts.text(Msg::StartCheckAgain)).clicked() {
+            let check = app.texts.text(Msg::StartCheckAgain);
+            if Button::new(&check).kind(Kind::Primary).show(ui).clicked() {
                 actions.push(Action::CheckGitAgain);
             }
-            if ui.button(app.texts.text(Msg::StartSetPath)).clicked() {
+            if Button::new(&app.texts.text(Msg::StartSetPath))
+                .show(ui)
+                .clicked()
+            {
                 actions.push(Action::ChooseGit);
             }
         });
@@ -462,10 +470,9 @@ fn chooser(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     ui.vertical_centered(|ui| {
         ui.heading(app.texts.text(Msg::ChooserTitle));
         ui.add_space(12.0);
-        if ui
-            .button(app.texts.text(Msg::ChooserChooseFolder))
-            .clicked()
-        {
+        let choose = app.texts.text(Msg::ChooserChooseFolder);
+        let choose = Button::new(&choose).kind(Kind::Primary).icon(icons::FOLDER);
+        if choose.show(ui).clicked() {
             actions.push(Action::ChooseFolder);
         }
         ui.add_space(24.0);
@@ -474,7 +481,9 @@ fn chooser(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
             ui.label(app.texts.text(Msg::ChooserNoRecent));
         }
         for path in &app.settings().recent {
-            if ui.button(path.display().to_string()).clicked() {
+            let shown = path.display().to_string();
+            let recent = Button::new(&shown).kind(Kind::Ghost).icon(icons::FOLDER);
+            if recent.show(ui).clicked() {
                 actions.push(Action::Open(path.clone()));
             }
         }
@@ -738,12 +747,8 @@ fn search_bar(app: &App, ui: &mut Ui, search: &Search, focus: bool, actions: &mu
         });
     focus_ring(ui, &combo.response);
     let mut text = search.text().to_owned();
-    let field = ui.add(
-        egui::TextEdit::singleline(&mut text)
-            .id(Id::new(SEARCH_FIELD))
-            .hint_text(app.texts.text(Msg::SearchHint))
-            .desired_width(260.0),
-    );
+    let hint = app.texts.text(Msg::SearchHint);
+    let field = ui.add(components::text_edit(&mut text, &hint, 260.0).id(Id::new(SEARCH_FIELD)));
     if focus {
         field.request_focus();
     }
@@ -755,21 +760,20 @@ fn search_bar(app: &App, ui: &mut Ui, search: &Search, focus: bool, actions: &mu
         actions.push(Action::NextMatch);
     }
     let found = !search.matches().is_empty();
-    if ui
-        .add_enabled(
-            found,
-            egui::Button::new(app.texts.text(Msg::SearchPrevious)),
-        )
-        .clicked()
-    {
-        actions.push(Action::PreviousMatch);
-    }
-    if ui
-        .add_enabled(found, egui::Button::new(app.texts.text(Msg::SearchNext)))
-        .clicked()
-    {
-        actions.push(Action::NextMatch);
-    }
+    ui.add_enabled_ui(found, |ui| {
+        if Button::new(&app.texts.text(Msg::SearchPrevious))
+            .show(ui)
+            .clicked()
+        {
+            actions.push(Action::PreviousMatch);
+        }
+        if Button::new(&app.texts.text(Msg::SearchNext))
+            .show(ui)
+            .clicked()
+        {
+            actions.push(Action::NextMatch);
+        }
+    });
     if search.mode() != SearchMode::Hash && !search.text().trim().is_empty() {
         let mut args = FluentArgs::new();
         args.set("count", search.matches().len());

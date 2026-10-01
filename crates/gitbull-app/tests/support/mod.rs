@@ -339,3 +339,40 @@ pub fn texts_in_row(output: &eframe::egui::FullOutput, rect: eframe::egui::Rect)
     );
     texts_in(output, row)
 }
+
+/// The colours `text` is drawn in, wherever it is drawn.
+pub fn text_colours(output: &eframe::egui::FullOutput, text: &str) -> Vec<eframe::egui::Color32> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, text: &str, found: &mut Vec<eframe::egui::Color32>) {
+        match shape {
+            Shape::Text(shape) if shape.galley.text() == text => {
+                // A galley laid out with the placeholder takes the colour it
+                // is drawn with.
+                let section = shape
+                    .galley
+                    .job
+                    .sections
+                    .first()
+                    .map(|section| section.format.color)
+                    .filter(|colour| *colour != eframe::egui::Color32::PLACEHOLDER);
+                found.push(
+                    shape
+                        .override_text_color
+                        .or(section)
+                        .unwrap_or(shape.fallback_color),
+                );
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, text, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, text, &mut found);
+    }
+    found
+}

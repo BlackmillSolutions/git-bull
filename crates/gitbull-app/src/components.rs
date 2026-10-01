@@ -173,6 +173,12 @@ pub fn icon(ui: &mut Ui, icon: &str, size: f32, colour: Color32) -> Response {
     response
 }
 
+/// A message that something failed, in the colour of errors.
+pub fn error_text(ui: &mut Ui, text: impl Into<String>) -> Response {
+    let palette = active_palette(ui.ctx());
+    ui.label(RichText::new(text.into()).color(color(palette.error_fg)))
+}
+
 /// A tooltip that names an action, and its shortcut as the platform writes
 /// it, such as Ctrl+W, or Cmd+W on macOS.
 pub fn tooltip(response: Response, name: &str, shortcut: Option<KeyboardShortcut>) -> Response {
@@ -261,15 +267,19 @@ pub fn segmented<T: PartialEq + Copy>(
 /// A single-line text field of `width`, as high as a button, with `hint`
 /// while it is empty. Its focus ring comes from the style.
 pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
+    ui.add(text_edit(text, hint, width))
+}
+
+/// The text edit of [`text_field`], for a caller that adds to it, such as
+/// an id.
+pub fn text_edit<'t>(text: &'t mut String, hint: &str, width: f32) -> egui::TextEdit<'t> {
     let margin = Margin::symmetric(SHAPE.space[1] as i8, 0);
-    ui.add(
-        egui::TextEdit::singleline(text)
-            .hint_text(hint)
-            .margin(margin)
-            .vertical_align(egui::Align::Center)
-            .min_size(vec2(width, SHAPE.control_height))
-            .desired_width(width - margin.sum().x),
-    )
+    egui::TextEdit::singleline(text)
+        .hint_text(hint)
+        .margin(margin)
+        .vertical_align(egui::Align::Center)
+        .min_size(vec2(width, SHAPE.control_height))
+        .desired_width(width - margin.sum().x)
 }
 
 /// The entries of a menu, which follow each other without a gap.

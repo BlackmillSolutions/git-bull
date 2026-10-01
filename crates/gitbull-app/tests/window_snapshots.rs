@@ -184,13 +184,11 @@ fn wait_for(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -> 
     panic!("the content did not arrive");
 }
 
-/// Scenario "Interface seen without colour": added and removed lines, the
-/// kinds of change and the kinds of reference stay apart in shades of grey.
-#[test]
-fn interface_in_shades_of_grey() {
+/// The History view with a commit selected, in `theme`.
+fn history_view(theme: ThemeSetting) -> Harness<'static, App> {
     let test = build(Setup {
         settings: Settings {
-            theme: ThemeSetting::Dark,
+            theme,
             tabs: vec![path(&["work", "git-bull"])],
             active_tab: Some(0),
             ..Settings::default()
@@ -206,6 +204,28 @@ fn interface_in_shades_of_grey() {
     wait_for(&mut harness, |h| {
         h.query_all_by_role(Role::Code).next().is_some()
     });
+    harness
+}
+
+#[test]
+fn main_window_in_the_light_palette() {
+    let mut harness = history_view(ThemeSetting::Light);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "window_light", &options());
+}
+
+#[test]
+fn main_window_in_the_dark_palette() {
+    let mut harness = history_view(ThemeSetting::Dark);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "window_dark", &options());
+}
+
+/// Scenario "Interface seen without colour": added and removed lines, the
+/// kinds of change and the kinds of reference stay apart in shades of grey.
+#[test]
+fn interface_in_shades_of_grey() {
+    let mut harness = history_view(ThemeSetting::Dark);
 
     let image = harness.render().expect("rendered window");
     let grey = image::DynamicImage::ImageLuma8(image::imageops::grayscale(&image)).to_rgba8();

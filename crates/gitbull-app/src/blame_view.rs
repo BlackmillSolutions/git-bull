@@ -14,6 +14,7 @@ use gitbull_git::object_id::ObjectId;
 
 use crate::app::App;
 use crate::commit_list::{SHORT_HASH, color, local_date};
+use crate::components;
 use crate::diff_view::{FONT_SIZE, ROW_HEIGHT, line_job};
 use crate::file_history_view::header;
 use crate::i18n::Msg;
@@ -117,13 +118,13 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             return;
         }
         BlameContent::Failed(failure) => {
-            ui.colored_label(color(palette.status_deleted), failure_text(failure));
+            components::error_text(ui, failure_text(failure));
             return;
         }
         BlameContent::Text(lines) => lines,
     };
     if let Some(failed) = blame_failed {
-        ui.colored_label(color(palette.status_deleted), failed);
+        components::error_text(ui, failed);
     }
 
     let font = FontId::monospace(FONT_SIZE);

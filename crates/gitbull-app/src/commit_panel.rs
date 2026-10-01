@@ -20,6 +20,7 @@ use crate::app::{App, FileAction};
 use crate::commit_list::{
     BadgeLook, badge_size, color, local_date, original_date, paint_badge, take_copy,
 };
+use crate::components;
 use crate::i18n::Msg;
 use crate::theme::{Palette, SHAPE};
 use crate::ui::AREA_COMMIT_PANEL;
@@ -122,7 +123,10 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     };
     if view.uncommitted_selected() {
         ui.label(RichText::new(uncommitted).italics());
-        if ui.button(open_file_status).clicked() {
+        if components::Button::new(&open_file_status)
+            .show(ui)
+            .clicked()
+        {
             app.show_view(View::FileStatus);
         }
         return false;
@@ -349,7 +353,7 @@ fn files(
                 Failure::Git(error) => error.to_string(),
                 Failure::Panic(message) => message.clone(),
             };
-            ui.colored_label(color(palette.status_deleted), error);
+            components::error_text(ui, error);
             return (false, None);
         }
         ChangedFiles::Loaded(files) if files.is_empty() => {
@@ -383,27 +387,29 @@ fn files(
     let menu_row = view.files.menu_row();
     let mut opened = None;
     output.response.context_menu(|ui| {
-        let Some(index) = menu_row.map(|row| row as usize) else {
-            return;
-        };
-        if ui.button(&texts.file_history).clicked() {
-            opened = Some((index, false));
-            ui.close();
-        }
-        // A file the commit deleted is not in it.
-        let deleted = files
-            .get(index)
-            .is_some_and(|change| change.kind == ChangeKind::Deleted);
-        if !deleted && ui.button(&texts.blame).clicked() {
-            opened = Some((index, true));
-            ui.close();
-        }
-        if ui.button(&texts.copy_path).clicked() {
-            if let Some(path) = path_of(index as u64) {
-                ui.ctx().copy_text(path);
+        components::menu(ui, |ui| {
+            let Some(index) = menu_row.map(|row| row as usize) else {
+                return;
+            };
+            if components::menu_item(ui, None, &texts.file_history, None).clicked() {
+                opened = Some((index, false));
+                ui.close();
             }
-            ui.close();
-        }
+            // A file the commit deleted is not in it.
+            let deleted = files
+                .get(index)
+                .is_some_and(|change| change.kind == ChangeKind::Deleted);
+            if !deleted && components::menu_item(ui, None, &texts.blame, None).clicked() {
+                opened = Some((index, true));
+                ui.close();
+            }
+            if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
+                if let Some(path) = path_of(index as u64) {
+                    ui.ctx().copy_text(path);
+                }
+                ui.close();
+            }
+        });
     });
     (true, opened)
 }

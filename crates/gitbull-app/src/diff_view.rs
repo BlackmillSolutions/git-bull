@@ -18,8 +18,9 @@ use gitbull_git::path::RepoPath;
 
 use crate::app::{App, DiffKey, DiffView};
 use crate::commit_list::{color, take_copy};
+use crate::components;
 use crate::i18n::Msg;
-use crate::theme::{Appearance, Palette};
+use crate::theme::{Appearance, Palette, Rgb};
 use crate::ui::{AREA_DIFF, appearance, lock_tab};
 
 /// The height of a row of the diff, and of blame.
@@ -282,7 +283,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
                 Failure::Git(error) => error.to_string(),
                 Failure::Panic(message) => message.clone(),
             };
-            ui.colored_label(color(palette.status_deleted), error);
+            components::error_text(ui, error);
             return false;
         }
         DiffState::Loaded(diff) => diff,
@@ -302,7 +303,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
     if diff.truncated {
         ui.horizontal(|ui| {
             ui.weak(&texts.truncated);
-            load_all = ui.button(&texts.load_all).clicked();
+            load_all = components::Button::new(&texts.load_all).show(ui).clicked();
         });
     }
     let hunks = match &diff.content {
@@ -477,14 +478,16 @@ fn draw_rows(
                     Row::Header(hunk) | Row::Line(hunk, _) => hunk,
                 };
                 response.context_menu(|ui| {
-                    if ui.button(&texts.copy_lines).clicked() {
-                        outcome.copy = Some(Copy::Lines);
-                        ui.close();
-                    }
-                    if ui.button(&texts.copy_hunk).clicked() {
-                        outcome.copy = Some(Copy::Hunk(hunk));
-                        ui.close();
-                    }
+                    components::menu(ui, |ui| {
+                        if components::menu_item(ui, None, &texts.copy_lines, None).clicked() {
+                            outcome.copy = Some(Copy::Lines);
+                            ui.close();
+                        }
+                        if components::menu_item(ui, None, &texts.copy_hunk, None).clicked() {
+                            outcome.copy = Some(Copy::Hunk(hunk));
+                            ui.close();
+                        }
+                    });
                 });
             }
         });
@@ -512,6 +515,16 @@ fn row_rect(
         node.set_selected(selected);
     });
     (rect, response)
+}
+
+/// The colour of the marker `+` or `-` of a line; a line of context has
+/// none and draws its blank marker in the weak text colour.
+fn marker_colour(kind: LineKind, palette: &Palette) -> Option<Rgb> {
+    match kind {
+        LineKind::Added => Some(palette.diff_added_marker),
+        LineKind::Removed => Some(palette.diff_removed_marker),
+        LineKind::Context => None,
+    }
 }
 
 /// The opacity of the selection over a row, out of 255.
@@ -638,7 +651,7 @@ fn line_row(
         egui::Align2::CENTER_CENTER,
         marker(line.kind),
         font.clone(),
-        weak,
+        marker_colour(line.kind, palette).map_or(weak, color),
     );
     let text_x = rect.left() + text_left;
     let text_width = galley.size().x;
@@ -714,6 +727,22 @@ pub(crate) fn line_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markers_of_added_and_removed_lines_take_their_colours() {
+        use crate::theme::{DARK_RED_GREEN, LIGHT};
+        for palette in [&LIGHT, &DARK_RED_GREEN] {
+            assert_eq!(
+                marker_colour(LineKind::Added, palette),
+                Some(palette.diff_added_marker)
+            );
+            assert_eq!(
+                marker_colour(LineKind::Removed, palette),
+                Some(palette.diff_removed_marker)
+            );
+            assert_eq!(marker_colour(LineKind::Context, palette), None);
+        }
+    }
 
     fn line(kind: LineKind, text: &str, no_newline: bool) -> DiffLine {
         DiffLine {

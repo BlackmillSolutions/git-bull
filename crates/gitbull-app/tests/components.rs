@@ -10,7 +10,8 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::components::{self, BannerAction, BannerKind, Button, Kind};
 use gitbull_app::icons;
 use gitbull_app::style::apply_style;
-use gitbull_app::theme::Appearance;
+use gitbull_app::theme::{Appearance, DARK};
+use gitbull_app::ui::color;
 use gitbull_core::settings::{ColourVision, Settings};
 
 const CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
@@ -301,6 +302,36 @@ fn icons_are_hidden_from_assistive_technology() {
     for icon in [icons::TAG, icons::WARNING] {
         assert!(!offered(&harness, icon), "{icon:?} is offered");
     }
+}
+
+#[test]
+fn a_disabled_button_is_faded_and_reports_no_click() {
+    let mut harness = harness(0, |ui, clicks: &mut u32| {
+        ui.add_enabled_ui(false, |ui| {
+            if Button::new("Next").show(ui).clicked() {
+                *clicks += 1;
+            }
+        });
+    });
+    harness.run();
+    harness.get_by_role_and_label(Role::Button, "Next").click();
+    harness.run();
+    assert_eq!(*harness.state(), 0);
+    // egui fades whatever a disabled ui draws.
+    let colours = support::text_colours(harness.output(), "Next");
+    assert!(colours.iter().all(|colour| colour.a() < 255), "{colours:?}");
+}
+
+#[test]
+fn an_error_text_is_drawn_in_the_error_colour() {
+    let mut harness = harness((), |ui, _| {
+        components::error_text(ui, "Git could not be started.");
+    });
+    harness.run();
+    assert_eq!(
+        support::text_colours(harness.output(), "Git could not be started."),
+        [color(DARK.error_fg)]
+    );
 }
 
 #[test]

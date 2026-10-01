@@ -19,7 +19,7 @@ use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 
 use crate::app::{App, TabView};
-use crate::components::focus_ring;
+use crate::components::{self, Button, Kind, focus_ring};
 use crate::graph_view::{self, LANE_WIDTH, Shape as GraphShape};
 use crate::i18n::Msg;
 use crate::icons;
@@ -318,12 +318,14 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     }
     let menu_commit = view.commit_menu;
     output.response.context_menu(|ui| {
-        if ui.button(&copy_label).clicked() {
-            if let Some(commit) = menu_commit {
-                ui.ctx().copy_text(commit.to_string());
+        components::menu(ui, |ui| {
+            if components::menu_item(ui, None, &copy_label, None).clicked() {
+                if let Some(commit) = menu_commit {
+                    ui.ctx().copy_text(commit.to_string());
+                }
+                ui.close();
             }
-            ui.close();
-        }
+        });
     });
     if resize.dragged() {
         app.update_layout(|layout| layout.graph_column = Some(graph_width));
@@ -403,7 +405,7 @@ fn commit_graph_bar(ui: &mut Ui, session: &mut Session, view: &mut TabView, text
                     .animate(unknown)
                     .desired_width(ui.available_width() - 90.0),
             );
-            if ui.button(&texts.cancel).clicked() {
+            if Button::new(&texts.cancel).show(ui).clicked() {
                 session.cancel_commit_graph();
             }
         });
@@ -414,7 +416,7 @@ fn commit_graph_bar(ui: &mut Ui, session: &mut Session, view: &mut TabView, text
     }
     ui.horizontal(|ui| {
         ui.label(&texts.hint);
-        if ui.button(&texts.generate).clicked() {
+        if Button::new(&texts.generate).show(ui).clicked() {
             view.confirm_graph = true;
         }
     });
@@ -430,10 +432,14 @@ fn commit_graph_bar(ui: &mut Ui, session: &mut Session, view: &mut TabView, text
             ui.add_space(10.0);
             let mut choice = None;
             ui.horizontal(|ui| {
-                if ui.button(&texts.confirm).clicked() {
+                if Button::new(&texts.confirm)
+                    .kind(Kind::Primary)
+                    .show(ui)
+                    .clicked()
+                {
                     choice = Some(true);
                 }
-                if ui.button(&texts.cancel).clicked() {
+                if Button::new(&texts.cancel).show(ui).clicked() {
                     choice = Some(false);
                 }
             });
