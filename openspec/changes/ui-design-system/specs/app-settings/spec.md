@@ -64,6 +64,10 @@ left out of the saved settings; the other settings SHALL still be saved.
 - **WHEN** the user resizes and moves the window on Windows, on macOS or on Linux under X11, closes git-bull and starts it again
 - **THEN** the window has the same size and position
 
+#### Scenario: Window geometry at a larger interface size
+- **WHEN** the interface size is 150 % and the user resizes and moves the window on Windows, on macOS or on Linux under X11, closes git-bull and starts it again
+- **THEN** the window has the same size and position
+
 #### Scenario: Window geometry under Wayland
 - **WHEN** the user resizes the window on Linux under Wayland, closes git-bull and starts it again
 - **THEN** the window has the same size, and the system chooses its position
@@ -77,16 +81,40 @@ left out of the saved settings; the other settings SHALL still be saved.
 - **WHEN** git-bull starts with a settings file that has no colour vision and no interface size
 - **THEN** it uses the colour vision Standard and the interface size 100 %, and keeps every other setting from the file
 
+### Requirement: Invalid settings file
+When the settings file cannot be read or is invalid, git-bull SHALL rename it
+with the suffix `.bak`, start with default settings and report this once in
+the status bar. A value of the theme, the colour vision or the interface
+size that git-bull does not know, such as one written by a later version,
+SHALL NOT make the file invalid: that setting SHALL take its default, and
+every other setting SHALL be kept.
+
+#### Scenario: Corrupted file
+- **WHEN** git-bull starts and the settings file contains invalid content
+- **THEN** the file is renamed with the suffix `.bak`
+- **AND** git-bull starts with default settings
+- **AND** the status bar reports that the settings were reset
+
+#### Scenario: Unknown value of a later version
+- **WHEN** git-bull starts with a settings file whose colour vision has a value git-bull does not know
+- **THEN** it uses the colour vision Standard and keeps every other setting from the file
+- **AND** the file is not renamed and the status bar reports no reset
+
 ### Requirement: Settings dialog
 The settings dialog SHALL offer, in a section "Appearance", the theme, the
 colour vision and the interface size, and further the language and the path
-to the Git executable. All other settings SHALL be saved without user
-action. When another Git executable is applied while tabs are open, the
-tabs SHALL open again with it, each in its initial state.
+to the Git executable. While the dialog is open, the main window SHALL take
+no input. All other settings SHALL be saved without user action. When
+another Git executable is applied while tabs are open, the tabs SHALL open
+again with it, each in its initial state.
 
 #### Scenario: Appearance section
 - **WHEN** the user opens the settings dialog
 - **THEN** its section "Appearance" offers the theme, the colour vision and the interface size
+
+#### Scenario: Dialog is modal
+- **WHEN** the settings dialog is open and the user clicks Refresh in the toolbar
+- **THEN** nothing is refreshed and the dialog stays open
 
 #### Scenario: Valid Git path
 - **WHEN** the user enters the path to a Git executable of a supported version
