@@ -5,15 +5,14 @@
 
 mod support;
 
-use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
-use eframe::egui::{Event, Key, Modifiers, MouseWheelUnit, TouchPhase, vec2};
-use egui_kittest::kittest::{NodeT, Queryable};
+use eframe::egui::{Key, Modifiers};
+use egui_kittest::kittest::Queryable;
 use gitbull_core::settings::Settings;
 use gitbull_testkit::FakeBackend;
 use support::{
-    Setup, active_title, build, commit_list_scroll, long_history, path, settle_window, tab_titles,
-    wait_for_row, window, window_at_60_fps, window_on,
+    BURST, Setup, active_title, build, commit_list_scroll, find_row, long_history, path,
+    settle_window, tab_titles, turn_wheel, wait_for_row, window, window_at_60_fps, window_on,
 };
 
 /// Three repositories open, the middle one active.
@@ -129,25 +128,12 @@ fn a_tab_left_during_a_motion_shows_its_commit_list_at_rest_on_return() {
     let mut harness = window_at_60_fps(test.app);
     settle_window(&mut harness);
     wait_for_row(&mut harness, "Commit 0, ");
-    let row = harness
-        .query_all_by_role(Role::Row)
-        .find(|node| {
-            node.accesskit_node()
-                .label()
-                .is_some_and(|label| label.starts_with("Commit 3, "))
-        })
-        .expect("the row of Commit 3")
-        .rect();
+    let row = find_row(&harness, "Commit 3, ").expect("the row of Commit 3");
     let start = commit_list_scroll(&harness);
 
     harness.hover_at(row.center());
     harness.step();
-    harness.input_mut().events.push(Event::MouseWheel {
-        unit: MouseWheelUnit::Line,
-        delta: vec2(0.0, -681.0 / 40.0),
-        phase: TouchPhase::Move,
-        modifiers: Modifiers::NONE,
-    });
+    turn_wheel(&mut harness, -BURST / 40.0, Modifiers::NONE);
     for _ in 0..5 {
         harness.step();
     }
@@ -164,7 +150,7 @@ fn a_tab_left_during_a_motion_shows_its_commit_list_at_rest_on_return() {
     assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
 
     let moved = commit_list_scroll(&harness) - start;
-    assert!((moved - 681.0).abs() < 0.5, "{moved}");
+    assert!((moved - BURST).abs() < 0.5, "{moved}");
     for _ in 0..10 {
         harness.step();
     }

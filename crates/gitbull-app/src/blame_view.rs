@@ -4,7 +4,7 @@
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    Align2, Color32, FontId, Id, Rect, ScrollArea, Sense, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    Align2, Color32, FontId, Id, Rect, Sense, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::blame::{BlameContent, BlameState};
@@ -137,97 +137,94 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let text_color = ui.visuals().text_color();
     let weak = ui.visuals().weak_text_color();
     let mut chosen = None;
-    // `show_rows` plans each row as high as `ROW_HEIGHT` plus the spacing of
-    // the `Ui` it is given; the rows have no spacing, so neither has that.
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        ScrollArea::both()
-            .id_salt(Id::new(BLAME_AREA))
-            .auto_shrink([false, false])
-            .show_rows(ui, ROW_HEIGHT, lines.len(), |ui, range| {
-                for index in range {
-                    let commit = blame.line_commit(index);
-                    // A block begins where the commit of the line above differs.
-                    let starts = index == 0 || blame.line_commit(index - 1) != commit;
-                    let margin = commit
-                        .filter(|_| starts)
-                        .and_then(|id| blame.commit(&id))
-                        .map(|info| Margin {
-                            commit: info.id,
-                            text: format!(
-                                "{}  {}  {}",
-                                info.id.short(SHORT_HASH),
-                                info.author,
-                                local_date(info.time, &zone)
-                            ),
-                        });
-                    let spans = blame
-                        .highlighting()
-                        .and_then(|lines| lines.get(index))
-                        .map(Vec::as_slice);
-                    let job = line_job(&lines[index], spans, &font, text_color);
-                    let galley = ui.painter().layout_job(job);
-                    let width = (MARGIN_WIDTH + number_width + galley.size().x + 12.0)
-                        .max(ui.available_width());
-                    let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::hover());
-                    let margin_rect = Rect::from_min_size(rect.min, vec2(MARGIN_WIDTH, ROW_HEIGHT));
-                    if let Some(commit) = commit {
-                        ui.painter()
-                            .rect_filled(margin_rect, 0.0, band_color(&commit, palette));
-                    }
-                    if let Some(margin) = margin {
-                        let response = ui.interact(
-                            margin_rect,
-                            Id::new(("blame-margin", index)),
-                            Sense::click(),
-                        );
-                        response.widget_info(|| {
-                            WidgetInfo::labeled(WidgetType::Link, true, &margin.text)
-                        });
-                        let clipped = ui.painter().with_clip_rect(margin_rect);
-                        clipped.text(
-                            pos2(margin_rect.left() + 6.0, margin_rect.center().y),
-                            Align2::LEFT_CENTER,
-                            &margin.text,
-                            FontId::proportional(FONT_SIZE),
-                            text_color,
-                        );
-                        if response.clicked() {
-                            chosen = Some(margin.commit);
-                        }
-                        response.on_hover_cursor(eframe::egui::CursorIcon::PointingHand);
-                    }
-                    let number = index + 1;
-                    let number_rect = Rect::from_min_size(
-                        pos2(margin_rect.right(), rect.top()),
-                        vec2(number_width, ROW_HEIGHT),
+    components::rows_area(
+        ui,
+        Id::new(BLAME_AREA),
+        ROW_HEIGHT,
+        lines.len(),
+        |ui, range| {
+            for index in range {
+                let commit = blame.line_commit(index);
+                // A block begins where the commit of the line above differs.
+                let starts = index == 0 || blame.line_commit(index - 1) != commit;
+                let margin = commit
+                    .filter(|_| starts)
+                    .and_then(|id| blame.commit(&id))
+                    .map(|info| Margin {
+                        commit: info.id,
+                        text: format!(
+                            "{}  {}  {}",
+                            info.id.short(SHORT_HASH),
+                            info.author,
+                            local_date(info.time, &zone)
+                        ),
+                    });
+                let spans = blame
+                    .highlighting()
+                    .and_then(|lines| lines.get(index))
+                    .map(Vec::as_slice);
+                let job = line_job(&lines[index], spans, &font, text_color);
+                let galley = ui.painter().layout_job(job);
+                let width = (MARGIN_WIDTH + number_width + galley.size().x + 12.0)
+                    .max(ui.available_width());
+                let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::hover());
+                let margin_rect = Rect::from_min_size(rect.min, vec2(MARGIN_WIDTH, ROW_HEIGHT));
+                if let Some(commit) = commit {
+                    ui.painter()
+                        .rect_filled(margin_rect, 0.0, band_color(&commit, palette));
+                }
+                if let Some(margin) = margin {
+                    let response = ui.interact(
+                        margin_rect,
+                        Id::new(("blame-margin", index)),
+                        Sense::click(),
                     );
-                    ui.painter().text(
-                        pos2(number_rect.right() - 6.0, number_rect.center().y),
-                        Align2::RIGHT_CENTER,
-                        number.to_string(),
-                        font.clone(),
-                        weak,
-                    );
-                    let text_top = rect.center().y - galley.size().y / 2.0;
-                    ui.painter().galley(
-                        pos2(number_rect.right() + 6.0, text_top),
-                        galley,
+                    response
+                        .widget_info(|| WidgetInfo::labeled(WidgetType::Link, true, &margin.text));
+                    let clipped = ui.painter().with_clip_rect(margin_rect);
+                    clipped.text(
+                        pos2(margin_rect.left() + 6.0, margin_rect.center().y),
+                        Align2::LEFT_CENTER,
+                        &margin.text,
+                        FontId::proportional(FONT_SIZE),
                         text_color,
                     );
-                    // Each line, for assistive technology.
-                    let line = ui.interact(
-                        Rect::from_min_max(pos2(number_rect.left(), rect.top()), rect.max),
-                        Id::new(("blame-line", index)),
-                        Sense::hover(),
-                    );
-                    let label = format!("{number}: {}", lines[index]);
-                    line.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
-                    ui.ctx()
-                        .accesskit_node_builder(line.id, |node| node.set_role(Role::Code));
+                    if response.clicked() {
+                        chosen = Some(margin.commit);
+                    }
+                    response.on_hover_cursor(eframe::egui::CursorIcon::PointingHand);
                 }
-            });
-    });
+                let number = index + 1;
+                let number_rect = Rect::from_min_size(
+                    pos2(margin_rect.right(), rect.top()),
+                    vec2(number_width, ROW_HEIGHT),
+                );
+                ui.painter().text(
+                    pos2(number_rect.right() - 6.0, number_rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    number.to_string(),
+                    font.clone(),
+                    weak,
+                );
+                let text_top = rect.center().y - galley.size().y / 2.0;
+                ui.painter().galley(
+                    pos2(number_rect.right() + 6.0, text_top),
+                    galley,
+                    text_color,
+                );
+                // Each line, for assistive technology.
+                let line = ui.interact(
+                    Rect::from_min_max(pos2(number_rect.left(), rect.top()), rect.max),
+                    Id::new(("blame-line", index)),
+                    Sense::hover(),
+                );
+                let label = format!("{number}: {}", lines[index]);
+                line.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
+                ui.ctx()
+                    .accesskit_node_builder(line.id, |node| node.set_role(Role::Code));
+            }
+        },
+    );
     if let Some(commit) = chosen {
         // The History view shows the commit, or tells why it cannot.
         app.show_view(gitbull_core::workspace::View::History);

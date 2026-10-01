@@ -13,8 +13,8 @@ use gitbull_core::settings::{ColourVision, InterfaceSize, Settings, SettingsFile
 use gitbull_core::workspace::View;
 use gitbull_testkit::FakeBackend;
 use support::{
-    Answer, Scripted, Setup, build, commit_list_scroll, long_history, path, settle_window,
-    sized_window, wait_for_row, window, window_at_60_fps,
+    Answer, Scripted, Setup, build, commit_list_scroll, find_row, long_history, path,
+    settle_window, sized_window, turn_wheel, wait_for_row, window, window_at_60_fps,
 };
 
 fn open_dialog(harness: &mut Harness<'_, App>) {
@@ -409,26 +409,13 @@ fn the_wheel_does_not_scroll_the_commit_list_behind_the_dialog() {
     let mut harness = window_at_60_fps(test.app);
     settle_window(&mut harness);
     wait_for_row(&mut harness, "Commit 0, ");
-    let row = harness
-        .query_all_by_role(Role::Row)
-        .find(|node| {
-            node.accesskit_node()
-                .label()
-                .is_some_and(|label| label.starts_with("Commit 3, "))
-        })
-        .expect("the row of Commit 3")
-        .rect();
+    let row = find_row(&harness, "Commit 3, ").expect("the row of Commit 3");
     let start = commit_list_scroll(&harness);
     open_dialog(&mut harness);
 
     harness.hover_at(row.left_center() + vec2(20.0, 0.0));
     harness.step();
-    harness.input_mut().events.push(Event::MouseWheel {
-        unit: MouseWheelUnit::Line,
-        delta: vec2(0.0, -3.0),
-        phase: TouchPhase::Move,
-        modifiers: Modifiers::NONE,
-    });
+    turn_wheel(&mut harness, -3.0, Modifiers::NONE);
     for _ in 0..90 {
         harness.step();
     }

@@ -4,8 +4,7 @@
 use eframe::egui::accesskit::Role;
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
-    self, Color32, FontId, Id, Label, ScrollArea, Sense, Stroke, Ui, WidgetInfo, WidgetType, pos2,
-    vec2,
+    self, Color32, FontId, Id, Label, Sense, Stroke, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::details::{DiffState, Highlighting};
@@ -444,54 +443,46 @@ fn draw_rows(
         marker: 2.0 * digit,
     };
     let mut outcome = Outcome::default();
-    // `show_rows` plans each row as high as `ROW_HEIGHT` plus the spacing of
-    // the `Ui` it is given; the rows have no spacing, so neither has that.
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        ScrollArea::both()
-            .id_salt(("diff", shown))
-            .auto_shrink([false, false])
-            .show_rows(ui, ROW_HEIGHT, all.len(), |ui, range| {
-                for index in range {
-                    let is_selected = selected(selection, index);
-                    // A row is known by its diff and its index, so that the
-                    // row of a new diff at the same place does not take over
-                    // the state of the one before, such as its open menu.
-                    let row = ui.push_id((shown, index), |ui| match all[index] {
-                        Row::Header(hunk) => {
-                            header_row(ui, &hunks[hunk].header, is_selected, &font, palette)
-                        }
-                        Row::Line(hunk, line) => {
-                            let line = &hunks[hunk].lines[line];
-                            let spans = highlighting.and_then(|h| h.spans(line));
-                            line_row(ui, line, spans, is_selected, &gutter, &font, texts, palette)
-                        }
-                    });
-                    let response = row.inner;
-                    if response.clicked() {
-                        let extend = ui.input(|input| input.modifiers.shift);
-                        outcome.clicked = Some((index, extend));
-                    }
-                    if response.secondary_clicked() {
-                        outcome.menu = Some(index);
-                    }
-                    let hunk = match all[index] {
-                        Row::Header(hunk) | Row::Line(hunk, _) => hunk,
-                    };
-                    response.context_menu(|ui| {
-                        components::menu(ui, |ui| {
-                            if components::menu_item(ui, None, &texts.copy_lines, None).clicked() {
-                                outcome.copy = Some(Copy::Lines);
-                                ui.close();
-                            }
-                            if components::menu_item(ui, None, &texts.copy_hunk, None).clicked() {
-                                outcome.copy = Some(Copy::Hunk(hunk));
-                                ui.close();
-                            }
-                        });
-                    });
+    components::rows_area(ui, ("diff", shown), ROW_HEIGHT, all.len(), |ui, range| {
+        for index in range {
+            let is_selected = selected(selection, index);
+            // A row is known by its diff and its index, so that the
+            // row of a new diff at the same place does not take over
+            // the state of the one before, such as its open menu.
+            let row = ui.push_id((shown, index), |ui| match all[index] {
+                Row::Header(hunk) => {
+                    header_row(ui, &hunks[hunk].header, is_selected, &font, palette)
+                }
+                Row::Line(hunk, line) => {
+                    let line = &hunks[hunk].lines[line];
+                    let spans = highlighting.and_then(|h| h.spans(line));
+                    line_row(ui, line, spans, is_selected, &gutter, &font, texts, palette)
                 }
             });
+            let response = row.inner;
+            if response.clicked() {
+                let extend = ui.input(|input| input.modifiers.shift);
+                outcome.clicked = Some((index, extend));
+            }
+            if response.secondary_clicked() {
+                outcome.menu = Some(index);
+            }
+            let hunk = match all[index] {
+                Row::Header(hunk) | Row::Line(hunk, _) => hunk,
+            };
+            response.context_menu(|ui| {
+                components::menu(ui, |ui| {
+                    if components::menu_item(ui, None, &texts.copy_lines, None).clicked() {
+                        outcome.copy = Some(Copy::Lines);
+                        ui.close();
+                    }
+                    if components::menu_item(ui, None, &texts.copy_hunk, None).clicked() {
+                        outcome.copy = Some(Copy::Hunk(hunk));
+                        ui.close();
+                    }
+                });
+            });
+        }
     });
     outcome
 }
