@@ -11,10 +11,11 @@ interface.
 ### Requirement: Persisted settings
 git-bull SHALL persist the following in one file in the operating system's
 configuration directory for applications: theme, colour vision, interface
-size, language, the path to the Git executable, recently opened
-repositories, open tabs and the active tab, window size and position,
-divider positions and column widths. A path that is not valid UTF-8 SHALL be
-left out of the saved settings; the other settings SHALL still be saved.
+size, whether to use the system title bar, language, the path to the Git
+executable, recently opened repositories, open tabs in their order and the
+active tab, window size and position, divider positions and column widths.
+A path that is not valid UTF-8 SHALL be left out of the saved settings; the
+other settings SHALL still be saved.
 
 #### Scenario: Layout survives a restart
 - **WHEN** the user changes a divider position and a column width, closes git-bull and starts it again
@@ -41,6 +42,10 @@ left out of the saved settings; the other settings SHALL still be saved.
 - **WHEN** git-bull starts with a settings file that has no colour vision and no interface size
 - **THEN** it uses the colour vision Standard and the interface size 100 %, and keeps every other setting from the file
 
+#### Scenario: Settings file without the title bar setting
+- **WHEN** git-bull starts with a settings file that does not say whether to use the system title bar
+- **THEN** it uses its own title bar, and keeps every other setting from the file
+
 ### Requirement: Recently opened repositories
 git-bull SHALL remember the 20 most recently opened repositories, most recent
 first.
@@ -55,17 +60,23 @@ first.
 
 ### Requirement: Settings dialog
 The settings dialog SHALL offer, in a section "Appearance", the theme, the
-colour vision and the interface size, and further the language and the path
-to the Git executable. While the dialog is open, the main window SHALL take
-no input. The dialog SHALL fit the window at every interface size; what
-does not fit SHALL scroll. All other settings SHALL be saved without user
-action. When
-another Git executable is applied while tabs are open, the tabs SHALL open
-again with it, each in its initial state.
+colour vision, the interface size and whether to use the system title bar,
+and further the language and the path to the Git executable. A change of
+the title bar SHALL take effect when git-bull starts next, and the dialog
+SHALL say so. While the dialog is open, the main window SHALL take no
+input. The dialog SHALL fit the window at every interface size; what does
+not fit SHALL scroll. All other settings SHALL be saved without user
+action. When another Git executable is applied while tabs are open, the
+tabs SHALL open again with it, each in its initial state.
 
 #### Scenario: Appearance section
 - **WHEN** the user opens the settings dialog
-- **THEN** its section "Appearance" offers the theme, the colour vision and the interface size
+- **THEN** its section "Appearance" offers the theme, the colour vision, the interface size and the system title bar
+
+#### Scenario: Title bar changed
+- **WHEN** the user turns on "Use the system title bar" in the settings dialog
+- **THEN** the dialog says that the change takes effect when git-bull starts next, and the window keeps its title bar until then
+- **AND** after a restart the window has the system's title bar
 
 #### Scenario: Dialog is modal
 - **WHEN** the settings dialog is open and the user clicks Refresh in the toolbar
