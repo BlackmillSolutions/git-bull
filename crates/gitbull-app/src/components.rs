@@ -241,6 +241,29 @@ pub fn segmented<T: PartialEq + Copy>(
     response
 }
 
+/// A single-line text field of `width`, as high as a button, with `hint`
+/// while it is empty. Its focus ring comes from the style.
+pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
+    let margin = Margin::symmetric(SHAPE.space[1] as i8, 0);
+    ui.add(
+        egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .margin(margin)
+            .vertical_align(egui::Align::Center)
+            .min_size(vec2(width, SHAPE.control_height))
+            .desired_width(width - margin.sum().x),
+    )
+}
+
+/// The entries of a menu, which follow each other without a gap.
+pub fn menu<R>(ui: &mut Ui, add_entries: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        add_entries(ui)
+    })
+    .inner
+}
+
 /// An entry of a menu, with an optional icon before its label and the
 /// shortcut after it.
 pub fn menu_item(

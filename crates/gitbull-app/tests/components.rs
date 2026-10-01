@@ -252,6 +252,34 @@ fn focused_combo_boxes_of_the_window_show_the_focus_ring() {
 }
 
 #[test]
+fn a_text_field_is_as_high_as_a_button() {
+    let mut harness = harness(String::new(), |ui, text: &mut String| {
+        ui.horizontal(|ui| {
+            Button::new("Search").show(ui);
+            components::text_field(ui, text, "Search commits", 200.0);
+        });
+    });
+    harness.run();
+    let button = harness.get_by_role_and_label(Role::Button, "Search").rect();
+    let field = harness.get_by_role(Role::TextInput).rect();
+    assert_eq!(field.height(), button.height(), "{field:?} {button:?}");
+}
+
+#[test]
+fn menu_items_follow_each_other_without_a_gap() {
+    let mut harness = harness((), |ui, _| {
+        components::menu(ui, |ui| {
+            components::menu_item(ui, None, "First", None);
+            components::menu_item(ui, None, "Second", None);
+        });
+    });
+    harness.run();
+    let first = harness.get_by_role_and_label(Role::Button, "First").rect();
+    let second = harness.get_by_role_and_label(Role::Button, "Second").rect();
+    assert_eq!(second.top(), first.bottom());
+}
+
+#[test]
 fn every_component_has_a_click_target_of_24_by_24() {
     let mut harness = harness(("light", 0), |ui, (chosen, _)| {
         Button::new("A").kind(Kind::Ghost).show(ui);

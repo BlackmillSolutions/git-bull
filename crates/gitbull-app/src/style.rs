@@ -119,6 +119,13 @@ pub fn style(palette: &Palette, appearance: Appearance) -> egui::Style {
     style
 }
 
+/// Applies the style as [`apply_style`] does, and lets `ui` draw with it in
+/// this frame already.
+pub fn use_style(ui: &mut egui::Ui, appearance: Appearance, vision: ColourVision) {
+    apply_style(ui.ctx(), appearance, vision);
+    ui.set_style(ui.ctx().global_style());
+}
+
 /// Sets egui's style when the appearance or the colour vision changed
 /// since the last call, and not otherwise. The interface size does not
 /// enter: the zoom factor scales the points the style is measured in.
@@ -259,6 +266,27 @@ mod tests {
             ctx.global_style().visuals.panel_fill,
             color(LIGHT_RED_GREEN.panel)
         );
+    }
+
+    #[test]
+    fn the_frame_that_applies_the_style_draws_with_it() {
+        let ctx = Context::default();
+        let mut panel_fills = Vec::new();
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                use_style(ui, appearance, ColourVision::Standard);
+                assert!(
+                    ui.style()
+                        .text_styles
+                        .contains_key(&TextStyle::Name(TITLE.into())),
+                    "{appearance:?}"
+                );
+                panel_fills.push(ui.visuals().panel_fill);
+            })
+            .textures_delta
+            .clear();
+        }
+        assert_eq!(panel_fills, [color(DARK.panel), color(LIGHT.panel)]);
     }
 
     #[test]

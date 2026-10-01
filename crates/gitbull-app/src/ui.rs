@@ -107,7 +107,8 @@ const SEARCH_REPAINT: Duration = Duration::from_millis(50);
 
 /// Draws the whole window.
 pub fn show(app: &mut App, ui: &mut Ui) {
-    style::apply_style(ui.ctx(), appearance(app, ui), ColourVision::Standard);
+    let appearance = appearance(app, ui);
+    style::use_style(ui, appearance, ColourVision::Standard);
 
     let mut actions = Vec::new();
     if let GitStatus::Problem(problem) = &app.git {
