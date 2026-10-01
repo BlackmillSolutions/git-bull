@@ -127,7 +127,7 @@ const SEARCH_REPAINT: Duration = Duration::from_millis(50);
 /// Draws the whole window.
 pub fn show(app: &mut App, ui: &mut Ui) {
     let appearance = appearance(app, ui);
-    style::use_style(ui, appearance, ColourVision::Standard);
+    style::use_style(ui, appearance, app.settings().colour_vision);
     apply_interface_size(app, ui);
 
     let mut actions = Vec::new();
@@ -1249,9 +1249,10 @@ fn move_between_areas(ui: &Ui, areas: &[&str]) {
     ui.memory_mut(|memory| memory.request_focus(areas[target % areas.len()]));
 }
 
-/// The palette of the appearance the window is drawn with.
+/// The palette of the appearance and the colour vision in use. Syntax
+/// highlighting takes the appearance alone.
 fn palette(app: &App, ui: &Ui) -> &'static Palette {
-    theme::palette(appearance(app, ui), ColourVision::Standard)
+    theme::palette(appearance(app, ui), app.settings().colour_vision)
 }
 
 /// The appearance the window is drawn with.
