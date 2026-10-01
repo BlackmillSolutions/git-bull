@@ -696,11 +696,76 @@ fn tab_id(id: TabId) -> Id {
     Id::new(("tab", id))
 }
 
-/// The tabs side by side. A tab dragged with the pointer follows it, and
-/// the others make room as its centre passes theirs (design, decision 5).
+/// The narrowest a tab becomes to fit, and the widest it ever is, in
+/// points (design, decision 4).
+const TAB_MIN: f32 = 96.0;
+const TAB_MAX: f32 = 240.0;
+
+/// The id of the scroll area of the row of tabs.
+const TAB_ROW: &str = "tab-row";
+
+/// The widths of tabs that need `natural` widths, in `room` with `gap`
+/// between them: each at most [`TAB_MAX`], and when they do not fit, the
+/// widest narrowed alike to one width, but not below [`TAB_MIN`].
+fn tab_widths(natural: &[f32], room: f32, gap: f32) -> Vec<f32> {
+    let widths: Vec<f32> = natural.iter().map(|width| width.min(TAB_MAX)).collect();
+    let gaps = gap * widths.len().saturating_sub(1) as f32;
+    let mut sorted = widths.clone();
+    sorted.sort_by(f32::total_cmp);
+    // Narrower tabs keep their width as long as they need less than an
+    // equal share of what the narrower ones left.
+    let mut rest = room - gaps;
+    let mut cap = f32::INFINITY;
+    for (index, width) in sorted.iter().enumerate() {
+        let share = rest / (sorted.len() - index) as f32;
+        if *width > share {
+            cap = share.max(TAB_MIN);
+            break;
+        }
+        rest -= width;
+    }
+    widths.iter().map(|width| width.min(cap)).collect()
+}
+
+/// The tabs side by side in the room the row leaves for the button for a
+/// new tab after it; when even the narrowest tabs do not fit, the row
+/// scrolls sideways (design, decision 4).
 fn tab_row(ui: &mut Ui, palette: &Palette, tabs: &[TabLabel], actions: &mut Vec<Action>) {
     let gap = ui.spacing().item_spacing.x;
-    let sizes: Vec<egui::Vec2> = tabs.iter().map(|tab| tab_size(ui, &tab.title)).collect();
+    let room = (ui.available_width() - gap - SHAPE.control_height).max(0.0);
+    let natural: Vec<egui::Vec2> = tabs.iter().map(|tab| tab_size(ui, &tab.title)).collect();
+    let widths = tab_widths(
+        &natural.iter().map(|size| size.x).collect::<Vec<_>>(),
+        room,
+        gap,
+    );
+    let sizes: Vec<egui::Vec2> = natural
+        .iter()
+        .zip(widths)
+        .map(|(size, width)| egui::vec2(width, size.y))
+        .collect();
+    ui.scope(|ui| {
+        // The wheel scrolls the row sideways, without Shift.
+        ui.style_mut().always_scroll_the_only_direction = true;
+        egui::ScrollArea::horizontal()
+            .id_salt(TAB_ROW)
+            .max_width(room)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| place_tabs(ui, palette, tabs, &sizes, actions));
+    });
+}
+
+/// The tabs of `sizes`, side by side. A tab dragged with the pointer
+/// follows it, and the others make room as its centre passes theirs
+/// (design, decision 5).
+fn place_tabs(
+    ui: &mut Ui,
+    palette: &Palette,
+    tabs: &[TabLabel],
+    sizes: &[egui::Vec2],
+    actions: &mut Vec<Action>,
+) {
+    let gap = ui.spacing().item_spacing.x;
     let height = sizes.iter().map(|size| size.y).fold(0.0, f32::max);
     let width =
         sizes.iter().map(|size| size.x).sum::<f32>() + gap * tabs.len().saturating_sub(1) as f32;
@@ -750,6 +815,18 @@ fn tab_row(ui: &mut Ui, palette: &Palette, tabs: &[TabLabel], actions: &mut Vec<
         rects[index] = egui::Rect::from_min_size(egui::pos2(left, row.top()), sizes[index]);
         index
     });
+
+    // A tab that became active, and a tab being dragged, scroll into view.
+    let shown_id = Id::new(TAB_ROW).with("active");
+    if let Some(index) = tabs.iter().position(|tab| tab.active)
+        && ui.data(|data| data.get_temp::<TabId>(shown_id)) != Some(tabs[index].id)
+    {
+        ui.scroll_to_rect(rects[index], None);
+        ui.data_mut(|data| data.insert_temp(shown_id, tabs[index].id));
+    }
+    if let Some(index) = dragged {
+        ui.scroll_to_rect(rects[index], None);
+    }
 
     let escape = ui.input(|input| input.key_pressed(Key::Escape));
     // The dragged tab last, so that it is drawn over the others.
@@ -828,12 +905,23 @@ fn tab_button(
             &tab.title,
         )
     });
-    let font = egui::TextStyle::Body.resolve(ui.style());
-    let galley = ui
-        .painter()
-        .layout_no_wrap(tab.title.clone(), font, Color32::PLACEHOLDER);
-    let [small, _, padding, _] = SHAPE.space;
+    let [small, gap, padding, _] = SHAPE.space;
     let side = SHAPE.control_height;
+    // The title ends in "…" where the tab is narrower than it needs, and
+    // its tooltip shows it whole.
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::single_section(
+        tab.title.clone(),
+        egui::TextFormat::simple(font, Color32::PLACEHOLDER),
+    );
+    job.wrap =
+        egui::text::TextWrapping::truncate_at_width(rect.width() - padding - gap - side - small);
+    let galley = ui.painter().layout_job(job);
+    let response = if galley.elided {
+        response.on_hover_text(&tab.title)
+    } else {
+        response
+    };
     let under_pointer = ui.rect_contains_pointer(rect);
     let painter = ui.painter();
     let fill = if tab.active {
@@ -1476,4 +1564,32 @@ pub(crate) fn section_text(text: impl Into<String>) -> RichText {
 
 pub fn color(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.0, rgb.1, rgb.2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tabs_that_fit_keep_their_widths_up_to_the_widest_a_tab_gets() {
+        assert_eq!(tab_widths(&[60.0, 300.0], 1000.0, 4.0), [60.0, TAB_MAX]);
+    }
+
+    #[test]
+    fn the_widest_tabs_narrow_alike_while_narrow_ones_keep_their_width() {
+        // 400 points of room, 8 for the gaps: 60 for the first, 166 each
+        // for the other two.
+        assert_eq!(
+            tab_widths(&[60.0, 200.0, 230.0], 400.0, 4.0),
+            [60.0, 166.0, 166.0]
+        );
+    }
+
+    #[test]
+    fn tabs_narrow_no_further_than_the_narrowest_a_tab_gets() {
+        assert_eq!(
+            tab_widths(&[200.0, 200.0, 200.0], 100.0, 4.0),
+            [TAB_MIN, TAB_MIN, TAB_MIN]
+        );
+    }
 }

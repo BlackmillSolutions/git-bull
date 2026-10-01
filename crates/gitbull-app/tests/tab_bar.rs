@@ -5,13 +5,17 @@ mod support;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
-use eframe::egui::{Key, Rect, pos2};
+use std::path::PathBuf;
+
+use eframe::egui::{self, Key, Rect, pos2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use gitbull_app::app::App;
 use gitbull_core::settings::{Settings, SettingsFile};
 use gitbull_testkit::FakeBackend;
-use support::{Setup, active_title, build, path, settle_window, tab_titles, window, window_on};
+use support::{
+    Setup, active_title, build, path, settle_window, sized_window, tab_titles, window, window_on,
+};
 
 /// Two repositories open, the first active.
 fn two_tabs() -> Setup {
@@ -169,6 +173,60 @@ fn the_tabs_are_saved_in_the_order_they_were_dragged_into() {
             path(&["work", "linux"]),
         ]
     );
+}
+
+/// `count` repositories open, `repository-with-a-long-name-00` and on,
+/// the last active, in a window of the smallest size.
+fn many_tabs(count: usize) -> Harness<'static, App> {
+    let paths: Vec<PathBuf> = (0..count)
+        .map(|i| path(&["work", &format!("repository-with-a-long-name-{i:02}")]))
+        .collect();
+    let backend = paths.iter().fold(FakeBackend::default(), |backend, path| {
+        backend.with_repository(path)
+    });
+    let test = build(Setup {
+        settings: Settings {
+            tabs: paths,
+            active_tab: Some(count - 1),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = sized_window((640.0, 400.0), test.app);
+    settle_window(&mut harness);
+    harness
+}
+
+#[test]
+fn with_30_tabs_the_new_tab_button_and_the_active_tab_stay_in_the_window() {
+    let harness = many_tabs(30);
+    let window = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(640.0, 400.0));
+    let new_tab = harness
+        .get_by_role_and_label(Role::Button, "New tab")
+        .rect();
+    assert!(window.contains_rect(new_tab), "New tab at {new_tab:?}");
+    let active = tab(&harness, "repository-with-a-long-name-29");
+    assert!(window.contains_rect(active), "active tab at {active:?}");
+    let first = tab(&harness, "repository-with-a-long-name-00");
+    assert!(
+        first.width() >= 96.0,
+        "a tab narrows to 96 points at most: {first:?}"
+    );
+}
+
+#[test]
+fn a_narrowed_tab_names_its_full_title() {
+    let mut harness = many_tabs(5);
+    let title = "repository-with-a-long-name-01";
+    let narrowed = harness.get_by_role_and_label(Role::Button, title);
+    let width = narrowed.rect().width();
+    narrowed.hover();
+    harness.run();
+    assert!(width <= 240.0, "{width}");
+    // The tab names it to assistive technology, its tooltip to the eye.
+    let named = harness.query_all_by_label(title).count();
+    assert_eq!(named, 2, "the tab and its tooltip");
 }
 
 #[test]
