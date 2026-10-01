@@ -41,7 +41,7 @@ decision 6).
 
 ## 6. Third-party notices
 
-- [ ] 6.1 Let `cargo xtask notices` list Inter and JetBrains Mono with their licence texts from `crates/gitbull-app/assets/fonts/`, and regenerate `THIRD-PARTY-NOTICES.md`; verify a test, like the one for syntaxes and themes, that every font in that folder is listed with its licence text
+- [x] 6.1 Let `cargo xtask notices` list Inter and JetBrains Mono with their licence texts from `crates/gitbull-app/assets/fonts/`, and regenerate `THIRD-PARTY-NOTICES.md`; verify a test, like the one for syntaxes and themes, that every font in that folder is listed with its licence text
 
 ## 7. Final check
 
