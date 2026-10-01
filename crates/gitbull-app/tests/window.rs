@@ -4,14 +4,20 @@ mod support;
 
 use std::slice;
 
-use eframe::egui::FontFamily;
 use eframe::egui::accesskit::Role;
+use eframe::egui::os::OperatingSystem;
+use eframe::egui::{
+    Event, FontFamily, Modifiers, PointerButton, Pos2, ViewportCommand, ViewportId, pos2, vec2,
+};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use gitbull_app::app::App;
 use gitbull_app::{fonts, icons};
 use gitbull_core::settings::{Layout, Settings};
-use support::{app_with_open_repository, window};
+use support::{
+    Answer, Scripted, Setup, app_with_open_repository, build, window, window_at_60_fps,
+    window_at_60_fps_on, window_on,
+};
 
 #[test]
 fn history_view_shows_every_area() {
@@ -19,8 +25,10 @@ fn history_view_shows_every_area() {
     let mut harness = window(test.app);
     harness.run();
 
-    harness.get_by_label("git-bull"); // tab bar
-    harness.get_by_label("Open"); // toolbar
+    // The title bar with the tabs, above the toolbar.
+    let tab = harness.get_by_label("git-bull").rect();
+    let open = harness.get_by_label("Open").rect();
+    assert!(tab.bottom() <= open.top(), "tab {tab:?}, Open {open:?}");
     harness.get_by_label("WORKSPACE"); // sidebar
     harness.get_by_label("Description"); // commit list
     harness.get_by_label("COMMIT"); // commit panel
@@ -233,4 +241,173 @@ fn measured_divider_positions_are_saved() {
     assert!(saved.layout.details_height.is_some());
     assert!(saved.layout.commit_panel_width.is_some());
     assert_eq!(saved.tabs, [support::path(&["work", "git-bull"])]);
+}
+
+/// The commands the window sent to the system in the last frame.
+fn commands(harness: &Harness<'_, App>) -> Vec<ViewportCommand> {
+    harness
+        .output()
+        .viewport_output
+        .get(&ViewportId::ROOT)
+        .map(|output| output.commands.clone())
+        .unwrap_or_default()
+}
+
+/// Sends `events` to the window, one per frame, and returns the commands
+/// it sent to the system meanwhile.
+fn send(harness: &mut Harness<'_, App>, events: Vec<Event>) -> Vec<ViewportCommand> {
+    let mut sent = Vec::new();
+    for event in events {
+        harness.event(event);
+        harness.step();
+        sent.extend(commands(harness));
+    }
+    sent
+}
+
+fn button(at: Pos2, pressed: bool) -> Event {
+    Event::PointerButton {
+        pos: at,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+/// Presses at `at`, moves 30 points to the right and releases there.
+fn drag_from(at: Pos2) -> Vec<Event> {
+    let to = at + vec2(30.0, 0.0);
+    vec![
+        Event::PointerMoved(at),
+        button(at, true),
+        Event::PointerMoved(to),
+        button(to, false),
+    ]
+}
+
+/// Two clicks at `at`.
+fn double_click(at: Pos2) -> Vec<Event> {
+    vec![
+        Event::PointerMoved(at),
+        button(at, true),
+        button(at, false),
+        button(at, true),
+        button(at, false),
+    ]
+}
+
+/// A point of the free space of the title bar, right of the button for a
+/// new tab.
+fn free_space(harness: &Harness<'_, App>) -> Pos2 {
+    let new_tab = harness
+        .get_by_role_and_label(Role::Button, "New tab")
+        .rect();
+    pos2(new_tab.right() + 60.0, new_tab.center().y)
+}
+
+#[test]
+fn dragging_the_free_space_of_the_title_bar_moves_the_window() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_at_60_fps(test.app);
+    harness.run();
+    let at = free_space(&harness);
+    let sent = send(&mut harness, drag_from(at));
+    assert!(sent.contains(&ViewportCommand::StartDrag), "{sent:?}");
+}
+
+#[test]
+fn a_double_click_on_the_title_bar_maximizes_the_window_or_restores_it() {
+    for (maximized, asked) in [(false, true), (true, false)] {
+        let test = app_with_open_repository(Settings::default());
+        let mut harness = window_at_60_fps(test.app);
+        harness
+            .input_mut()
+            .viewports
+            .entry(ViewportId::ROOT)
+            .or_default()
+            .maximized = Some(maximized);
+        harness.run();
+        let at = free_space(&harness);
+        let sent = send(&mut harness, double_click(at));
+        assert!(
+            sent.contains(&ViewportCommand::Maximized(asked)),
+            "maximized {maximized}: {sent:?}"
+        );
+    }
+}
+
+#[test]
+fn on_macos_the_tabs_leave_room_for_the_buttons_of_the_system() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_on(OperatingSystem::Mac, test.app);
+    harness.run();
+    let tab = harness
+        .get_by_role_and_label(Role::Button, "git-bull")
+        .rect();
+    assert!(tab.left() >= 72.0, "{tab:?}");
+    let at = free_space(&harness);
+    let sent = send(&mut harness, drag_from(at));
+    assert!(sent.contains(&ViewportCommand::StartDrag), "{sent:?}");
+}
+
+#[test]
+fn with_the_system_title_bar_the_tabs_get_a_bar_that_moves_nothing() {
+    for os in [OperatingSystem::Windows, OperatingSystem::Mac] {
+        let test = app_with_open_repository(Settings {
+            system_title_bar: true,
+            ..Settings::default()
+        });
+        let mut harness = window_at_60_fps_on(os, test.app);
+        harness.run();
+        let tab = harness
+            .get_by_role_and_label(Role::Button, "git-bull")
+            .rect();
+        assert!(tab.left() < 72.0, "{os:?}: {tab:?}");
+        let at = free_space(&harness);
+        let mut sent = send(&mut harness, drag_from(at));
+        sent.extend(send(&mut harness, double_click(at)));
+        assert!(
+            !sent.iter().any(|command| matches!(
+                command,
+                ViewportCommand::StartDrag | ViewportCommand::Maximized(_)
+            )),
+            "{os:?}: {sent:?}"
+        );
+    }
+}
+
+#[test]
+fn the_start_screen_has_the_title_bar_to_move_the_window() {
+    let script = Scripted::new(|_| Answer::Missing);
+    let test = build(Setup {
+        checker: Some(script.checker()),
+        ..Setup::default()
+    });
+    let mut harness = window_at_60_fps(test.app);
+    harness.run();
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "New tab")
+            .is_none(),
+        "no tabs before Git is usable"
+    );
+    let sent = send(&mut harness, drag_from(pos2(640.0, 16.0)));
+    assert!(sent.contains(&ViewportCommand::StartDrag), "{sent:?}");
+}
+
+#[test]
+fn the_title_bar_stays_above_the_toolbar_in_another_view() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window(test.app);
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TreeItem, "File status")
+        .click();
+    harness.run();
+    let tab = harness
+        .get_by_role_and_label(Role::Button, "git-bull")
+        .rect();
+    let open = harness.get_by_role_and_label(Role::Button, "Open").rect();
+    assert!(tab.bottom() <= open.top(), "tab {tab:?}, Open {open:?}");
+    harness.get_by_label("Git 2.55.0");
 }

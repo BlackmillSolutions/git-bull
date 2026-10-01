@@ -141,6 +141,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     let mut actions = Vec::new();
     if let GitStatus::Problem(problem) = &app.git {
+        title_bar(app, ui, &mut actions);
         CentralPanel::default().show(ui, |ui| start_screen(app, problem, ui, &mut actions));
         apply(app, actions);
         return;
@@ -156,7 +157,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let focus_search = actions
         .iter()
         .any(|action| matches!(action, Action::FocusSearch));
-    Panel::top("tab_bar").show(ui, |ui| tab_bar(app, ui, &mut actions));
+    title_bar(app, ui, &mut actions);
     Panel::top("toolbar").show(ui, |ui| toolbar(app, ui, focus_search, &mut actions));
     if app.dialog.is_some() {
         settings_dialog(app, ui, &mut actions);
@@ -634,41 +635,89 @@ fn notice_kind(notice: &Notice) -> BannerKind {
     }
 }
 
-fn tab_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
-    let palette = palette(app, ui);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = SHAPE.space[0];
-        if let Some(workspace) = app.workspace() {
-            let active = workspace.active().map(|tab| tab.id());
-            let tabs: Vec<TabLabel> = workspace
-                .tabs()
-                .iter()
-                .map(|tab| {
-                    let title = match tab.state() {
-                        TabState::Opening => {
-                            let mut args = FluentArgs::new();
-                            args.set("folder", tab.title());
-                            app.texts.text_with(Msg::TabOpening, Some(&args))
-                        }
-                        _ => tab.title(),
-                    };
-                    let mut args = FluentArgs::new();
-                    args.set("title", tab.title());
-                    TabLabel {
-                        id: tab.id(),
-                        title,
-                        close: app.texts.text_with(Msg::TabClose, Some(&args)),
-                        active: Some(tab.id()) == active,
-                    }
-                })
-                .collect();
-            tab_row(ui, palette, &tabs, actions);
+/// The room left of the tabs for the system's buttons on macOS, in points of
+/// macOS, which does not scale them with the interface size.
+const MAC_BUTTONS: f32 = 72.0;
+/// The height of the system's title bar on macOS, in points.
+const MAC_TITLE_BAR: f32 = 28.0;
+/// The free space of the title bar that stays whatever the number of tabs,
+/// so that the window can always be moved.
+const FREE_SPACE: f32 = 48.0;
+
+/// The panel at the top of the window. With git-bull's own title bar it
+/// holds the tabs, on macOS right of the system's buttons, and free space
+/// that moves the window when dragged and maximizes or restores it on a
+/// double click; with the system's title bar only the tabs (design,
+/// decision 2). Before Git is usable it has no tabs.
+fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let own = !app.system_title_bar();
+    if !own && app.workspace().is_none() {
+        return;
+    }
+    let frame = egui::Frame::side_top_panel(ui.style());
+    Panel::top("title_bar").frame(frame).show(ui, |ui| {
+        if own {
+            // First, so that the tabs and buttons on it take their own
+            // clicks; with the margin of the panel, to its edges.
+            let whole = ui.max_rect() + frame.inner_margin;
+            let free = ui.interact(whole, Id::new("title-bar"), Sense::click_and_drag());
+            if free.drag_started_by(egui::PointerButton::Primary) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if free.double_clicked() {
+                let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            }
         }
-        let new_tab = app.texts.text(Msg::TabNew);
-        if components::icon_button(ui, icons::PLUS, &new_tab, Some(NEW_TAB)).clicked() {
-            actions.push(Action::ShowChooser);
-        }
+        ui.horizontal(|ui| {
+            if own && ui.ctx().os() == egui::os::OperatingSystem::Mac {
+                ui.set_min_height(MAC_TITLE_BAR);
+                ui.add_space(MAC_BUTTONS / ui.ctx().zoom_factor());
+            }
+            if app.workspace().is_some() {
+                let reserve = if own { FREE_SPACE } else { 0.0 };
+                tabs(app, ui, reserve, actions);
+            }
+        });
     });
+}
+
+/// The tabs and the button for a new tab, leaving `reserve` points free
+/// right of them.
+fn tabs(app: &App, ui: &mut Ui, reserve: f32, actions: &mut Vec<Action>) {
+    let palette = palette(app, ui);
+    ui.spacing_mut().item_spacing.x = SHAPE.space[0];
+    if let Some(workspace) = app.workspace() {
+        let active = workspace.active().map(|tab| tab.id());
+        let tabs: Vec<TabLabel> = workspace
+            .tabs()
+            .iter()
+            .map(|tab| {
+                let title = match tab.state() {
+                    TabState::Opening => {
+                        let mut args = FluentArgs::new();
+                        args.set("folder", tab.title());
+                        app.texts.text_with(Msg::TabOpening, Some(&args))
+                    }
+                    _ => tab.title(),
+                };
+                let mut args = FluentArgs::new();
+                args.set("title", tab.title());
+                TabLabel {
+                    id: tab.id(),
+                    title,
+                    close: app.texts.text_with(Msg::TabClose, Some(&args)),
+                    active: Some(tab.id()) == active,
+                }
+            })
+            .collect();
+        tab_row(ui, palette, &tabs, reserve, actions);
+    }
+    let new_tab = app.texts.text(Msg::TabNew);
+    if components::icon_button(ui, icons::PLUS, &new_tab, Some(NEW_TAB)).clicked() {
+        actions.push(Action::ShowChooser);
+    }
 }
 
 /// What a tab shows.
@@ -728,11 +777,17 @@ fn tab_widths(natural: &[f32], room: f32, gap: f32) -> Vec<f32> {
 }
 
 /// The tabs side by side in the room the row leaves for the button for a
-/// new tab after it; when even the narrowest tabs do not fit, the row
+/// new tab after it and `reserve` points beyond; when even the narrowest tabs do not fit, the row
 /// scrolls sideways (design, decision 4).
-fn tab_row(ui: &mut Ui, palette: &Palette, tabs: &[TabLabel], actions: &mut Vec<Action>) {
+fn tab_row(
+    ui: &mut Ui,
+    palette: &Palette,
+    tabs: &[TabLabel],
+    reserve: f32,
+    actions: &mut Vec<Action>,
+) {
     let gap = ui.spacing().item_spacing.x;
-    let room = (ui.available_width() - gap - SHAPE.control_height).max(0.0);
+    let room = (ui.available_width() - gap - SHAPE.control_height - reserve).max(0.0);
     let natural: Vec<egui::Vec2> = tabs.iter().map(|tab| tab_size(ui, &tab.title)).collect();
     let widths = tab_widths(
         &natural.iter().map(|size| size.x).collect::<Vec<_>>(),
