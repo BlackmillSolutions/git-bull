@@ -111,4 +111,4 @@ after each stage.
 - [x] 9.2 Add the release workflow that builds the five packages on a version tag, each with both licence texts and the notices file, and publishes nothing when one build fails; verify by pushing a pre-release tag
 - [x] 9.3 Write the README sections on supported systems, prerequisites per platform including the desktop portal on Linux, installation, the Git requirement and the warnings for packages without a developer signature; verify the documented steps on Windows. The checks on macOS and Linux moved to the change `verify-release-0-1-0`.
 - 9.4 Moved to the change `verify-release-0-1-0`: starting each package on a clean installation of Windows 10, macOS 12 and Ubuntu 22.04.
-- [ ] 9.5 Final check: run `openspec validate add-repository-viewer --strict` and the full test suite; verify both succeed and CI is green on all three platforms
+- [x] 9.5 Final check: run `openspec validate add-repository-viewer --strict` and the full test suite; verify both succeed and CI is green on all three platforms
