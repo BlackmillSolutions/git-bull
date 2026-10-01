@@ -196,6 +196,38 @@ fn tab_onto_a_button_shows_the_focus_ring() {
 }
 
 #[test]
+fn a_text_field_shows_where_typing_goes_after_a_click() {
+    let mut harness = harness(String::new(), |ui, text: &mut String| {
+        components::text_field(ui, text, "Search", 200.0);
+    });
+    harness.run();
+    let field = harness.get_by_role(Role::TextInput);
+    let widget = field.rect();
+    field.click();
+    harness.run();
+    assert!(
+        has_focus_ring(&harness, widget),
+        "no border around {widget:?}"
+    );
+}
+
+#[test]
+fn a_click_on_a_button_shows_no_focus_ring() {
+    let mut harness = harness((), |ui, _| {
+        Button::new("Open").show(ui);
+    });
+    harness.run();
+    harness.key_press(Key::Tab);
+    harness.run();
+    let button = harness.get_by_role_and_label(Role::Button, "Open");
+    let widget = button.rect();
+    assert!(has_focus_ring(&harness, widget), "Tab shows the ring");
+    button.click();
+    harness.run();
+    assert!(!has_focus_ring(&harness, widget), "the click hides it");
+}
+
+#[test]
 fn focused_components_show_the_focus_ring() {
     let mut harness = harness(("light", String::new()), |ui, (chosen, text)| {
         Button::new("Open").kind(Kind::Primary).show(ui);

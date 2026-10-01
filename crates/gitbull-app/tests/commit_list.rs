@@ -598,14 +598,38 @@ fn tab_moves_focus_through_the_areas() {
 fn each_area_shows_the_focus_ring_when_tab_reaches_it() {
     let mut harness = open(backend());
     click_row(&mut harness, "Fix the parser", PointerButton::Primary);
-    for area in [COMMIT_LIST, AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR] {
+    for area in [AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST] {
+        press(&mut harness, Modifiers::NONE);
         assert_eq!(focused(&harness), Some(Id::new(area)));
         assert!(
             !support::focus_rings(harness.output()).is_empty(),
             "no ring in {area}"
         );
-        press(&mut harness, Modifiers::NONE);
     }
+}
+
+/// Scenario "No focus ring after a click".
+#[test]
+fn a_click_focuses_the_list_without_a_focus_ring() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    assert_eq!(focused(&harness), Some(Id::new(COMMIT_LIST)));
+    assert_eq!(support::focus_rings(harness.output()), []);
+}
+
+/// Scenario "Focus ring after a key": the ring of an area is thinner than
+/// that of a control.
+#[test]
+fn a_key_after_a_click_shows_a_thin_focus_ring_on_the_list() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    let widths: Vec<f32> = support::focus_strokes(harness.output())
+        .into_iter()
+        .map(|(_, width)| width)
+        .collect();
+    assert_eq!(widths, [1.0]);
 }
 
 #[test]

@@ -4,8 +4,8 @@
 use eframe::egui::accesskit::Role;
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
-    self, Color32, FontId, Id, Label, ScrollArea, Sense, Stroke, StrokeKind, Ui, WidgetInfo,
-    WidgetType, pos2, vec2,
+    self, Color32, FontId, Id, Label, ScrollArea, Sense, Stroke, Ui, WidgetInfo, WidgetType, pos2,
+    vec2,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::details::{DiffState, Highlighting};
@@ -371,12 +371,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
     }
     if focused {
         lock_tab(ui, background.id);
-        ui.painter().rect_stroke(
-            area.shrink(1.0),
-            0.0,
-            ui.visuals().selection.stroke,
-            StrokeKind::Inside,
-        );
+        components::area_focus_ring(ui, area, true);
     }
     if load_all {
         load_whole(session, pane);

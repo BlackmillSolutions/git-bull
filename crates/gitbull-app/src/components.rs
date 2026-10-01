@@ -5,8 +5,9 @@
 
 use eframe::egui::os::OperatingSystem;
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, Frame, KeyboardShortcut, Margin, ModifierNames, Response,
-    RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
+    self, Align2, Color32, Context, CornerRadius, Event, Frame, Id, KeyboardShortcut, Margin,
+    ModifierNames, Response, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo,
+    WidgetType, vec2,
 };
 
 use crate::icons;
@@ -415,16 +416,62 @@ pub fn banner(
     clicked
 }
 
-/// Draws the focus ring around `response` while it has the keyboard focus:
-/// the stroke of the selection, which the style makes the focus colour.
+/// Where the pass that last looked at the input, and whether focus rings
+/// show, are kept.
+const FOCUS_VISIBLE: &str = "gitbull-focus-visible";
+
+/// Whether focus rings show, as `:focus-visible` in browsers: from a pass
+/// with a key pressed or an action of assistive technology on, and not from
+/// a pass with a pointer button pressed on (design, decision 5). Each pass
+/// reads its input once, at the first call; `ui::show` calls this before
+/// the keys are consumed.
+pub fn focus_visible(ctx: &Context) -> bool {
+    let id = Id::new(FOCUS_VISIBLE);
+    let pass = ctx.cumulative_pass_nr();
+    let known = ctx.data(|data| data.get_temp::<(u64, bool)>(id));
+    if let Some((seen, visible)) = known
+        && seen == pass
+    {
+        return visible;
+    }
+    let mut visible = known.is_some_and(|(_, visible)| visible);
+    ctx.input(|input| {
+        for event in &input.events {
+            match event {
+                Event::Key { pressed: true, .. } | Event::AccessKitActionRequest(_) => {
+                    visible = true;
+                }
+                Event::PointerButton { pressed: true, .. } => visible = false,
+                _ => {}
+            }
+        }
+    });
+    ctx.data_mut(|data| data.insert_temp(id, (pass, visible)));
+    visible
+}
+
+/// Draws the focus ring of a control around `response` while it has the
+/// focus and rings show: the stroke of the selection, 2 points in the focus
+/// colour.
 pub fn focus_ring(ui: &Ui, response: &Response) {
-    if response.has_focus() {
+    if response.has_focus() && focus_visible(ui.ctx()) {
         ui.painter().rect_stroke(
             response.rect,
             radius(),
             ui.visuals().selection.stroke,
             StrokeKind::Inside,
         );
+    }
+}
+
+/// Draws the focus ring of an area, such as a list, inside `rect` while
+/// `focused` and rings show: 1 point in the focus colour, thinner than that
+/// of a control, as the area is large.
+pub fn area_focus_ring(ui: &Ui, rect: egui::Rect, focused: bool) {
+    if focused && focus_visible(ui.ctx()) {
+        let colour = ui.visuals().selection.stroke.color;
+        ui.painter()
+            .rect_stroke(rect, 0.0, Stroke::new(1.0, colour), StrokeKind::Inside);
     }
 }
 

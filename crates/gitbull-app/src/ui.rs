@@ -129,6 +129,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let appearance = appearance(app, ui);
     style::use_style(ui, appearance, app.settings().colour_vision);
     apply_interface_size(app, ui);
+    // Reads this pass's keys and clicks before the widgets consume them.
+    components::focus_visible(ui.ctx());
 
     let mut actions = Vec::new();
     if let GitStatus::Problem(problem) = &app.git {
@@ -1213,7 +1215,7 @@ pub(crate) fn focus_area(ui: &mut Ui, id: &str) {
     if response.has_focus() {
         lock_tab(ui, response.id);
     }
-    focus_ring(ui, &response);
+    components::area_focus_ring(ui, rect, response.has_focus());
 }
 
 /// Keeps egui from moving the focus on Tab, which `move_between_areas`
