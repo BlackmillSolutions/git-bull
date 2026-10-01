@@ -1,0 +1,135 @@
+# Spec Delta
+
+## ADDED Requirements
+
+### Requirement: Colour vision
+git-bull SHALL offer the colour visions Standard, Red-green and Blue-yellow,
+with Standard as the default. The colour vision SHALL be independent of the
+theme: each combination of theme and colour vision has its own palette. The
+colour vision SHALL apply at once to every area that carries meaning in
+colour, including the diff, the kinds of change, the badges and the commit
+graph; syntax highlighting SHALL keep the colours of the theme.
+
+#### Scenario: Choose a colour vision
+- **WHEN** the user chooses the colour vision Red-green
+- **THEN** the diff, the kinds of change, the badges and the commit graph change to the red-green palette of the current theme without a restart
+
+#### Scenario: Colour vision with another theme
+- **WHEN** the colour vision is Blue-yellow and the theme changes from light to dark
+- **THEN** git-bull uses the dark palette for Blue-yellow
+
+#### Scenario: Colour vision survives a restart
+- **WHEN** the user chooses the colour vision Blue-yellow, closes git-bull and starts it again
+- **THEN** the colour vision is Blue-yellow
+
+### Requirement: Interface size
+git-bull SHALL offer the interface sizes 100 %, 115 %, 130 % and 150 %, with
+100 % as the default. The interface size SHALL scale text, icons, spacing and
+click targets alike, on top of the scaling of the operating system, and SHALL
+apply at once. Changing the interface size with the keyboard SHALL move to
+the next or previous of these sizes and SHALL be saved like a change in the
+settings dialog.
+
+#### Scenario: Larger interface
+- **WHEN** the interface size is 100 % and the user chooses 130 %
+- **THEN** text, icons, spacing and click targets become 1.3 times as large at once
+
+#### Scenario: Interface size survives a restart
+- **WHEN** the user chooses the interface size 115 %, closes git-bull and starts it again
+- **THEN** the interface size is 115 %
+
+#### Scenario: Keyboard moves between the sizes
+- **WHEN** the interface size is 115 % and the user presses Ctrl+Plus
+- **THEN** the interface size is 130 %
+
+#### Scenario: Largest size
+- **WHEN** the interface size is 150 % and the user presses Ctrl+Plus
+- **THEN** the interface size stays 150 %
+
+## MODIFIED Requirements
+
+### Requirement: Persisted settings
+git-bull SHALL persist the following in one file in the operating system's
+configuration directory for applications: theme, colour vision, interface
+size, language, the path to the Git executable, recently opened
+repositories, open tabs and the active tab, window size and position,
+divider positions and column widths. A path that is not valid UTF-8 SHALL be
+left out of the saved settings; the other settings SHALL still be saved.
+
+#### Scenario: Layout survives a restart
+- **WHEN** the user changes a divider position and a column width, closes git-bull and starts it again
+- **THEN** the divider position and the column width are as the user left them
+
+#### Scenario: Window geometry survives a restart
+- **WHEN** the user resizes and moves the window on Windows, on macOS or on Linux under X11, closes git-bull and starts it again
+- **THEN** the window has the same size and position
+
+#### Scenario: Window geometry under Wayland
+- **WHEN** the user resizes the window on Linux under Wayland, closes git-bull and starts it again
+- **THEN** the window has the same size, and the system chooses its position
+
+#### Scenario: Repository path that is not valid UTF-8
+- **WHEN** the user has opened a repository whose path is not valid UTF-8, changes a column width, closes git-bull and starts it again
+- **THEN** the column width is as the user left it
+- **AND** that repository is neither restored as a tab nor listed among the recently opened repositories, and the tab that was active is active again
+
+#### Scenario: Settings file of an earlier version
+- **WHEN** git-bull starts with a settings file that has no colour vision and no interface size
+- **THEN** it uses the colour vision Standard and the interface size 100 %, and keeps every other setting from the file
+
+### Requirement: Settings dialog
+The settings dialog SHALL offer, in a section "Appearance", the theme, the
+colour vision and the interface size, and further the language and the path
+to the Git executable. All other settings SHALL be saved without user
+action. When another Git executable is applied while tabs are open, the
+tabs SHALL open again with it, each in its initial state.
+
+#### Scenario: Appearance section
+- **WHEN** the user opens the settings dialog
+- **THEN** its section "Appearance" offers the theme, the colour vision and the interface size
+
+#### Scenario: Valid Git path
+- **WHEN** the user enters the path to a Git executable of a supported version
+- **THEN** git-bull uses that executable from then on
+
+#### Scenario: Invalid Git path
+- **WHEN** the user enters a path that is not a Git executable of a supported version
+- **THEN** git-bull shows a message explaining why and keeps the previous value
+
+#### Scenario: Git path changed while tabs are open
+- **WHEN** three tabs are open, the user closed a fourth one earlier, a file history is open in the third tab, and the user applies another valid Git path
+- **THEN** the three tabs open again with that executable
+- **AND** each tab shows the History view of its own repository, without the scroll position, selection or open view that any tab had before
+
+### Requirement: Theme
+git-bull SHALL offer a light and a dark theme. By default the theme SHALL
+follow the setting of the operating system. On Windows and macOS it SHALL
+follow changes of that setting while running. On Linux it SHALL read the
+setting of the desktop once at start-up, and SHALL use the dark theme when
+the desktop reports none. The theme switch in the toolbar SHALL override the
+system. The theme SHALL apply to every area, including syntax highlighting
+and the colours of the commit graph.
+
+#### Scenario: Follow the system
+- **WHEN** the theme setting is "system" and the operating system uses a dark appearance
+- **THEN** git-bull uses the dark theme
+
+#### Scenario: System appearance changes on Windows or macOS
+- **WHEN** the theme setting is "system" and the operating system switches to a light appearance while git-bull is running
+- **THEN** git-bull switches to the light theme
+
+#### Scenario: System appearance changes on Linux
+- **WHEN** the theme setting is "system" and the desktop switches its appearance while git-bull is running
+- **THEN** git-bull keeps its theme until it is started again
+
+#### Scenario: Desktop reports no appearance
+- **WHEN** git-bull starts on a Linux desktop that reports no appearance
+- **THEN** git-bull uses the dark theme
+
+#### Scenario: Manual override
+- **WHEN** the user switches the theme in the toolbar, closes git-bull and starts it again
+- **THEN** git-bull uses the theme the user chose
+
+#### Scenario: Graph colours are visible
+- **WHEN** either theme is active, with any of the three colour visions
+- **THEN** every colour of the commit graph has a contrast ratio of at least 3:1 against the background of the commit list
