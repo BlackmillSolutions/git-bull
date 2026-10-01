@@ -107,6 +107,8 @@ enum Action {
     PreviousTab,
     /// Move the active tab this many places to the right, or to the left.
     MoveActive(isize),
+    /// Move the tab to this place among the tabs.
+    MoveTab(TabId, usize),
     Retry(TabId),
     /// Show all branches and go to the reference with this full name.
     ShowAllBranches(String),
@@ -282,6 +284,11 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::MoveActive(step) => {
                 if let Some(workspace) = app.workspace_mut() {
                     workspace.move_active(step);
+                }
+            }
+            Action::MoveTab(id, index) => {
+                if let Some(workspace) = app.workspace_mut() {
+                    workspace.move_tab(id, index);
                 }
             }
         }
@@ -633,24 +640,29 @@ fn tab_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
         ui.spacing_mut().item_spacing.x = SHAPE.space[0];
         if let Some(workspace) = app.workspace() {
             let active = workspace.active().map(|tab| tab.id());
-            for tab in workspace.tabs() {
-                let title = match tab.state() {
-                    TabState::Opening => {
-                        let mut args = FluentArgs::new();
-                        args.set("folder", tab.title());
-                        app.texts.text_with(Msg::TabOpening, Some(&args))
+            let tabs: Vec<TabLabel> = workspace
+                .tabs()
+                .iter()
+                .map(|tab| {
+                    let title = match tab.state() {
+                        TabState::Opening => {
+                            let mut args = FluentArgs::new();
+                            args.set("folder", tab.title());
+                            app.texts.text_with(Msg::TabOpening, Some(&args))
+                        }
+                        _ => tab.title(),
+                    };
+                    let mut args = FluentArgs::new();
+                    args.set("title", tab.title());
+                    TabLabel {
+                        id: tab.id(),
+                        title,
+                        close: app.texts.text_with(Msg::TabClose, Some(&args)),
+                        active: Some(tab.id()) == active,
                     }
-                    _ => tab.title(),
-                };
-                let mut args = FluentArgs::new();
-                args.set("title", tab.title());
-                let close = app.texts.text_with(Msg::TabClose, Some(&args));
-                match tab_button(ui, palette, &title, &close, Some(tab.id()) == active) {
-                    Some(TabClick::Activate) => actions.push(Action::Activate(tab.id())),
-                    Some(TabClick::Close) => actions.push(Action::Close(tab.id())),
-                    None => {}
-                }
-            }
+                })
+                .collect();
+            tab_row(ui, palette, &tabs, actions);
         }
         let new_tab = app.texts.text(Msg::TabNew);
         if components::icon_button(ui, icons::PLUS, &new_tab, Some(NEW_TAB)).clicked() {
@@ -659,39 +671,172 @@ fn tab_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     });
 }
 
+/// What a tab shows.
+struct TabLabel {
+    id: TabId,
+    title: String,
+    /// The name of its close button.
+    close: String,
+    active: bool,
+}
+
+/// Where the row of tabs keeps the tab being dragged between frames.
+const TAB_DRAG: &str = "tab-drag";
+
+/// A tab being dragged to another place, and where the pointer holds it,
+/// from the tab's left edge.
+#[derive(Clone, Copy)]
+struct TabDrag {
+    id: TabId,
+    grab: f32,
+}
+
+/// The id of the tab with `id`, the same wherever the tab is drawn.
+fn tab_id(id: TabId) -> Id {
+    Id::new(("tab", id))
+}
+
+/// The tabs side by side. A tab dragged with the pointer follows it, and
+/// the others make room as its centre passes theirs (design, decision 5).
+fn tab_row(ui: &mut Ui, palette: &Palette, tabs: &[TabLabel], actions: &mut Vec<Action>) {
+    let gap = ui.spacing().item_spacing.x;
+    let sizes: Vec<egui::Vec2> = tabs.iter().map(|tab| tab_size(ui, &tab.title)).collect();
+    let height = sizes.iter().map(|size| size.y).fold(0.0, f32::max);
+    let width =
+        sizes.iter().map(|size| size.x).sum::<f32>() + gap * tabs.len().saturating_sub(1) as f32;
+    let (row, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    // The left edge of each tab in its own place.
+    let lefts: Vec<f32> = sizes
+        .iter()
+        .scan(row.left(), |left, size| {
+            let this = *left;
+            *left += size.x + gap;
+            Some(this)
+        })
+        .collect();
+
+    // The tab being dragged, where it is drawn, and its place among the
+    // others: after each one whose centre it has passed.
+    let drag_id = Id::new(TAB_DRAG);
+    let drag = ui
+        .data(|data| data.get_temp::<TabDrag>(drag_id))
+        .and_then(|drag| {
+            let index = tabs.iter().position(|tab| tab.id == drag.id)?;
+            let pointer = ui.input(|input| input.pointer.latest_pos())?;
+            let left = pointer.x - drag.grab;
+            // Its place by where the pointer holds it, so that a wide tab
+            // passes a narrow one at the end of the row, though it is drawn
+            // within the row.
+            let centre = left + sizes[index].x / 2.0;
+            let left = left.clamp(row.left(), row.right() - sizes[index].x);
+            let place = (0..tabs.len())
+                .filter(|&other| other != index && lefts[other] + sizes[other].x / 2.0 < centre)
+                .count();
+            Some((index, left, place))
+        });
+
+    let mut order: Vec<usize> = (0..tabs.len()).collect();
+    if let Some((index, _, place)) = drag {
+        order.remove(index);
+        order.insert(place, index);
+    }
+    let mut rects = vec![egui::Rect::NOTHING; tabs.len()];
+    let mut x = row.left();
+    for &index in &order {
+        rects[index] = egui::Rect::from_min_size(egui::pos2(x, row.top()), sizes[index]);
+        x += sizes[index].x + gap;
+    }
+    let dragged = drag.map(|(index, left, _)| {
+        rects[index] = egui::Rect::from_min_size(egui::pos2(left, row.top()), sizes[index]);
+        index
+    });
+
+    let escape = ui.input(|input| input.key_pressed(Key::Escape));
+    // The dragged tab last, so that it is drawn over the others.
+    for index in (0..tabs.len())
+        .filter(|&index| Some(index) != dragged)
+        .chain(dragged)
+    {
+        let tab = &tabs[index];
+        let (response, click) = tab_button(ui, palette, rects[index], tab);
+        match click {
+            Some(TabClick::Activate) => actions.push(Action::Activate(tab.id)),
+            Some(TabClick::Close) => actions.push(Action::Close(tab.id)),
+            None => {}
+        }
+        // Where the button went down, as egui sees a drag only once the
+        // pointer has moved away from there.
+        if response.drag_started()
+            && let Some(pressed) = ui.input(|input| input.pointer.press_origin())
+        {
+            let grab = pressed.x - rects[index].left();
+            ui.data_mut(|data| data.insert_temp(drag_id, TabDrag { id: tab.id, grab }));
+            actions.push(Action::Activate(tab.id));
+        }
+        // egui ends a drag on Escape; the tab then stays where it was.
+        if response.drag_stopped()
+            && !escape
+            && let Some((dragged, _, place)) = drag
+            && dragged == index
+        {
+            actions.push(Action::MoveTab(tab.id, place));
+        }
+    }
+    if drag.is_some()
+        && !tabs
+            .iter()
+            .any(|tab| ui.ctx().is_being_dragged(tab_id(tab.id)))
+    {
+        ui.data_mut(|data| data.remove::<TabDrag>(drag_id));
+    }
+}
+
 /// What the user did with a tab.
 enum TabClick {
     Activate,
     Close,
 }
 
-/// A tab with its title, and the button named `close` on the active tab
-/// and under the pointer. The active tab is raised and marked with a line
-/// in the accent colour.
-fn tab_button(
-    ui: &mut Ui,
-    palette: &Palette,
-    title: &str,
-    close: &str,
-    active: bool,
-) -> Option<TabClick> {
+/// The size of a tab with `title`, its close button included.
+fn tab_size(ui: &Ui, title: &str) -> egui::Vec2 {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let galley = ui
         .painter()
         .layout_no_wrap(title.to_owned(), font, Color32::PLACEHOLDER);
     let [small, gap, padding, _] = SHAPE.space;
-    let side = SHAPE.control_height;
-    let size = egui::vec2(
-        padding + galley.size().x + gap + side + small,
+    egui::vec2(
+        padding + galley.size().x + gap + SHAPE.control_height + small,
         SHAPE.control_height + small,
-    );
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    )
+}
+
+/// The tab drawn in `rect`, with its title and the button named after
+/// `tab.close` on the active tab and under the pointer. The active tab is
+/// raised and marked with a line in the accent colour.
+fn tab_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    rect: egui::Rect,
+    tab: &TabLabel,
+) -> (egui::Response, Option<TabClick>) {
+    let response = ui.interact(rect, tab_id(tab.id), Sense::click_and_drag());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, title)
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            true,
+            tab.active,
+            &tab.title,
+        )
     });
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(tab.title.clone(), font, Color32::PLACEHOLDER);
+    let [small, _, padding, _] = SHAPE.space;
+    let side = SHAPE.control_height;
     let under_pointer = ui.rect_contains_pointer(rect);
     let painter = ui.painter();
-    let fill = if active {
+    let fill = if tab.active {
         color(palette.raised)
     } else if under_pointer {
         color(palette.hover)
@@ -706,14 +851,14 @@ fn tab_button(
         se: 0,
     };
     painter.rect_filled(rect, top, fill);
-    if active {
+    if tab.active {
         let line = egui::Rect::from_min_max(
             egui::pos2(rect.left(), rect.bottom() - 2.0),
             rect.right_bottom(),
         );
         painter.rect_filled(line, 0.0, color(palette.accent));
     }
-    let text = if active {
+    let text = if tab.active {
         palette.text
     } else {
         palette.text_muted
@@ -726,20 +871,18 @@ fn tab_button(
     focus_ring(ui, &response);
 
     let mut clicked = response.clicked().then_some(TabClick::Activate);
-    if active || under_pointer {
+    if tab.active || under_pointer {
         let centre = egui::pos2(rect.right() - small - side / 2.0, rect.center().y);
         let place = egui::Rect::from_center_size(centre, egui::vec2(side, side));
-        let shortcut = active.then_some(CLOSE_TAB);
-        let button = ui
-            .scope_builder(egui::UiBuilder::new().max_rect(place), |ui| {
-                components::icon_button(ui, icons::CLOSE, close, shortcut)
-            })
-            .inner;
+        let shortcut = tab.active.then_some(CLOSE_TAB);
+        // A child that takes no space of the row: the row has taken it.
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(place));
+        let button = components::icon_button(&mut child, icons::CLOSE, &tab.close, shortcut);
         if button.clicked() {
             clicked = Some(TabClick::Close);
         }
     }
-    clicked
+    (response, clicked)
 }
 
 fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>) {
