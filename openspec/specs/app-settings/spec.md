@@ -3,7 +3,8 @@
 ## Purpose
 
 Settings keep the user's preferences and the state of the window across runs,
-and control the theme and the language of the interface.
+and control the theme, the colour vision, the size and the language of the
+interface.
 
 ## Requirements
 
