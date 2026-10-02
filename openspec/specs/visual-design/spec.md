@@ -16,10 +16,11 @@ roles, such as text, backgrounds, borders, the colours of added and removed
 lines and the backgrounds of changed words in them. In every palette, text
 SHALL have a contrast ratio of at least 4.5:1 against each background it is
 drawn on, including the letters of the kinds of change, the markers `+` and
-`-` of added and removed lines, text on the backgrounds of changed words
-and the text of badges. The borders of controls, the focus ring, the
-colours of the commit graph and the fills of badges SHALL have at least 3:1
-against the background around them. The background of changed words SHALL
+`-` of added and removed lines, text on the backgrounds of changed words,
+the numbers of added and removed lines in a file list and the text of
+badges. The borders of controls, the focus ring, the colours of the commit
+graph, the fills of badges and the boxes of the bar of changed lines SHALL
+have at least 3:1 against the background around them. The background of changed words SHALL
 differ in lightness from the background of its line by at least 8 (CIELAB
 L*), so that changed words stand out in every colour vision and in shades
 of grey.
@@ -35,6 +36,10 @@ of grey.
 #### Scenario: Changed words stand out
 - **WHEN** any of the six palettes is active
 - **THEN** the backgrounds of changed words in added and in removed lines differ in lightness from the backgrounds of these lines by at least 8, and text on them has a contrast ratio of at least 4.5:1
+
+#### Scenario: Changed lines in a file list
+- **WHEN** any of the six palettes is active
+- **THEN** the numbers of added and removed lines have a contrast ratio of at least 4.5:1, and the boxes of their bar at least 3:1, against the background of a file list, a selected row and a row under the pointer
 
 ### Requirement: Distinguishable colours for each colour vision
 In the palettes for Red-green, colours that carry meaning SHALL stay

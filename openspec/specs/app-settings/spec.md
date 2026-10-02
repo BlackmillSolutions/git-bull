@@ -12,9 +12,10 @@ interface.
 git-bull SHALL persist the following in one file in the operating system's
 configuration directory for applications: theme, colour vision, interface
 size, whether to use the system title bar, whether the diff shows invisible
-characters, language, the path to the Git executable, recently opened
-repositories, open tabs in their order and the active tab, window size and
-position, divider positions and column widths.
+characters, whether file lists show a tree of folders, language, the path
+to the Git executable, recently opened repositories, open tabs in their
+order and the active tab, window size and position, divider positions and
+column widths.
 A path that is not valid UTF-8 SHALL be left out of the saved settings; the
 other settings SHALL still be saved.
 
@@ -50,6 +51,14 @@ other settings SHALL still be saved.
 #### Scenario: Settings file without the setting for invisible characters
 - **WHEN** git-bull starts with a settings file that does not say whether the diff shows invisible characters
 - **THEN** the diff hides them, and every other setting from the file is kept
+
+#### Scenario: Settings file without the setting for trees
+- **WHEN** git-bull starts with a settings file that does not say whether file lists show a tree
+- **THEN** file lists are flat, and every other setting from the file is kept
+
+#### Scenario: Window geometry right after a change of the interface size
+- **WHEN** the user changes the interface size with Ctrl+Plus and closes git-bull in the next moment
+- **THEN** the window starts again with the size and position it had
 
 ### Requirement: Recently opened repositories
 git-bull SHALL remember the 20 most recently opened repositories, most recent

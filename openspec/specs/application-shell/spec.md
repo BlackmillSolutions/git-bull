@@ -242,8 +242,11 @@ on every platform.
 | Keys | Action |
 |---|---|
 | Up, Down, Page Up, Page Down, Home, End | Move in the focused list |
+| Left, Right | In a file tree, collapse and expand a folder, or move to the folder above or into it; the focus stays in the list |
+| Enter, Space | Collapse or expand the folder selected in a file tree |
 | Tab, Shift+Tab | Move focus between areas |
 | Ctrl+F | Focus the search field |
+| Ctrl+L | Focus the filter of the file list shown |
 | Ctrl+O | Open a repository |
 | Ctrl+T | New tab |
 | Ctrl+W | Close the current tab |
@@ -251,7 +254,7 @@ on every platform.
 | Ctrl+Shift+Page Up, Ctrl+Shift+Page Down | Move the current tab one place to the left or right, with Ctrl on every platform |
 | F7, Shift+F7 | Next and previous hunk in the diff |
 | F5, Ctrl+R | Refresh |
-| Ctrl+C | Copy: the full hash in the commit list, the path in a file list, the selected text in diff and blame |
+| Ctrl+C | Copy: the full hash in the commit list, the path of the file or folder in a file list, the selected text in diff and blame |
 | Ctrl+Plus, Ctrl+= | Next larger interface size |
 | Ctrl+Minus | Next smaller interface size |
 | Ctrl+0 | Interface size 100 % |
@@ -291,6 +294,14 @@ on every platform.
 #### Scenario: Next hunk with the keyboard
 - **WHEN** a diff with several hunks is shown, no text field has the keyboard focus and the user presses F7
 - **THEN** the diff scrolls to the next hunk
+
+#### Scenario: Collapse a folder with the keyboard
+- **WHEN** a file list shows a tree, has focus, a folder in it is selected and expanded, and the user presses Left
+- **THEN** the folder is collapsed and the file list keeps the focus
+
+#### Scenario: Focus the filter of the file list
+- **WHEN** the File status view is shown and the user presses Ctrl+L
+- **THEN** the filter field of its file list has the focus
 
 ### Requirement: Responsive interface
 The interface SHALL respond to input within 100 ms at all times, including
