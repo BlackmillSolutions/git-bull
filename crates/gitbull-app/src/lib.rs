@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod blame_view;
+pub mod columns;
 pub mod commit_list;
 pub mod commit_panel;
 pub mod components;

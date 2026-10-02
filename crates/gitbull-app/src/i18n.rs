@@ -82,6 +82,7 @@ messages! {
     ColumnDate => "column-date",
     ColumnAuthor => "column-author",
     ColumnCommit => "column-commit",
+    ColumnPath => "column-path",
     NoticeHiddenByFilter => "notice-hidden-by-filter",
     NoticeShowAllBranches => "notice-show-all-branches",
     NoticeNotACommit => "notice-not-a-commit",

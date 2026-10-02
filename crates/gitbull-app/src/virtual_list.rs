@@ -35,6 +35,12 @@ fn end(rows: u64, view: f64) -> f64 {
     (rows as f64 * HEIGHT - view).max(0.0)
 }
 
+/// Whether a list of `rows` scrolls in a view `height` high; its rows then
+/// leave room for the scrollbar.
+pub(crate) fn scrolls(rows: u64, height: f32) -> bool {
+    rows as f64 * HEIGHT > f64::from(height)
+}
+
 /// A move of the selection with the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Move {
@@ -269,7 +275,7 @@ impl ListState {
 }
 
 /// The width of the scrollbar, in logical pixels.
-const SCROLLBAR_WIDTH: f32 = 10.0;
+pub(crate) const SCROLLBAR_WIDTH: f32 = 10.0;
 /// The scrollbar thumb never gets shorter than this.
 const MIN_THUMB: f32 = 24.0;
 
@@ -338,7 +344,7 @@ impl VirtualList {
             }
             _ => {}
         }
-        let scrolls = rows as f64 * HEIGHT > view;
+        let scrolls = scrolls(rows, rect.height());
         let rows_rect = if scrolls {
             Rect::from_min_max(rect.min, pos2(rect.max.x - SCROLLBAR_WIDTH, rect.max.y))
         } else {
@@ -726,6 +732,14 @@ mod tests {
         let mut state = ListState::default();
         state.scroll_to(row as f64 * HEIGHT, ROWS, VIEW);
         state
+    }
+
+    #[test]
+    fn a_list_scrolls_when_its_rows_are_higher_than_the_view() {
+        assert!(scrolls(11, 240.0));
+        assert!(!scrolls(10, 240.0));
+        assert!(!scrolls(0, 240.0));
+        assert!(scrolls(ROWS, 240.0));
     }
 
     #[test]

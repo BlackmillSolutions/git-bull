@@ -1,12 +1,12 @@
 //! The commit list: graph, description with badges, date, author and hash.
 
-use std::ops::{Range, RangeInclusive};
+use std::ops::Range;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    Align, Align2, Color32, ComboBox, CursorIcon, Event, Id, InputState, Key, Label, Layout, Modal,
-    Modifiers, Pos2, ProgressBar, Rect, Response, RichText, Sense, Stroke, StrokeKind, TextStyle,
-    Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    Align2, Color32, ComboBox, Event, Id, InputState, Key, Modal, Modifiers, Pos2, ProgressBar,
+    Rangef, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo, WidgetType,
+    pos2, vec2,
 };
 use gitbull_core::badges::{Badge, BadgeKind};
 use gitbull_core::graph::{GraphRow, uncommitted_rows};
@@ -19,6 +19,7 @@ use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 
 use crate::app::{App, TabView};
+use crate::columns::{self, Column, Widths, text_cell};
 use crate::components::{self, Button, Kind, focus_ring};
 use crate::graph_view::{self, LANE_WIDTH, Shape as GraphShape};
 use crate::i18n::Msg;
@@ -74,17 +75,14 @@ pub fn badges_that_fit(
     shown
 }
 
-/// Widths of the fixed columns; the description takes the rest. The graph
-/// column starts with room for eight lanes and can be dragged wider or
-/// narrower.
+/// The graph column starts with room for eight lanes and can be dragged
+/// wider or narrower; the other columns are shared with the file history
+/// (`columns::shared`).
 const GRAPH_WIDTH: f32 = 8.0 * LANE_WIDTH;
-const GRAPH_WIDTH_RANGE: RangeInclusive<f32> = 24.0..=600.0;
-const DATE_WIDTH: f32 = 130.0;
-const AUTHOR_WIDTH: f32 = 160.0;
-const COMMIT_WIDTH: f32 = 80.0;
-const HEADER_HEIGHT: f32 = 22.0;
-/// The part of the edge between two headers that can be dragged.
-const HANDLE_WIDTH: f32 = 8.0;
+const GRAPH_RANGE: Rangef = Rangef {
+    min: 24.0,
+    max: 600.0,
+};
 const NODE_RADIUS: f32 = 4.0;
 const BADGE_HEIGHT: f32 = 17.0;
 const BADGE_PADDING: f32 = 5.0;
@@ -172,7 +170,11 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         [Msg::FilterAllBranches, Msg::FilterCurrentBranch].map(|msg| app.texts.text(msg));
     let graph_texts = GraphTexts::new(app);
     let zone = app.time_zone.clone();
-    let mut graph_width = clamp_graph(app.settings().layout.graph_column.unwrap_or(GRAPH_WIDTH));
+    let layout = app.settings().layout;
+    let mut widths = Widths {
+        leading: Some(Column::new(layout.graph_column, GRAPH_WIDTH, GRAPH_RANGE)),
+        trailing: columns::shared(&layout),
+    };
     let filter = match app.active_view() {
         Some((session, _)) => session.filter().clone(),
         None => return,
@@ -185,22 +187,6 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     };
     commit_graph_bar(ui, session, view, &graph_texts);
 
-    let (header, _) =
-        ui.allocate_exact_size(vec2(ui.available_width(), HEADER_HEIGHT), Sense::hover());
-    let edge = Rect::from_center_size(
-        pos2(header.left() + graph_width, header.center().y),
-        vec2(HANDLE_WIDTH, header.height()),
-    );
-    let resize = ui
-        .interact(edge, Id::new("graph-column-edge"), Sense::drag())
-        .on_hover_cursor(CursorIcon::ResizeHorizontal);
-    if resize.dragged() {
-        graph_width = clamp_graph(graph_width + resize.drag_delta().x);
-    }
-    for (cell, title) in columns(header, graph_width).into_iter().zip(titles) {
-        text_cell(ui, cell, RichText::new(title).strong());
-    }
-
     // Each in a statement of its own: the guard of the history lives to the
     // end of its statement, and asking for the row takes it again.
     let commits = session.history().store.len() as u64;
@@ -209,6 +195,14 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         commits,
         uncommitted,
     };
+    let resized = columns::header(
+        ui,
+        Id::new("commit-list-columns"),
+        list.len(),
+        &titles,
+        &mut widths,
+    );
+    let graph_width = widths.leading.map_or(GRAPH_WIDTH, |graph| graph.width);
     // A reloaded history took the place of the one shown: the selected
     // commit is selected again where it now is, if it still exists.
     let generation = session.history_generation();
@@ -249,6 +243,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         ui.vertical_centered(|ui| ui.label(RichText::new(empty).weak()));
         // The list stays an area that Tab moves to.
         focus_area(ui, COMMIT_LIST, &name);
+        if resized {
+            record(app, widths);
+        }
         return;
     }
     let height = f64::from(ui.available_height());
@@ -281,7 +278,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
                 .checked_sub(gathered.start)
                 .and_then(|i| data.get(i as usize))
             {
-                draw_row(ui, data, selected, palette, &row_texts, graph_width, lanes);
+                draw_row(ui, data, selected, palette, &row_texts, &widths, lanes);
             }
         },
     );
@@ -329,8 +326,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             }
         });
     });
-    if resize.dragged() {
-        app.update_layout(|layout| layout.graph_column = Some(graph_width));
+    if resized {
+        record(app, widths);
     }
     if open_file_status {
         app.show_view(View::FileStatus);
@@ -494,8 +491,12 @@ fn short_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-fn clamp_graph(width: f32) -> f32 {
-    width.clamp(*GRAPH_WIDTH_RANGE.start(), *GRAPH_WIDTH_RANGE.end())
+/// Records the widths of the columns after a drag.
+fn record(app: &mut App, widths: Widths<3>) {
+    app.update_layout(|layout| {
+        layout.graph_column = widths.leading.map(|graph| graph.width);
+        columns::record_shared(layout, widths.trailing);
+    });
 }
 
 /// Whether the user asked to copy, by the shortcut or by the platform's
@@ -624,24 +625,6 @@ fn commit_data(
     }
 }
 
-/// The cells of a row or of the header: graph, description, date, author
-/// and commit.
-fn columns(rect: Rect, graph_width: f32) -> [Rect; 5] {
-    let right = rect.right();
-    let commit = Rect::from_x_y_ranges((right - COMMIT_WIDTH)..=right, rect.y_range());
-    let author = Rect::from_x_y_ranges(
-        (commit.left() - AUTHOR_WIDTH)..=commit.left(),
-        rect.y_range(),
-    );
-    let date = Rect::from_x_y_ranges((author.left() - DATE_WIDTH)..=author.left(), rect.y_range());
-    let graph = Rect::from_x_y_ranges(rect.left()..=(rect.left() + graph_width), rect.y_range());
-    let description = Rect::from_x_y_ranges(
-        graph.right()..=date.left().max(graph.right()),
-        rect.y_range(),
-    );
-    [graph, description, date, author, commit]
-}
-
 /// The texts a row may show, read before the tab is borrowed.
 struct RowTexts {
     loading: String,
@@ -655,7 +638,7 @@ fn draw_row(
     selected: bool,
     palette: &Palette,
     texts: &RowTexts,
-    graph_width: f32,
+    widths: &Widths<3>,
     lanes: usize,
 ) {
     let loading = texts.loading.as_str();
@@ -668,7 +651,9 @@ fn draw_row(
         let bar = Rect::from_min_size(rect.min, vec2(3.0, rect.height()));
         ui.painter().rect_filled(bar, 0.0, accent);
     }
-    let [graph, description, date, author, commit] = columns(rect, graph_width);
+    let cells = widths.cells(rect);
+    let (graph, description) = (cells.leading, cells.description);
+    let [date, author, commit] = cells.trailing;
     let shapes = graph_view::shapes(&data.graph, lanes, graph.height(), data.boundary);
     paint_graph(ui, graph, &shapes, palette);
 
@@ -900,18 +885,6 @@ pub(crate) fn badge_color(kind: BadgeKind, palette: &Palette) -> Rgb {
 }
 
 /// A label in `cell`, cut off with an ellipsis where it does not fit.
-fn text_cell(ui: &mut Ui, cell: Rect, text: RichText) -> Response {
-    ui.scope_builder(
-        UiBuilder::new()
-            .max_rect(cell.shrink2(vec2(4.0, 0.0)))
-            .layout(Layout::left_to_right(Align::Center)),
-        // Not selectable: selecting text would take the clicks that select
-        // the row, and the copy command that copies its hash.
-        |ui| ui.add(Label::new(text).truncate().selectable(false)),
-    )
-    .inner
-}
-
 pub(crate) fn color(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.0, rgb.1, rgb.2)
 }

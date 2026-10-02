@@ -3,13 +3,13 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Id, Key, Modifiers, OutputCommand, PointerButton};
+use eframe::egui::{CursorIcon, Event, Id, Key, Modifiers, OutputCommand, PointerButton, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
 use gitbull_app::icons;
 use gitbull_app::ui::{AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST};
-use gitbull_core::settings::Settings;
+use gitbull_core::settings::{Layout, Settings};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
@@ -20,8 +20,9 @@ use gitbull_testkit::{FakeBackend, HistoryFeed, LiveRepo, fake_id};
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 use support::{
-    BURST, Setup, build, commit_list_scroll, find_row, long_history, path, settle_window,
-    turn_wheel, wait_for_references, wait_for_row, window, window_at_60_fps,
+    BURST, Setup, build, column_header, commit_list_scroll, drag_by, edge_left_of, find_row,
+    long_history, path, settle_window, turn_wheel, wait_for_references, wait_for_row, window,
+    window_at_60_fps,
 };
 
 fn seconds(text: &str) -> i64 {
@@ -128,10 +129,16 @@ fn backend() -> FakeBackend {
 }
 
 fn open(backend: FakeBackend) -> Harness<'static, App> {
+    open_with(backend, Layout::default())
+}
+
+/// Like [`open`], with the dividers and widths of `layout`.
+fn open_with(backend: FakeBackend, layout: Layout) -> Harness<'static, App> {
     let test = build(Setup {
         settings: Settings {
             tabs: vec![root()],
             active_tab: Some(0),
+            layout,
             ..Settings::default()
         },
         backend,
@@ -674,6 +681,146 @@ fn dragging_the_edge_of_the_graph_column_changes_and_keeps_its_width() {
     assert!(
         (kept - (before - graph.left() + 40.0)).abs() < 12.0,
         "{kept}"
+    );
+}
+
+/// Where the settings keep the width of a column.
+type SavedWidth = fn(&Layout) -> Option<f32>;
+
+/// The columns whose edges at their left can be dragged, with where their
+/// widths are saved and their widths before any drag.
+const RESIZED: [(&str, SavedWidth, f32); 3] = [
+    ("Date", |layout| layout.date_column, 130.0),
+    ("Author", |layout| layout.author_column, 160.0),
+    ("Commit", |layout| layout.hash_column, 80.0),
+];
+
+/// The left edges of the titles of the columns right of the Graph.
+fn header_lefts(harness: &Harness<'_, App>) -> [f32; 4] {
+    ["Description", "Date", "Author", "Commit"].map(|title| column_header(harness, title).left())
+}
+
+/// The widths of Description, Date and Author, from one title to the next,
+/// and where Commit starts, which the right edge of the list fixes.
+fn header_widths(harness: &Harness<'_, App>) -> [f32; 4] {
+    let [description, date, author, commit] = header_lefts(harness);
+    [date - description, author - date, commit - author, -commit]
+}
+
+#[test]
+fn dragging_an_edge_right_of_the_description_widens_only_the_column_right_of_it() {
+    for (title, saved, width) in RESIZED {
+        let mut harness = open(backend());
+        let before = header_widths(&harness);
+        let edge = edge_left_of(&harness, title);
+        drag_by(&mut harness, edge, vec2(-40.0, 0.0));
+
+        // The column is 40 points wider, the Description 40 narrower, and
+        // every other column as wide as before.
+        let after = header_widths(&harness);
+        for (index, name) in ["Description", "Date", "Author", "Commit"]
+            .iter()
+            .enumerate()
+        {
+            let grew = after[index] - before[index];
+            let expected = match *name {
+                "Description" => -40.0,
+                name if name == title => 40.0,
+                _ => 0.0,
+            };
+            assert!(
+                (grew - expected).abs() < 1.0,
+                "dragging {title}: {name} grew by {grew}"
+            );
+        }
+        let kept = saved(&harness.state().settings().layout).expect("a saved width");
+        assert!((kept - (width + 40.0)).abs() < 1.0, "{title}: {kept}");
+    }
+}
+
+#[test]
+fn a_drag_towards_the_description_leaves_it_its_minimum_width() {
+    // A wide Graph leaves the Description less room than the Date may take.
+    let layout = Layout {
+        graph_column: Some(300.0),
+        ..Layout::default()
+    };
+    let mut harness = open_with(backend(), layout);
+    let edge = edge_left_of(&harness, "Date");
+    // Far to the left, over the sidebar.
+    drag_by(&mut harness, edge, vec2(20.0 - edge.x, 0.0));
+
+    let [description, date, ..] = header_lefts(&harness);
+    assert!(
+        (date - description - 120.0).abs() < 1.0,
+        "{}",
+        date - description
+    );
+}
+
+#[test]
+fn the_pointer_over_an_edge_of_the_header_shows_that_it_can_be_dragged() {
+    let mut harness = open(backend());
+    for title in ["Description", "Date", "Author", "Commit"] {
+        let edge = edge_left_of(&harness, title);
+        harness.hover_at(edge);
+        harness.run();
+        assert_eq!(
+            harness.output().platform_output.cursor_icon,
+            CursorIcon::ResizeHorizontal,
+            "edge left of {title}"
+        );
+    }
+    harness.hover_at(column_header(&harness, "Description").center());
+    harness.run();
+    assert_eq!(
+        harness.output().platform_output.cursor_icon,
+        CursorIcon::Default
+    );
+}
+
+#[test]
+fn widths_saved_in_the_settings_are_used_at_start() {
+    let layout = Layout {
+        graph_column: Some(100.0),
+        date_column: Some(200.0),
+        author_column: Some(100.0),
+        hash_column: Some(120.0),
+        ..Layout::default()
+    };
+    let harness = open_with(backend(), layout);
+    let graph = column_header(&harness, "Graph").left();
+    let [description, date, author, commit] = header_lefts(&harness);
+    assert!(
+        (description - graph - 100.0).abs() < 0.5,
+        "{}",
+        description - graph
+    );
+    assert!((author - date - 200.0).abs() < 0.5, "{}", author - date);
+    assert!((commit - author - 100.0).abs() < 0.5, "{}", commit - author);
+}
+
+#[test]
+fn the_headers_stand_over_the_columns_of_a_list_that_scrolls() {
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: long_history(FakeBackend::default().with_repository(root()), &root(), 200),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    wait_for_row(&mut harness, "Commit 0, ");
+
+    // The rows leave room for the scrollbar; the header does too.
+    let hash = harness.get_by_label(&fake_id("n0").short(7)).rect();
+    let header = column_header(&harness, "Commit");
+    assert!(
+        (hash.left() - header.left()).abs() < 0.5,
+        "{hash:?} {header:?}"
     );
 }
 
