@@ -406,6 +406,77 @@ fn file_count(harness: &Harness<'_, App>) -> usize {
     harness.query_all_by_role(Role::ListItem).count()
 }
 
+/// The rows of the file list, flat or as a tree.
+fn file_rows(harness: &Harness<'_, App>) -> std::collections::BTreeSet<String> {
+    harness
+        .query_all_by(|node| matches!(node.role(), Role::ListItem | Role::TreeItem))
+        .filter_map(|node| node.accesskit_node().label())
+        .filter(|label| label.contains("file") || label.starts_with("dir"))
+        .collect()
+}
+
+/// Whether the lines of the commit shown are counted.
+fn counted(harness: &Harness<'_, App>) -> bool {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| session.details().line_counts().is_some())
+}
+
+/// Presses and releases the primary button at `at`.
+fn click(harness: &mut Harness<'_, App>, at: eframe::egui::Pos2) {
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+}
+
+/// Steps one frame after `input` and returns how long it took.
+fn timed(harness: &mut Harness<'_, App>, input: impl FnOnce(&mut Harness<'_, App>)) -> Duration {
+    input(harness);
+    let started = Instant::now();
+    harness.step();
+    started.elapsed()
+}
+
+fn key(key: Key) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+/// 400 frames of Page Down and the mouse wheel in turn.
+fn scroll_frames(harness: &mut Harness<'_, App>) -> Vec<Duration> {
+    (0..400)
+        .map(|frame| {
+            timed(harness, |harness| {
+                let event = if frame % 2 == 0 {
+                    key(Key::PageDown)
+                } else {
+                    Event::MouseWheel {
+                        unit: MouseWheelUnit::Point,
+                        delta: vec2(0.0, -240.0),
+                        phase: TouchPhase::Move,
+                        modifiers: Modifiers::NONE,
+                    }
+                };
+                harness.input_mut().events.push(event);
+            })
+        })
+        .collect()
+}
+
 #[test]
 #[ignore]
 fn wide_commit() {
@@ -430,27 +501,26 @@ fn wide_commit() {
     for _ in 0..20 {
         harness.step();
     }
-    // Select the commit, the only row, and wait for its files.
+    // Select the commit, the only row, and wait for its files; every frame
+    // until they show is measured, the one in which they arrive included.
     let row = harness
         .query_all_by_role(Role::Row)
         .next()
         .expect("the commit")
         .rect()
         .center();
-    harness.hover_at(row);
     let started = Instant::now();
-    for pressed in [true, false] {
-        harness.event(Event::PointerButton {
-            pos: row,
-            button: PointerButton::Primary,
-            pressed,
-            modifiers: Modifiers::NONE,
-        });
-    }
+    click(&mut harness, row);
+    let mut arriving = Vec::new();
     while file_count(&harness) == 0 {
-        harness.step();
+        arriving.push(timed(&mut harness, |_| {}));
     }
     let listed = started.elapsed();
+    while !counted(&harness) {
+        harness.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let counted_after = started.elapsed();
 
     // Focus the file list, then scroll through it with the keyboard and
     // the mouse wheel in turn.
@@ -464,44 +534,103 @@ fn wide_commit() {
     harness.drop_at(first);
     harness.step();
     harness.hover_at(first);
-    let shown = |harness: &Harness<'_, App>| -> std::collections::BTreeSet<String> {
-        harness
-            .query_all_by_role(Role::ListItem)
-            .filter_map(|node| node.accesskit_node().label())
-            .collect()
-    };
-    let top = shown(&harness);
-    let mut times = Vec::new();
-    for frame in 0..400 {
-        if frame % 2 == 0 {
-            harness.input_mut().events.push(Event::Key {
-                key: Key::PageDown,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: Modifiers::NONE,
-            });
-        } else {
-            harness.input_mut().events.push(Event::MouseWheel {
-                unit: MouseWheelUnit::Point,
-                delta: vec2(0.0, -240.0),
-                phase: TouchPhase::Move,
-                modifiers: Modifiers::NONE,
-            });
-        }
-        let started = Instant::now();
-        harness.step();
-        times.push(started.elapsed());
-    }
+    let top = file_rows(&harness);
+    let flat = scroll_frames(&mut harness);
+    assert!(file_rows(&harness).is_disjoint(&top), "the file list moved");
+
+    // The tree: the frame of the switch builds its rows.
+    let toggle = harness
+        .get_by_role_and_label(Role::Button, "Show as tree")
+        .rect()
+        .center();
+    let mut switching = vec![timed(&mut harness, |harness| click(harness, toggle))];
+    switching.extend((0..2).map(|_| timed(&mut harness, |_| {})));
+    // A file of the tree, which a click selects and leaves as it is.
+    let file = harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.contains("file"))
+        })
+        .expect("a file of the tree")
+        .rect()
+        .center();
+    click(&mut harness, file);
+    harness.step();
+    harness.hover_at(file);
+    let top = file_rows(&harness);
+    let tree = scroll_frames(&mut harness);
+    assert!(file_rows(&harness).is_disjoint(&top), "the tree moved");
+
+    // The first folder, collapsed and expanded in turn.
+    harness.input_mut().events.push(key(Key::Home));
+    harness.step();
+    let folding: Vec<Duration> = (0..200)
+        .map(|frame| {
+            let pressed = if frame % 2 == 0 {
+                Key::ArrowLeft
+            } else {
+                Key::ArrowRight
+            };
+            timed(&mut harness, |harness| {
+                harness.input_mut().events.push(key(pressed));
+            })
+        })
+        .collect();
+
+    // A filter typed character by character, then cleared.
+    let field = harness
+        .get_by_role_and_label(Role::TextInput, "Filter files")
+        .rect()
+        .center();
+    click(&mut harness, field);
+    harness.step();
+    let text = "file04999";
+    let mut filtering: Vec<Duration> = text
+        .chars()
+        .map(|typed| {
+            timed(&mut harness, |harness| {
+                harness
+                    .input_mut()
+                    .events
+                    .push(Event::Text(typed.to_string()));
+            })
+        })
+        .collect();
+    let narrowed = file_rows(&harness);
+    filtering.extend(text.chars().map(|_| {
+        timed(&mut harness, |harness| {
+            harness.input_mut().events.push(key(Key::Backspace));
+        })
+    }));
+    assert!(
+        narrowed.iter().any(|row| row.contains("file04999")) && narrowed.len() <= 2,
+        "{narrowed:?}"
+    );
+
     eprintln!();
     eprintln!("| Commit with {WIDE_FILES} files | Result |");
     eprintln!("|---|---|");
     eprintln!("| Files listed after | {:.2} s |", listed.as_secs_f64());
+    eprintln!(
+        "| Lines counted after | {:.2} s |",
+        counted_after.as_secs_f64()
+    );
     eprintln!();
-    eprintln!("| Scrolling the file list | Frames | Median | 99th percentile | Slowest |");
+    eprintln!("| File list | Frames | Median | 99th percentile | Slowest |");
     eprintln!("|---|---|---|---|---|");
-    let slowest = summary("File list", times);
-    assert!(shown(&harness).is_disjoint(&top), "the file list moved");
+    let slowest = [
+        summary("Until the files show, their arrival included", arriving),
+        summary("Flat list, Page Down and wheel", flat),
+        summary("Switching to the tree", switching),
+        summary("Tree, Page Down and wheel", tree),
+        summary("Collapsing and expanding a folder", folding),
+        summary("Typing and clearing a filter", filtering),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or_default();
     assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
 }
 

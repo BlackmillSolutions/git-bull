@@ -38,7 +38,7 @@ use crate::paths::System;
 use crate::search_view::{self, SEARCH_RESULTS};
 use crate::sidebar_view::{self, SidebarAction};
 use crate::style;
-use crate::theme::{self, Appearance, Palette, Rgb, SHAPE};
+use crate::theme::{Appearance, Palette, Rgb, SHAPE};
 use crate::virtual_list;
 use gitbull_core::search::{Search, SearchMode, SearchState};
 use gitbull_core::session::{BranchFilter, LoadState, Session};
@@ -72,6 +72,7 @@ const NEW_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key:
 const CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
 const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const FILTER_FILES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::L);
 const LARGER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
 const LARGER_TOO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals);
 const SMALLER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
@@ -126,6 +127,8 @@ enum Action {
     PreviousMatch,
     /// Give the search field the keyboard focus.
     FocusSearch,
+    /// Give the filter of the file list shown the keyboard focus.
+    FocusFilter,
     /// Move the diff shown to the next or the previous hunk.
     MoveHunk(HunkMove),
 }
@@ -173,6 +176,26 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let focus_search = actions
         .iter()
         .any(|action| matches!(action, Action::FocusSearch));
+    if actions
+        .iter()
+        .any(|action| matches!(action, Action::FocusFilter))
+    {
+        // The filter above the file list of the view shown. Without a list,
+        // such as for the row of uncommitted changes, there is no field,
+        // and the focus stays where it is.
+        let field = match app
+            .workspace()
+            .and_then(|workspace| workspace.active())
+            .map(|tab| tab.view())
+        {
+            Some(View::FileStatus) => file_status_view::STATUS_FILTER,
+            _ => commit_panel::FILES_FILTER,
+        };
+        let field = Id::new(field);
+        if ui.ctx().read_response(field).is_some() {
+            ui.memory_mut(|memory| memory.request_focus(field));
+        }
+    }
     // The diff drawn in this frame takes the move, and none is left over
     // for a diff drawn later.
     let hunk_move = actions.iter().find_map(|action| match action {
@@ -266,7 +289,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::NextMatch => app.next_match(),
             Action::PreviousMatch => app.previous_match(),
             // The toolbar has taken it.
-            Action::FocusSearch | Action::MoveHunk(_) => {}
+            Action::FocusSearch | Action::FocusFilter | Action::MoveHunk(_) => {}
             Action::CheckGitAgain => app.check_again(),
             Action::ChooseGit => app.choose_git(),
             Action::SetTheme(theme) => app.set_theme(theme),
@@ -512,6 +535,9 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
         }
         if input.consume_shortcut(&FIND) {
             actions.push(Action::FocusSearch);
+        }
+        if input.consume_shortcut(&FILTER_FILES) {
+            actions.push(Action::FocusFilter);
         }
         // The variant with Shift first, as Ctrl+Tab would also match it.
         if input.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) {
@@ -928,7 +954,7 @@ fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
 /// The tabs of `workspace` and the button for a new tab, leaving `reserve`
 /// points free right of them.
 fn tabs(app: &App, workspace: &Workspace, ui: &mut Ui, reserve: f32, actions: &mut Vec<Action>) {
-    let palette = palette(app, ui);
+    let palette = style::active_palette(ui.ctx());
     ui.spacing_mut().item_spacing.x = SHAPE.space[0];
     let active = workspace.active().map(|tab| tab.id());
     let tabs: Vec<TabLabel> = workspace
@@ -1674,7 +1700,7 @@ fn status_bar(app: &App, ui: &mut Ui) {
 
 fn history(app: &mut App, ui: &mut Ui) {
     let layout = app.settings().layout;
-    let palette = palette(app, ui);
+    let palette = style::active_palette(ui.ctx());
     app.poll_navigation();
     app.poll_search();
     // The search starts once its text has settled, and its matches arrive
@@ -1771,8 +1797,9 @@ fn history(app: &mut App, ui: &mut Ui) {
                         .size_range(200.0..=f32::INFINITY)
                         .show(ui, |ui| {
                             fill(ui);
+                            // The panel draws its title, with the buttons
+                            // that copy what it shows.
                             let title = app.texts.text(Msg::PanelCommit);
-                            section_title(ui, title.clone());
                             if !commit_panel::show(app, ui, palette) {
                                 focus_area(ui, AREA_COMMIT_PANEL, &title);
                             }
@@ -1864,7 +1891,19 @@ pub(crate) fn lock_tab(ui: &Ui, id: Id) {
 /// Tab and Shift+Tab move the focus from one of `areas` to the next or
 /// back.
 fn move_between_areas(ui: &Ui, areas: &[&str]) {
-    let focused = ui.memory(|memory| memory.focused());
+    // The filter above a file list moves on as the list does.
+    let focused = ui.memory(|memory| memory.focused()).map(|id| {
+        match [
+            (commit_panel::FILES_FILTER, AREA_COMMIT_PANEL),
+            (file_status_view::STATUS_FILTER, STATUS_LIST),
+        ]
+        .into_iter()
+        .find(|(field, _)| Id::new(*field) == id)
+        {
+            Some((_, area)) => Id::new(area),
+            None => id,
+        }
+    });
     let areas: Vec<Id> = areas.iter().map(Id::new).collect();
     let Some(position) = focused.and_then(|id| areas.iter().position(|area| *area == id)) else {
         return;
@@ -1878,12 +1917,6 @@ fn move_between_areas(ui: &Ui, areas: &[&str]) {
         return;
     };
     ui.memory_mut(|memory| memory.request_focus(areas[target % areas.len()]));
-}
-
-/// The palette of the appearance and the colour vision in use. Syntax
-/// highlighting takes the appearance alone.
-fn palette(app: &App, ui: &Ui) -> &'static Palette {
-    theme::palette(appearance(app, ui), app.settings().colour_vision)
 }
 
 /// The appearance the window is drawn with.

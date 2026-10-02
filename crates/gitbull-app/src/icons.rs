@@ -4,6 +4,8 @@
 //! own on some of these code points. Views name icons here, not by the
 //! crate's constants.
 
+use std::sync::LazyLock;
+
 use eframe::egui::{Context, FontFamily, FontId, RichText};
 use egui_phosphor::regular as phosphor;
 
@@ -14,14 +16,12 @@ pub const FAMILY: &str = "icons";
 /// which at start-up happens before the first frame, the proportional
 /// family stands in, because egui cannot draw a family it does not know.
 pub fn font(ctx: &Context, size: f32) -> FontId {
-    let family = FontFamily::Name(FAMILY.into());
-    let known = ctx.fonts(|fonts| fonts.definitions().families.contains_key(&family));
+    static ICONS: LazyLock<FontFamily> = LazyLock::new(|| FontFamily::Name(FAMILY.into()));
     FontId::new(
         size,
-        if known {
-            family
-        } else {
-            FontFamily::Proportional
+        match crate::fonts::loaded(ctx) {
+            true => ICONS.clone(),
+            false => FontFamily::Proportional,
         },
     )
 }
@@ -58,9 +58,17 @@ pub const REVEAL_DOWN: &str = phosphor::ARROW_LINE_DOWN;
 /// Reveals the hidden lines that lead into the hunk below.
 pub const REVEAL_UP: &str = phosphor::ARROW_LINE_UP;
 pub const REVEAL_ALL: &str = phosphor::ARROWS_OUT_LINE_VERTICAL;
+/// Shows a file list as a tree of folders.
+pub const TREE: &str = phosphor::TREE_STRUCTURE;
+/// Copies the full hash of a commit.
+pub const COPY: &str = phosphor::COPY_SIMPLE;
+/// Copies the short hash of a commit.
+pub const HASH: &str = phosphor::HASH;
+/// Copies the message of a commit.
+pub const MESSAGE: &str = phosphor::TEXT_ALIGN_LEFT;
 
 /// Every icon with its name.
-pub const ALL: [(&str, &str); 23] = [
+pub const ALL: [(&str, &str); 27] = [
     ("folder", FOLDER),
     ("refresh", REFRESH),
     ("sun", SUN),
@@ -84,4 +92,8 @@ pub const ALL: [(&str, &str); 23] = [
     ("reveal down", REVEAL_DOWN),
     ("reveal up", REVEAL_UP),
     ("reveal all", REVEAL_ALL),
+    ("tree", TREE),
+    ("copy", COPY),
+    ("hash", HASH),
+    ("message", MESSAGE),
 ];

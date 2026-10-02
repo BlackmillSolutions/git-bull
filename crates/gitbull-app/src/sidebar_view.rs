@@ -4,9 +4,7 @@
 use std::path::PathBuf;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{
-    Align2, Color32, Id, Sense, Shape, Stroke, TextStyle, Ui, WidgetInfo, WidgetType, pos2, vec2,
-};
+use eframe::egui::{Align2, Color32, Id, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2, vec2};
 use gitbull_core::sidebar_tree::{self, Section, SidebarRow, SidebarState};
 use gitbull_core::workspace::View;
 
@@ -17,9 +15,7 @@ use crate::theme::{Palette, Rgb};
 use crate::ui::AREA_SIDEBAR;
 use crate::virtual_list::VirtualList;
 
-/// Indentation per level of folders.
-const INDENT: f32 = 12.0;
-const LEFT: f32 = 6.0;
+use crate::components::{TREE_INDENT as INDENT, TREE_LEFT as LEFT};
 
 /// What the user asked for in the sidebar that concerns more than it.
 pub(crate) enum SidebarAction {
@@ -281,7 +277,7 @@ fn draw_row(
     let left = rect.left() + LEFT + depth as f32 * INDENT;
     let painter = ui.painter();
     if let Some(open) = expanded {
-        triangle(painter, pos2(left + 4.0, rect.center().y), open, muted);
+        components::triangle(painter, pos2(left + 4.0, rect.center().y), open, muted);
     }
     let text_left = left + if expanded.is_some() { 14.0 } else { 0.0 };
     let galley = painter.layout_no_wrap(label.clone(), font, fill);
@@ -323,29 +319,6 @@ fn draw_row(
             node.set_description(text);
         }
     });
-}
-
-/// A small triangle pointing right, or down when `open`.
-fn triangle(
-    painter: &eframe::egui::Painter,
-    center: eframe::egui::Pos2,
-    open: bool,
-    fill: Color32,
-) {
-    let points = if open {
-        vec![
-            center + vec2(-4.0, -2.0),
-            center + vec2(4.0, -2.0),
-            center + vec2(0.0, 3.0),
-        ]
-    } else {
-        vec![
-            center + vec2(-2.0, -4.0),
-            center + vec2(3.0, 0.0),
-            center + vec2(-2.0, 4.0),
-        ]
-    };
-    painter.add(Shape::convex_polygon(points, fill, Stroke::NONE));
 }
 
 fn color(rgb: Rgb) -> Color32 {

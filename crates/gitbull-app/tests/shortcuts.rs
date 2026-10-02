@@ -342,3 +342,111 @@ fn f7_moves_the_diff_to_its_next_hunk() {
 
     assert_eq!(header_top(&harness, "@@ -47,7"), Some(top));
 }
+
+/// A repository whose one commit changes two files, one in a folder, with
+/// file lists shown as trees.
+fn tree_of_files() -> Setup {
+    let mut setup = four_hunks();
+    setup.settings.file_tree = true;
+    setup.backend = setup.backend.with_changes(
+        fake_id("c"),
+        vec![
+            FileChange {
+                kind: ChangeKind::Modified,
+                path: "src/main.rs".into(),
+                old_path: None,
+            },
+            FileChange {
+                kind: ChangeKind::Modified,
+                path: "notes.txt".into(),
+                old_path: None,
+            },
+        ],
+    );
+    setup
+}
+
+#[test]
+fn left_collapses_the_folder_selected_in_a_file_tree() {
+    let mut harness = window(build(tree_of_files()).app);
+    settle_window(&mut harness);
+    wait_for_row(&mut harness, "Change four places");
+    harness.get_by_label("Change four places").click();
+    let file = |harness: &egui_kittest::Harness<'_, gitbull_app::app::App>, label: &str| {
+        harness
+            .query_all_by_role(Role::TreeItem)
+            .find(|node| node.accesskit_node().label().as_deref() == Some(label))
+            .map(|node| node.rect().center())
+    };
+    for _ in 0..200 {
+        if file(&harness, "Modified: main.rs").is_some() {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let at = file(&harness, "Modified: main.rs").expect("the file in the tree");
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+    harness.key_press(Key::ArrowUp);
+    harness.run();
+    harness.key_press(Key::ArrowLeft);
+    harness.run();
+
+    let folder = harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| node.accesskit_node().label().as_deref() == Some("src"))
+        .expect("the folder");
+    assert_eq!(folder.accesskit_node().data().is_expanded(), Some(false));
+    assert!(file(&harness, "Modified: main.rs").is_none());
+    assert_eq!(
+        harness.ctx.memory(|memory| memory.focused()),
+        Some(eframe::egui::Id::new(gitbull_app::ui::AREA_COMMIT_PANEL))
+    );
+}
+
+#[test]
+fn control_l_focuses_the_filter_of_the_file_status() {
+    let mut setup = four_hunks();
+    setup.backend = setup.backend.with_status(
+        path(&["work", "git-bull"]),
+        gitbull_git::status::WorkingStatus {
+            untracked: vec![gitbull_git::status::StatusEntry {
+                kind: gitbull_git::status::StatusKind::Untracked,
+                path: "notes.md".into(),
+                old_path: None,
+                submodule: false,
+            }],
+            ..Default::default()
+        },
+    );
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    wait_for_row(&mut harness, "Change four places");
+    harness
+        .get_by_role_and_label(Role::TreeItem, "File status")
+        .click();
+    for _ in 0..200 {
+        if harness.query_by_label("Filter files").is_some() {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::L);
+    harness.run();
+    assert_eq!(
+        harness.ctx.memory(|memory| memory.focused()),
+        Some(eframe::egui::Id::new(
+            gitbull_app::file_status_view::STATUS_FILTER
+        ))
+    );
+}

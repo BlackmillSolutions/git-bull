@@ -32,14 +32,36 @@ pub struct FileChange {
     pub old_path: Option<RepoPath>,
 }
 
+/// How many lines a commit added and removed in one file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineCount {
+    Lines {
+        added: u64,
+        removed: u64,
+    },
+    /// Git counts no lines of a binary file.
+    Binary,
+}
+
+/// The lines a commit changed in one file, with its paths as the file
+/// list has them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLines {
+    pub path: RepoPath,
+    /// The path in the parent, for renamed and copied files.
+    pub old_path: Option<RepoPath>,
+    pub count: LineCount,
+}
+
 /// The arguments of `git diff-tree` that list the files `commit` changed
-/// against `parent`, or all of its files when it has no parent.
-fn arguments(commit: &ObjectId, parent: Option<&ObjectId>) -> Vec<OsString> {
+/// against `parent`, or all of its files when it has no parent, in
+/// `format`: `--name-status` for the files, `--numstat` for their lines.
+fn arguments(format: &str, commit: &ObjectId, parent: Option<&ObjectId>) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "diff-tree",
         "-r",
         "--no-commit-id",
-        "--name-status",
+        format,
         "-M",
         "-C",
         "-z",
@@ -65,7 +87,7 @@ pub fn changed_files(
     parent: Option<&ObjectId>,
     cancel: &CancelToken,
 ) -> Result<Vec<FileChange>, Error> {
-    let args = arguments(commit, parent);
+    let args = arguments("--name-status", commit, parent);
     let output = git.run_cancellable(repo, &[], &args, cancel)?;
     parse_name_status(&output).map_err(|message| Error::Parse {
         command: format!(
@@ -121,6 +143,80 @@ pub fn parse_name_status(output: &[u8]) -> Result<Vec<FileChange>, String> {
         changes.push(change);
     }
     Ok(changes)
+}
+
+/// The lines `commit` changed in each of its files against `parent`, its
+/// first parent; for a root commit, in all of its files. The files come as
+/// [`changed_files`] lists them.
+pub fn line_counts(
+    git: &Git,
+    repo: &Path,
+    commit: &ObjectId,
+    parent: Option<&ObjectId>,
+    cancel: &CancelToken,
+) -> Result<Vec<FileLines>, Error> {
+    let args = arguments("--numstat", commit, parent);
+    let output = git.run_cancellable(repo, &[], &args, cancel)?;
+    parse_numstat(&output).map_err(|message| Error::Parse {
+        command: format!(
+            "git {}",
+            args.iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        message,
+        bytes: output,
+    })
+}
+
+/// Reads `--numstat -z` output: the added and the removed lines, or `-`
+/// and `-` for a binary file, then the path ended by NUL; for a renamed or
+/// copied file an empty path, then its old and its new path.
+pub fn parse_numstat(output: &[u8]) -> Result<Vec<FileLines>, String> {
+    let mut fields = output.split(|&b| b == 0);
+    let mut counts = Vec::new();
+    while let Some(field) = fields.next() {
+        if field.is_empty() {
+            // The NUL that ends the last path leaves an empty field.
+            continue;
+        }
+        let mut parts = field.splitn(3, |&b| b == b'\t');
+        let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(format!(
+                "no numbers and path in {:?}",
+                String::from_utf8_lossy(field)
+            ));
+        };
+        let count = match (added, removed) {
+            (b"-", b"-") => LineCount::Binary,
+            _ => LineCount::Lines {
+                added: number(added)?,
+                removed: number(removed)?,
+            },
+        };
+        let (path, old_path) = match path {
+            b"" => {
+                let old = next_path(&mut fields, field)?;
+                (next_path(&mut fields, field)?, Some(old))
+            }
+            path => (RepoPath::new(path), None),
+        };
+        counts.push(FileLines {
+            path,
+            old_path,
+            count,
+        });
+    }
+    Ok(counts)
+}
+
+fn number(digits: &[u8]) -> Result<u64, String> {
+    std::str::from_utf8(digits)
+        .ok()
+        .and_then(|digits| digits.parse().ok())
+        .ok_or_else(|| format!("{:?} is no number", String::from_utf8_lossy(digits)))
 }
 
 fn next_path<'a>(
@@ -199,14 +295,91 @@ mod tests {
         assert!(parse_name_status(b"R100\x00a.txt\x00").is_err());
     }
 
+    fn lines(path: &str, old_path: Option<&str>, count: LineCount) -> FileLines {
+        FileLines {
+            path: path.into(),
+            old_path: old_path.map(RepoPath::from),
+            count,
+        }
+    }
+
+    #[test]
+    fn line_counts_are_read_with_their_paths() {
+        // As Git 2.55.0 prints them for a modification, an added file, a
+        // rename with changes, a binary file and a change of mode alone.
+        let output = b"3\t1\ta.txt\x002\t0\tnew.txt\x001\t1\t\x00old.txt\x00renamed.txt\x00-\t-\tlogo.png\x000\t0\tscript.sh\x00";
+        assert_eq!(
+            parse_numstat(output).unwrap(),
+            [
+                lines(
+                    "a.txt",
+                    None,
+                    LineCount::Lines {
+                        added: 3,
+                        removed: 1
+                    }
+                ),
+                lines(
+                    "new.txt",
+                    None,
+                    LineCount::Lines {
+                        added: 2,
+                        removed: 0
+                    }
+                ),
+                lines(
+                    "renamed.txt",
+                    Some("old.txt"),
+                    LineCount::Lines {
+                        added: 1,
+                        removed: 1
+                    }
+                ),
+                lines("logo.png", None, LineCount::Binary),
+                lines(
+                    "script.sh",
+                    None,
+                    LineCount::Lines {
+                        added: 0,
+                        removed: 0
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn line_counts_without_numbers_or_paths_are_an_error() {
+        assert!(parse_numstat(b"x\t1\ta.txt\x00").is_err());
+        assert!(parse_numstat(b"1\t1\x00").is_err());
+        assert!(parse_numstat(b"1\t1\t\x00old.txt\x00").is_err());
+        assert!(parse_numstat(b"").unwrap().is_empty());
+    }
+
+    #[test]
+    fn line_counts_ask_for_the_same_comparison_as_the_files() {
+        let commit = ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
+        let parent = ObjectId::from_hex(b"2222222222222222222222222222222222222222").unwrap();
+        let files = arguments("--name-status", &commit, Some(&parent));
+        let counts = arguments("--numstat", &commit, Some(&parent));
+        assert_eq!(counts.len(), files.len());
+        for (count, file) in counts.iter().zip(&files) {
+            if file != "--name-status" {
+                assert_eq!(count, file);
+            }
+        }
+        assert!(counts.iter().any(|arg| arg == "--numstat"));
+        assert!(counts.iter().any(|arg| arg == "--no-textconv"));
+    }
+
     #[test]
     fn a_root_commit_is_compared_with_nothing() {
         let commit = ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
-        let args = arguments(&commit, None);
+        let args = arguments("--name-status", &commit, None);
         let tail: Vec<_> = args[args.len() - 2..].iter().collect();
         assert_eq!(tail, ["--root", "1111111111111111111111111111111111111111"]);
         let parent = ObjectId::from_hex(b"2222222222222222222222222222222222222222").unwrap();
-        let args = arguments(&commit, Some(&parent));
+        let args = arguments("--name-status", &commit, Some(&parent));
         assert!(!args.iter().any(|arg| arg == "--root"));
         assert_eq!(
             args[args.len() - 2],

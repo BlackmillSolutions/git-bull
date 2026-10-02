@@ -2,32 +2,40 @@
 //! groups (spec `working-copy-status`). The diff panel beside it shows the
 //! file chosen.
 
+use std::sync::Arc;
+
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
     self, Align, Color32, Id, Label, Layout, Sense, Ui, UiBuilder, WidgetInfo, WidgetType, pos2,
     vec2,
 };
 use fluent_bundle::FluentArgs;
-use gitbull_core::file_status::StatusState;
+use gitbull_core::file_status::{GROUPS, StatusState};
+use gitbull_core::file_tree::{FileOrder, FileTree, Mode, Row};
 use gitbull_core::workspace::Failure;
 use gitbull_git::changes::ChangeKind;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 
-use crate::app::{App, FileAction};
-use crate::commit_list::{color, take_copy};
-use crate::commit_panel::{kind_index, marker, marker_color, path_job};
+use crate::app::{App, FileAction, StatusMenu};
+use crate::commit_list::color;
+use crate::commit_panel::{kind_index, marker, marker_color, path_job, shown_path};
 use crate::components;
+use crate::file_list::{self, FileRow, ListTexts};
 use crate::i18n::Msg;
 use crate::theme::Palette;
 use crate::ui::section_text;
-use crate::virtual_list::VirtualList;
 
 /// The id of the file list, which takes the focus of its area.
 pub const STATUS_LIST: &str = "file-status-list";
 
-/// The groups, in the order the list shows them.
-const GROUPS: [Group; 3] = [Group::Staged, Group::Unstaged, Group::Untracked];
+/// The id of the filter field above the files.
+pub const STATUS_FILTER: &str = "file-status-filter";
+
+/// The index of `group` among the groups of the list.
+fn group_index(group: Group) -> usize {
+    GROUPS.iter().position(|g| *g == group).unwrap_or(0)
+}
 
 /// The texts of the list, read before the tab is borrowed.
 struct Texts {
@@ -84,7 +92,7 @@ impl Texts {
     }
 
     fn title(&self, group: Group) -> &str {
-        &self.titles[GROUPS.iter().position(|g| *g == group).unwrap_or(0)]
+        &self.titles[group_index(group)]
     }
 
     fn kind(&self, kind: StatusKind) -> &str {
@@ -96,54 +104,12 @@ impl Texts {
     }
 }
 
-/// A row of the list: the title of a group, or one of its files.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StatusRow {
-    Title(Group),
-    Entry(Group, usize),
-}
-
-/// The rows of `status`: each group that has files, under its title.
-fn status_rows(status: &WorkingStatus) -> Vec<StatusRow> {
-    let mut rows = Vec::new();
-    for group in GROUPS {
-        let count = status.group(group).len();
-        if count > 0 {
-            rows.push(StatusRow::Title(group));
-            rows.extend((0..count).map(|index| StatusRow::Entry(group, index)));
-        }
-    }
-    rows
-}
-
-/// The file to select instead of the title at `row`: the next one, or when
-/// the selection moved up from `before`, the one above.
-fn past_title(rows: &[StatusRow], row: usize, before: Option<u64>) -> Option<usize> {
-    let up = before.is_some_and(|before| before as usize > row);
-    let candidates = match up {
-        true => [row.checked_sub(1), Some(row + 1)],
-        false => [Some(row + 1), row.checked_sub(1)],
-    };
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|&candidate| matches!(rows.get(candidate), Some(StatusRow::Entry(..))))
-}
-
 /// The letter that marks an entry, and its colour.
 fn entry_marker(kind: StatusKind, palette: &Palette) -> (&'static str, Color32) {
     match kind {
         StatusKind::Changed(kind) => (marker(kind), marker_color(kind, palette)),
         StatusKind::Conflicted => ("!", color(palette.status_conflict)),
         StatusKind::Untracked => ("?", color(palette.status_added)),
-    }
-}
-
-/// The path of an entry as the list shows it and copies it.
-fn shown_path(entry: &StatusEntry) -> String {
-    match &entry.old_path {
-        Some(old) => format!("{old} → {}", entry.path),
-        None => entry.path.to_string(),
     }
 }
 
@@ -163,6 +129,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             });
         Texts::new(app, loaded)
     };
+    let list_texts = ListTexts::new(app);
+    let mode = file_list::mode(app);
     let Some((session, view)) = app.active_view() else {
         return false;
     };
@@ -191,79 +159,97 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         }
         StatusState::Loaded(status) => status,
     };
-    let rows = status_rows(status);
+    let chosen_mode = file_list::header(
+        ui,
+        Id::new(STATUS_FILTER),
+        Id::new(STATUS_LIST),
+        &mut view.status_files.filter,
+        mode,
+        &list_texts,
+    );
 
     // A status read again may have moved the file chosen, which stays
-    // selected; the first file is selected when none is chosen.
-    if view.status_version != Some(file_status.version()) {
+    // selected, also while the filter hides it; the rows keep the folders
+    // collapsed. The first file is selected when nothing is.
+    if view.status_version != Some(file_status.version())
+        && let Some(order) = file_status.file_order()
+    {
         view.status_version = Some(file_status.version());
-        let row = match file_status.chosen() {
-            Some((group, index)) => rows
-                .iter()
-                .position(|row| *row == StatusRow::Entry(group, index)),
-            None => past_title(&rows, 0, None),
+        let mut tree = match &view.status_files.tree {
+            Some(tree) => tree.renewed(Arc::clone(order)),
+            None => FileTree::shown_as(Arc::clone(order), chosen_mode, &view.status_files.filter),
         };
-        match row {
-            Some(row) => view.status_files.reselect(row as u64),
-            None => view.status_files.select(None),
-        }
-    }
-
-    let before = view.status_files.selected();
-    let list = VirtualList::new(
-        Id::new(STATUS_LIST),
-        Role::List,
-        texts.name.as_str(),
-        rows.len() as u64,
-    );
-    let output = list.show(ui, &mut view.status_files, |ui, row, selected| {
-        match rows.get(row as usize) {
-            Some(StatusRow::Title(group)) => title_row(ui, texts.title(*group)),
-            Some(StatusRow::Entry(group, index)) => {
-                let entry = &status.group(*group)[*index];
-                entry_row(ui, entry, selected, &texts, palette);
+        if !tree.holds_selection() {
+            match file_status.chosen() {
+                Some((group, index)) => tree.select_file(group_index(group), index),
+                None => tree.select_first(),
             }
-            None => {}
         }
-    });
-    // Titles are not selected: the selection moves on to a file.
-    if let Some(row) = view.status_files.selected()
-        && matches!(rows.get(row as usize), Some(StatusRow::Title(_)))
-    {
-        let before = before.filter(|_| output.clicked.is_none());
-        match past_title(&rows, row as usize, before) {
-            Some(file) => view.status_files.select_and_reveal(file as u64),
-            None => view.status_files.select(None),
-        }
+        view.status_files.tree = Some(tree);
     }
 
-    let entry_at = |row: u64| match rows.get(row as usize) {
-        Some(StatusRow::Entry(group, index)) => Some((*group, *index)),
-        _ => None,
+    let order = view
+        .status_files
+        .tree
+        .as_ref()
+        .map(|tree| Arc::clone(tree.order()));
+    let Some(output) = file_list::show(
+        ui,
+        Id::new(STATUS_LIST),
+        &texts.name,
+        &mut view.status_files,
+        chosen_mode,
+        &list_texts,
+        palette,
+        |ui, row, selected| {
+            let entry = status.group(GROUPS[row.group]).get(row.index);
+            if let (Some(entry), Some(order)) = (entry, &order) {
+                entry_row(ui, entry, order, row, selected, &texts, palette);
+            }
+        },
+        |ui, group| title_row(ui, texts.title(GROUPS[group])),
+    ) else {
+        return false;
     };
-    let path_of =
-        |row: u64| entry_at(row).map(|(group, index)| status.group(group)[index].path.to_string());
-    if output.response.has_focus()
-        && ui.input_mut(take_copy)
-        && let Some(path) = view.status_files.selected().and_then(path_of)
-    {
-        ui.ctx().copy_text(path);
-    }
+
     // The menu acts on the entry it was opened for, wherever a refresh
     // moves it meanwhile, and on the path the last commit had of it then.
-    if let Some(row) = output.menu_opened {
-        view.status_menu = entry_at(row).map(|(group, index)| {
-            let entry = &status.group(group)[index];
-            (entry.clone(), last_commit_path(status, group, entry))
-        });
+    if output.menu_opened.is_some() {
+        view.status_menu = match view.status_files.menu {
+            Some(Row::File { group, index, .. }) => {
+                let group = GROUPS[group];
+                status.group(group).get(index).map(|entry| {
+                    StatusMenu::File(entry.clone(), last_commit_path(status, group, entry))
+                })
+            }
+            Some(Row::Folder { group, folder, .. }) => order
+                .as_ref()
+                .map(|order| StatusMenu::Folder(order.folder_path(group, folder).clone())),
+            Some(Row::Title(_)) | None => None,
+        };
     }
     let (menu_entry, in_last_commit) = match &view.status_menu {
-        Some((entry, path)) => (Some(entry), path.as_ref()),
-        None => (None, None),
+        Some(StatusMenu::File(entry, path)) => (Some(entry), path.as_ref()),
+        Some(StatusMenu::Folder(_)) | None => (None, None),
+    };
+    let menu_folder = match &view.status_menu {
+        Some(StatusMenu::Folder(path)) => Some(path),
+        _ => None,
     };
     let mut opened = None;
     output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
+            // A folder offers its path alone.
+            if let Some(path) = menu_folder {
+                if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
+                    ui.ctx().copy_text(path.to_string());
+                    ui.close();
+                }
+                return;
+            }
+            let Some(entry) = menu_entry else {
+                return;
+            };
             // Nothing here changes the index, the working copy or the
             // repository. The history and blame show the file as of the last
             // commit, which a file new to it does not have.
@@ -278,17 +264,23 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
                 }
             }
             if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
-                if let Some(entry) = menu_entry {
-                    ui.ctx().copy_text(entry.path.to_string());
-                }
+                ui.ctx().copy_text(entry.path.to_string());
                 ui.close();
             }
         });
     });
-    let chosen = view.status_files.selected().and_then(entry_at);
+    let chosen = view
+        .status_files
+        .tree
+        .as_ref()
+        .and_then(FileTree::selected_file)
+        .map(|(group, index)| (GROUPS[group], index));
     session.choose_status_file(chosen);
     if let Some(action) = opened {
         app.open_file_action(action);
+    }
+    if chosen_mode != mode {
+        app.set_file_tree(chosen_mode == Mode::Tree);
     }
     true
 }
@@ -331,23 +323,36 @@ fn title_row(ui: &mut Ui, title: &str) {
     );
 }
 
-fn entry_row(ui: &mut Ui, entry: &StatusEntry, selected: bool, texts: &Texts, palette: &Palette) {
+fn entry_row(
+    ui: &mut Ui,
+    entry: &StatusEntry,
+    order: &FileOrder,
+    row: FileRow,
+    selected: bool,
+    texts: &Texts,
+    palette: &Palette,
+) {
     let rect = ui.max_rect();
     if selected {
         ui.painter()
             .rect_filled(rect, 0.0, color(palette.selection));
     }
-    let label = format!("{}: {}", texts.kind(entry.kind), shown_path(entry));
-    let row = ui.interact(rect, ui.id().with("file"), Sense::hover());
-    row.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
-    ui.ctx().accesskit_node_builder(row.id, |node| {
-        node.set_role(Role::ListItem);
-        node.set_selected(selected);
-    });
+    let (old, path) = row.paths(order);
+    let label = format!(
+        "{}: {}",
+        texts.kind(entry.kind),
+        shown_path(old.as_deref(), &path)
+    );
+    let response = ui.interact(rect, ui.id().with("file"), Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
+    row.describe(ui, &response, selected);
     let (letter, letter_color) = entry_marker(entry.kind, palette);
+    let mut inner = rect;
+    inner.min.x += row.indent();
+    inner.max.x -= 6.0;
     ui.scope_builder(
         UiBuilder::new()
-            .max_rect(rect.shrink2(vec2(6.0, 0.0)))
+            .max_rect(inner)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             let (marker_rect, _) =
@@ -360,7 +365,7 @@ fn entry_row(ui: &mut Ui, entry: &StatusEntry, selected: bool, texts: &Texts, pa
                 letter_color,
             );
             ui.add(
-                Label::new(path_job(entry.old_path.as_ref(), &entry.path, ui))
+                Label::new(path_job(old.as_deref(), &path, ui))
                     .truncate()
                     .selectable(false),
             );
@@ -371,63 +376,11 @@ fn entry_row(ui: &mut Ui, entry: &StatusEntry, selected: bool, texts: &Texts, pa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gitbull_git::changes::ChangeKind;
-    use gitbull_git::path::RepoPath;
 
-    fn entry(kind: StatusKind, path: &str) -> StatusEntry {
-        StatusEntry {
-            kind,
-            path: RepoPath::new(path),
-            old_path: None,
-            submodule: false,
+    #[test]
+    fn the_groups_are_found_by_their_place_in_the_list() {
+        for (index, group) in GROUPS.into_iter().enumerate() {
+            assert_eq!(group_index(group), index);
         }
-    }
-
-    fn status() -> WorkingStatus {
-        let modified = StatusKind::Changed(ChangeKind::Modified);
-        WorkingStatus {
-            staged: vec![entry(modified, "a.txt")],
-            unstaged: Vec::new(),
-            untracked: vec![
-                entry(StatusKind::Untracked, "b.txt"),
-                entry(StatusKind::Untracked, "c.txt"),
-            ],
-        }
-    }
-
-    #[test]
-    fn groups_with_files_are_listed_under_their_titles() {
-        assert_eq!(
-            status_rows(&status()),
-            [
-                StatusRow::Title(Group::Staged),
-                StatusRow::Entry(Group::Staged, 0),
-                StatusRow::Title(Group::Untracked),
-                StatusRow::Entry(Group::Untracked, 0),
-                StatusRow::Entry(Group::Untracked, 1),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_title_passes_the_selection_on_in_the_direction_it_moved() {
-        let rows = status_rows(&status());
-        // Down from the staged file onto the title of the untracked ones.
-        assert_eq!(past_title(&rows, 2, Some(1)), Some(3));
-        // Up from the first untracked file.
-        assert_eq!(past_title(&rows, 2, Some(3)), Some(1));
-        // Up onto the first title: the first file.
-        assert_eq!(past_title(&rows, 0, Some(1)), Some(1));
-        // Clicked, or at the start.
-        assert_eq!(past_title(&rows, 2, None), Some(3));
-    }
-
-    #[test]
-    fn a_rename_shows_where_it_came_from() {
-        let renamed = StatusEntry {
-            old_path: Some(RepoPath::new("old.txt")),
-            ..entry(StatusKind::Changed(ChangeKind::Renamed), "new.txt")
-        };
-        assert_eq!(shown_path(&renamed), "old.txt → new.txt");
     }
 }

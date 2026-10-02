@@ -140,6 +140,9 @@ pub struct Settings {
     /// Whether the diff shows spaces, tabs and line endings.
     #[serde(deserialize_with = "or_default")]
     pub show_invisibles: bool,
+    /// Whether file lists show a tree of folders instead of full paths.
+    #[serde(deserialize_with = "or_default")]
+    pub file_tree: bool,
     /// A language tag such as `en-US`.
     pub language: String,
     /// The Git executable chosen by the user, if any.
@@ -173,6 +176,7 @@ impl Default for Settings {
             interface_size: InterfaceSize::Percent100,
             system_title_bar: false,
             show_invisibles: false,
+            file_tree: false,
             language: "en-US".to_owned(),
             git_path: None,
             recent: Vec::new(),
@@ -327,6 +331,7 @@ mod tests {
             interface_size: InterfaceSize::Percent100,
             system_title_bar: false,
             show_invisibles: false,
+            file_tree: false,
             language: "de-DE".to_owned(),
             git_path: Some(PathBuf::from("/opt/git/bin/git")),
             recent: vec![
@@ -586,6 +591,41 @@ mod tests {
 
         let text = std::fs::read_to_string(file.path()).unwrap();
         assert!(text.contains("show_invisibles = true"), "{text}");
+        assert_eq!(file.load().settings, settings);
+    }
+
+    #[test]
+    fn a_file_without_the_setting_for_trees_shows_flat_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(
+            &file,
+            "theme = \"dark\"\n\
+             show_invisibles = true\n\
+             tabs = [\"/work/git-bull\"]\n",
+        );
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert!(!loaded.settings.file_tree);
+        assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
+        assert!(loaded.settings.show_invisibles);
+        assert_eq!(loaded.settings.tabs, [PathBuf::from("/work/git-bull")]);
+    }
+
+    #[test]
+    fn the_setting_for_trees_survives_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            file_tree: true,
+            ..example()
+        };
+        file.save(&settings).unwrap();
+
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.contains("file_tree = true"), "{text}");
         assert_eq!(file.load().settings, settings);
     }
 

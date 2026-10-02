@@ -8,6 +8,7 @@ pub mod commit_panel;
 pub mod components;
 pub mod diff_view;
 pub mod file_history_view;
+pub mod file_list;
 pub mod file_status_view;
 pub mod fonts;
 pub mod graph_view;

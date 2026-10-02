@@ -86,6 +86,18 @@ fn design_commands() -> Vec<Vec<String>> {
             &["HEAD~1", "HEAD"],
         ),
         diff(
+            &[
+                "diff-tree",
+                "-r",
+                "--no-commit-id",
+                "--numstat",
+                "-M",
+                "-C",
+                "-z",
+            ],
+            &["HEAD~1", "HEAD"],
+        ),
+        diff(
             &["diff-tree", "-p", "-M"],
             &["HEAD~1", "HEAD", "--", "file.txt"],
         ),

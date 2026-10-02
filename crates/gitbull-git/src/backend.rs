@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::blame::{self, BlameEntry, BlameStream};
 use crate::blob;
 use crate::cancel::CancelToken;
-use crate::changes::{self, FileChange};
+use crate::changes::{self, FileChange, FileLines};
 use crate::commit_graph::{self, GraphProgress};
 use crate::content::{Content, ContentReader};
 use crate::diff::{self, FileDiff};
@@ -121,6 +121,16 @@ pub trait Backend: Send + Sync {
         parent: Option<&ObjectId>,
         cancel: &CancelToken,
     ) -> Result<Vec<FileChange>, Error>;
+
+    /// The lines `commit` changed in each of its files against `parent`,
+    /// compared as [`Backend::changed_files`] compares them.
+    fn line_counts(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        parent: Option<&ObjectId>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<FileLines>, Error>;
 
     /// The diff of the file `change` describes, in `commit` against
     /// `parent`, its first parent; with a `limit`, up to that many lines
@@ -305,6 +315,16 @@ impl Backend for CliBackend {
         cancel: &CancelToken,
     ) -> Result<Vec<FileChange>, Error> {
         changes::changed_files(&self.git, repo, commit, parent, cancel)
+    }
+
+    fn line_counts(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        parent: Option<&ObjectId>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<FileLines>, Error> {
+        changes::line_counts(&self.git, repo, commit, parent, cancel)
     }
 
     fn file_diff(

@@ -66,10 +66,7 @@ fn main() -> eframe::Result {
                 open_at_start,
                 time_zone: jiff::tz::TimeZone::system(),
             });
-            Ok(Box::new(NativeApp {
-                app,
-                fonts: Some(fonts),
-            }))
+            Ok(Box::new(NativeApp::new(app, Some(fonts))))
         }),
     )
 }

@@ -28,14 +28,17 @@ struct Applied {
     bundled_fonts: bool,
 }
 
-/// The palette the style was last built from, for the colours egui's style
-/// has no place for, such as the accent fill and the colours of notices.
-/// Before any style is applied, the dark Standard palette.
+/// The palette the style was last built from, the one source of every
+/// colour that views and components draw beyond egui's style, such as the
+/// accent fill and the colours of notices. Drawing before any style is
+/// applied is a mistake of the code: debug builds stop at it, and release
+/// builds draw with the dark Standard palette.
 pub fn active_palette(ctx: &Context) -> &'static Palette {
-    ctx.data(|data| data.get_temp::<Applied>(Id::new(APPLIED)))
-        .map_or(&theme::DARK, |applied| {
-            theme::palette(applied.appearance, applied.vision)
-        })
+    let applied = ctx.data(|data| data.get_temp::<Applied>(Id::new(APPLIED)));
+    debug_assert!(applied.is_some(), "no style was applied before drawing");
+    applied.map_or(&theme::DARK, |applied| {
+        theme::palette(applied.appearance, applied.vision)
+    })
 }
 
 /// egui's whole style for `palette`. Headings and titles take the semibold
@@ -389,6 +392,35 @@ mod tests {
             .clear();
         }
         assert_eq!(panel_fills, [color(DARK.panel), color(LIGHT.panel)]);
+    }
+
+    #[test]
+    fn the_active_palette_is_the_one_the_style_was_built_from() {
+        let ctx = Context::default();
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            for vision in [
+                ColourVision::Standard,
+                ColourVision::RedGreen,
+                ColourVision::BlueYellow,
+            ] {
+                ctx.run_ui(egui::RawInput::default(), |ui| {
+                    use_style(ui, appearance, vision);
+                    assert!(std::ptr::eq(
+                        active_palette(ui.ctx()),
+                        theme::palette(appearance, vision)
+                    ));
+                })
+                .textures_delta
+                .clear();
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "no style was applied")]
+    fn asking_for_the_palette_before_a_style_is_a_mistake() {
+        active_palette(&context());
     }
 
     #[test]

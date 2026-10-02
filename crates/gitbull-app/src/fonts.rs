@@ -26,10 +26,27 @@ static JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Reg
 /// Whether the bundled fonts are loaded, which at start-up happens before
 /// the first frame. Until then egui knows only its own fonts. Valid from
 /// the first pass of `ctx` on, when egui has fonts.
+///
+/// egui's fonts are asked only until they know the bundled families, which
+/// locks them; from then on a record in the context's data answers, as
+/// nothing takes the bundled fonts away. The record comes from egui's
+/// fonts, not from the call that gives them: egui takes fonts given to
+/// `set_fonts` only at the start of the next pass.
 pub fn loaded(ctx: &egui::Context) -> bool {
+    let record = egui::Id::new(LOADED);
+    if ctx.data(|data| data.get_temp::<bool>(record)) == Some(true) {
+        return true;
+    }
     let semibold = FontFamily::Name(SEMIBOLD.into());
-    ctx.fonts(|fonts| fonts.definitions().families.contains_key(&semibold))
+    let known = ctx.fonts(|fonts| fonts.definitions().families.contains_key(&semibold));
+    if known {
+        ctx.data_mut(|data| data.insert_temp(record, true));
+    }
+    known
 }
+
+/// The record that the bundled fonts are loaded.
+const LOADED: &str = "bundled-fonts-loaded";
 
 /// egui's emoji fonts, in their order.
 const EMOJI: [&str; 2] = ["NotoEmoji-Regular", "emoji-icon-font"];

@@ -104,6 +104,29 @@ pub struct NativeApp {
     pub app: App,
     /// Fallback fonts while they are still being searched for.
     pub fonts: Option<Receiver<Vec<Fallback>>>,
+    /// The zoom factor of the last frame.
+    zoom: Option<f32>,
+}
+
+impl NativeApp {
+    pub fn new(app: App, fonts: Option<Receiver<Vec<Fallback>>>) -> NativeApp {
+        NativeApp {
+            app,
+            fonts,
+            zoom: None,
+        }
+    }
+
+    /// Records the geometry of the window as `info` reports it in the
+    /// points of the zoom factor `zoom`. In the frame after the zoom factor
+    /// changed, egui already reports the new one while egui-winit measured
+    /// the window with the old one; that frame records nothing.
+    pub fn remember_window(&mut self, info: &egui::ViewportInfo, content_size: Vec2, zoom: f32) {
+        if self.zoom.is_none_or(|last| last == zoom) {
+            self.app.record_window(geometry(info, content_size, zoom));
+        }
+        self.zoom = Some(zoom);
+    }
 }
 
 /// Searches the system's fonts in the background; scanning them can take a
@@ -125,8 +148,7 @@ impl eframe::App for NativeApp {
             fonts::install(ctx, &found);
             self.fonts = None;
         }
-        self.app
-            .record_window(geometry(&info, content.size(), ctx.zoom_factor()));
+        self.remember_window(&info, content.size(), ctx.zoom_factor());
         self.app.logic();
         if let Some(due) = self.app.save_due_in() {
             ctx.request_repaint_after(due);

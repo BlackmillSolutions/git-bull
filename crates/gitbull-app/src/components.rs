@@ -10,7 +10,7 @@ use std::sync::Arc;
 use eframe::egui::{
     self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
     KeyboardShortcut, Label, Layout, Margin, ModifierNames, Rect, Response, RichText, ScrollArea,
-    Sense, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
+    Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
 };
 
 use crate::icons;
@@ -162,6 +162,61 @@ pub fn icon_button(
     );
     paint_icon_button(ui, &response, rect, icon, radius(), colours);
     tooltip(response, name, shortcut)
+}
+
+/// The record of the copy button clicked last, whose tooltip confirms the
+/// copy until the pointer leaves it.
+const COPIED: &str = "copied-button";
+
+/// A small icon button named `name` that copies `text`, and is disabled
+/// while there is none. After a click its tooltip says `copied` until the
+/// pointer leaves the button.
+pub fn copy_button(
+    ui: &mut Ui,
+    icon: &str,
+    name: &str,
+    copied: &str,
+    text: Option<&str>,
+) -> Response {
+    let palette = active_palette(ui.ctx());
+    let side = SHAPE.target;
+    let enabled = text.is_some();
+    let sense = match enabled {
+        true => Sense::click(),
+        false => Sense::hover(),
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), sense);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    let record = Id::new(COPIED);
+    if response.clicked()
+        && let Some(text) = text
+    {
+        ui.ctx().copy_text(text.to_owned());
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(record, response.id));
+    }
+    let confirmed = ui.ctx().data(|data| data.get_temp::<Id>(record)) == Some(response.id);
+    if confirmed && !response.hovered() {
+        ui.ctx().data_mut(|data| data.remove::<Id>(record));
+    }
+    let ink = match enabled {
+        true => color(palette.text),
+        false => color(palette.text_muted),
+    };
+    let colours = (
+        State::of(&response).fill(palette, Color32::TRANSPARENT),
+        ink,
+    );
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
+    // egui hides a tooltip after a click until the pointer moves; the
+    // confirmation shows at once.
+    if confirmed && response.hovered() {
+        response.show_tooltip_ui(|ui| {
+            ui.label(copied);
+        });
+        return response;
+    }
+    tooltip(response, name, None)
 }
 
 /// An [`icon_button`] that switches `value` on and off. While on it is
@@ -824,5 +879,155 @@ impl State {
             State::Hovered => color(palette.hover),
             State::Pressed => color(palette.pressed),
         }
+    }
+}
+
+/// The indentation per level of folders in a tree, such as the sidebar
+/// or a file list.
+pub(crate) const TREE_INDENT: f32 = 12.0;
+/// The room left of the first level of a tree.
+pub(crate) const TREE_LEFT: f32 = 6.0;
+
+/// A small triangle pointing right, or down when `open`.
+pub(crate) fn triangle(
+    painter: &eframe::egui::Painter,
+    center: eframe::egui::Pos2,
+    open: bool,
+    fill: Color32,
+) {
+    let points = if open {
+        vec![
+            center + vec2(-4.0, -2.0),
+            center + vec2(4.0, -2.0),
+            center + vec2(0.0, 3.0),
+        ]
+    } else {
+        vec![
+            center + vec2(-2.0, -4.0),
+            center + vec2(3.0, 0.0),
+            center + vec2(-2.0, 4.0),
+        ]
+    };
+    painter.add(Shape::convex_polygon(points, fill, Stroke::NONE));
+}
+
+/// The colours of added and removed lines, as the markers of the diff
+/// draw them.
+pub fn line_colours(palette: &Palette) -> (Color32, Color32) {
+    (
+        color(palette.diff_added_marker),
+        color(palette.diff_removed_marker),
+    )
+}
+
+/// The side of a box of the bar of changed lines, the room between two
+/// boxes, and how many boxes the bar has.
+const BOX: f32 = 8.0;
+const BOX_GAP: f32 = 2.0;
+const BOXES: usize = 5;
+
+/// How many boxes of the bar show added and how many removed lines: as
+/// many as lines changed, at most five, filled in proportion, with at least
+/// one for each kind that changed.
+pub fn bar_boxes(added: u64, removed: u64) -> (usize, usize) {
+    let changed = added + removed;
+    if changed == 0 {
+        return (0, 0);
+    }
+    let filled = changed.min(BOXES as u64) as usize;
+    let mut green = (filled as f64 * added as f64 / changed as f64).round() as usize;
+    if added > 0 {
+        green = green.max(1);
+    }
+    if removed > 0 {
+        green = green.min(filled - 1);
+    }
+    (green, filled - green)
+}
+
+/// The width of the bar of five boxes.
+const BAR_WIDTH: f32 = BOXES as f32 * BOX + (BOXES - 1) as f32 * BOX_GAP;
+
+/// The numbers of the lines removed and added, in this order, as they are
+/// drawn from the right, laid out in the colours of the markers.
+fn changed_line_numbers(ui: &Ui, added: u64, removed: u64) -> [(Arc<Galley>, Color32); 2] {
+    let (added_colour, removed_colour) = line_colours(active_palette(ui.ctx()));
+    let font = egui::FontId::monospace(12.0);
+    [
+        (format!("−{removed}"), removed_colour),
+        (format!("+{added}"), added_colour),
+    ]
+    .map(|(text, colour)| {
+        let galley = ui.painter().layout_no_wrap(text, font.clone(), colour);
+        (galley, colour)
+    })
+}
+
+/// The width [`paint_changed_lines`] takes for `added` and `removed`.
+pub fn changed_lines_width(ui: &Ui, added: u64, removed: u64) -> f32 {
+    let [(removed, _), (added, _)] = changed_line_numbers(ui, added, removed);
+    BAR_WIDTH + SHAPE.space[1] + removed.size().x + SHAPE.space[0] + added.size().x
+}
+
+/// Paints the lines added and removed as `+12 −3` in the colours of the
+/// markers, and the bar of five boxes after them, ending at `right` and
+/// centred on `middle`. Returns where the numbers begin.
+pub fn paint_changed_lines(ui: &Ui, right: f32, middle: f32, added: u64, removed: u64) -> f32 {
+    let palette = active_palette(ui.ctx());
+    let painter = ui.painter();
+    let (added_colour, removed_colour) = line_colours(palette);
+    let left = right - BAR_WIDTH;
+    let (green, red) = bar_boxes(added, removed);
+    for index in 0..BOXES {
+        let at = egui::pos2(left + index as f32 * (BOX + BOX_GAP), middle - BOX / 2.0);
+        let square = Rect::from_min_size(at, vec2(BOX, BOX));
+        if index < green {
+            painter.rect_filled(square, 1.0, added_colour);
+        } else if index < green + red {
+            painter.rect_filled(square, 1.0, removed_colour);
+        } else {
+            painter.rect_stroke(
+                square,
+                1.0,
+                Stroke::new(1.0, color(palette.border_strong)),
+                StrokeKind::Inside,
+            );
+        }
+    }
+    let mut start = left - SHAPE.space[1];
+    for (galley, colour) in changed_line_numbers(ui, added, removed) {
+        start -= galley.size().x;
+        painter.galley(
+            egui::pos2(start, middle - galley.size().y / 2.0),
+            galley,
+            colour,
+        );
+        start -= SHAPE.space[0];
+    }
+    start + SHAPE.space[0]
+}
+
+/// The lines added and removed with their bar, as a widget of its own of
+/// `width`, such as the gallery shows; the file lists paint them at the end
+/// of their rows.
+pub fn changed_lines(ui: &mut Ui, added: u64, removed: u64, width: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, SHAPE.target), Sense::hover());
+    paint_changed_lines(ui, rect.right(), rect.center().y, added, removed);
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bar_fills_its_boxes_in_proportion_and_one_for_each_kind() {
+        assert_eq!(bar_boxes(12, 3), (4, 1));
+        assert_eq!(bar_boxes(1, 1), (1, 1));
+        assert_eq!(bar_boxes(3, 0), (3, 0));
+        assert_eq!(bar_boxes(0, 2), (0, 2));
+        assert_eq!(bar_boxes(1, 100), (1, 4));
+        assert_eq!(bar_boxes(100, 1), (4, 1));
+        assert_eq!(bar_boxes(0, 0), (0, 0));
     }
 }

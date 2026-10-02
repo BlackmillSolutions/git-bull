@@ -76,8 +76,12 @@ benchmark prints a table in the form used below.
   and with the current branch only, the time to the whole history, and the
   memory the loaded history takes.
 - `wide_commit` generates a repository whose one commit adds 50,000 files
-  into `target/bench-wide`, selects the commit and scrolls through its file
-  list with Page Down and the mouse wheel in turn.
+  into `target/bench-wide`, selects the commit and measures every frame
+  until its files show, then the time until their lines are counted. It
+  scrolls through the file list with Page Down and the mouse wheel in
+  turn, switches it to the tree and scrolls that too, collapses and
+  expands the first folder in turn, and types a filter character by
+  character and clears it again.
 - `scrolling` opens the repository in the window without a graphics
   adapter and scrolls with Page Down and the mouse wheel in turn, while the
   history loads and afterwards, then with the mouse wheel alone, then drags
@@ -408,3 +412,35 @@ every line of `data/large.txt`, a file of 100,000 lines over 512 KiB.
 - The syntax colours of the Rust file take 2.5 s in the background, as
   before this change; the diff, its changed words and the text to reveal
   do not wait for them.
+
+## The comforts of the commit details (change `commit-details-comforts`, task 5.1)
+
+Measured on 2026-10-02 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, NVMe SSD, Git 2.55.0.windows.5, release build, with
+`cargo test --release -p gitbull-app --test benchmarks wide_commit -- --ignored --nocapture`.
+
+The repository of the benchmark has one commit that adds 50,000 files in
+50 folders of 1,000 files each.
+
+| Commit with 50,000 files | Result |
+|---|---|
+| Files listed after selecting the commit | 0.14 s |
+| Lines of every file counted after selecting the commit | 3.70 s |
+
+| File list | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Until the files show, the frame of their arrival included | 441 | 0.2 ms | 0.5 ms | 5.0 ms | yes |
+| Flat list, Page Down and wheel in turn | 400 | 0.4 ms | 0.8 ms | 1.1 ms | yes |
+| Switching to the tree | 3 | 1.6 ms | 1.6 ms | 1.9 ms | yes |
+| Tree, Page Down and wheel in turn | 400 | 0.4 ms | 0.8 ms | 0.8 ms | yes |
+| Collapsing and expanding the first folder in turn | 200 | 0.8 ms | 1.4 ms | 1.4 ms | yes |
+| Typing `file04999` and clearing it, one character a frame | 18 | 2.2 ms | 3.3 ms | 3.4 ms | yes |
+
+- Every frame stays far below the target of 16.7 ms. The order of the
+  files, flat and as a tree, is prepared on the worker that reads them, so
+  the frame in which they arrive only takes them; the rows are built when
+  the mode, the filter or a folder changes, in two passes over the files,
+  which a change of the filter costs most of.
+- Counting the lines of a commit of 50,000 files makes Git read every
+  blob; it takes 3.7 s in the background after the list has shown and does
+  not delay it.

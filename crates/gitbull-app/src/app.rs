@@ -27,6 +27,8 @@ use gitbull_git::{Backend, CliBackend};
 use jiff::tz::TimeZone;
 
 use crate::commit_list::{SHORT_HASH, list_row};
+use crate::commit_panel::MessagePart;
+use crate::file_list::FileList;
 use crate::i18n::Translations;
 use crate::theme::{Appearance, ThemeFollower};
 use crate::virtual_list::ListState;
@@ -135,10 +137,15 @@ pub(crate) struct TabView {
     /// The dialog that asks before writing the commit-graph is open.
     pub(crate) confirm_graph: bool,
     /// The files of the commit shown in the commit panel.
-    pub(crate) files: ListState,
-    /// The commit whose files `files` lists, to select the first file of
-    /// the next one.
+    pub(crate) commit_files: FileList,
+    /// The commit whose files `commit_files` lists, to select the first
+    /// file of the next one.
     pub(crate) files_for: Option<ObjectId>,
+    /// The parts of the message of the commit shown where it has links,
+    /// found once the message has arrived; none for a message without.
+    pub(crate) message_parts: Option<Vec<MessagePart>>,
+    /// The commit whose message `message_parts` splits.
+    pub(crate) message_for: Option<ObjectId>,
     /// The matches of the Search view.
     pub(crate) search_results: ListState,
     /// A view opened from the context menu of a file, shown instead of the
@@ -152,13 +159,13 @@ pub(crate) struct TabView {
     /// The diff of the commit chosen in the file history.
     pub(crate) history_diff: DiffView,
     /// The files of the File status view.
-    pub(crate) status_files: ListState,
+    pub(crate) status_files: FileList,
     /// The version of the status `status_files` shows, to select the file
     /// chosen again where a new status puts it.
     pub(crate) status_version: Option<u64>,
     /// The entry of the File status view whose context menu was opened
     /// last, with the path the last commit has of it.
-    pub(crate) status_menu: Option<(StatusEntry, Option<RepoPath>)>,
+    pub(crate) status_menu: Option<StatusMenu>,
     /// The full name of the branch or remote branch whose context menu was
     /// opened last in the sidebar.
     pub(crate) sidebar_menu: Option<String>,
@@ -180,6 +187,14 @@ impl TabView {
     pub(crate) fn uncommitted_selected(&self) -> bool {
         self.uncommitted.is_some() && self.commits.selected() == self.uncommitted
     }
+}
+
+/// What the context menu of the File status view was opened for.
+pub(crate) enum StatusMenu {
+    /// An entry, with the path the last commit has of it.
+    File(StatusEntry, Option<RepoPath>),
+    /// A folder of the tree, by its path.
+    Folder(RepoPath),
 }
 
 /// A view opened from the context menu of a file.
@@ -375,6 +390,14 @@ impl App {
     pub fn set_show_invisibles(&mut self, show: bool) {
         if self.settings.show_invisibles != show {
             self.settings.show_invisibles = show;
+            self.dirty = true;
+        }
+    }
+
+    /// Sets whether file lists show a tree of folders.
+    pub fn set_file_tree(&mut self, tree: bool) {
+        if self.settings.file_tree != tree {
+            self.settings.file_tree = tree;
             self.dirty = true;
         }
     }
