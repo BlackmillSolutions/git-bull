@@ -48,4 +48,4 @@ behaviour fails before its code.
 
 ## 8. Final check
 
-- [ ] 8.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate diff-comforts --strict`; verify all succeed and CI is green on Linux, Windows and macOS
+- [x] 8.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate diff-comforts --strict`; verify all succeed and CI is green on Linux, Windows and macOS. All passed, and CI was green on Linux, Windows and macOS for f85ab9f, the head of pull request #25, merged into `dev` as 363c4e1 on 2026-10-02.

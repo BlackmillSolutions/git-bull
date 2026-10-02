@@ -249,6 +249,7 @@ on every platform.
 | Ctrl+W | Close the current tab |
 | Ctrl+Tab, Ctrl+Shift+Tab | Next and previous tab, with Ctrl on every platform |
 | Ctrl+Shift+Page Up, Ctrl+Shift+Page Down | Move the current tab one place to the left or right, with Ctrl on every platform |
+| F7, Shift+F7 | Next and previous hunk in the diff |
 | F5, Ctrl+R | Refresh |
 | Ctrl+C | Copy: the full hash in the commit list, the path in a file list, the selected text in diff and blame |
 | Ctrl+Plus, Ctrl+= | Next larger interface size |
@@ -286,6 +287,10 @@ on every platform.
 #### Scenario: Back to the default size
 - **WHEN** the interface size is 150 % and the user presses Ctrl+0
 - **THEN** the interface size is 100 %
+
+#### Scenario: Next hunk with the keyboard
+- **WHEN** a diff with several hunks is shown, no text field has the keyboard focus and the user presses F7
+- **THEN** the diff scrolls to the next hunk
 
 ### Requirement: Responsive interface
 The interface SHALL respond to input within 100 ms at all times, including

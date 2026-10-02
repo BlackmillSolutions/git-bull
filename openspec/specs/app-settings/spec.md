@@ -11,9 +11,10 @@ interface.
 ### Requirement: Persisted settings
 git-bull SHALL persist the following in one file in the operating system's
 configuration directory for applications: theme, colour vision, interface
-size, whether to use the system title bar, language, the path to the Git
-executable, recently opened repositories, open tabs in their order and the
-active tab, window size and position, divider positions and column widths.
+size, whether to use the system title bar, whether the diff shows invisible
+characters, language, the path to the Git executable, recently opened
+repositories, open tabs in their order and the active tab, window size and
+position, divider positions and column widths.
 A path that is not valid UTF-8 SHALL be left out of the saved settings; the
 other settings SHALL still be saved.
 
@@ -45,6 +46,10 @@ other settings SHALL still be saved.
 #### Scenario: Settings file without the title bar setting
 - **WHEN** git-bull starts with a settings file that does not say whether to use the system title bar
 - **THEN** it uses its own title bar, and keeps every other setting from the file
+
+#### Scenario: Settings file without the setting for invisible characters
+- **WHEN** git-bull starts with a settings file that does not say whether the diff shows invisible characters
+- **THEN** the diff hides them, and every other setting from the file is kept
 
 ### Requirement: Recently opened repositories
 git-bull SHALL remember the 20 most recently opened repositories, most recent
