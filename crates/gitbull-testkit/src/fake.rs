@@ -633,6 +633,9 @@ impl Backend for FakeBackend {
 
     fn stashes(&self, repo: &Path) -> Result<Vec<Stash>, Error> {
         self.probe.record("stashes", repo);
+        if let Some(stashes) = self.live_of(repo).and_then(|live| live.stashes.clone()) {
+            return Ok(stashes);
+        }
         let root = self.root_of(repo);
         Ok(self
             .stashes
@@ -1215,6 +1218,7 @@ pub struct LiveRepo {
 struct LiveState {
     head: Option<Head>,
     references: Option<Vec<Reference>>,
+    stashes: Option<Vec<Stash>>,
     lines: Option<Vec<CommitLine>>,
     /// Takes the place of `lines` for the next streams.
     feed: Option<HistoryFeed>,
@@ -1236,6 +1240,10 @@ impl LiveRepo {
 
     pub fn set_references(&self, references: Vec<Reference>) {
         self.lock().references = Some(references);
+    }
+
+    pub fn set_stashes(&self, stashes: Vec<Stash>) {
+        self.lock().stashes = Some(stashes);
     }
 
     /// The history every later stream delivers at once.

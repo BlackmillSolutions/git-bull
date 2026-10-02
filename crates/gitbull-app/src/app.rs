@@ -126,6 +126,9 @@ pub(crate) struct TabView {
     /// The rows laid out for `sidebar_key`, kept until it changes.
     pub(crate) sidebar_rows: Vec<SidebarRow>,
     pub(crate) sidebar_key: Option<(u64, SidebarState)>,
+    /// The entry `sidebar_list` shows selected: the tab's selection placed
+    /// last, or the entry the list selected and reported.
+    pub(crate) sidebar_placed: Option<SidebarKey>,
     /// The reference the last navigation went to.
     pub(crate) target: Option<String>,
     /// The selected commit, to select it again in a reloaded history.

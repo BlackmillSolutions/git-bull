@@ -57,11 +57,13 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     };
     let hint = app.texts.text(Msg::SidebarFilter);
     let name = app.texts.text(Msg::Sidebar);
-    let shown_view = app
+    let Some((shown_view, selection)) = app
         .workspace()
         .and_then(|workspace| workspace.active())
-        .map(|tab| tab.view())
-        .unwrap_or_default();
+        .map(|tab| (tab.view(), tab.sidebar_selection().clone()))
+    else {
+        return Vec::new();
+    };
     let Some((session, view)) = app.active_view() else {
         return Vec::new();
     };
@@ -70,6 +72,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         sidebar_list,
         sidebar_rows,
         sidebar_key,
+        sidebar_placed,
         sidebar_menu,
         ..
     } = view;
@@ -84,7 +87,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     // Laying out thousands of references each frame would cost more than
     // the frame; the rows are kept until what they show changes.
     let key = (session.sidebar_version(), sidebar.clone());
-    if sidebar_key.as_ref() != Some(&key) {
+    let rebuilt = sidebar_key.as_ref() != Some(&key);
+    let filtered = rebuilt
+        && sidebar_key
+            .as_ref()
+            .is_some_and(|(_, before)| before.filter != sidebar.filter);
+    if rebuilt {
         let loaded = session.sidebar().and_then(|result| result.as_ref().ok());
         *sidebar_rows =
             sidebar_tree::rows(loaded, &session.opened().head, sidebar, session.views());
@@ -92,6 +100,22 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     }
 
     let rows: &[SidebarRow] = sidebar_rows;
+    // The tab's selection is placed before the list is drawn, so that the
+    // list does not report it as the user's, and only when the rows or the
+    // selection changed: searching 10,000 rows each frame would cost more
+    // than the frame.
+    let elsewhere = sidebar_placed.as_ref() != Some(&selection);
+    if rebuilt || elsewhere {
+        // Only a change of the filter or an entry selected elsewhere scrolls
+        // to the row. A refresh leaves the sidebar where the user scrolled
+        // it, and so does a view, whose rows are at the top.
+        let reveal = filtered || (elsewhere && !matches!(selection, SidebarKey::View(_)));
+        match sidebar_tree::row_of(rows, &selection).map(|row| row as u64) {
+            Some(row) if reveal => sidebar_list.reselect(row),
+            row => sidebar_list.select(row),
+        }
+        *sidebar_placed = Some(selection);
+    }
     let output = VirtualList::new(Id::new(AREA_SIDEBAR), Role::Tree, name, rows.len() as u64).show(
         ui,
         sidebar_list,
@@ -117,6 +141,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         .clicked
         .or(sidebar_list.selected().filter(|_| output.selection_changed));
     if let Some(row) = selected.and_then(row_at) {
+        // The list shows it already; the tab takes it at the end of the
+        // frame.
+        *sidebar_placed = Some(row.key());
         actions.push(SidebarAction::Select(row.key()));
     }
     if let Some(row) = output.clicked.and_then(row_at) {
