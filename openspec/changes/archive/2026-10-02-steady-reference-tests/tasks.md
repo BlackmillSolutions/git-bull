@@ -10,4 +10,4 @@
 
 ## 3. Final check
 
-- [ ] 3.1 Remove the delay from `FakeBackend` and run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate steady-reference-tests --strict`; verify all succeed, that `git diff` shows no change to `crates/gitbull-testkit` or the snapshot images, and that CI is green on Linux, Windows and macOS
+- [x] 3.1 Remove the delay from `FakeBackend` and run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate steady-reference-tests --strict`; verify all succeed, that `git diff` shows no change to `crates/gitbull-testkit` or the snapshot images, and that CI is green on Linux, Windows and macOS
