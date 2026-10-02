@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use eframe::egui::{
     self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
-    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Response, RichText, ScrollArea, Sense,
-    Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
+    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Rect, Response, RichText, ScrollArea,
+    Sense, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
 };
 
 use crate::icons;
@@ -156,20 +156,78 @@ pub fn icon_button(
     let side = SHAPE.control_height;
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
-    if ui.is_rect_visible(rect) {
-        let fill = State::of(&response).fill(palette, Color32::TRANSPARENT);
-        let painter = ui.painter();
-        painter.rect_filled(rect, radius(), fill);
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            icon,
-            icons::font(ui.ctx(), ICON_SIZE),
-            color(palette.text),
-        );
-        focus_ring(ui, &response);
-    }
+    let colours = (
+        State::of(&response).fill(palette, Color32::TRANSPARENT),
+        color(palette.text),
+    );
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
     tooltip(response, name, shortcut)
+}
+
+/// Draws an icon button of `response` in `rect` with corners of `radius`:
+/// its surface and `icon` in `colours`, and its focus ring with the same
+/// corners.
+fn paint_icon_button(
+    ui: &Ui,
+    response: &Response,
+    rect: Rect,
+    icon: &str,
+    radius: CornerRadius,
+    (fill, ink): (Color32, Color32),
+) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, fill);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icon,
+        icons::font(ui.ctx(), ICON_SIZE),
+        ink,
+    );
+    focus_ring_with(ui, response, radius);
+}
+
+/// The surface of Close window under the pointer, and its icon there: the
+/// red of Windows, which many Linux themes share. It only marks the button
+/// under the pointer and tells nothing by itself.
+const CLOSE_WINDOW: Color32 = Color32::from_rgb(0xC4, 0x2B, 0x1C);
+const ON_CLOSE_WINDOW: Color32 = Color32::WHITE;
+
+/// A button of the title bar that acts on the window, filling `rect`: an
+/// icon button of a larger size, named `name` and red under the pointer if
+/// it `closes` the window, which takes the keyboard focus if `focusable`
+/// (design, decision 3).
+pub fn window_button(
+    ui: &mut Ui,
+    rect: Rect,
+    icon: &str,
+    name: &str,
+    closes: bool,
+    focusable: bool,
+) -> Response {
+    let palette = active_palette(ui.ctx());
+    let sense = if focusable {
+        Sense::click()
+    } else {
+        Sense::CLICK
+    };
+    let response = ui.interact(rect, Id::new(("window-button", icon)), sense);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
+    let state = State::of(&response);
+    let colours = if closes && state != State::Idle {
+        (CLOSE_WINDOW, ON_CLOSE_WINDOW)
+    } else {
+        (
+            state.fill(palette, Color32::TRANSPARENT),
+            color(palette.text),
+        )
+    };
+    // Square, as the title bar is filled to its edges.
+    paint_icon_button(ui, &response, rect, icon, CornerRadius::ZERO, colours);
+    tooltip(response, name, None)
 }
 
 /// `icon` of `size` points in `colour`, beside a text that names it. It is
@@ -276,6 +334,70 @@ pub fn segmented<T: PartialEq + Copy>(
         painter.galley(at, galley, color(text));
         focus_ring(ui, &segment);
         response = response.union(segment);
+    }
+    response
+}
+
+/// The side of the box of a checkbox, in points.
+const CHECK_BOX: f32 = 16.0;
+
+/// A box that `value` ticks, with `label` beside it, as high as a control
+/// and taking clicks on its label too (design, decision 6). Space toggles
+/// it while it has the keyboard focus.
+pub fn checkbox(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
+    let palette = active_palette(ui.ctx());
+    let font = TextStyle::Body.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
+    let gap = SHAPE.space[1];
+    let size = vec2(
+        CHECK_BOX + gap + galley.size().x,
+        SHAPE.control_height.max(SHAPE.target),
+    );
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *value, label));
+    if ui.is_rect_visible(rect) {
+        let state = State::of(&response);
+        let check = Rect::from_center_size(
+            egui::pos2(rect.left() + CHECK_BOX / 2.0, rect.center().y),
+            vec2(CHECK_BOX, CHECK_BOX),
+        );
+        let (fill, border) = if *value {
+            (color(palette.accent_fill), color(palette.accent_fill))
+        } else {
+            (
+                state.fill(palette, color(palette.canvas)),
+                color(palette.border_strong),
+            )
+        };
+        let painter = ui.painter();
+        painter.rect(
+            check,
+            CornerRadius::same(SHAPE.radius_small as u8 / 2),
+            fill,
+            Stroke::new(1.0, border),
+            StrokeKind::Inside,
+        );
+        if *value {
+            let at = |x: f32, y: f32| {
+                egui::pos2(check.left() + x * CHECK_BOX, check.top() + y * CHECK_BOX)
+            };
+            let tick = Stroke::new(2.0, color(palette.on_accent));
+            painter.line_segment([at(0.22, 0.52), at(0.42, 0.72)], tick);
+            painter.line_segment([at(0.42, 0.72), at(0.78, 0.3)], tick);
+        }
+        painter.galley(
+            egui::pos2(check.right() + gap, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color(palette.text),
+        );
+        focus_ring(ui, &response);
     }
     response
 }
@@ -491,10 +613,15 @@ pub fn focus_visible(ctx: &Context) -> bool {
 /// focus and rings show: the stroke of the selection, 2 points in the focus
 /// colour.
 pub fn focus_ring(ui: &Ui, response: &Response) {
+    focus_ring_with(ui, response, radius());
+}
+
+/// Like [`focus_ring`], with corners of `radius`, as the control has.
+fn focus_ring_with(ui: &Ui, response: &Response, radius: CornerRadius) {
     if response.has_focus() && focus_visible(ui.ctx()) {
         ui.painter().rect_stroke(
             response.rect,
-            radius(),
+            radius,
             ui.visuals().selection.stroke,
             StrokeKind::Inside,
         );

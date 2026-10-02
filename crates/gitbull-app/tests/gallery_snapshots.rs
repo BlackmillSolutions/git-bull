@@ -23,6 +23,8 @@ struct Gallery {
     vision: ColourVision,
     choice: &'static str,
     text: String,
+    /// A checkbox ticked and one that is not.
+    checks: [bool; 2],
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
@@ -115,6 +117,11 @@ fn gallery(ui: &mut egui::Ui, state: &mut Gallery) {
                     ],
                 );
                 components::text_field(ui, &mut state.text, "Search commits", 260.0);
+            });
+            ui.horizontal(|ui| {
+                let [ticked, unticked] = &mut state.checks;
+                components::checkbox(ui, ticked, "Ticked");
+                components::checkbox(ui, unticked, "Not ticked");
             });
 
             section(ui, "MENU");
@@ -246,6 +253,7 @@ fn snapshot(name: &str, appearance: Appearance, vision: ColourVision) {
         vision,
         choice: "light",
         text: String::new(),
+        checks: [true, false],
     };
     let mut harness = Harness::builder()
         .with_size((900.0, 860.0))

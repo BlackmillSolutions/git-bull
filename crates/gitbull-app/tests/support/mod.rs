@@ -224,9 +224,17 @@ fn sized_window_on(
 /// Like [`window`], at 60 frames per second as on a common display, with
 /// room for the spring of the lists to come to rest after the wheel.
 pub fn window_at_60_fps(app: App) -> Harness<'static, App> {
+    window_at_60_fps_on(eframe::egui::os::OperatingSystem::from_target_os(), app)
+}
+
+/// Like [`window_at_60_fps`], with egui behaving as on `os`.
+pub fn window_at_60_fps_on(
+    os: eframe::egui::os::OperatingSystem,
+    app: App,
+) -> Harness<'static, App> {
     let builder = Harness::builder()
         .with_size((1280.0, 800.0))
-        .with_os(eframe::egui::os::OperatingSystem::from_target_os())
+        .with_os(os)
         .with_step_dt(1.0 / 60.0)
         .with_max_steps(120);
     build_window(builder, app)
@@ -415,19 +423,27 @@ pub fn focus_rings(output: &eframe::egui::FullOutput) -> Vec<eframe::egui::Rect>
 /// Every rectangle drawn with the focus ring of either appearance, with the
 /// width of its stroke: 2 points around a control, 1 around an area.
 pub fn focus_strokes(output: &eframe::egui::FullOutput) -> Vec<(eframe::egui::Rect, f32)> {
+    focus_ring_shapes(output)
+        .into_iter()
+        .map(|ring| (ring.rect, ring.stroke.width))
+        .collect()
+}
+
+/// Every rectangle drawn with the focus ring of either appearance, as it
+/// was drawn.
+pub fn focus_ring_shapes(
+    output: &eframe::egui::FullOutput,
+) -> Vec<eframe::egui::epaint::RectShape> {
     use eframe::egui::epaint::{RectShape, Shape};
     use gitbull_app::theme::{DARK, LIGHT};
     let colours = [LIGHT.focus, DARK.focus].map(gitbull_app::ui::color);
-    fn walk(
-        shape: &Shape,
-        colours: &[eframe::egui::Color32],
-        found: &mut Vec<(eframe::egui::Rect, f32)>,
-    ) {
+    fn walk(shape: &Shape, colours: &[eframe::egui::Color32], found: &mut Vec<RectShape>) {
         match shape {
-            Shape::Rect(RectShape { rect, stroke, .. })
-                if [1.0, 2.0].contains(&stroke.width) && colours.contains(&stroke.color) =>
+            Shape::Rect(ring)
+                if [1.0, 2.0].contains(&ring.stroke.width)
+                    && colours.contains(&ring.stroke.color) =>
             {
-                found.push((*rect, stroke.width));
+                found.push(ring.clone());
             }
             Shape::Vec(shapes) => {
                 for shape in shapes {

@@ -115,6 +115,70 @@ fn segmented_control_offers_its_choices_as_radio_buttons() {
     assert_eq!(toggled(&harness, "Light"), Some(Toggled::False));
 }
 
+const SYSTEM_TITLE_BAR: &str = "Use the system title bar";
+
+/// Whether the checkbox named `label` is ticked, as assistive technology
+/// learns it.
+fn ticked(harness: &Harness<'_, bool>, label: &str) -> Option<Toggled> {
+    harness
+        .get_by_role_and_label(Role::CheckBox, label)
+        .accesskit_node()
+        .toggled()
+}
+
+#[test]
+fn a_checkbox_toggles_on_a_click_and_with_space() {
+    let mut harness = harness(false, |ui, on: &mut bool| {
+        components::checkbox(ui, on, SYSTEM_TITLE_BAR);
+    });
+    harness.run();
+    assert_eq!(ticked(&harness, SYSTEM_TITLE_BAR), Some(Toggled::False));
+
+    harness
+        .get_by_role_and_label(Role::CheckBox, SYSTEM_TITLE_BAR)
+        .click();
+    harness.run();
+    assert!(*harness.state());
+    assert_eq!(ticked(&harness, SYSTEM_TITLE_BAR), Some(Toggled::True));
+
+    // The keyboard reaches it with Tab.
+    harness.key_press(Key::Tab);
+    harness.run();
+    harness.key_press(Key::Space);
+    harness.run();
+    assert!(!*harness.state());
+}
+
+#[test]
+fn tab_onto_a_checkbox_shows_the_focus_ring() {
+    let mut harness = harness(false, |ui, on: &mut bool| {
+        components::checkbox(ui, on, SYSTEM_TITLE_BAR);
+    });
+    harness.run();
+    let widget = harness
+        .get_by_role_and_label(Role::CheckBox, SYSTEM_TITLE_BAR)
+        .rect();
+    harness.key_press(Key::Tab);
+    harness.run();
+    assert!(
+        has_focus_ring(&harness, widget),
+        "no ring around {widget:?}"
+    );
+}
+
+#[test]
+fn a_checkbox_has_a_click_target_of_at_least_24() {
+    let mut harness = harness(false, |ui, on: &mut bool| {
+        components::checkbox(ui, on, "On");
+    });
+    harness.run();
+    let size = harness
+        .get_by_role_and_label(Role::CheckBox, "On")
+        .rect()
+        .size();
+    assert!(size.x >= 24.0 && size.y >= 24.0, "{size:?}");
+}
+
 #[test]
 fn button_reports_its_click() {
     let mut harness = harness(0, |ui, clicks: &mut u32| {

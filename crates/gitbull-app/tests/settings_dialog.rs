@@ -5,6 +5,7 @@ mod support;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::accesskit::Role;
+use eframe::egui::os::OperatingSystem;
 use eframe::egui::{Event, Key, Modifiers, MouseWheelUnit, Popup, TouchPhase, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
@@ -14,7 +15,7 @@ use gitbull_core::workspace::View;
 use gitbull_testkit::FakeBackend;
 use support::{
     Answer, Scripted, Setup, build, commit_list_scroll, find_row, long_history, path,
-    settle_window, sized_window, turn_wheel, wait_for_row, window, window_at_60_fps,
+    settle_window, sized_window, turn_wheel, wait_for_row, window, window_at_60_fps, window_on,
 };
 
 fn open_dialog(harness: &mut Harness<'_, App>) {
@@ -167,7 +168,7 @@ fn browsing_puts_the_chosen_file_into_the_field() {
 }
 
 #[test]
-fn appearance_section_offers_theme_colour_vision_and_interface_size() {
+fn appearance_section_offers_theme_colour_vision_interface_size_and_title_bar() {
     let test = build(Setup::default());
     let mut harness = window(test.app);
     harness.run();
@@ -188,8 +189,65 @@ fn appearance_section_offers_theme_colour_vision_and_interface_size() {
     ] {
         harness.get_by_role_and_label(Role::RadioButton, choice);
     }
+    harness.get_by_role_and_label(Role::CheckBox, "Use the system title bar");
     harness.get_by_label("Language");
     harness.get_by_label("Git");
+}
+
+const AT_NEXT_START: &str = "Takes effect when git-bull starts next.";
+
+#[test]
+fn the_system_title_bar_takes_effect_at_the_next_start() {
+    let test = build(Setup::default());
+    let file = SettingsFile::new(test.dir.path().join("settings.toml"));
+    let mut harness = window_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    open_dialog(&mut harness);
+    assert!(harness.query_by_label(AT_NEXT_START).is_none());
+
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Use the system title bar")
+        .click();
+    harness.run();
+
+    assert!(harness.state().settings().system_title_bar);
+    harness.get_by_label(AT_NEXT_START);
+    // The window keeps its title bar until then.
+    assert!(!harness.state().system_title_bar());
+    harness.get_by_role_and_label(Role::Button, "Minimize");
+
+    harness.state_mut().save();
+    let saved = file.load().settings;
+    assert!(saved.system_title_bar);
+    let restarted = build(Setup {
+        settings: saved,
+        ..Setup::default()
+    });
+    let mut harness = window_on(OperatingSystem::Windows, restarted.app);
+    harness.run();
+    assert!(harness.state().system_title_bar());
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Minimize")
+            .is_none(),
+        "the system's title bar has the window buttons"
+    );
+}
+
+#[test]
+fn the_note_goes_when_the_title_bar_is_set_back() {
+    let test = build(Setup::default());
+    let mut harness = window(test.app);
+    harness.run();
+    open_dialog(&mut harness);
+    for _ in 0..2 {
+        harness
+            .get_by_role_and_label(Role::CheckBox, "Use the system title bar")
+            .click();
+        harness.run();
+    }
+    assert!(!harness.state().settings().system_title_bar);
+    assert!(harness.query_by_label(AT_NEXT_START).is_none());
 }
 
 #[test]
@@ -221,6 +279,44 @@ fn each_choice_of_appearance_applies_at_once_and_survives_a_restart() {
     let saved = file.load().settings;
     assert_eq!(saved.colour_vision, ColourVision::RedGreen);
     assert_eq!(saved.interface_size, InterfaceSize::Percent130);
+}
+
+#[test]
+fn a_click_on_another_tab_activates_nothing_while_the_dialog_is_open() {
+    let (git_bull, linux) = (path(&["work", "git-bull"]), path(&["work", "linux"]));
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![git_bull.clone(), linux.clone()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: FakeBackend::default()
+            .with_repository(git_bull)
+            .with_repository(linux),
+        ..Setup::default()
+    });
+    let mut harness = window_on(OperatingSystem::Windows, test.app);
+    settle_window(&mut harness);
+    open_dialog(&mut harness);
+
+    // With the pointer, as assistive technology would reach the tab past
+    // the modal.
+    let at = harness
+        .get_by_role_and_label(Role::Button, "linux")
+        .rect()
+        .center();
+    harness.hover_at(at);
+    harness.drag_at(at);
+    harness.drop_at(at);
+    harness.run();
+
+    let active = harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .map(|tab| tab.title());
+    assert_eq!(active.as_deref(), Some("git-bull"));
+    harness.get_by_label("Appearance");
 }
 
 #[test]

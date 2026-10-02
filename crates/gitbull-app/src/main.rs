@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use eframe::egui::os::OperatingSystem;
 use gitbull_app::app::{App, Parts, SystemPicker};
 use gitbull_app::native::{NativeApp, find_fonts_in_background, viewport, wgpu_setup};
 use gitbull_app::paths::{AppPaths, System};
@@ -40,7 +41,7 @@ fn main() -> eframe::Result {
     let open_at_start = std::env::args_os().nth(1).map(std::path::PathBuf::from);
 
     let mut options = eframe::NativeOptions {
-        viewport: viewport(&loaded.settings),
+        viewport: viewport(&loaded.settings, OperatingSystem::from_target_os()),
         ..Default::default()
     };
     options.wgpu_options.wgpu_setup = wgpu_setup();

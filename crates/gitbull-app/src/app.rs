@@ -217,6 +217,10 @@ pub(crate) enum DiffKey {
 pub struct App {
     settings_file: SettingsFile,
     pub(crate) settings: Settings,
+    /// Whether the window was built with the system's title bar: the
+    /// setting as it was at start-up, since a change takes effect at the
+    /// next start (design, decision 1).
+    system_title_bar: bool,
     /// The settings file was unreadable at start-up; reported once.
     pub(crate) settings_reset: bool,
     pub(crate) texts: Translations,
@@ -252,6 +256,7 @@ impl App {
         let (git, backend) = checker(loaded.settings.git_path.as_deref());
         let mut app = App {
             settings_file,
+            system_title_bar: loaded.settings.system_title_bar,
             settings: loaded.settings,
             settings_reset: loaded.reset,
             texts,
@@ -330,6 +335,15 @@ impl App {
     pub fn set_colour_vision(&mut self, vision: ColourVision) {
         if self.settings.colour_vision != vision {
             self.settings.colour_vision = vision;
+            self.dirty = true;
+        }
+    }
+
+    /// Sets whether to use the system's title bar; the window keeps the
+    /// one it was built with until the next start.
+    pub fn set_system_title_bar(&mut self, system: bool) {
+        if self.settings.system_title_bar != system {
+            self.settings.system_title_bar = system;
             self.dirty = true;
         }
     }
@@ -495,6 +509,11 @@ impl App {
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Whether the window has the system's title bar, as it was built.
+    pub fn system_title_bar(&self) -> bool {
+        self.system_title_bar
     }
 
     pub fn workspace(&self) -> Option<&Workspace> {
