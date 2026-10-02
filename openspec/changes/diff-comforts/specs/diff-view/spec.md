@@ -1,0 +1,187 @@
+# Spec Delta
+
+## ADDED Requirements
+
+### Requirement: Changed words
+In a hunk, a run of removed lines directly followed by a run of added lines
+SHALL be paired line by line: the first removed line with the first added
+line, the second with the second, and so on. The two lines of a pair SHALL
+be compared word by word, where a word is a run of letters, digits and
+underscores, a run of whitespace, or any other single character. When the
+words the two lines have in common make up at least half of the longer
+line, the words that differ SHALL be marked with a stronger background than
+the rest of their line, in the removed and in the added line. A line
+without a partner, a pair with less in common, and a line longer than 1,000
+characters SHALL get no marks. The diff SHALL appear without waiting for
+the marks, and the marks SHALL follow without blocking the interface. The
+markers `+` and `-` SHALL remain what tells added and removed lines apart.
+
+#### Scenario: One word changed
+- **WHEN** a hunk replaces the line `let total = price * count;` by `let total = price * amount;`
+- **THEN** `count` is marked in the removed line and `amount` in the added line, and the rest of both lines is not marked
+
+#### Scenario: Lines with little in common
+- **WHEN** a hunk replaces a line by a line that has less than half of it in common
+- **THEN** neither line has marks
+
+#### Scenario: Line without a partner
+- **WHEN** a hunk replaces one line by two lines
+- **THEN** the removed line and the first added line are compared, and the second added line has no marks
+
+#### Scenario: Marks follow the diff
+- **WHEN** the user selects a file whose marks take noticeable time to compute
+- **THEN** the diff appears at once without marks and the marks follow
+
+### Requirement: Invisible characters
+A toggle in the header of the diff SHALL show and hide invisible
+characters. While they are shown, every space SHALL appear as `·`, every
+tab as `→` across the width of the tab, and the end of every line as `↵`
+when it ends with a line feed or as `␍↵` when it ends with a carriage
+return and a line feed, in a colour that does not compete with the text. A
+line without a line break at the end of the file SHALL keep its note and
+show no mark of a line ending. When the two lines of a pair differ only in
+their line endings, the marks of their line endings SHALL be marked as
+changed. The toggle SHALL keep its state across restarts. Copying and
+assistive technology SHALL receive the real text of a line, never the marks.
+
+#### Scenario: Spaces and tabs
+- **WHEN** invisible characters are shown and a line is indented with a tab and contains two spaces
+- **THEN** the tab appears as `→` and each of the two spaces as `·`
+
+#### Scenario: Change of line endings
+- **WHEN** invisible characters are shown and the user selects a file whose lines a commit converted from CRLF to LF
+- **THEN** the removed lines end in `␍↵` and the added lines in `↵`, and these marks are marked as changed
+
+#### Scenario: Copying while invisible characters are shown
+- **WHEN** invisible characters are shown and the user copies lines that contain spaces and tabs
+- **THEN** the clipboard contains the spaces and tabs of the lines, without any mark
+
+#### Scenario: Toggle survives a restart
+- **WHEN** the user shows invisible characters, closes git-bull and starts it again
+- **THEN** invisible characters are shown
+
+#### Scenario: Toggle for assistive technology
+- **WHEN** a screen reader reaches the toggle in the header of the diff
+- **THEN** it receives the name "Show invisible characters" and whether invisible characters are shown
+
+### Requirement: Moving between hunks
+While a diff is shown and no text field has the keyboard focus, F7 SHALL
+scroll the diff towards the next hunk that begins below the top of its
+visible part, and Shift+F7 towards the previous hunk that begins above it,
+so that the hunk begins at the top as far as the diff can scroll. Two
+buttons in the header of the diff, Previous hunk and Next hunk, SHALL do
+the same and name their shortcut in their tooltip. Next hunk SHALL be
+disabled when no hunk begins below the top of the visible part or the diff
+cannot scroll further down, and Previous hunk when no hunk begins above it;
+F7 and Shift+F7 SHALL then do nothing. Moving SHALL change neither the
+keyboard focus nor the selected lines.
+
+#### Scenario: Next hunk
+- **WHEN** a diff with three hunks shows its beginning and the user presses F7
+- **THEN** the second hunk begins at the top of the diff
+
+#### Scenario: Previous hunk
+- **WHEN** the third hunk begins at the top of the diff and the user presses Shift+F7
+- **THEN** the second hunk begins at the top of the diff
+
+#### Scenario: End of the diff
+- **WHEN** the diff is scrolled to its end
+- **THEN** the button Next hunk is disabled and F7 does not scroll the diff
+
+#### Scenario: Diff that fits
+- **WHEN** the whole diff fits into the diff panel
+- **THEN** both buttons are disabled
+
+#### Scenario: Typing in the search field
+- **WHEN** the search field has the keyboard focus and the user presses F7
+- **THEN** the diff does not scroll
+
+### Requirement: Expanding context
+Between two hunks, before the first hunk and after the last, the diff SHALL
+show the lines it hides as a row that names their number. Such a row SHALL
+offer to reveal 20 of its lines at a time: those at its top, which follow
+the hunk above, and those at its bottom, which lead into the hunk below;
+the row before the first hunk only those at its bottom, the row after the
+last hunk only those at its top. A row of 20 hidden lines or fewer SHALL
+instead offer to reveal all of them at once. Revealed lines SHALL be shown
+as context lines, with their line numbers in the old and in the new version
+and with syntax highlighting. The header of every hunk SHALL stay in place,
+and a row SHALL disappear when all its lines are revealed. Revealed lines
+SHALL stay revealed while the same diff is shown, also across a refresh
+that reads the same diff again. Each offer SHALL have a name for assistive
+technology.
+
+A file that was added or deleted, a binary file and a submodule SHALL offer
+nothing to reveal. When the new version of the file is larger than 512 KB,
+the rows before and between the hunks SHALL name their number of lines
+without offering to reveal them. A diff that was truncated at its limit
+SHALL show no row after the point where it was cut.
+
+#### Scenario: Gap between two hunks
+- **WHEN** a diff has two hunks with 50 hidden lines between them
+- **THEN** a row between them names 50 hidden lines and offers to reveal the 20 lines at its top and the 20 lines at its bottom
+
+#### Scenario: Revealing lines at the top of a gap
+- **WHEN** the user reveals the 20 lines at the top of that gap
+- **THEN** the 20 lines after the first hunk appear as context lines with their old and new line numbers
+- **AND** the row names 30 hidden lines
+
+#### Scenario: Small gap
+- **WHEN** a gap between two hunks hides 12 lines
+- **THEN** its row offers to reveal all 12 lines at once
+- **AND** after revealing them the row is gone and the header of the second hunk stays
+
+#### Scenario: Beginning and end of the file
+- **WHEN** the first hunk of a diff begins at line 40 and the last hunk ends 100 lines before the end of the file
+- **THEN** a row above the first hunk offers to reveal the 20 lines before it, and a row after the last hunk offers to reveal the 20 lines after it
+
+#### Scenario: Added file
+- **WHEN** the user selects an added file
+- **THEN** the diff shows no row of hidden lines
+
+#### Scenario: Large file
+- **WHEN** the new version of the file is larger than 512 KB
+- **THEN** the rows before and between the hunks name their number of lines and offer nothing to reveal
+
+#### Scenario: Refresh keeps revealed lines
+- **WHEN** the user revealed lines of a gap and git-bull refreshes the tab while the file is unchanged
+- **THEN** the lines are still revealed
+
+## MODIFIED Requirements
+
+### Requirement: Copying from the diff
+Visible lines of the diff, revealed context lines included, SHALL be
+selectable and copyable with their real text, also while invisible
+characters are shown. The context menu SHALL offer to copy a whole hunk, as
+Git produced it, without revealed context lines.
+
+A selection SHALL belong to the diff it was made in. When the diff shown is
+replaced by one with other content, for example because a refresh read a
+changed file, the selection SHALL be cleared. A refresh that reads the same
+diff again SHALL keep the selection and the scroll position. Revealing
+context SHALL keep the same lines selected.
+
+#### Scenario: Copy selected lines
+- **WHEN** the user selects lines of the diff and copies them
+- **THEN** the clipboard contains the text of these lines
+
+#### Scenario: Copy a hunk
+- **WHEN** the user chooses to copy the hunk from the context menu
+- **THEN** the clipboard contains the hunk including its header
+
+#### Scenario: Copy revealed lines
+- **WHEN** the user reveals lines of a gap, selects them and copies them
+- **THEN** the clipboard contains the text of these lines
+
+#### Scenario: Revealing keeps the selection
+- **WHEN** the user has selected lines of the second hunk and reveals lines of the gap above it
+- **THEN** the same lines of the second hunk are still selected
+
+#### Scenario: Diff replaced while lines are selected
+- **WHEN** the user has selected lines 40 to 60 in the diff of an unstaged file, shortens the file in an editor so that its diff has 20 lines, and returns to git-bull
+- **THEN** the new diff is shown with no lines selected
+- **AND** copying with the keyboard shortcut or from the context menu does not copy lines of the previous diff and git-bull keeps running
+
+#### Scenario: Refresh without changes
+- **WHEN** the user has selected lines of the diff and scrolled it, and git-bull refreshes the tab while the file is unchanged, for example because the window gained focus
+- **THEN** the same lines are still selected and the diff keeps its scroll position
