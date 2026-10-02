@@ -16,7 +16,8 @@ later change of milestone M2.
   system's: the tabs, the button for a new tab, and the buttons to
   minimize, maximize or restore, and close the window. The free space of
   the title bar moves the window when dragged and maximizes or restores it
-  on a double click, and the edges of the window resize it.
+  on a double click, and the edges of the window resize it; all of this
+  also works while the settings dialog is open.
 - On macOS, the system keeps its buttons to close, minimize and zoom the
   window, and the tabs move into the title bar beside them.
 - The toolbar stays a row of its own below the title bar, unchanged.

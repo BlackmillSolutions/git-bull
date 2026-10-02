@@ -2,8 +2,9 @@
 
 Group 1 works in today's tab bar and comes first; group 2 moves that row
 into the title bar, and group 3 adds the setting that group 2 reads. The
-manual check of group 4 needs all three. Each task names the test that
-shows it works.
+manual check of group 4 needs all three. Group 6 carries the findings of
+the review of pull request 18 into the code, and group 7 checks the result.
+Each task names the test that shows it works.
 
 ## 1. Reordering tabs
 
@@ -33,3 +34,19 @@ shows it works.
 ## 5. Final check
 
 - [x] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate title-bar-and-tabs --strict`; verify all succeed and CI is green on Linux, Windows and macOS. All succeed here with 1020 tests, and CI runs 36941560723 and 36941824217 of commit 6464b0a are green on Linux, Windows and macOS. The run of 9c28184 failed once on Linux in `workspace::tests::showing_a_tab_again_refreshes_it_but_the_first_showing_does_not`, a test of the first milestone that races the reading of the references against the load of the history; it is left to a change of its own.
+
+## 6. Review of the pull request
+
+- [ ] 6.1 Let the free space of the title bar sense `Sense::CLICK | Sense::DRAG` and the bands `Sense::DRAG`, so that neither takes the keyboard focus (design, decisions 2 and 3); verify a UI test in `tests/window.rs` that pressing Tab through the main window never focuses a widget without a name, for the scenario "Keyboard focus in the title bar" of `application-shell`
+- [ ] 6.2 Add `native::TitleBar` with `TitleBar::new(system_title_bar, os)`, build the window in `native::viewport` from it and derive it in `ui` from the value `App` kept and `Context::os` (design, decision 1); verify unit tests of `TitleBar::new` for each platform with and without the setting, and that the tests of `native::viewport` and `tests/window.rs` pass
+- [ ] 6.3 Replace the twelve bands by four strips along the edges with `resize_direction(window, pointer)`, and send `BeginResize` only for the primary button (design, decision 3); verify unit tests of `resize_direction` at each edge and corner and inside the window, and a UI test in `tests/window.rs` that a press of the secondary button on the right edge sends no `BeginResize`, for the scenario "Resizing only with the primary button"
+- [ ] 6.4 Put the bands and the window buttons on a layer of `Order::Foreground` raised by `move_to_top` in every pass, with the bands registered last, and the free space on that layer while the settings dialog is open; the window buttons take no keyboard focus while it is open (design, decisions 2 and 3); verify UI tests in `tests/window.rs` that with the dialog open a drag on the free space sends `StartDrag`, Close window sends `Close` and a press on the right edge sends `BeginResize`, for "Window controls while the settings dialog is open", a UI test in `tests/settings_dialog.rs` for "Tabs while the dialog is open" of `app-settings`, and that the existing tests of the bands and window buttons pass
+- [ ] 6.5 Start the drag of a tab only with the primary button, keep the last position of the pointer for a release outside the window, and drop the state of the drag whenever no tab is dragged (design, decision 5); verify UI tests in `tests/tab_bar.rs` for the scenarios "Tab dropped outside the window" and "Tab dragged with the secondary button"
+- [ ] 6.6 Scroll the active tab into view when it becomes active, when it moves and when the width of the row changes (design, decision 4); verify UI tests in `tests/tab_bar.rs` for the scenarios "Active tab moved in a row that scrolls", "Window made narrower" and "Wheel over many tabs"
+- [ ] 6.7 Leave out the inset for the system's buttons on macOS in full screen (design, decision 2); verify a UI test in `tests/window.rs` with the harness on macOS and `fullscreen` set in the raw input, for the scenario "Title bar on macOS in full screen"
+- [ ] 6.8 Let `components::window_button` share the drawing of `icon_button` and draw its focus ring with square corners, pass the workspace to `tabs` instead of checking for it twice, and move the doc comment of `components::text_field` back above it (design, decision 3); verify that the tests of `tests/components.rs` and `tests/window.rs` and the snapshots pass unchanged
+
+## 7. Checks after the review
+
+- [ ] 7.1 The user checks on Windows with a release build: moving, maximizing, minimizing, closing and resizing the window while the settings dialog is open, that a right click at an edge resizes nothing, that Tab no longer stops in the title bar, and the checks of task 4.1 again in short (design, decision 8); verify that the result and the date are recorded in this task
+- [ ] 7.2 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate title-bar-and-tabs --strict`; verify all succeed and CI is green on Linux, Windows and macOS

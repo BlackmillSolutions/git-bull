@@ -46,10 +46,12 @@ colour vision, the interface size and whether to use the system title bar,
 and further the language and the path to the Git executable. A change of
 the title bar SHALL take effect when git-bull starts next, and the dialog
 SHALL say so. While the dialog is open, the main window SHALL take no
-input. The dialog SHALL fit the window at every interface size; what does
-not fit SHALL scroll. All other settings SHALL be saved without user
-action. When another Git executable is applied while tabs are open, the
-tabs SHALL open again with it, each in its initial state.
+input, except that its title bar and edges SHALL still move, resize,
+minimize, maximize and close the window (requirement "Title bar" of
+`application-shell`). The dialog SHALL fit the window at every interface
+size; what does not fit SHALL scroll. All other settings SHALL be saved
+without user action. When another Git executable is applied while tabs are
+open, the tabs SHALL open again with it, each in its initial state.
 
 #### Scenario: Appearance section
 - **WHEN** the user opens the settings dialog
@@ -63,6 +65,10 @@ tabs SHALL open again with it, each in its initial state.
 #### Scenario: Dialog is modal
 - **WHEN** the settings dialog is open and the user clicks Refresh in the toolbar
 - **THEN** nothing is refreshed and the dialog stays open
+
+#### Scenario: Tabs while the dialog is open
+- **WHEN** two tabs are open, the settings dialog is open and the user clicks the tab that is not active
+- **THEN** the active tab does not change and the dialog stays open
 
 #### Scenario: Shortcut while the dialog is open
 - **WHEN** the settings dialog is open and the user presses Ctrl+W
