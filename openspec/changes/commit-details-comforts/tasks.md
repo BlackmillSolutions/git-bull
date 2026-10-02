@@ -46,7 +46,7 @@ before its code.
 
 ## 6. Snapshots and manual check
 
-- [ ] 6.1 Update the window snapshots, which now show the title row of the commit panel with its buttons, the row of filter and toggle, and the line counts, and the gallery, which shows the bar of changed lines; verify that `tests/window_snapshots.rs` and `tests/gallery_snapshots.rs` pass with the new images and that the user approves them
+- [x] 6.1 Update the window snapshots, which now show the title row of the commit panel with its buttons, the row of filter and toggle, and the line counts, and the gallery, which shows the bar of changed lines; verify that `tests/window_snapshots.rs` and `tests/gallery_snapshots.rs` pass with the new images and that the user approves them
 - [ ] 6.2 The user checks on Windows with a release build: copying hash and message, a link in a message, the line counts of a few commits, the tree and the filter in the commit panel and in the File status view with the mouse and the keyboard, Ctrl+L, collapsed folders after returning to the window, the choice of the tree after a restart, and that a large commit stays fluid; verify that the result and the date are recorded in this task
 
 ## 7. Final check
