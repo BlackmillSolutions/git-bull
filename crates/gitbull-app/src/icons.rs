@@ -58,9 +58,11 @@ pub const REVEAL_DOWN: &str = phosphor::ARROW_LINE_DOWN;
 /// Reveals the hidden lines that lead into the hunk below.
 pub const REVEAL_UP: &str = phosphor::ARROW_LINE_UP;
 pub const REVEAL_ALL: &str = phosphor::ARROWS_OUT_LINE_VERTICAL;
+/// Shows a file list as a tree of folders.
+pub const TREE: &str = phosphor::TREE_STRUCTURE;
 
 /// Every icon with its name.
-pub const ALL: [(&str, &str); 23] = [
+pub const ALL: [(&str, &str); 24] = [
     ("folder", FOLDER),
     ("refresh", REFRESH),
     ("sun", SUN),
@@ -84,4 +86,5 @@ pub const ALL: [(&str, &str); 23] = [
     ("reveal down", REVEAL_DOWN),
     ("reveal up", REVEAL_UP),
     ("reveal all", REVEAL_ALL),
+    ("tree", TREE),
 ];

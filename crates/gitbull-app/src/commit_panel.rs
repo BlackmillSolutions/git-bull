@@ -1,30 +1,33 @@
 //! The commit panel: the details of the selected commit and the files it
 //! changed (spec `commit-details`).
 
-use eframe::egui::accesskit::Role;
+use std::sync::Arc;
+
 use eframe::egui::{
     self, Align, Color32, Frame, Id, Label, Layout, Margin, Panel, RichText, ScrollArea, Sense,
     TextStyle, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 use gitbull_core::badges::Badge;
 use gitbull_core::details::ChangedFiles;
+use gitbull_core::file_tree::{FileTree, Mode, Row};
 use gitbull_core::store::Parent;
 use gitbull_core::workspace::{Failure, View};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::object_id::ObjectId;
-use gitbull_git::path::RepoPath;
 use jiff::tz::TimeZone;
 
 use crate::app::{App, FileAction};
-use crate::commit_list::{
-    BadgeLook, badge_size, color, local_date, original_date, paint_badge, take_copy,
-};
+use crate::commit_list::{BadgeLook, badge_size, color, local_date, original_date, paint_badge};
 use crate::components;
+use crate::file_list::{self, FileRow, ListTexts};
 use crate::i18n::Msg;
 use crate::theme::{Palette, SHAPE};
 use crate::ui::AREA_COMMIT_PANEL;
-use crate::virtual_list::VirtualList;
+use crate::virtual_list::{ListState, ROW_HEIGHT};
+
+/// The id of the filter field above the files.
+pub const FILES_FILTER: &str = "commit-files-filter";
 
 /// The texts of the panel, read before the tab is borrowed.
 struct Texts {
@@ -103,15 +106,16 @@ pub(crate) fn marker_color(kind: ChangeKind, palette: &Palette) -> Color32 {
 
 /// The path of an entry as the list shows it; a renamed or copied file
 /// shows where it came from.
-fn shown_path(change: &FileChange) -> String {
-    match &change.old_path {
-        Some(old) => format!("{old} → {}", change.path),
-        None => change.path.to_string(),
+pub(crate) fn shown_path(old_path: Option<&str>, path: &str) -> String {
+    match old_path {
+        Some(old) => format!("{old} → {path}"),
+        None => path.to_owned(),
     }
 }
 
-/// The height the file list keeps below the details: four rows.
-const MIN_FILE_ROOM: f32 = 4.0 * 24.0;
+/// The height the file list keeps below the details: four rows below the
+/// row of its filter.
+const MIN_FILE_ROOM: f32 = 4.0 * ROW_HEIGHT + file_list::HEADER_HEIGHT;
 /// The height the details keep above the file list: two lines.
 const MIN_DETAILS: f32 = 40.0;
 /// The room on each side of the divider between the details and the file
@@ -123,6 +127,8 @@ const DIVIDER_GAP: i8 = 6;
 /// otherwise the caller keeps the panel focusable.
 pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let texts = Texts::new(app);
+    let list_texts = ListTexts::new(app);
+    let mode = file_list::mode(app);
     let zone = app.time_zone.clone();
     let uncommitted = app.texts.text(Msg::HistoryUncommitted);
     let open_file_status = app.texts.text(Msg::OpenFileStatus);
@@ -207,16 +213,38 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let details_height = details.response.rect.height();
     ui.add_space(f32::from(DIVIDER_GAP));
 
+    let chosen_mode = file_list::header(
+        ui,
+        Id::new(FILES_FILTER),
+        &mut view.commit_files.filter,
+        mode,
+        &list_texts,
+    );
     let files_shown = session.details().files();
-    // The first file of each commit is selected once its files are known.
+    // The rows of each commit start with every folder expanded and the
+    // first file shown selected, once its files are known.
     if view.files_for != Some(commit)
-        && let ChangedFiles::Loaded(files) = files_shown
+        && let ChangedFiles::Loaded(_) = files_shown
+        && let Some(order) = session.details().file_order()
     {
-        view.files = Default::default();
-        view.files.select((!files.is_empty()).then_some(0));
+        let mut tree = FileTree::new(Arc::clone(order));
+        tree.set_mode(chosen_mode);
+        tree.set_filter(&view.commit_files.filter);
+        tree.select_first();
+        view.commit_files.tree = Some(tree);
+        view.commit_files.list = ListState::default();
+        view.commit_files.menu = None;
         view.files_for = Some(commit);
     }
-    let (has_list, action) = files(ui, files_shown, view, &texts, palette);
+    let (has_list, action) = files(
+        ui,
+        files_shown,
+        view,
+        chosen_mode,
+        &texts,
+        &list_texts,
+        palette,
+    );
     // The revision that holds each file: the commit, or for an untracked
     // file of a stash the commit that saved it.
     let action = action.and_then(|(index, blame)| {
@@ -230,11 +258,11 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             false => FileAction::History(revision, change.path.clone()),
         })
     });
-    // The diff panel shows the file selected here.
+    // The diff panel shows the file selected here, and none for a folder.
     let chosen = has_list
-        .then(|| view.files.selected())
+        .then(|| view.commit_files.tree.as_ref()?.selected_file())
         .flatten()
-        .map(|row| row as usize);
+        .map(|(_, index)| index);
     session.show_file(chosen);
     if let Some(parent) = parent_chosen {
         app.navigate_to_commit(parent);
@@ -243,6 +271,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         app.open_file_action(action);
     }
     app.update_layout(|layout| layout.commit_details_height = Some(details_height));
+    if chosen_mode != mode {
+        app.set_file_tree(chosen_mode == Mode::Tree);
+    }
     has_list
 }
 
@@ -371,7 +402,9 @@ fn files(
     ui: &mut Ui,
     files: &ChangedFiles,
     view: &mut crate::app::TabView,
+    mode: Mode,
     texts: &Texts,
+    list_texts: &ListTexts,
     palette: &Palette,
 ) -> (bool, Option<(usize, bool)>) {
     let files = match files {
@@ -394,34 +427,38 @@ fn files(
         ChangedFiles::Loaded(files) => files,
     };
 
-    let list = VirtualList::new(
+    let order = view
+        .commit_files
+        .tree
+        .as_ref()
+        .map(|tree| Arc::clone(tree.order()));
+    let Some(shown) = file_list::show(
+        ui,
         Id::new(AREA_COMMIT_PANEL),
-        Role::List,
-        texts.title.as_str(),
-        files.len() as u64,
-    );
-    let output = list.show(ui, &mut view.files, |ui, row, selected| {
-        if let Some(change) = files.get(row as usize) {
-            file_row(ui, change, selected, texts, palette);
-        }
-    });
-
-    let path_of = |row: u64| {
-        files
-            .get(row as usize)
-            .map(|change| change.path.to_string())
+        &texts.title,
+        &mut view.commit_files,
+        mode,
+        list_texts,
+        palette,
+        |ui, row, selected| {
+            if let (Some(change), Some(order)) = (files.get(row.index), &order) {
+                file_row(ui, change, order, row, selected, texts, palette);
+            }
+        },
+        |_, _| {},
+    ) else {
+        return (false, None);
     };
-    if output.response.has_focus()
-        && ui.input_mut(take_copy)
-        && let Some(path) = view.files.selected().and_then(path_of)
-    {
-        ui.ctx().copy_text(path);
-    }
-    let menu_row = view.files.menu_row();
+
+    let menu_file = match view.commit_files.menu {
+        Some(Row::File { index, .. }) => Some(index),
+        _ => None,
+    };
+    let path_of = |index: usize| files.get(index).map(|change| change.path.to_string());
     let mut opened = None;
-    output.response.context_menu(|ui| {
+    shown.output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
-            let Some(index) = menu_row.map(|row| row as usize) else {
+            let Some(index) = menu_file else {
                 return;
             };
             if components::menu_item(ui, None, &texts.file_history, None).clicked() {
@@ -437,7 +474,7 @@ fn files(
                 ui.close();
             }
             if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
-                if let Some(path) = path_of(index as u64) {
+                if let Some(path) = path_of(index) {
                     ui.ctx().copy_text(path);
                 }
                 ui.close();
@@ -447,48 +484,71 @@ fn files(
     (true, opened)
 }
 
-fn path_text(change: &FileChange, ui: &Ui) -> egui::text::LayoutJob {
-    path_job(change.old_path.as_ref(), &change.path, ui)
-}
-
 /// A path as text to lay out, after where it came from if it was renamed
 /// or copied. The arrow is set in the monospace font, as the proportional
 /// default font has no arrow.
-pub(crate) fn path_job(
-    old_path: Option<&RepoPath>,
-    path: &RepoPath,
-    ui: &Ui,
-) -> egui::text::LayoutJob {
+pub(crate) fn path_job(old_path: Option<&str>, path: &str, ui: &Ui) -> egui::text::LayoutJob {
     let style = ui.style();
     let body = TextStyle::Body.resolve(style);
     let text = ui.visuals().text_color();
     let format = |font: egui::FontId| egui::TextFormat::simple(font, text);
     let mut job = egui::text::LayoutJob::default();
     if let Some(old) = old_path {
-        job.append(&old.to_string(), 0.0, format(body.clone()));
+        job.append(old, 0.0, format(body.clone()));
         job.append(" → ", 0.0, format(egui::FontId::monospace(body.size)));
     }
-    job.append(&path.to_string(), 0.0, format(body));
+    job.append(path, 0.0, format(body));
     job
 }
 
-fn file_row(ui: &mut Ui, change: &FileChange, selected: bool, texts: &Texts, palette: &Palette) {
+/// The path of a file as its row shows it: the full path in the flat
+/// list, the name in the tree, each after where a renamed or copied file
+/// came from.
+fn row_paths(
+    change: &FileChange,
+    order: &gitbull_core::file_tree::FileOrder,
+    row: FileRow,
+) -> (Option<String>, String) {
+    match row.mode {
+        Mode::Flat => (
+            change.old_path.as_ref().map(ToString::to_string),
+            change.path.to_string(),
+        ),
+        Mode::Tree => (
+            order
+                .came_from(row.group, row.index)
+                .map(|came| came.into_owned()),
+            order.file_name(row.group, row.index).into_owned(),
+        ),
+    }
+}
+
+fn file_row(
+    ui: &mut Ui,
+    change: &FileChange,
+    order: &gitbull_core::file_tree::FileOrder,
+    row: FileRow,
+    selected: bool,
+    texts: &Texts,
+    palette: &Palette,
+) {
     let rect = ui.max_rect();
     if selected {
         ui.painter()
             .rect_filled(rect, 0.0, color(palette.selection));
     }
-    let path = shown_path(change);
-    let row = ui.interact(rect, ui.id().with("file"), Sense::hover());
-    let label = format!("{}: {path}", texts.kind(change.kind));
-    row.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
-    ui.ctx().accesskit_node_builder(row.id, |node| {
-        node.set_role(Role::ListItem);
-        node.set_selected(selected);
-    });
+    let (old, path) = row_paths(change, order, row);
+    let shown = shown_path(old.as_deref(), &path);
+    let response = ui.interact(rect, ui.id().with("file"), Sense::hover());
+    let label = format!("{}: {shown}", texts.kind(change.kind));
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
+    row.describe(ui, &response, selected);
+    let mut inner = rect;
+    inner.min.x += row.indent();
+    inner.max.x -= 6.0;
     ui.scope_builder(
         UiBuilder::new()
-            .max_rect(rect.shrink2(vec2(6.0, 0.0)))
+            .max_rect(inner)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             let (marker_rect, _) =
@@ -501,7 +561,7 @@ fn file_row(ui: &mut Ui, change: &FileChange, selected: bool, texts: &Texts, pal
                 marker_color(change.kind, palette),
             );
             ui.add(
-                Label::new(path_text(change, ui))
+                Label::new(path_job(old.as_deref(), &path, ui))
                     .truncate()
                     .selectable(false),
             );
@@ -535,12 +595,8 @@ mod tests {
 
     #[test]
     fn a_renamed_file_shows_its_old_and_new_path() {
-        let change = FileChange {
-            kind: ChangeKind::Renamed,
-            path: "b.rs".into(),
-            old_path: Some("a.rs".into()),
-        };
-        assert_eq!(shown_path(&change), "a.rs → b.rs");
-        assert_eq!(marker(change.kind), "R");
+        assert_eq!(shown_path(Some("a.rs"), "b.rs"), "a.rs → b.rs");
+        assert_eq!(shown_path(None, "b.rs"), "b.rs");
+        assert_eq!(marker(ChangeKind::Renamed), "R");
     }
 }

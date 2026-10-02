@@ -10,7 +10,7 @@ use std::sync::Arc;
 use eframe::egui::{
     self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
     KeyboardShortcut, Label, Layout, Margin, ModifierNames, Rect, Response, RichText, ScrollArea,
-    Sense, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
+    Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
 };
 
 use crate::icons;
@@ -825,4 +825,33 @@ impl State {
             State::Pressed => color(palette.pressed),
         }
     }
+}
+
+/// The indentation per level of folders in a tree, such as the sidebar
+/// or a file list.
+pub(crate) const TREE_INDENT: f32 = 12.0;
+/// The room left of the first level of a tree.
+pub(crate) const TREE_LEFT: f32 = 6.0;
+
+/// A small triangle pointing right, or down when `open`.
+pub(crate) fn triangle(
+    painter: &eframe::egui::Painter,
+    center: eframe::egui::Pos2,
+    open: bool,
+    fill: Color32,
+) {
+    let points = if open {
+        vec![
+            center + vec2(-4.0, -2.0),
+            center + vec2(4.0, -2.0),
+            center + vec2(0.0, 3.0),
+        ]
+    } else {
+        vec![
+            center + vec2(-2.0, -4.0),
+            center + vec2(3.0, 0.0),
+            center + vec2(-2.0, 4.0),
+        ]
+    };
+    painter.add(Shape::convex_polygon(points, fill, Stroke::NONE));
 }

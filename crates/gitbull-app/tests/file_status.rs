@@ -911,3 +911,207 @@ fn blame_and_file_history_of_a_renamed_file_with_further_changes_use_its_old_pat
         });
     }
 }
+
+// The groups as trees and with a filter (spec `file-lists`).
+
+const FILTER: &str = "Filter files";
+const TREE: &str = "Show as tree";
+
+/// The rows of the file list, titles, folders and files, top to bottom; the
+/// list lies right of the sidebar and its tree.
+fn shown_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    let left = harness
+        .get_by_role_and_label(Role::Label, "FILES")
+        .rect()
+        .left()
+        - 12.0;
+    let mut rows: Vec<(f32, String)> = harness
+        .query_all_by(|node| matches!(node.role(), Role::ListItem | Role::TreeItem | Role::Heading))
+        .filter(|node| node.rect().left() >= left)
+        .filter_map(|node| Some((node.rect().top(), node.accesskit_node().label()?)))
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    rows.into_iter().map(|(_, label)| label).collect()
+}
+
+/// The folder or file shown as the `nth` row labelled `label`, from 0.
+fn nth_row<'a>(harness: &'a Harness<'_, App>, label: &str, nth: usize) -> egui_kittest::Node<'a> {
+    let left = harness
+        .get_by_role_and_label(Role::Label, "FILES")
+        .rect()
+        .left()
+        - 12.0;
+    let mut found: Vec<egui_kittest::Node<'a>> = harness
+        .query_all_by(|node| matches!(node.role(), Role::ListItem | Role::TreeItem))
+        .filter(|node| node.rect().left() >= left)
+        .filter(|node| node.accesskit_node().label().as_deref() == Some(label))
+        .collect();
+    found.sort_by(|a, b| a.rect().top().total_cmp(&b.rect().top()));
+    found
+        .into_iter()
+        .nth(nth)
+        .unwrap_or_else(|| panic!("no row {label:?} {nth} in {:?}", shown_rows(harness)))
+}
+
+fn show_tree(harness: &mut Harness<'_, App>) {
+    harness.get_by_role_and_label(Role::Button, TREE).click();
+    harness.run();
+}
+
+#[test]
+fn a_new_folder_lists_its_files_one_by_one_flat_and_as_a_tree() {
+    let status = WorkingStatus {
+        untracked: vec![
+            entry(StatusKind::Untracked, "new/one.txt"),
+            entry(StatusKind::Untracked, "new/two.txt"),
+        ],
+        ..WorkingStatus::default()
+    };
+    let mut harness = open_with(backend().with_status(root(), status));
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    assert_eq!(
+        shown_rows(&harness),
+        [
+            "Untracked files (2)",
+            "Untracked: new/one.txt",
+            "Untracked: new/two.txt"
+        ]
+    );
+    show_tree(&mut harness);
+    assert_eq!(
+        shown_rows(&harness),
+        [
+            "Untracked files (2)",
+            "new",
+            "Untracked: one.txt",
+            "Untracked: two.txt"
+        ]
+    );
+}
+
+#[test]
+fn the_filter_narrows_every_group_and_hides_those_without_matches() {
+    let status = WorkingStatus {
+        staged: vec![changed(MODIFIED, "src/a.rs")],
+        untracked: vec![entry(StatusKind::Untracked, "notes.txt")],
+        ..WorkingStatus::default()
+    };
+    let mut harness = open_with(backend().with_status(root(), status));
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .type_text(".rs");
+    harness.run();
+    assert_eq!(
+        shown_rows(&harness),
+        ["Staged files (1)", "Modified: src/a.rs"]
+    );
+}
+
+#[test]
+fn folders_stay_as_they_were_when_the_status_is_read_again() {
+    let status = WorkingStatus {
+        staged: vec![changed(MODIFIED, "src/a.rs")],
+        unstaged: vec![changed(MODIFIED, "src/b.rs")],
+        ..WorkingStatus::default()
+    };
+    let live = LiveRepo::new();
+    live.set_status(status.clone());
+    let backend = backend().with_live(root(), &live);
+    let probe = backend.probe();
+    let mut harness = open_with(backend);
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    show_tree(&mut harness);
+    // The click collapses the staged folder; Down passes the title on to
+    // the unstaged one, which it selects without collapsing it.
+    let at = nth_row(&harness, "src", 0).rect().center();
+    click_at(&mut harness, at, PointerButton::Primary);
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    let state = |harness: &Harness<'_, App>, nth| {
+        let node = nth_row(harness, "src", nth);
+        let node = node.accesskit_node();
+        (node.data().is_expanded(), node.is_selected())
+    };
+    assert_eq!(state(&harness, 0), (Some(false), Some(false)));
+    assert_eq!(state(&harness, 1), (Some(true), Some(true)));
+
+    let reads = status_reads(&probe);
+    harness.event(Event::WindowFocused(true));
+    wait_until(&mut harness, |_| status_reads(&probe) > reads);
+    for _ in 0..5 {
+        harness.step();
+    }
+    assert_eq!(
+        shown_rows(&harness),
+        [
+            "Staged files (1)",
+            "src",
+            "Unstaged files (1)",
+            "src",
+            "Modified: b.rs"
+        ]
+    );
+    assert_eq!(state(&harness, 0), (Some(false), Some(false)));
+    assert_eq!(state(&harness, 1), (Some(true), Some(true)));
+}
+
+#[test]
+fn the_tree_holds_for_both_lists_and_survives_a_restart() {
+    let status = WorkingStatus {
+        untracked: vec![entry(StatusKind::Untracked, "new/one.txt")],
+        ..WorkingStatus::default()
+    };
+    let backend = || {
+        backend().with_status(root(), status.clone()).with_changes(
+            fake_id("c"),
+            vec![gitbull_git::changes::FileChange {
+                kind: ChangeKind::Added,
+                path: "src/lib.rs".into(),
+                old_path: None,
+            }],
+        )
+    };
+    let mut harness = open_with(backend());
+    let at = row(&harness, "Head work").expect("the commit").center();
+    click_at(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |h| {
+        h.query_all_by_role(Role::ListItem)
+            .any(|node| node.accesskit_node().label().as_deref() == Some("Added: src/lib.rs"))
+    });
+    show_tree(&mut harness);
+    show_file_status(&mut harness);
+    wait_until(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Label, "FILES").is_some() && !shown_rows(h).is_empty()
+    });
+    assert_eq!(
+        shown_rows(&harness),
+        ["Untracked files (1)", "new", "Untracked: one.txt"]
+    );
+
+    let settings = harness.state().settings().clone();
+    assert!(settings.file_tree);
+    let test = build(Setup {
+        settings,
+        backend: backend(),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    wait_until(&mut harness, |h| has_row(h, "Base"));
+    show_file_status(&mut harness);
+    wait_until(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Label, "FILES").is_some() && !shown_rows(h).is_empty()
+    });
+    assert_eq!(
+        shown_rows(&harness),
+        ["Untracked files (1)", "new", "Untracked: one.txt"]
+    );
+}

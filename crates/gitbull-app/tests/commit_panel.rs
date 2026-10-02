@@ -304,7 +304,7 @@ fn with_nothing_selected_both_panels_are_empty() {
 
 #[test]
 fn choosing_a_parent_selects_it_in_the_commit_list() {
-    let mut harness = open(backend());
+    let mut harness = open_with(backend(), roomy());
     select(&mut harness, "Fix the parser");
     let link = harness
         .get_by_label(&fake_id("b").short(10))
@@ -559,11 +559,15 @@ fn file_list(harness: &Harness<'_, App>) -> Rect {
     harness.get_by_role_and_label(Role::List, "COMMIT").rect()
 }
 
-/// The divider between the details and the files: the list starts 6
-/// points below it. A press on it takes the divider to the pointer.
+/// The divider between the details and the files: the filter field above
+/// the list starts 6 points below it. A press on it takes the divider to
+/// the pointer.
 fn divider(harness: &Harness<'_, App>) -> Pos2 {
     let list = file_list(harness);
-    Pos2::new(list.center().x, list.top() - 6.0)
+    let field = harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .rect();
+    Pos2::new(list.center().x, field.top() - 6.0)
 }
 
 /// Room for the details to grow and shrink: a panel 500 points high, with
@@ -722,4 +726,342 @@ fn the_row_of_uncommitted_changes_shows_no_divider() {
         h.query_by_label("Open File status").is_some()
     });
     assert!(!divider_found(&mut harness));
+}
+
+// The file list as a tree and with a filter (spec `file-lists`).
+
+const FILTER: &str = "Filter files";
+const TREE: &str = "Show as tree";
+
+/// The newest commit changes two files of `src/app` and the readme; the
+/// root commit adds the readme and `src/main.rs`.
+fn tree_backend() -> FakeBackend {
+    backend().with_changes(
+        fake_id("c"),
+        vec![
+            change(ChangeKind::Modified, "src/app/main.rs", None),
+            change(ChangeKind::Modified, "src/app/view.rs", None),
+            change(ChangeKind::Added, "README.md", None),
+        ],
+    )
+}
+
+/// Opens `backend` with room for the files and selects its newest commit.
+fn open_newest(backend: FakeBackend) -> Harness<'static, App> {
+    let mut harness = open_with(backend, roomy());
+    select(&mut harness, "Fix the parser");
+    wait_until(&mut harness, has_items);
+    harness
+}
+
+fn is_row(role: Role) -> bool {
+    matches!(role, Role::ListItem | Role::TreeItem)
+}
+
+/// The rows of the file list, which lies right of the sidebar and its tree.
+fn rows<'a>(harness: &'a Harness<'_, App>) -> Vec<egui_kittest::Node<'a>> {
+    let left = harness
+        .get_by_role_and_label(Role::Label, "COMMIT")
+        .rect()
+        .left()
+        - 12.0;
+    harness
+        .query_all_by(|node| is_row(node.role()))
+        .filter(|node| node.rect().left() >= left)
+        .collect()
+}
+
+fn has_items(harness: &Harness<'_, App>) -> bool {
+    !rows(harness).is_empty()
+}
+
+/// The rows of the file list, top to bottom, by their labels.
+fn items(harness: &Harness<'_, App>) -> Vec<String> {
+    let mut rows: Vec<(f32, String)> = rows(harness)
+        .into_iter()
+        .map(|node| {
+            let label = node.accesskit_node().label().unwrap_or_default();
+            (node.rect().top(), label)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    rows.into_iter().map(|(_, label)| label).collect()
+}
+
+fn item<'a>(harness: &'a Harness<'_, App>, label: &str) -> egui_kittest::Node<'a> {
+    rows(harness)
+        .into_iter()
+        .find(|node| node.accesskit_node().label().as_deref() == Some(label))
+        .unwrap_or_else(|| panic!("no row {label:?} in {:?}", items(harness)))
+}
+
+fn selected_item(harness: &Harness<'_, App>) -> Option<String> {
+    rows(harness)
+        .into_iter()
+        .find(|node| node.accesskit_node().is_selected() == Some(true))
+        .and_then(|node| node.accesskit_node().label())
+}
+
+/// The index of the file the diff panel shows, among the files of the
+/// commit.
+fn shown_file(harness: &Harness<'_, App>) -> Option<usize> {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .and_then(|session| session.details().file())
+}
+
+fn tree_toggled(harness: &Harness<'_, App>) -> Option<eframe::egui::accesskit::Toggled> {
+    harness
+        .get_by_role_and_label(Role::Button, TREE)
+        .accesskit_node()
+        .toggled()
+}
+
+fn show_tree(harness: &mut Harness<'_, App>) {
+    harness.get_by_role_and_label(Role::Button, TREE).click();
+    harness.run();
+}
+
+fn click_item(harness: &mut Harness<'_, App>, label: &str) {
+    let at = item(harness, label).rect().center();
+    click_at(harness, at, PointerButton::Primary);
+}
+
+/// Types `text` into the filter field of the file list.
+fn type_filter(harness: &mut Harness<'_, App>, text: &str) {
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .type_text(text);
+    harness.run();
+}
+
+fn clear_filter(harness: &mut Harness<'_, App>) {
+    let length = harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .accesskit_node()
+        .value()
+        .map_or(0, |value| value.chars().count());
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    for _ in 0..length {
+        harness.key_press(eframe::egui::Key::Backspace);
+    }
+    harness.run();
+}
+
+#[test]
+fn switching_to_the_tree_shows_folders_before_files() {
+    let mut harness = open_newest(tree_backend());
+    assert_eq!(
+        items(&harness),
+        [
+            "Modified: src/app/main.rs",
+            "Modified: src/app/view.rs",
+            "Added: README.md"
+        ]
+    );
+    assert_eq!(
+        tree_toggled(&harness),
+        Some(eframe::egui::accesskit::Toggled::False)
+    );
+    show_tree(&mut harness);
+    assert_eq!(
+        items(&harness),
+        [
+            "src/app",
+            "Modified: main.rs",
+            "Modified: view.rs",
+            "Added: README.md"
+        ]
+    );
+    assert_eq!(
+        tree_toggled(&harness),
+        Some(eframe::egui::accesskit::Toggled::True)
+    );
+    assert!(harness.state().settings().file_tree);
+}
+
+#[test]
+fn a_click_on_a_folder_collapses_and_expands_it() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    click_item(&mut harness, "src/app");
+    assert_eq!(items(&harness), ["src/app", "Added: README.md"]);
+    click_item(&mut harness, "src/app");
+    assert_eq!(
+        items(&harness),
+        [
+            "src/app",
+            "Modified: main.rs",
+            "Modified: view.rs",
+            "Added: README.md"
+        ]
+    );
+}
+
+#[test]
+fn a_folder_tells_assistive_technology_its_level_and_state() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    harness.get_by_role_and_label(Role::Tree, "COMMIT");
+    let folder = item(&harness, "src/app");
+    assert_eq!(folder.accesskit_node().role(), Role::TreeItem);
+    assert_eq!(folder.accesskit_node().level(), Some(1));
+    assert_eq!(folder.accesskit_node().data().is_expanded(), Some(true));
+    assert_eq!(
+        item(&harness, "Modified: main.rs").accesskit_node().level(),
+        Some(2)
+    );
+    click_item(&mut harness, "src/app");
+    assert_eq!(
+        item(&harness, "src/app")
+            .accesskit_node()
+            .data()
+            .is_expanded(),
+        Some(false)
+    );
+}
+
+#[test]
+fn the_filter_narrows_the_list_regardless_of_case() {
+    let mut harness = open_newest(tree_backend());
+    type_filter(&mut harness, "VIEW");
+    assert_eq!(items(&harness), ["Modified: src/app/view.rs"]);
+    show_tree(&mut harness);
+    assert_eq!(items(&harness), ["src/app", "Modified: view.rs"]);
+    clear_filter(&mut harness);
+    assert_eq!(items(&harness).len(), 4);
+}
+
+#[test]
+fn the_filter_finds_a_renamed_file_by_its_old_path() {
+    let mut harness = open_newest(backend());
+    type_filter(&mut harness, "a.rs");
+    assert_eq!(items(&harness), ["Renamed: src/a.rs → src/b.rs"]);
+}
+
+#[test]
+fn a_filter_without_matches_says_so_and_shows_no_diff() {
+    let mut harness = open_newest(tree_backend());
+    type_filter(&mut harness, "nothing like it");
+    assert!(items(&harness).is_empty());
+    assert!(
+        harness
+            .query_by_label("No file matches the filter.")
+            .is_some()
+    );
+    assert_eq!(shown_file(&harness), None);
+    assert_eq!(diff_texts(&harness), ["DIFF"]);
+}
+
+#[test]
+fn a_selected_file_the_filter_hides_gives_way_to_the_first_file_shown() {
+    let mut harness = open_newest(tree_backend());
+    click_item(&mut harness, "Modified: src/app/view.rs");
+    assert_eq!(shown_file(&harness), Some(1));
+    type_filter(&mut harness, "main");
+    assert_eq!(
+        selected_item(&harness).as_deref(),
+        Some("Modified: src/app/main.rs")
+    );
+    assert_eq!(shown_file(&harness), Some(0));
+    clear_filter(&mut harness);
+    assert_eq!(
+        selected_item(&harness).as_deref(),
+        Some("Modified: src/app/main.rs")
+    );
+}
+
+#[test]
+fn the_selection_stays_on_its_file_while_filtering() {
+    let mut harness = open_newest(tree_backend());
+    click_item(&mut harness, "Modified: src/app/view.rs");
+    type_filter(&mut harness, "view");
+    assert_eq!(
+        selected_item(&harness).as_deref(),
+        Some("Modified: src/app/view.rs")
+    );
+    assert_eq!(shown_file(&harness), Some(1));
+}
+
+#[test]
+fn folders_collapse_while_filtering_until_the_filter_changes() {
+    let backend = backend().with_changes(
+        fake_id("c"),
+        vec![
+            change(ChangeKind::Added, "docs/guide.md", None),
+            change(ChangeKind::Modified, "src/app/main.rs", None),
+            change(ChangeKind::Modified, "src/app/view.rs", None),
+            change(ChangeKind::Added, "README.md", None),
+        ],
+    );
+    let mut harness = open_newest(backend);
+    show_tree(&mut harness);
+    click_item(&mut harness, "docs");
+    type_filter(&mut harness, ".r");
+    click_item(&mut harness, "src/app");
+    assert_eq!(items(&harness), ["src/app"]);
+    type_filter(&mut harness, "s");
+    assert_eq!(
+        items(&harness),
+        ["src/app", "Modified: main.rs", "Modified: view.rs"]
+    );
+    clear_filter(&mut harness);
+    assert_eq!(
+        items(&harness),
+        [
+            "docs",
+            "src/app",
+            "Modified: main.rs",
+            "Modified: view.rs",
+            "Added: README.md"
+        ]
+    );
+}
+
+#[test]
+fn the_filter_stays_while_other_commits_are_selected() {
+    let mut harness = open_newest(tree_backend());
+    type_filter(&mut harness, ".rs");
+    select(&mut harness, "First commit");
+    wait_until(&mut harness, |h| items(h) == ["Added: src/main.rs"]);
+    assert_eq!(
+        selected_item(&harness).as_deref(),
+        Some("Added: src/main.rs")
+    );
+}
+
+#[test]
+fn in_the_tree_the_first_file_of_the_tree_is_selected() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    select(&mut harness, "First commit");
+    wait_until(&mut harness, |h| {
+        items(h).contains(&"Added: main.rs".to_owned())
+    });
+    assert_eq!(
+        items(&harness),
+        ["src", "Added: main.rs", "Added: README.md"]
+    );
+    assert_eq!(selected_item(&harness).as_deref(), Some("Added: main.rs"));
+    assert_eq!(shown_file(&harness), Some(1));
+}
+
+#[test]
+fn a_selected_folder_shows_no_diff() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    click_item(&mut harness, "src/app");
+    click_item(&mut harness, "src/app");
+    assert_eq!(selected_item(&harness).as_deref(), Some("src/app"));
+    assert_eq!(shown_file(&harness), None);
 }

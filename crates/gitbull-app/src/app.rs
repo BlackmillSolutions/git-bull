@@ -27,6 +27,7 @@ use gitbull_git::{Backend, CliBackend};
 use jiff::tz::TimeZone;
 
 use crate::commit_list::{SHORT_HASH, list_row};
+use crate::file_list::FileList;
 use crate::i18n::Translations;
 use crate::theme::{Appearance, ThemeFollower};
 use crate::virtual_list::ListState;
@@ -135,9 +136,9 @@ pub(crate) struct TabView {
     /// The dialog that asks before writing the commit-graph is open.
     pub(crate) confirm_graph: bool,
     /// The files of the commit shown in the commit panel.
-    pub(crate) files: ListState,
-    /// The commit whose files `files` lists, to select the first file of
-    /// the next one.
+    pub(crate) commit_files: FileList,
+    /// The commit whose files `commit_files` lists, to select the first
+    /// file of the next one.
     pub(crate) files_for: Option<ObjectId>,
     /// The matches of the Search view.
     pub(crate) search_results: ListState,
@@ -152,7 +153,7 @@ pub(crate) struct TabView {
     /// The diff of the commit chosen in the file history.
     pub(crate) history_diff: DiffView,
     /// The files of the File status view.
-    pub(crate) status_files: ListState,
+    pub(crate) status_files: FileList,
     /// The version of the status `status_files` shows, to select the file
     /// chosen again where a new status puts it.
     pub(crate) status_version: Option<u64>,
