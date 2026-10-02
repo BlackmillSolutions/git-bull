@@ -11,10 +11,11 @@ on every platform.
 | Keys | Action |
 |---|---|
 | Up, Down, Page Up, Page Down, Home, End | Move in the focused list |
-| Left, Right | Collapse and expand a folder of a file tree, or move to the folder above or into it |
+| Left, Right | In a file tree, collapse and expand a folder, or move to the folder above or into it; the focus stays in the list |
 | Enter, Space | Collapse or expand the folder selected in a file tree |
 | Tab, Shift+Tab | Move focus between areas |
 | Ctrl+F | Focus the search field |
+| Ctrl+L | Focus the filter of the file list shown |
 | Ctrl+O | Open a repository |
 | Ctrl+T | New tab |
 | Ctrl+W | Close the current tab |
@@ -65,4 +66,8 @@ on every platform.
 
 #### Scenario: Collapse a folder with the keyboard
 - **WHEN** a file list shows a tree, has focus, a folder in it is selected and expanded, and the user presses Left
-- **THEN** the folder is collapsed
+- **THEN** the folder is collapsed and the file list keeps the focus
+
+#### Scenario: Focus the filter of the file list
+- **WHEN** the File status view is shown and the user presses Ctrl+L
+- **THEN** the filter field of its file list has the focus
