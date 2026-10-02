@@ -678,7 +678,8 @@ mod tests {
 
         assert_eq!(pane.version(), version + 1);
         assert_eq!(revealed(&pane), 0);
-        assert!(!document(&pane).has_text());
+        // The versions are read again; the fake may answer within the
+        // same poll, so whether the text is there yet is not asked here.
         wait_until(&mut pane, settled);
         assert!(reads(&probe) > read);
         assert!(document(&pane).has_text());
