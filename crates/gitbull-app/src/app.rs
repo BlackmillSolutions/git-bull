@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gitbull_core::diff_document::RowKey;
+
+use crate::components::RowsShown;
 use gitbull_core::git_setup::GitCheck;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
@@ -141,6 +143,9 @@ pub(crate) struct TabView {
     /// A view opened from the context menu of a file, shown instead of the
     /// view of the sidebar until the user goes back.
     pub(crate) overlay: Option<Overlay>,
+    /// The move to another hunk F7 or Shift+F7 asked for in this frame,
+    /// which the diff drawn takes.
+    pub(crate) hunk_move: Option<HunkMove>,
     /// The commits of the file history.
     pub(crate) file_commits: ListState,
     /// The diff of the commit chosen in the file history.
@@ -192,6 +197,13 @@ pub(crate) enum FileAction {
     Blame(String, RepoPath),
 }
 
+/// A move to the next or the previous hunk of the diff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HunkMove {
+    Next,
+    Previous,
+}
+
 /// What a diff panel keeps for the diff it shows.
 #[derive(Default)]
 pub(crate) struct DiffView {
@@ -200,6 +212,9 @@ pub(crate) struct DiffView {
     pub(crate) selection: Option<(RowKey, RowKey)>,
     /// The diff the selection belongs to.
     pub(crate) key: Option<DiffKey>,
+    /// What its rows showed in the last frame: where the hunk buttons and
+    /// F7 can move from.
+    pub(crate) shown: RowsShown,
 }
 
 /// Which diff a diff panel shows. The last field counts how often a diff

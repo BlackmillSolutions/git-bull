@@ -97,7 +97,7 @@ F7 and Shift+F7 SHALL then do nothing. Moving SHALL change neither the
 keyboard focus nor the selected lines.
 
 #### Scenario: Next hunk
-- **WHEN** a diff with three hunks shows its beginning and the user presses F7
+- **WHEN** a diff with three hunks shows its first hunk at the top and the user presses F7
 - **THEN** the second hunk begins at the top of the diff
 
 #### Scenario: Previous hunk

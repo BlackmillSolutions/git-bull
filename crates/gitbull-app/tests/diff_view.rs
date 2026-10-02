@@ -1316,3 +1316,174 @@ fn the_toggle_names_itself_and_whether_invisible_characters_are_shown() {
     toggle_invisibles(&mut harness);
     assert_eq!(state(&harness), Some(Toggled::True));
 }
+
+// Moving between hunks.
+
+const fn change_at(at: u32) -> Change {
+    Change {
+        at,
+        old: "let value = 1;",
+        new: "let value = 2;",
+    }
+}
+
+/// Four hunks in a file of 200 lines, the first at its top.
+fn four_hunks() -> Harness<'static, App> {
+    let changes = [change_at(2), change_at(50), change_at(100), change_at(150)];
+    open_totals(totals_backend(200, &changes))
+}
+
+const FIRST: &str = "@@ -1,5 +1,5 @@";
+const SECOND: &str = "@@ -47,7 +47,7 @@";
+const THIRD: &str = "@@ -97,7 +97,7 @@";
+
+/// The top of the header of a hunk, which starts with `header`.
+fn header_top(harness: &Harness<'_, App>, header: &str) -> Option<f32> {
+    row_of(harness, Role::Code, header).map(|rect| rect.top())
+}
+
+fn press_f7(harness: &mut Harness<'_, App>, modifiers: Modifiers) {
+    for pressed in [true, false] {
+        harness.input_mut().events.push(Event::Key {
+            key: Key::F7,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        });
+    }
+    harness.run();
+}
+
+fn hunk_button_enabled(harness: &Harness<'_, App>, name: &str) -> bool {
+    !harness
+        .get_by_role_and_label(Role::Button, name)
+        .accesskit_node()
+        .is_disabled()
+}
+
+#[test]
+fn f7_moves_the_next_hunk_to_the_top_of_the_diff() {
+    let mut harness = four_hunks();
+    let top = header_top(&harness, FIRST).expect("the first hunk shows");
+    press_f7(&mut harness, Modifiers::NONE);
+    assert_eq!(header_top(&harness, SECOND), Some(top));
+    press_f7(&mut harness, Modifiers::NONE);
+    assert_eq!(header_top(&harness, THIRD), Some(top));
+}
+
+#[test]
+fn shift_f7_moves_the_previous_hunk_to_the_top_of_the_diff() {
+    let mut harness = four_hunks();
+    let top = header_top(&harness, FIRST).unwrap();
+    press_f7(&mut harness, Modifiers::NONE);
+    press_f7(&mut harness, Modifiers::NONE);
+    assert_eq!(header_top(&harness, THIRD), Some(top));
+    press_f7(&mut harness, Modifiers::SHIFT);
+    assert_eq!(header_top(&harness, SECOND), Some(top));
+}
+
+#[test]
+fn the_buttons_move_between_hunks_and_name_their_shortcut() {
+    let mut harness = four_hunks();
+    let top = header_top(&harness, FIRST).unwrap();
+    harness
+        .get_by_role_and_label(Role::Button, "Next hunk")
+        .click();
+    harness.run();
+    assert_eq!(header_top(&harness, SECOND), Some(top));
+    harness
+        .get_by_role_and_label(Role::Button, "Previous hunk")
+        .click();
+    harness.run();
+    assert_eq!(header_top(&harness, FIRST), Some(top));
+
+    harness
+        .get_by_role_and_label(Role::Button, "Next hunk")
+        .hover();
+    for _ in 0..30 {
+        harness.step();
+    }
+    assert!(
+        harness.query_by_label_contains("F7").is_some(),
+        "the tooltip names F7"
+    );
+}
+
+#[test]
+fn at_the_end_of_the_diff_next_hunk_is_disabled_and_f7_does_nothing() {
+    let mut harness = four_hunks();
+    for _ in 0..6 {
+        press_f7(&mut harness, Modifiers::NONE);
+    }
+    assert!(!hunk_button_enabled(&harness, "Next hunk"));
+    assert!(hunk_button_enabled(&harness, "Previous hunk"));
+    let rows = diff_rows(&harness);
+    let tops: Vec<_> = harness
+        .query_all_by_role(Role::Code)
+        .map(|node| node.rect().top())
+        .collect();
+    press_f7(&mut harness, Modifiers::NONE);
+    assert_eq!(diff_rows(&harness), rows);
+    let after: Vec<_> = harness
+        .query_all_by_role(Role::Code)
+        .map(|node| node.rect().top())
+        .collect();
+    assert_eq!(after, tops);
+}
+
+#[test]
+fn both_buttons_are_disabled_for_a_diff_that_fits() {
+    let harness = open_totals(totals_backend(10, &[change_at(5)]));
+    assert!(!hunk_button_enabled(&harness, "Next hunk"));
+    assert!(!hunk_button_enabled(&harness, "Previous hunk"));
+}
+
+#[test]
+fn f7_in_the_search_field_does_not_move_the_diff() {
+    let mut harness = four_hunks();
+    let top = header_top(&harness, FIRST).unwrap();
+    // Ctrl+F gives the search field the focus.
+    for pressed in [true, false] {
+        harness.input_mut().events.push(Event::Key {
+            key: Key::F,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        });
+    }
+    harness.run();
+    harness.run();
+    assert!(
+        harness
+            .query_all_by_role(Role::TextInput)
+            .any(|node| node.is_focused()),
+        "the search field has the focus"
+    );
+    press_f7(&mut harness, Modifiers::NONE);
+    assert_eq!(header_top(&harness, FIRST), Some(top));
+}
+
+#[test]
+fn moving_between_hunks_keeps_the_focus_and_the_selected_lines() {
+    let mut harness = four_hunks();
+    let line = row_of(&harness, Role::Code, "Added, –, 2")
+        .unwrap()
+        .center();
+    click(&mut harness, line, PointerButton::Primary);
+    let selected = selected_rows(&harness);
+    assert_eq!(selected.len(), 1, "{selected:?}");
+    let focused = |harness: &Harness<'_, App>| {
+        harness
+            .query_all_by_role(Role::Pane)
+            .find(|node| node.is_focused())
+            .and_then(|node| node.accesskit_node().label())
+    };
+    let before = focused(&harness);
+    assert!(before.is_some(), "the diff has the focus");
+    press_f7(&mut harness, Modifiers::NONE);
+    press_f7(&mut harness, Modifiers::SHIFT);
+    assert_eq!(focused(&harness), before);
+    assert_eq!(selected_rows(&harness), selected);
+}

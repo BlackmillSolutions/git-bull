@@ -28,8 +28,8 @@ behaviour fails before its code.
 
 ## 4. Moving between hunks
 
-- [ ] 4.1 Let `components::rows_area` scroll to a row when asked and return the first visible row and whether it can scroll further down (design, decision 7); verify that the tests of the commit list, the file lists, the blame and the diff pass unchanged
-- [ ] 4.2 Turn F7 and Shift+F7 into `Action::NextHunk` and `Action::PreviousHunk` in `ui::shortcuts` while no text field has the keyboard focus, add the buttons Previous hunk and Next hunk to the header of the diff with the shortcut in their tooltips, and let the diff scroll to the hunk the document names, disabling a button where there is nowhere to go (design, decisions 6 and 7); verify UI tests in `tests/diff_view.rs` for the scenarios "Next hunk", "Previous hunk", "End of the diff", "Diff that fits" and "Typing in the search field" of `diff-view`, that moving keeps the keyboard focus and the selected lines, and a UI test in `tests/shortcuts.rs` for the scenario "Next hunk with the keyboard" of `application-shell`
+- [x] 4.1 Let `components::rows_area` scroll to a row when asked and return the first visible row and whether it can scroll further down (design, decision 7); verify that the tests of the commit list, the file lists, the blame and the diff pass unchanged
+- [x] 4.2 Turn F7 and Shift+F7 into `Action::NextHunk` and `Action::PreviousHunk` in `ui::shortcuts` while no text field has the keyboard focus, add the buttons Previous hunk and Next hunk to the header of the diff with the shortcut in their tooltips, and let the diff scroll to the hunk the document names, disabling a button where there is nowhere to go (design, decisions 6 and 7); verify UI tests in `tests/diff_view.rs` for the scenarios "Next hunk", "Previous hunk", "End of the diff", "Diff that fits" and "Typing in the search field" of `diff-view`, that moving keeps the keyboard focus and the selected lines, and a UI test in `tests/shortcuts.rs` for the scenario "Next hunk with the keyboard" of `application-shell`
 
 ## 5. Expanding context
 

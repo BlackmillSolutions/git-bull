@@ -22,13 +22,13 @@ use gitbull_git::Error;
 use gitbull_git::diff::{Content, FileDiff, Hunk, LINE_LIMIT, LineKind};
 use gitbull_git::path::RepoPath;
 
-use crate::app::{App, DiffKey, DiffView};
+use crate::app::{App, DiffKey, DiffView, HunkMove};
 use crate::commit_list::{color, take_copy};
-use crate::components::{self, RowLayout};
+use crate::components::{self, RowLayout, RowsShown};
 use crate::i18n::Msg;
 use crate::icons;
 use crate::theme::{Appearance, Palette, Rgb, SHAPE};
-use crate::ui::{AREA_DIFF, appearance, lock_tab};
+use crate::ui::{AREA_DIFF, NEXT_HUNK, PREVIOUS_HUNK, appearance, lock_tab};
 
 /// The height of a row of the diff, and of blame.
 pub(crate) const ROW_HEIGHT: f32 = 18.0;
@@ -52,6 +52,8 @@ struct Texts {
     copy_hunk: String,
     too_large: String,
     show_invisibles: String,
+    previous_hunk: String,
+    next_hunk: String,
     /// The names of the kinds of line, for assistive technology.
     added: String,
     removed: String,
@@ -75,6 +77,8 @@ impl Texts {
             copy_hunk: text(Msg::CopyHunk),
             too_large: text(Msg::DiffTooLarge),
             show_invisibles: text(Msg::DiffShowInvisibles),
+            previous_hunk: text(Msg::DiffPreviousHunk),
+            next_hunk: text(Msg::DiffNextHunk),
             added: text(Msg::DiffLineAdded),
             removed: text(Msg::DiffLineRemoved),
             context: text(Msg::DiffLineContext),
@@ -329,6 +333,7 @@ fn draw(
     let Some((session, view)) = app.active_view() else {
         return false;
     };
+    let mut hunk_move = view.hunk_move.take();
     let state = match pane {
         Pane::Commit => &mut view.commit_diff,
         Pane::FileStatus => &mut view.status_diff,
@@ -360,8 +365,16 @@ fn draw(
     if state.key != Some(key) {
         state.key = Some(key);
         state.selection = None;
+        state.shown = Default::default();
     }
     let diff = document.diff();
+    // Where the hunks are from the top of the view of the last frame; the
+    // next one only while the diff can scroll towards it.
+    let last = state.shown;
+    let next = document
+        .next_hunk(last.first_visible)
+        .filter(|_| last.can_scroll_down);
+    let previous = document.previous_hunk(last.first_visible);
 
     let path = paths(diff);
     egui::Sides::new().shrink_left().truncate().show(
@@ -372,6 +385,20 @@ fn draw(
             }
         },
         |ui| {
+            // From the right: Next hunk, Previous hunk, the toggle.
+            let hunk_button = |ui: &mut Ui, target: Option<usize>, icon, name, shortcut| {
+                ui.add_enabled_ui(target.is_some(), |ui| {
+                    components::icon_button(ui, icon, name, Some(shortcut)).clicked()
+                })
+                .inner
+            };
+            if hunk_button(ui, next, icons::NEXT_HUNK, &texts.next_hunk, NEXT_HUNK) {
+                hunk_move = Some(HunkMove::Next);
+            }
+            let name = &texts.previous_hunk;
+            if hunk_button(ui, previous, icons::PREVIOUS_HUNK, name, PREVIOUS_HUNK) {
+                hunk_move = Some(HunkMove::Previous);
+            }
             components::toggle_icon_button(
                 ui,
                 icons::INVISIBLES,
@@ -380,6 +407,11 @@ fn draw(
             );
         },
     );
+    let scroll_to = match hunk_move {
+        Some(HunkMove::Next) => next,
+        Some(HunkMove::Previous) => previous,
+        None => None,
+    };
     for note in notes.unwrap_or_default() {
         ui.label(note);
     }
@@ -411,8 +443,9 @@ fn draw(
     let selection = state
         .selection
         .and_then(|(anchor, end)| Some((document.index(anchor)?, document.index(end)?)));
-    let outcome = draw_rows(
+    let (outcome, shown) = draw_rows(
         ui,
+        scroll_to,
         &Drawn {
             document,
             highlighting,
@@ -425,6 +458,7 @@ fn draw(
             palette,
         },
     );
+    state.shown = shown;
     if outcome.clicked.is_some() || outcome.menu.is_some() {
         background.request_focus();
     }
@@ -571,7 +605,9 @@ struct Drawn<'a> {
     palette: &'a Palette,
 }
 
-fn draw_rows(ui: &mut Ui, drawn: &Drawn<'_>) -> Outcome {
+/// Draws the rows, first scrolling so that the row `scroll_to`, if any,
+/// begins at the top. Returns what happened and what the rows showed.
+fn draw_rows(ui: &mut Ui, scroll_to: Option<usize>, drawn: &Drawn<'_>) -> (Outcome, RowsShown) {
     let Drawn {
         document,
         highlighting,
@@ -598,90 +634,91 @@ fn draw_rows(ui: &mut Ui, drawn: &Drawn<'_>) -> Outcome {
         gap_rows: document.gap_rows(),
     };
     let mut outcome = Outcome::default();
-    components::rows_area_in(ui, ("diff", shown), &layout, None, |ui, range| {
-        for index in range {
-            let row = rows[index];
-            let key = document.key(row);
-            let is_selected = key.is_some() && selected(selection, index);
-            // A row is known by its diff and its key, so that the row of a
-            // new diff at the same place, or a row that revealed lines
-            // pushed down, does not take over the state of another, such
-            // as its open menu.
-            let id = match key {
-                Some(key) => Id::new((shown, key)),
-                None => Id::new((shown, "gap", index_of_gap(row))),
-            };
-            let response = ui
-                .push_id(id, |ui| match row {
-                    Row::Header(hunk) => header_row(
-                        ui,
-                        &document.hunks()[hunk].header,
-                        is_selected,
-                        &font,
-                        palette,
-                    ),
-                    Row::Line(..) | Row::Revealed(_) => {
-                        let line = line_view(document, highlighting, row);
-                        line_row(
+    let rows_shown =
+        components::rows_area_in(ui, ("diff", shown), &layout, scroll_to, |ui, range| {
+            for index in range {
+                let row = rows[index];
+                let key = document.key(row);
+                let is_selected = key.is_some() && selected(selection, index);
+                // A row is known by its diff and its key, so that the row of a
+                // new diff at the same place, or a row that revealed lines
+                // pushed down, does not take over the state of another, such
+                // as its open menu.
+                let id = match key {
+                    Some(key) => Id::new((shown, key)),
+                    None => Id::new((shown, "gap", index_of_gap(row))),
+                };
+                let response = ui
+                    .push_id(id, |ui| match row {
+                        Row::Header(hunk) => header_row(
                             ui,
-                            &line,
+                            &document.hunks()[hunk].header,
                             is_selected,
-                            drawn.invisibles,
-                            &gutter,
                             &font,
-                            texts,
                             palette,
-                        )
-                    }
-                    Row::Gap(gap) => {
-                        let labels = &drawn.gap_labels[gap];
-                        let too_large = drawn.too_large.then_some(texts.too_large.as_str());
-                        let (response, part) = gap_row(
-                            ui,
-                            &document.gaps()[gap],
-                            labels,
-                            too_large,
-                            &gutter,
-                            palette,
-                        );
-                        if let Some(part) = part {
-                            outcome.expand = Some((gap, part));
+                        ),
+                        Row::Line(..) | Row::Revealed(_) => {
+                            let line = line_view(document, highlighting, row);
+                            line_row(
+                                ui,
+                                &line,
+                                is_selected,
+                                drawn.invisibles,
+                                &gutter,
+                                &font,
+                                texts,
+                                palette,
+                            )
                         }
-                        response
-                    }
-                })
-                .inner;
-            // A gap is no line of the file: it is neither selected nor
-            // copied, and has no menu.
-            if key.is_none() {
-                continue;
-            }
-            if response.clicked() {
-                let extend = ui.input(|input| input.modifiers.shift);
-                outcome.clicked = Some((index, extend));
-            }
-            if response.secondary_clicked() {
-                outcome.menu = Some(index);
-            }
-            let hunk = document.hunk(row);
-            response.context_menu(|ui| {
-                components::menu(ui, |ui| {
-                    if components::menu_item(ui, None, &texts.copy_lines, None).clicked() {
-                        outcome.copy = Some(Copy::Lines);
-                        ui.close();
-                    }
-                    // A revealed line belongs to no hunk.
-                    if let Some(hunk) = hunk
-                        && components::menu_item(ui, None, &texts.copy_hunk, None).clicked()
-                    {
-                        outcome.copy = Some(Copy::Hunk(hunk));
-                        ui.close();
-                    }
+                        Row::Gap(gap) => {
+                            let labels = &drawn.gap_labels[gap];
+                            let too_large = drawn.too_large.then_some(texts.too_large.as_str());
+                            let (response, part) = gap_row(
+                                ui,
+                                &document.gaps()[gap],
+                                labels,
+                                too_large,
+                                &gutter,
+                                palette,
+                            );
+                            if let Some(part) = part {
+                                outcome.expand = Some((gap, part));
+                            }
+                            response
+                        }
+                    })
+                    .inner;
+                // A gap is no line of the file: it is neither selected nor
+                // copied, and has no menu.
+                if key.is_none() {
+                    continue;
+                }
+                if response.clicked() {
+                    let extend = ui.input(|input| input.modifiers.shift);
+                    outcome.clicked = Some((index, extend));
+                }
+                if response.secondary_clicked() {
+                    outcome.menu = Some(index);
+                }
+                let hunk = document.hunk(row);
+                response.context_menu(|ui| {
+                    components::menu(ui, |ui| {
+                        if components::menu_item(ui, None, &texts.copy_lines, None).clicked() {
+                            outcome.copy = Some(Copy::Lines);
+                            ui.close();
+                        }
+                        // A revealed line belongs to no hunk.
+                        if let Some(hunk) = hunk
+                            && components::menu_item(ui, None, &texts.copy_hunk, None).clicked()
+                        {
+                            outcome.copy = Some(Copy::Hunk(hunk));
+                            ui.close();
+                        }
+                    });
                 });
-            });
-        }
-    });
-    outcome
+            }
+        });
+    (outcome, rows_shown)
 }
 
 fn index_of_gap(row: Row) -> usize {

@@ -22,7 +22,7 @@ use gitbull_git::version::GitVersion;
 
 use gitbull_core::settings::{ColourVision, InterfaceSize, ThemeSetting};
 
-use crate::app::{App, GitMessage, GitStatus, Notice, Overlay, SettingsDialog};
+use crate::app::{App, GitMessage, GitStatus, HunkMove, Notice, Overlay, SettingsDialog};
 use crate::blame_view;
 use crate::commit_list;
 use crate::commit_panel;
@@ -126,7 +126,14 @@ enum Action {
     PreviousMatch,
     /// Give the search field the keyboard focus.
     FocusSearch,
+    /// Move the diff shown to the next or the previous hunk.
+    MoveHunk(HunkMove),
 }
+
+/// Moves the diff to its next hunk.
+pub const NEXT_HUNK: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F7);
+/// Moves the diff to its previous hunk.
+pub const PREVIOUS_HUNK: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F7);
 
 /// The id of the search field in the toolbar.
 pub const SEARCH_FIELD: &str = "search-field";
@@ -166,6 +173,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let focus_search = actions
         .iter()
         .any(|action| matches!(action, Action::FocusSearch));
+    // The diff drawn in this frame takes the move, and none is left over
+    // for a diff drawn later.
+    let hunk_move = actions.iter().find_map(|action| match action {
+        Action::MoveHunk(hunk_move) => Some(*hunk_move),
+        _ => None,
+    });
+    if let Some((_, view)) = app.active_view() {
+        view.hunk_move = hunk_move;
+    }
     title_bar(app, ui, &mut actions);
     // After the window buttons, so that the bands lie above them.
     resize_bands(app, ui.ctx(), window);
@@ -250,7 +266,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::NextMatch => app.next_match(),
             Action::PreviousMatch => app.previous_match(),
             // The toolbar has taken it.
-            Action::FocusSearch => {}
+            Action::FocusSearch | Action::MoveHunk(_) => {}
             Action::CheckGitAgain => app.check_again(),
             Action::ChooseGit => app.choose_git(),
             Action::SetTheme(theme) => app.set_theme(theme),
@@ -464,8 +480,18 @@ fn apply_interface_size(app: &App, ui: &Ui) {
 /// Keyboard shortcuts of the window. `COMMAND` is Ctrl, and Cmd on macOS;
 /// switching tabs uses Ctrl everywhere, because Cmd+Tab belongs to macOS.
 fn shortcuts(ui: &Ui) -> Vec<Action> {
+    // F7 belongs to a text field that has the focus.
+    let typing = ui.ctx().text_edit_focused();
     let actions = ui.ctx().input_mut(|input| {
         let mut actions = Vec::new();
+        // The variant with Shift first, as F7 would also match it.
+        if !typing {
+            if input.consume_shortcut(&PREVIOUS_HUNK) {
+                actions.push(Action::MoveHunk(HunkMove::Previous));
+            } else if input.consume_shortcut(&NEXT_HUNK) {
+                actions.push(Action::MoveHunk(HunkMove::Next));
+            }
+        }
         if input.consume_shortcut(&OPEN) || input.consume_shortcut(&NEW_TAB) {
             actions.push(Action::ShowChooser);
         }

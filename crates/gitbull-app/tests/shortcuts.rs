@@ -1,15 +1,21 @@
-//! Keyboard shortcuts for tabs and opening repositories.
+//! Keyboard shortcuts for tabs, opening repositories and moving between
+//! the hunks of a diff.
 //!
 //! Shortcuts for lists, copying, search and refresh arrive with those
 //! features.
 
 mod support;
 
+use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
 use eframe::egui::{Key, Modifiers};
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_core::settings::Settings;
-use gitbull_testkit::FakeBackend;
+use gitbull_git::changes::{ChangeKind, FileChange};
+use gitbull_git::content::{CommitContent, Signature};
+use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
+use gitbull_git::history::CommitLine;
+use gitbull_testkit::{FakeBackend, fake_id};
 use support::{
     BURST, Setup, active_title, build, commit_list_scroll, find_row, long_history, path,
     settle_window, tab_titles, turn_wheel, wait_for_row, window, window_at_60_fps, window_on,
@@ -205,4 +211,134 @@ fn a_tab_left_during_a_motion_shows_its_commit_list_at_rest_on_return() {
         harness.step();
     }
     assert_eq!(commit_list_scroll(&harness) - start, moved, "still moving");
+}
+
+/// The hunk that replaces line `at`, with three lines of context.
+fn hunk_at(at: u32) -> Hunk {
+    let line = |kind, old, new, text: String| DiffLine {
+        kind,
+        old_number: old,
+        new_number: new,
+        text,
+        no_newline: false,
+        cut: false,
+        crlf: false,
+    };
+    let first = at.saturating_sub(3).max(1);
+    let context = |n: u32| line(LineKind::Context, Some(n), Some(n), format!("line {n}"));
+    let mut lines: Vec<DiffLine> = (first..at).map(context).collect();
+    lines.push(line(LineKind::Removed, Some(at), None, "old".to_owned()));
+    lines.push(line(LineKind::Added, None, Some(at), "new".to_owned()));
+    lines.extend((at + 1..=at + 3).map(context));
+    let count = at + 3 - first + 1;
+    Hunk {
+        header: format!("@@ -{first},{count} +{first},{count} @@"),
+        old_start: first,
+        new_start: first,
+        lines,
+    }
+}
+
+/// A repository whose one commit changes a file in four places.
+fn four_hunks() -> Setup {
+    let root = path(&["work", "git-bull"]);
+    let c = fake_id("c");
+    let person = Signature {
+        name: "Ada Lovelace".to_owned(),
+        email: "ada@example.com".to_owned(),
+        time: 1_767_268_800,
+        offset_minutes: 0,
+    };
+    let diff = FileDiff {
+        old_path: Some("notes.txt".into()),
+        new_path: Some("notes.txt".into()),
+        old_mode: Some("100644".to_owned()),
+        new_mode: Some("100644".to_owned()),
+        old_blob: None,
+        new_blob: None,
+        new_in_working_copy: false,
+        content: Content::Text([2, 50, 100, 150].map(hunk_at).to_vec()),
+        truncated: false,
+    };
+    Setup {
+        settings: Settings {
+            tabs: vec![root.clone()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: FakeBackend::default()
+            .with_repository(root.clone())
+            .with_history(
+                root,
+                vec![CommitLine {
+                    timestamp: 1_767_268_800,
+                    id: c,
+                    parents: Vec::new(),
+                }],
+            )
+            .with_content(
+                c,
+                CommitContent {
+                    author: person.clone(),
+                    committer: person,
+                    message: "Change four places\n".to_owned(),
+                },
+            )
+            .with_changes(
+                c,
+                vec![FileChange {
+                    kind: ChangeKind::Modified,
+                    path: "notes.txt".into(),
+                    old_path: None,
+                }],
+            )
+            .with_diff(c, "notes.txt", diff),
+        ..Setup::default()
+    }
+}
+
+/// The top of the header of the hunk that starts with `header`.
+fn header_top(
+    harness: &egui_kittest::Harness<'_, gitbull_app::app::App>,
+    header: &str,
+) -> Option<f32> {
+    harness
+        .query_all_by_role(Role::Code)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(header))
+        })
+        .map(|node| node.rect().top())
+}
+
+#[test]
+fn f7_moves_the_diff_to_its_next_hunk() {
+    let mut harness = window(build(four_hunks()).app);
+    settle_window(&mut harness);
+    wait_for_row(&mut harness, "Change four places");
+    let row = find_row(&harness, "Change four places").unwrap().center();
+    harness.hover_at(row);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: row,
+            button: eframe::egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    for _ in 0..200 {
+        if header_top(&harness, "@@ -1,5").is_some() {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    harness.run();
+    let top = header_top(&harness, "@@ -1,5").expect("the first hunk shows");
+
+    harness.key_press(Key::F7);
+    harness.run();
+
+    assert_eq!(header_top(&harness, "@@ -47,7"), Some(top));
 }
