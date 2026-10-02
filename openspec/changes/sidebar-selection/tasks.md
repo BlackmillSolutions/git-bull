@@ -9,7 +9,7 @@ passing; each names the test that shows it works.
 
 ## 1. Keys of the sidebar
 
-- [ ] 1.1 Add `SidebarKey` (`Section`, `View`, `Folder { section, path }`, `Reference(full name)`, `Stash(commit id)`, `Submodule(path)`), `SidebarRow::key` and `sidebar_tree::row_of` to `crates/gitbull-core/src/sidebar_tree.rs`, and give `SidebarRow::Stash` the id of its commit next to its index, which stays until task 3.1 (design, decision 1); verify unit tests that every kind of row gives its key, that `row_of` finds a tag after a filter that removes rows above it and after a new branch is added, finds a stash by its commit after a newer stash is added, and finds nothing for an entry hidden by the filter, by a collapsed section or folder, or gone, that `ten_thousand_tags_are_quick_to_lay_out` also finds the row of the last tag within its limit, and that `cargo test --workspace` passes
+- [x] 1.1 Add `SidebarKey` (`Section`, `View`, `Folder { section, path }`, `Reference(full name)`, `Stash(commit id)`, `Submodule(path)`), `SidebarRow::key` and `sidebar_tree::row_of` to `crates/gitbull-core/src/sidebar_tree.rs`, and give `SidebarRow::Stash` the id of its commit next to its index, which stays until task 3.1 (design, decision 1); verify unit tests that every kind of row gives its key, that `row_of` finds a tag after a filter that removes rows above it and after a new branch is added, finds a stash by its commit after a newer stash is added, and finds nothing for an entry hidden by the filter, by a collapsed section or folder, or gone, that `ten_thousand_tags_are_quick_to_lay_out` also finds the row of the last tag within its limit, and that `cargo test --workspace` passes
 
 ## 2. The tab owns its view and its selection
 

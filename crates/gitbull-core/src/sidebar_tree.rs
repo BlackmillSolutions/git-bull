@@ -70,6 +70,9 @@ pub enum SidebarRow {
     },
     Stash {
         index: usize,
+        /// The stash commit, which names the stash while newer ones are
+        /// made before it.
+        commit: String,
         selector: String,
         message: String,
     },
@@ -78,6 +81,66 @@ pub enum SidebarRow {
         /// Only initialised submodules can be opened.
         initialised: bool,
     },
+}
+
+/// What a row shows, by what it is rather than where it is, so that a
+/// selection finds its row again when the rows change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarKey {
+    Section(Section),
+    View(View),
+    Folder {
+        section: Section,
+        path: String,
+    },
+    /// A reference by its full name, which no other section has.
+    Reference(String),
+    /// A stash by its commit.
+    Stash(String),
+    /// A submodule by its path.
+    Submodule(String),
+}
+
+impl SidebarRow {
+    pub fn key(&self) -> SidebarKey {
+        match self {
+            SidebarRow::Section { section, .. } => SidebarKey::Section(*section),
+            SidebarRow::View(view) => SidebarKey::View(*view),
+            SidebarRow::Folder { section, path, .. } => SidebarKey::Folder {
+                section: *section,
+                path: path.clone(),
+            },
+            SidebarRow::Reference { name, .. } => SidebarKey::Reference(name.clone()),
+            SidebarRow::Stash { commit, .. } => SidebarKey::Stash(commit.clone()),
+            SidebarRow::Submodule { path, .. } => SidebarKey::Submodule(path.clone()),
+        }
+    }
+
+    /// Whether the row shows what `key` names, without copying its name as
+    /// `key` does.
+    fn shows(&self, key: &SidebarKey) -> bool {
+        match (self, key) {
+            (SidebarRow::Section { section, .. }, SidebarKey::Section(wanted)) => section == wanted,
+            (SidebarRow::View(view), SidebarKey::View(wanted)) => view == wanted,
+            (
+                SidebarRow::Folder { section, path, .. },
+                SidebarKey::Folder {
+                    section: wanted_section,
+                    path: wanted_path,
+                },
+            ) => section == wanted_section && path == wanted_path,
+            (SidebarRow::Reference { name, .. }, SidebarKey::Reference(wanted)) => name == wanted,
+            (SidebarRow::Stash { commit, .. }, SidebarKey::Stash(wanted)) => commit == wanted,
+            (SidebarRow::Submodule { path, .. }, SidebarKey::Submodule(wanted)) => path == wanted,
+            _ => false,
+        }
+    }
+}
+
+/// The row among `rows` that shows what `key` names; none while it is
+/// hidden by the filter or a collapsed section or folder, or gone.
+pub fn row_of(rows: &[SidebarRow], key: &SidebarKey) -> Option<usize> {
+    rows.iter().position(|row| row.shows(key))
 }
 
 /// The rows to show for `sidebar`, or only sections and views while it is
@@ -114,6 +177,7 @@ pub fn rows(
                     rows.extend(stashes.iter().enumerate().map(|(index, stash)| {
                         SidebarRow::Stash {
                             index,
+                            commit: stash.commit.clone(),
                             selector: stash.selector.clone(),
                             message: stash.message.clone(),
                         }
@@ -481,6 +545,129 @@ mod tests {
         let rows = rows(Some(&many), &main(), &SidebarState::default(), &View::ALL);
         assert!(rows.len() > 10_000);
         assert!(started.elapsed() < std::time::Duration::from_millis(500));
+
+        // A selection near the end is found again once per layout.
+        let last = SidebarKey::Reference("refs/tags/v9999".into());
+        let started = std::time::Instant::now();
+        let row = row_of(&rows, &last);
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
+        assert_eq!(row.map(|row| rows[row].key()), Some(last));
+    }
+
+    fn laid_out(sidebar: &Sidebar, state: &SidebarState) -> Vec<SidebarRow> {
+        rows(Some(sidebar), &main(), state, &View::ALL)
+    }
+
+    fn tag() -> SidebarKey {
+        SidebarKey::Reference("refs/tags/v1.0".into())
+    }
+
+    #[test]
+    fn every_row_gives_the_key_of_what_it_shows() {
+        let rows = laid_out(&sidebar(), &SidebarState::default());
+        let keys: Vec<SidebarKey> = rows.iter().map(SidebarRow::key).collect();
+        for key in [
+            SidebarKey::Section(Section::Workspace),
+            SidebarKey::View(View::FileStatus),
+            SidebarKey::Folder {
+                section: Section::Remotes,
+                path: "origin/release".into(),
+            },
+            SidebarKey::Reference("refs/heads/main".into()),
+            SidebarKey::Reference("refs/remotes/origin/main".into()),
+            tag(),
+            SidebarKey::Stash("2222222222222222222222222222222222222222".into()),
+            SidebarKey::Submodule("libs/missing".into()),
+        ] {
+            assert!(keys.contains(&key), "{key:?} in {keys:#?}");
+        }
+        // Each key names one row.
+        for (row, key) in keys.iter().enumerate() {
+            assert_eq!(row_of(&rows, key), Some(row), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_selected_tag_is_found_where_the_filter_moves_it() {
+        let all = laid_out(&sidebar(), &SidebarState::default());
+        let filtered = laid_out(
+            &sidebar(),
+            &SidebarState {
+                filter: "v1".into(),
+                ..SidebarState::default()
+            },
+        );
+        let (before, after) = (row_of(&all, &tag()), row_of(&filtered, &tag()));
+        assert!(after < before, "{before:?} {after:?}");
+        assert_eq!(after.map(|row| filtered[row].key()), Some(tag()));
+    }
+
+    #[test]
+    fn a_selected_tag_is_found_below_a_new_branch() {
+        let before = row_of(&laid_out(&sidebar(), &SidebarState::default()), &tag());
+        let mut more = sidebar();
+        more.references
+            .push(reference("refs/heads/another", RefKind::Branch));
+        let rows = laid_out(&more, &SidebarState::default());
+        let after = row_of(&rows, &tag());
+        assert_eq!(after, before.map(|row| row + 1));
+        assert_eq!(after.map(|row| rows[row].key()), Some(tag()));
+    }
+
+    #[test]
+    fn a_selected_stash_is_found_by_its_commit_below_a_newer_one() {
+        let selected = SidebarKey::Stash("2222222222222222222222222222222222222222".into());
+        let mut more = sidebar();
+        more.stashes.insert(
+            0,
+            Stash {
+                commit: "5555555555555555555555555555555555555555".into(),
+                parents: Vec::new(),
+                selector: "stash@{0}".into(),
+                message: "WIP on main: newer".into(),
+            },
+        );
+        more.stashes[1].selector = "stash@{1}".into();
+        let rows = laid_out(&more, &SidebarState::default());
+        let row = row_of(&rows, &selected).expect("the stash");
+        assert!(
+            matches!(&rows[row], SidebarRow::Stash { message, index: 1, .. } if message == "WIP on main: try")
+        );
+    }
+
+    #[test]
+    fn a_hidden_or_gone_entry_has_no_row() {
+        let filtered = SidebarState {
+            filter: "graph".into(),
+            ..SidebarState::default()
+        };
+        assert_eq!(row_of(&laid_out(&sidebar(), &filtered), &tag()), None);
+
+        let collapsed_section = SidebarState {
+            collapsed_sections: HashSet::from([Section::Tags]),
+            ..SidebarState::default()
+        };
+        assert_eq!(
+            row_of(&laid_out(&sidebar(), &collapsed_section), &tag()),
+            None
+        );
+
+        let collapsed_folder = SidebarState {
+            collapsed_folders: HashSet::from([(Section::Remotes, "origin/release".to_owned())]),
+            ..SidebarState::default()
+        };
+        let release = SidebarKey::Reference("refs/remotes/origin/release/0.1".into());
+        assert_eq!(
+            row_of(&laid_out(&sidebar(), &collapsed_folder), &release),
+            None
+        );
+
+        let mut fewer = sidebar();
+        fewer.references.retain(|r| r.name != "refs/tags/v1.0");
+        assert_eq!(
+            row_of(&laid_out(&fewer, &SidebarState::default()), &tag()),
+            None
+        );
     }
 
     #[test]
