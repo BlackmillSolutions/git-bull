@@ -83,6 +83,7 @@ fn diff(path: &str, added: &str) -> FileDiff {
                 text: added.to_owned(),
                 no_newline: false,
                 cut: false,
+                crlf: false,
             }],
         }]),
         truncated: false,

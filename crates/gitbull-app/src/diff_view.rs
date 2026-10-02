@@ -255,7 +255,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
         };
         session.set_highlight_theme(theme);
         match shown(session, pane) {
-            Some((DiffState::Loaded(diff), _, _)) => Some(NoteData::of(diff)),
+            Some((DiffState::Loaded(document), _, _)) => Some(NoteData::of(document.diff())),
             _ => None,
         }
     }
@@ -288,7 +288,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
             components::error_text(ui, error);
             return false;
         }
-        DiffState::Loaded(diff) => diff,
+        DiffState::Loaded(document) => document.diff(),
     };
     if state.key != Some(key) {
         state.key = Some(key);
@@ -745,6 +745,7 @@ mod tests {
             text: text.to_owned(),
             no_newline,
             cut: false,
+            crlf: false,
         }
     }
 

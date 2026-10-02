@@ -69,6 +69,7 @@ fn backend() -> FakeBackend {
             text: "work in progress".to_owned(),
             no_newline: false,
             cut: false,
+            crlf: false,
         }],
     };
     FakeBackend::default()

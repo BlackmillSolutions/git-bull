@@ -39,6 +39,7 @@ fn backend() -> FakeBackend {
         text: text.to_owned(),
         no_newline: false,
         cut: false,
+        crlf: false,
     };
     FakeBackend::default()
         .with_repository(root.clone())

@@ -44,6 +44,7 @@ fn line(kind: LineKind, old: Option<u32>, new: Option<u32>, text: &str) -> DiffL
         text: text.to_owned(),
         no_newline: false,
         cut: false,
+        crlf: false,
     }
 }
 

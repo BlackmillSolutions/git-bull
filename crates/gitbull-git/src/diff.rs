@@ -42,6 +42,9 @@ pub struct DiffLine {
     pub no_newline: bool,
     /// The text was cut after [`LINE_CHARS`] characters.
     pub cut: bool,
+    /// The line ended in a carriage return and a line feed; the carriage
+    /// return is not part of `text`.
+    pub crlf: bool,
 }
 
 /// A hunk: a header and its lines.
@@ -570,7 +573,10 @@ fn parse_hunk<'a>(
         if new_number.is_some() {
             new += 1;
         }
-        let rest = rest.strip_suffix(b"\r").unwrap_or(rest);
+        let (rest, crlf) = match rest.strip_suffix(b"\r") {
+            Some(rest) => (rest, true),
+            None => (rest, false),
+        };
         let (text, cut) = cut_line(lossy(rest));
         hunk_lines.push(DiffLine {
             kind,
@@ -579,6 +585,7 @@ fn parse_hunk<'a>(
             text,
             no_newline: false,
             cut,
+            crlf,
         });
     }
     Ok(Hunk {
@@ -995,6 +1002,26 @@ index 1111111111111111111111111111111111111111..22222222222222222222222222222222
         assert!(!hunk.lines[0].cut);
         assert_eq!(hunk.lines[1].text.chars().count(), LINE_CHARS);
         assert!(hunk.lines[1].cut);
+    }
+
+    #[test]
+    fn a_line_remembers_whether_it_ended_in_crlf() {
+        let output = b"diff --git a/crlf.txt b/crlf.txt\nindex 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644\n--- a/crlf.txt\n+++ b/crlf.txt\n@@ -1,2 +1,2 @@\n-one\r\n+one\n two\r\n";
+        let diff = one(output);
+        let hunk = &hunks(&diff)[0];
+        let ends: Vec<_> = hunk
+            .lines
+            .iter()
+            .map(|line| (line.text.as_str(), line.crlf))
+            .collect();
+        assert_eq!(ends, [("one", true), ("one", false), ("two", true)]);
+    }
+
+    #[test]
+    fn diffs_that_differ_only_in_line_endings_are_not_equal() {
+        let crlf = b"diff --git a/a.txt b/a.txt\nindex 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\r\n";
+        let lf = b"diff --git a/a.txt b/a.txt\nindex 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n";
+        assert_ne!(one(crlf), one(lf));
     }
 
     #[test]

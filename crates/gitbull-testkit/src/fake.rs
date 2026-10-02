@@ -65,6 +65,8 @@ pub struct FakeBackend {
     failing_changes: Vec<ObjectId>,
     diffs: HashMap<(ObjectId, String), FileDiff>,
     blobs: HashMap<ObjectId, Vec<u8>>,
+    /// Holds every read of a blob.
+    blob_gate: Option<Gate>,
     missing: Vec<(ObjectId, String)>,
     statuses: Vec<(PathBuf, WorkingStatus)>,
     failing_statuses: Vec<PathBuf>,
@@ -318,6 +320,12 @@ impl FakeBackend {
     /// Reading the status of `root` fails as if `git status` did.
     pub fn with_failing_status(mut self, root: impl Into<PathBuf>) -> FakeBackend {
         self.failing_statuses.push(root.into());
+        self
+    }
+
+    /// Reading a blob takes until the test opens `gate`.
+    pub fn with_blob_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.blob_gate = Some(gate.clone());
         self
     }
 
@@ -776,9 +784,16 @@ impl Backend for FakeBackend {
         repo: &Path,
         blob: &ObjectId,
         limit: u64,
-        _cancel: &CancelToken,
+        cancel: &CancelToken,
     ) -> Result<Option<Vec<u8>>, Error> {
         self.probe.record("blob", repo);
+        if let Some(gate) = &self.blob_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
         let content = self.blobs.get(blob).ok_or_else(|| Error::Parse {
             command: "git cat-file --batch".to_owned(),
             message: format!("the object {blob} is missing"),

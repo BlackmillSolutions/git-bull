@@ -11,6 +11,7 @@ use gitbull_git::cancel::CancelToken;
 use gitbull_git::file_history::FileCommit;
 use gitbull_git::path::RepoPath;
 
+use crate::diff_document::Part;
 use crate::diff_pane::{DiffPane, DiffSource, DiffState, Highlighting};
 use crate::highlight::HighlightTheme;
 use crate::session::catch;
@@ -154,6 +155,11 @@ impl FileHistory {
 
     pub(crate) fn load_whole_diff(&mut self) {
         self.pane.load_whole();
+    }
+
+    /// Reveals `part` of the gap `gap` of the diff shown.
+    pub(crate) fn expand_diff(&mut self, gap: usize, part: Part) -> bool {
+        self.pane.expand(gap, part)
     }
 
     pub(crate) fn set_theme(&mut self, theme: HighlightTheme) {

@@ -12,6 +12,9 @@ publish.workspace = true
 gitbull-git.workspace = true
 hashbrown = { version = "0.17.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
+# Comparing the words of changed lines (diff-comforts, decision 3); `std`
+# gives the deadline per pair.
+similar = { version = "3.2.0", default-features = false, features = ["std"] }
 # Pure-Rust regular expressions, so the build needs no C toolchain for them
 # (design, decision 7). Syntax definitions and themes come from two-face.
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
