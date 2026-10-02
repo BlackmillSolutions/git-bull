@@ -80,7 +80,9 @@ are unique across the sections (`refs/heads/…`, `refs/tags/…`,
 
 A stash is named by its commit, because `stash@{0}` and the index move to
 the next stash when a newer one is made; `SidebarRow::Stash` gets the id of
-its commit for this. The index of a stash is no longer needed in the row.
+its commit for this. Its index goes only together with
+`SidebarAction::ShowStash`, the one user of it (decision 3), so that the
+workspace builds after every step.
 
 Alternative considered: setting the index of the view's row from
 `App::show_view`. It fixes the one path of #27 and leaves the selection on
@@ -89,15 +91,20 @@ also make `App::show_view` know how the sidebar lays out its rows.
 
 ### 2. The tab owns the view and the selection together
 
-`Tab` gets a private field `sidebar: Option<SidebarKey>` next to `view`,
-`Some(SidebarKey::View(View::History))` when the tab is created, read with
-`Tab::sidebar_selection`. Two methods of `Workspace` change them, and they
-are the only ones:
+`Tab` gets a private field `sidebar_selection: SidebarKey` next to `view`,
+`SidebarKey::View(View::History)` when the tab is created, read with
+`Tab::sidebar_selection`. It is a plain key, not an `Option`: no rule ever
+leaves the sidebar without one, and an entry that is hidden or gone keeps
+its key (decision 4). Two methods of `Workspace` change the view and the
+key, and they are the only ones:
 
 - `set_view(id, view)`: when `view` differs from the shown view, it shows
   it and selects `SidebarKey::View(view)` in place of any key. When the
-  view is already shown, nothing changes, so a branch stays selected when
-  Next moves to a match in the History view.
+  view is already shown, it keeps a reference, a stash or any other entry,
+  so that a branch stays selected when Next moves to a match in the
+  History view, but replaces the key of another view, which the arrow keys
+  may have selected, with `SidebarKey::View(view)`. After `set_view`, the
+  sidebar never marks a view that is not shown.
 - `select_in_sidebar(id, key)`: it selects `key`; when the key is a
   reference or a stash, it also shows the History view. A view selected by
   the arrow keys stays only selected; showing it is `set_view`.
@@ -143,13 +150,22 @@ active tab, as it reads the shown view today. After the rows are built and
 before `VirtualList::show`, it places the selection:
 
 - When the rows were built again in this frame, it finds the row of the
-  key and selects it with `ListState::reselect`, which keeps it in view as
-  the commit list and the file trees do, or selects nothing when the key
-  has no row: hidden by the filter or by a collapsed section or folder,
-  not loaded yet, or gone.
+  key and selects it, or selects nothing when the key has no row: hidden
+  by the filter or by a collapsed section or folder, not loaded yet, or
+  gone. It scrolls to the row only when the filter changed in this frame,
+  with `ListState::reselect`, so that the entry stays in view while the
+  user narrows the list. After a refresh, a first load or a collapsed
+  section or folder, it selects with `ListState::select` and the sidebar
+  stays where the user scrolled it: a refresh comes with every return to
+  the window after a commit in a terminal, and would otherwise pull the
+  sidebar back to History, the default selection, at the top. The cached
+  key of the rows, `(version, SidebarState)`, tells which part changed.
 - When only the key changed since the sidebar last placed it, it finds the
-  row and selects it with `ListState::select`, without scrolling: the
-  views are at the top, and the user keeps the place among the references.
+  row and selects it. It scrolls to it with `ListState::reselect`, unless
+  the key names a view: the views are at the top, and the user keeps the
+  place among the references when a view opens elsewhere, while an entry
+  selected from elsewhere, as a command palette of M3 may do, comes into
+  view.
 - Otherwise it leaves the list as it is.
 
 The sidebar remembers in `TabView` the key the list shows: the key it
@@ -172,10 +188,17 @@ the click of the same frame.
 tags, a few tens of microseconds. It runs only in a frame in which the
 rows were built again, which costs far more already, or in which the key
 changed elsewhere. Moving through 10,000 tags with Page Down searches
-nothing: each key changes the list first and the key follows it. The
-existing tests `scrolling_ten_thousand_tags_stays_fluid` and
-`ten_thousand_tags_are_quick_to_lay_out` cover it; the first gets a view
-opened from the commit list in the middle of its frames.
+nothing: each key changes the list first and the key follows it.
+
+The costly case is a key near the end of the rows when they are built
+again: a tag far down selected, and a refresh that changes the references.
+`scrolling_ten_thousand_tags_stays_fluid` gets exactly that: it selects a
+tag near the end of its 10,000 and, in the middle of its frames, a refresh
+brings a new branch. The median frame stays within its limit, which shows
+that the row is searched in the frame of the rebuild only, and the test
+checks that the refresh did not scroll the sidebar. A view key is found among the
+first rows and needs no measurement. `ten_thousand_tags_are_quick_to_lay_out`
+gets a `row_of` for the last tag after the layout.
 
 ### Later: one place per tab
 

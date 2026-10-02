@@ -24,13 +24,17 @@ stash, in the History view that is not shown, and nothing visible happens.
   branch, a tag, a remote branch, a stash, a folder, a section or a
   submodule) and finds its row again whenever the rows change. Filtering
   and a refresh no longer move the mark to another entry; while the entry
-  is hidden, no row is marked, and the mark returns with the entry.
+  is hidden, no row is marked, and the mark returns with the entry. While
+  the user types in the filter, the selected entry stays in view; a
+  refresh does not scroll the sidebar.
 - Whenever the shown view changes, the sidebar selects the row of that
   view, also when a branch, a tag, a remote branch, a stash or any other
-  entry was selected. This covers every way a view opens: the row
-  "Uncommitted changes", the button "Open File status" of the commit panel,
-  Next, Previous and the matches of the Search view, and a commit chosen in
-  the blame.
+  entry was selected, unless the view changed because the user chose a
+  reference or a stash in the sidebar. This covers every way a view opens:
+  the row "Uncommitted changes", the button "Open File status" of the
+  commit panel, Next, Previous and the matches of the Search view, and a
+  commit chosen in the blame. A view shown again while the arrow keys left
+  another view selected takes the mark back as well.
 - Choosing a branch, a tag, a remote branch or a stash in the sidebar shows
   the History view, where its commit or its details appear. A file history
   or blame shown instead of the view closes, as it already does for a

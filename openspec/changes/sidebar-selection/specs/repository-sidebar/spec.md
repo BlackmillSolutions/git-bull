@@ -6,17 +6,21 @@
 The Workspace section SHALL offer the views History, File status and Search.
 Choosing a view by a click or by Enter SHALL show it in the main area;
 moving the selection onto a view with the arrow keys SHALL only select it.
-Whenever the shown view changes, however it was opened, the sidebar SHALL
-select the row of that view in place of the entry selected before, whether
-that was a view, a branch, a tag, a remote branch, a stash or any other
-entry. When a tab opens, the sidebar SHALL select History.
+Whenever the shown view changes, the sidebar SHALL select the row of the
+new view in place of the entry selected before, whether that was a view, a
+branch, a tag, a remote branch, a stash or any other entry, except when the
+view changed because the user selected a reference or a stash in the
+sidebar (see "Navigating to a reference" and "Stashes"). When a view that
+is shown already is shown again while the row of another view is selected,
+the sidebar SHALL select the row of the view shown. When a tab opens, the
+sidebar SHALL select History.
 
 #### Scenario: Switch to File status
-- **WHEN** the user selects File status
+- **WHEN** the user chooses File status by a click or by Enter
 - **THEN** the main area shows the file status view
 
 #### Scenario: Return to History
-- **WHEN** the user selects History after using another view
+- **WHEN** the user chooses History by a click or by Enter after using another view
 - **THEN** the commit list appears with the selection and scroll position it had before
 
 #### Scenario: Tab opens
@@ -45,6 +49,10 @@ entry. When a tab opens, the sidebar SHALL select History.
 - **WHEN** the History view is shown and the user moves the selection onto File status with the arrow keys
 - **THEN** File status is selected in the sidebar and the History view stays
 - **AND** pressing Enter shows the File status view
+
+#### Scenario: View reached with the arrow keys, then shown elsewhere
+- **WHEN** the History view is shown, the user moves the selection onto File status with the arrow keys and then moves to the next match of the search
+- **THEN** the History view stays and the sidebar selects History
 
 ### Requirement: Navigating to a reference
 Selecting a branch, a tag or a remote branch SHALL show the History view,
@@ -116,11 +124,12 @@ its rows change, when the filter narrows or is cleared and when a refresh
 adds or removes other entries, and SHALL mark no other entry meanwhile.
 While the selected entry is hidden, no row SHALL be selected; when it is
 shown again, it SHALL be selected again. A stash SHALL stay selected when
-newer stashes are added before it.
+newer stashes are added before it. While the user changes the filter, the
+selected entry SHALL stay in view; a refresh SHALL NOT scroll the sidebar.
 
 #### Scenario: Filter keeps the selected entry
 - **WHEN** the tag `v1.0` is selected and the user enters text in the filter field that `v1.0` contains but entries above it do not
-- **THEN** `v1.0` stays selected and no other row is selected
+- **THEN** `v1.0` stays selected and visible, and no other row is selected
 
 #### Scenario: Filter hides the selected entry
 - **WHEN** the tag `v1.0` is selected and the user enters text in the filter field that `v1.0` does not contain
@@ -130,6 +139,10 @@ newer stashes are added before it.
 #### Scenario: Refresh adds a branch
 - **WHEN** the tag `v1.0` is selected and a refresh brings a new branch
 - **THEN** `v1.0` stays selected and no other row is selected
+
+#### Scenario: Refresh keeps the place
+- **WHEN** History is selected and the user has scrolled the sidebar down to the tags, then returns to the window after a commit made in a terminal
+- **THEN** the sidebar shows the same tags as before and does not scroll back to History
 
 #### Scenario: Refresh adds a stash
 - **WHEN** a stash is selected and a refresh brings a newer stash
