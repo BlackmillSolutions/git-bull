@@ -187,8 +187,13 @@ from the active tab. The button for a new tab follows the last tab.
 
 A tab senses clicks and drags. A click activates it as today. A drag with
 the primary button activates it as well; while it lasts, the tab follows
-the pointer horizontally within the row, and the others make room as its
-centre passes theirs. When the drag ends, `Action::MoveTab(id, index)`
+the pointer horizontally within the row, and another tab makes room as
+soon as the dragged tab covers half of it: dragged to the right, once its
+right edge passes the other's centre; dragged to the left, once its left
+edge does. Tabs of different widths then swap after the same distance as
+tabs of one width, as in browsers. The decision rests on where the others
+were before the drag, so that it does not swing back and forth. When the
+drag ends, `Action::MoveTab(id, index)`
 moves the tab there with `Workspace::move_tab`. Escape ends a drag without
 moving the tab; egui aborts the drag itself. A tab dragged to the edge of a
 row that scrolls scrolls it. The row keeps the last position of the
@@ -253,8 +258,9 @@ The names of the window buttons, the setting and its note come from
   a tab released outside the window moves and one dragged with the
   secondary button does not, that the active tab stays in view after it
   moved to the end of a row that scrolls and after the window became
-  narrower, that the wheel scrolls a row of 30 tabs, and that there is no
-  inset in full screen on macOS.
+  narrower, that the wheel scrolls a row of 30 tabs, that there is no
+  inset in full screen on macOS, and that a wide tab swaps with a narrow
+  one once it covers half of it, to the right and to the left.
 - The snapshots of the window change with the title bar; a new snapshot
   shows the title bar as on macOS.
 - A manual check on Windows by the user: moving, snapping to the edges of
