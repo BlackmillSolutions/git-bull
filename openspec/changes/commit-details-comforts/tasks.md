@@ -53,4 +53,4 @@ before its code.
 
 ## 7. Final check
 
-- [ ] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate commit-details-comforts --strict`; verify all succeed and CI is green on Linux, Windows and macOS
+- [x] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate commit-details-comforts --strict`; verify all succeed and CI is green on Linux, Windows and macOS. All passed on 2026-10-03, and CI was green on Linux, Windows and macOS for dc50efc, the head of pull request #26.
