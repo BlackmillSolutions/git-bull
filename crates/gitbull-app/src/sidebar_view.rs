@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{Align2, Color32, Id, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2, vec2};
-use gitbull_core::sidebar_tree::{self, Section, SidebarRow, SidebarState};
+use gitbull_core::sidebar_tree::{self, Section, SidebarKey, SidebarRow, SidebarState};
 use gitbull_core::workspace::View;
 
 use crate::app::{App, TabView};
@@ -19,15 +19,14 @@ use crate::components::{TREE_INDENT as INDENT, TREE_LEFT as LEFT};
 
 /// What the user asked for in the sidebar that concerns more than it.
 pub(crate) enum SidebarAction {
+    /// The user selected this entry: a reference goes to its commit and a
+    /// stash shows in the details.
+    Select(SidebarKey),
     ShowView(View),
-    /// Go to the commit of the reference with this full name.
-    Navigate(String),
     /// Open the submodule at this path, relative to the repository.
     OpenSubmodule(PathBuf),
     /// Restrict the graph to the branch with this full name.
     ShowOnly(String),
-    /// Show the stash at this index in the details.
-    ShowStash(usize),
 }
 
 /// The texts rows need, read before the tab is borrowed.
@@ -110,16 +109,18 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
 
     let mut actions = Vec::new();
     let row_at = |index: u64| rows.get(index as usize).cloned();
+    // A click selects its row again, so that a branch clicked once more
+    // goes back to its commit; the keys and a right click select the row
+    // they moved onto, so that moving through references and stashes
+    // follows them in the commit list and the details.
+    let selected = output
+        .clicked
+        .or(sidebar_list.selected().filter(|_| output.selection_changed));
+    if let Some(row) = selected.and_then(row_at) {
+        actions.push(SidebarAction::Select(row.key()));
+    }
     if let Some(row) = output.clicked.and_then(row_at) {
         activate(&row, sidebar, &mut actions, false);
-    } else if output.selection_changed {
-        // Moving through references and stashes with the keyboard follows
-        // them in the commit list and the details.
-        match sidebar_list.selected().and_then(row_at) {
-            Some(SidebarRow::Reference { name, .. }) => actions.push(SidebarAction::Navigate(name)),
-            Some(SidebarRow::Stash { index, .. }) => actions.push(SidebarAction::ShowStash(index)),
-            _ => {}
-        }
     }
     if let Some(row) = output.activated.and_then(row_at) {
         activate(&row, sidebar, &mut actions, true);
@@ -157,8 +158,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     actions
 }
 
-/// What choosing `row` does. Opening a submodule takes Enter or a double
-/// click; a single click only selects it.
+/// What choosing `row` does besides selecting it. Opening a submodule
+/// takes Enter or a double click; a single click only selects it.
 fn activate(
     row: &SidebarRow,
     state: &mut SidebarState,
@@ -173,10 +174,6 @@ fn activate(
             toggle(&mut state.collapsed_folders, (*section, path.clone()));
         }
         SidebarRow::View(view) => actions.push(SidebarAction::ShowView(*view)),
-        SidebarRow::Reference { name, .. } if !open => {
-            actions.push(SidebarAction::Navigate(name.clone()))
-        }
-        SidebarRow::Stash { index, .. } if !open => actions.push(SidebarAction::ShowStash(*index)),
         SidebarRow::Submodule {
             path,
             initialised: true,

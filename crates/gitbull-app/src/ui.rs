@@ -1837,9 +1837,8 @@ fn history(app: &mut App, ui: &mut Ui) {
 fn apply_sidebar(app: &mut App, actions: Vec<SidebarAction>) {
     for action in actions {
         match action {
+            SidebarAction::Select(key) => app.select_in_sidebar(key),
             SidebarAction::ShowView(view) => app.show_view(view),
-            SidebarAction::Navigate(name) => app.navigate(&name),
-            SidebarAction::ShowStash(index) => app.show_stash(index),
             SidebarAction::ShowOnly(name) => {
                 app.set_branch_filter(BranchFilter::Selected(vec![name]))
             }

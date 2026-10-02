@@ -8,6 +8,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
 use gitbull_core::settings::Settings;
+use gitbull_core::workspace::View;
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
@@ -186,6 +187,23 @@ fn selected_commits(harness: &Harness<'_, App>) -> usize {
         .count()
 }
 
+/// The view the active tab shows.
+fn shown_view(harness: &Harness<'_, App>) -> View {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .map(|tab| tab.view())
+        .expect("an active tab")
+}
+
+fn stash_selected(harness: &Harness<'_, App>, message: &str) -> bool {
+    harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| node.accesskit_node().label().as_deref() == Some(message))
+        .is_some_and(|node| node.accesskit_node().is_selected() == Some(true))
+}
+
 fn select_stash(harness: &mut Harness<'_, App>, message: &str) {
     let at = labelled(harness, Role::TreeItem, message).expect("the stash");
     click(harness, at);
@@ -254,4 +272,58 @@ fn stashes_are_not_rows_of_the_commit_list() {
             .iter()
             .any(|row| row.contains("try the layout") || row.contains("parser"))
     );
+}
+
+#[test]
+fn a_stash_chosen_in_the_search_view_shows_in_the_history() {
+    let mut harness = open();
+    let search = labelled(&harness, Role::TreeItem, "Search").expect("the view");
+    click(&mut harness, search);
+    assert_eq!(shown_view(&harness), View::Search);
+
+    let at = labelled(&harness, Role::TreeItem, "On main: try the layout").unwrap();
+    click(&mut harness, at);
+    wait_until(&mut harness, |h| {
+        labels(h, Role::ListItem).first().map(String::as_str) == Some("Modified: layout.rs")
+    });
+    assert_eq!(shown_view(&harness), View::History);
+    assert!(stash_selected(&harness, "On main: try the layout"));
+}
+
+#[test]
+fn a_stash_chosen_while_the_file_history_is_shown_closes_it() {
+    let mut harness = open();
+    let commit = labelled(&harness, Role::Row, "Second commit").unwrap();
+    click(&mut harness, commit);
+    wait_until(&mut harness, |h| {
+        labels(h, Role::ListItem) == ["Modified: c.txt"]
+    });
+    let file = labelled(&harness, Role::ListItem, "Modified: c.txt").unwrap();
+    harness.hover_at(file);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: file,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+    harness.get_by_label("File history").click();
+    harness.run();
+    wait_until(&mut harness, |h| {
+        labels(h, Role::Button).iter().any(|label| label == "Back")
+    });
+
+    let at = labelled(&harness, Role::TreeItem, "On main: try the layout").unwrap();
+    click(&mut harness, at);
+    wait_until(&mut harness, |h| {
+        labels(h, Role::ListItem).first().map(String::as_str) == Some("Modified: layout.rs")
+    });
+    assert!(
+        !labels(&harness, Role::Button)
+            .iter()
+            .any(|label| label == "Back")
+    );
+    assert!(stash_selected(&harness, "On main: try the layout"));
 }

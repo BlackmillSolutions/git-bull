@@ -69,7 +69,6 @@ pub enum SidebarRow {
         current: bool,
     },
     Stash {
-        index: usize,
         /// The stash commit, which names the stash while newer ones are
         /// made before it.
         commit: String,
@@ -163,36 +162,32 @@ pub fn rows(
         if collapsed {
             continue;
         }
-        let kind =
-            match section {
-                Section::Workspace => {
-                    rows.extend(views.iter().copied().map(SidebarRow::View));
-                    continue;
-                }
-                Section::Branches => RefKind::Branch,
-                Section::Tags => RefKind::Tag,
-                Section::Remotes => RefKind::RemoteBranch,
-                Section::Stashes => {
-                    let stashes = sidebar.map(|s| s.stashes.as_slice()).unwrap_or_default();
-                    rows.extend(stashes.iter().enumerate().map(|(index, stash)| {
-                        SidebarRow::Stash {
-                            index,
-                            commit: stash.commit.clone(),
-                            selector: stash.selector.clone(),
-                            message: stash.message.clone(),
-                        }
-                    }));
-                    continue;
-                }
-                Section::Submodules => {
-                    let submodules = sidebar.map(|s| s.submodules.as_slice()).unwrap_or_default();
-                    rows.extend(submodules.iter().map(|submodule| SidebarRow::Submodule {
-                        path: submodule.path.clone(),
-                        initialised: submodule.state != SubmoduleState::NotInitialised,
-                    }));
-                    continue;
-                }
-            };
+        let kind = match section {
+            Section::Workspace => {
+                rows.extend(views.iter().copied().map(SidebarRow::View));
+                continue;
+            }
+            Section::Branches => RefKind::Branch,
+            Section::Tags => RefKind::Tag,
+            Section::Remotes => RefKind::RemoteBranch,
+            Section::Stashes => {
+                let stashes = sidebar.map(|s| s.stashes.as_slice()).unwrap_or_default();
+                rows.extend(stashes.iter().map(|stash| SidebarRow::Stash {
+                    commit: stash.commit.clone(),
+                    selector: stash.selector.clone(),
+                    message: stash.message.clone(),
+                }));
+                continue;
+            }
+            Section::Submodules => {
+                let submodules = sidebar.map(|s| s.submodules.as_slice()).unwrap_or_default();
+                rows.extend(submodules.iter().map(|submodule| SidebarRow::Submodule {
+                    path: submodule.path.clone(),
+                    initialised: submodule.state != SubmoduleState::NotInitialised,
+                }));
+                continue;
+            }
+        };
         let Some(sidebar) = sidebar else {
             continue;
         };
@@ -631,7 +626,7 @@ mod tests {
         let rows = laid_out(&more, &SidebarState::default());
         let row = row_of(&rows, &selected).expect("the stash");
         assert!(
-            matches!(&rows[row], SidebarRow::Stash { message, index: 1, .. } if message == "WIP on main: try")
+            matches!(&rows[row], SidebarRow::Stash { message, .. } if message == "WIP on main: try")
         );
     }
 

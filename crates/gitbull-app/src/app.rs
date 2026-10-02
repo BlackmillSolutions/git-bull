@@ -17,7 +17,7 @@ use gitbull_core::settings::{
     ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
     WindowGeometry,
 };
-use gitbull_core::sidebar_tree::{SidebarRow, SidebarState};
+use gitbull_core::sidebar_tree::{SidebarKey, SidebarRow, SidebarState};
 use gitbull_core::workspace::{Event, Notify, TabId, View, Workspace};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
@@ -606,16 +606,34 @@ impl App {
         self.show_navigation(outcome, short);
     }
 
-    /// Shows the stash at `index` of the sidebar in the details; no commit
+    /// Selects `key` in the sidebar of the active tab, which shows the
+    /// History view for a reference or a stash, and goes to the commit of
+    /// the reference or shows the stash.
+    pub(crate) fn select_in_sidebar(&mut self, key: SidebarKey) {
+        if let Some(workspace) = self.workspace_mut()
+            && let Some(id) = workspace.active().map(|tab| tab.id())
+        {
+            workspace.select_in_sidebar(id, key.clone());
+        }
+        match key {
+            SidebarKey::Reference(name) => self.navigate(&name),
+            SidebarKey::Stash(commit) => self.show_stash(&commit),
+            _ => {}
+        }
+    }
+
+    /// Shows the stash whose commit is `commit` in the details; no commit
     /// is selected meanwhile.
-    pub(crate) fn show_stash(&mut self, index: usize) {
+    pub(crate) fn show_stash(&mut self, commit: &str) {
+        // The details show in the History view.
+        self.close_overlay();
         let Some((session, view)) = self.active_view() else {
             return;
         };
         let stash = session
             .sidebar()
             .and_then(|sidebar| sidebar.as_ref().ok())
-            .and_then(|sidebar| sidebar.stashes.get(index))
+            .and_then(|sidebar| sidebar.stashes.iter().find(|stash| stash.commit == commit))
             .cloned();
         if let Some(stash) = stash {
             view.commits.select(None);

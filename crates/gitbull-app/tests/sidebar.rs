@@ -10,6 +10,7 @@ use gitbull_app::app::App;
 use gitbull_app::icons;
 use gitbull_core::session::BranchFilter;
 use gitbull_core::settings::Settings;
+use gitbull_core::workspace::View;
 use gitbull_git::content::CommitContent;
 use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
@@ -158,6 +159,21 @@ fn item<'a>(harness: &'a Harness<'_, App>, label: &str) -> egui_kittest::Node<'a
         .get_all_by_role(Role::TreeItem)
         .find(|node| node.accesskit_node().label().as_deref() == Some(label))
         .unwrap_or_else(|| panic!("no sidebar row {label}"))
+}
+
+/// Whether the row of the sidebar with `label` is selected.
+fn item_selected(harness: &Harness<'_, App>, label: &str) -> bool {
+    item(harness, label).accesskit_node().is_selected() == Some(true)
+}
+
+/// The view the active tab shows.
+fn shown_view(harness: &Harness<'_, App>) -> View {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .map(|tab| tab.view())
+        .expect("an active tab")
 }
 
 fn has_item(harness: &Harness<'_, App>, label: &str) -> bool {
@@ -331,6 +347,32 @@ fn choosing_file_status_shows_it_and_history_comes_back_as_it_was() {
 #[test]
 fn choosing_a_tag_selects_its_commit() {
     let mut harness = open(backend());
+    click(&mut harness, "v1.0");
+    assert!(commit_selected(&harness, "Third"));
+}
+
+#[test]
+fn a_branch_chosen_in_file_status_shows_its_commit_in_the_history() {
+    let mut harness = open(backend());
+    click(&mut harness, "File status");
+    assert_eq!(shown_view(&harness), View::FileStatus);
+
+    click(&mut harness, "main");
+    assert_eq!(shown_view(&harness), View::History);
+    wait_for(&mut harness, |h| commit_selected(h, "Fifth"));
+    assert!(item_selected(&harness, "main"));
+    assert!(!item_selected(&harness, "File status"));
+}
+
+#[test]
+fn clicking_the_selected_tag_again_goes_back_to_its_commit() {
+    let mut harness = open(backend());
+    click(&mut harness, "v1.0");
+    assert!(commit_selected(&harness, "Third"));
+    harness.get_by_label("Second").click();
+    harness.run();
+    assert!(commit_selected(&harness, "Second"));
+
     click(&mut harness, "v1.0");
     assert!(commit_selected(&harness, "Third"));
 }
