@@ -6,7 +6,7 @@
 
 ## 2. UI tests
 
-- [ ] 2.1 Add `support::wait_for_references`, which steps the harness until the session of the active tab has its sidebar and then runs it until it settles, and call it in `open` of `commit_list.rs`, `open_with` of `commit_panel.rs`, `open` of `colour_vision.rs` and `history_view_on` of `window_snapshots.rs` (design, decision 2); verify that with the delay of 300 ms in `FakeBackend::references` the thirteen tests listed in the proposal fail before the change and pass after, and that without the delay all tests of these four files pass with the snapshots unchanged
+- [x] 2.1 Add `support::wait_for_references`, which steps the harness until the session of the active tab has its sidebar and then runs it until it settles, and call it in `open` of `commit_list.rs`, `open_with` of `commit_panel.rs`, `open` of `colour_vision.rs` and `history_view_on` of `window_snapshots.rs` (design, decision 2); verify that with the delay of 300 ms in `FakeBackend::references` the thirteen tests listed in the proposal fail before the change and pass after, and that without the delay all tests of these four files pass with the snapshots unchanged
 
 ## 3. Final check
 

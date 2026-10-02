@@ -166,6 +166,28 @@ pub fn settle_window(harness: &mut Harness<'_, App>) {
     }
 }
 
+/// Steps the window until the active tab has read its references.
+///
+/// A tab reads them beside its history, in either order, and only then
+/// shows them as badges and in the sidebar. The state is checked rather
+/// than a label: the status bar names the branch before any badge does.
+pub fn wait_for_references(harness: &mut Harness<'_, App>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !references_read(harness.state()) {
+        assert!(Instant::now() < deadline, "the references were not read");
+        harness.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    harness.run();
+}
+
+fn references_read(app: &App) -> bool {
+    app.workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| session.sidebar().is_some())
+}
+
 /// The titles of the open tabs.
 pub fn tab_titles(app: &App) -> Vec<String> {
     app.workspace()
