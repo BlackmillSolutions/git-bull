@@ -203,25 +203,26 @@ impl Details {
         });
     }
 
-    /// Counts the lines of `files`, the files of the commit shown, in the
-    /// background: the files of the commit against its parent, and for a
-    /// stash its untracked files against nothing.
-    fn count_lines(&mut self, files: Vec<(RepoPath, Option<RepoPath>)>) {
+    /// Counts the lines of the files of the commit shown, in the order of
+    /// `order`, in the background: the files of the commit against its
+    /// parent, and for a stash its untracked files against nothing.
+    fn count_lines(&mut self, order: Arc<FileOrder>) {
         let Some(commit) = self.commit else {
             return;
         };
         let (parent, untracked, from) = (self.parent, self.untracked, self.untracked_from);
         let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
         self.counts_work.start(&self.notify, move |cancel| {
-            let split = from.unwrap_or(files.len());
+            // The list of a commit is one group.
+            let split = from.unwrap_or(usize::MAX);
             let mut counts = LineCounts::default();
             counts.add(
-                &files[..split],
+                order.files(0).take(split),
                 &backend.line_counts(&root, &commit, parent.as_ref(), cancel)?,
             );
             if let Some(untracked) = untracked {
                 counts.add(
-                    &files[split..],
+                    order.files(0).skip(split),
                     &backend.line_counts(&root, &untracked, None, cancel)?,
                 );
             }
@@ -286,12 +287,8 @@ impl Details {
             self.files = match files {
                 Ok((files, untracked_from, order)) => {
                     self.untracked_from = untracked_from;
+                    self.count_lines(Arc::clone(&order));
                     self.order = Some(order);
-                    let paths = files
-                        .iter()
-                        .map(|file| (file.path.clone(), file.old_path.clone()))
-                        .collect();
-                    self.count_lines(paths);
                     ChangedFiles::Loaded(files)
                 }
                 Err(failure) => ChangedFiles::Failed(failure),
@@ -386,13 +383,17 @@ pub struct LineCounts {
 
 impl LineCounts {
     /// Adds the counts of `files`, found in `counted` by their paths.
-    fn add(&mut self, files: &[(RepoPath, Option<RepoPath>)], counted: &[FileLines]) {
+    fn add<'a>(
+        &mut self,
+        files: impl Iterator<Item = (&'a RepoPath, Option<&'a RepoPath>)>,
+        counted: &[FileLines],
+    ) {
         let by_paths: HashMap<(&RepoPath, Option<&RepoPath>), LineCount> = counted
             .iter()
             .map(|lines| ((&lines.path, lines.old_path.as_ref()), lines.count))
             .collect();
-        for (path, old_path) in files {
-            let count = by_paths.get(&(path, old_path.as_ref())).copied();
+        for paths in files {
+            let count = by_paths.get(&paths).copied();
             if let Some(LineCount::Lines { added, removed }) = count {
                 self.added += added;
                 self.removed += removed;

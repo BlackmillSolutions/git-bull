@@ -58,14 +58,17 @@ it. Clearing the field SHALL show all files again, with the folders
 collapsed that were collapsed before the filter. When the filter hides
 the file or folder selected, the first file shown SHALL be selected and
 its diff shown. When no file matches, the list SHALL say so and nothing
-SHALL be selected. Clearing the field SHALL keep the selection. The
+SHALL be selected. Clearing the field SHALL keep the selection, also
+after the status was read again meanwhile; a commit selected while no
+file matched SHALL select the first file the filter shows again. The
 filter of the commit panel SHALL stay while the user selects other
 commits, and the filter of the File status view while the status is read
 again; each tab SHALL keep its own. Ctrl+L SHALL focus the field of the
-file list shown. In the field, Down and Enter SHALL move the focus to its
-list, Escape SHALL empty the field, and Tab and Shift+Tab SHALL move the
-focus on as from its list. The field SHALL be named for assistive
-technology.
+file list shown, and leave the focus where it is while no file list is
+shown. In the field, Down and Enter SHALL move the focus to its list and
+leave its selection and its folders as they were, Escape SHALL empty the
+field, and Tab and Shift+Tab SHALL move the focus on as from its list.
+The field SHALL be named for assistive technology.
 
 #### Scenario: Narrowing a list
 - **WHEN** a commit changed `src/app/main.rs`, `src/app/view.rs` and `README.md`, and the user types `VIEW` into the field
@@ -96,6 +99,18 @@ technology.
 #### Scenario: Filter with the keyboard
 - **WHEN** the commit panel shows the files of a commit, and the user presses Ctrl+L, types `view` and presses Down
 - **THEN** the field holds `view`, and the file list has the focus with `src/app/view.rs` selected
+
+#### Scenario: Down in the field keeps the selection
+- **WHEN** `src/app/main.rs` and `src/app/view.rs` match the filter, `src/app/main.rs` is selected and the user presses Down in the field
+- **THEN** the file list has the focus and `src/app/main.rs` stays selected
+
+#### Scenario: Commit selected while no file matches
+- **WHEN** the filter matches no file of a commit the user selects, and the user then changes the filter until it matches files of the commit
+- **THEN** the first file it shows is selected and its diff shown
+
+#### Scenario: Ctrl+L without a file list
+- **WHEN** the row of uncommitted changes is selected in the commit list and the user presses Ctrl+L
+- **THEN** the commit list keeps the focus
 
 ### Requirement: Moving in a tree with the keyboard
 In a tree, Up and Down SHALL move through files and folders alike. Right

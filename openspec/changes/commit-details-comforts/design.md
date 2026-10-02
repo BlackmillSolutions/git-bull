@@ -222,10 +222,11 @@ and assistive technology can press the buttons through their action.
 
 A new module `gitbull_core::links` finds the links of a text: a match of
 `http://` or `https://` up to whitespace; then, until neither applies,
-closing punctuation is removed from its end and a final `)` that closes no
-`(` of the link, so that `.)` and `).` both leave the link. A match with
-nothing left after the scheme is no link. It returns byte ranges and is
-tested alone.
+closing punctuation is removed from its end and a final `)`, `]` or `}`
+that closes no `(`, `[` or `{` of the link, so that `.)` and `).` both
+leave the link and an address such as `http://[::1]/` keeps its brackets.
+A match with nothing left after the scheme is no link. It returns byte
+ranges and is tested alone.
 
 The commit panel splits the message into runs when the message of the
 commit has arrived, and keeps them in its `TabView` with the commit; while

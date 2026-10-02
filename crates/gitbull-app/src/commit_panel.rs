@@ -173,12 +173,13 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             return None;
         }
         let commit = session.details().commit()?;
+        // The message is borrowed: the row is drawn in every frame.
         Some(Copies {
             full: commit.to_string(),
             short: commit.short(SHORT_HASH),
             message: session
                 .content(&commit)
-                .map(|content| content.message.trim_end_matches(['\n', '\r']).to_owned()),
+                .map(|content| content.message.trim_end_matches(['\n', '\r'])),
         })
     });
     title_row(ui, &texts, copies.as_ref());
@@ -288,14 +289,14 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     );
     let files_shown = session.details().files();
     // The rows of each commit start with every folder expanded and the
-    // first file shown selected, once its files are known.
+    // first file shown selected, once its files are known; while the
+    // filter shows none, the first one it shows again.
     if view.files_for != Some(commit)
         && let ChangedFiles::Loaded(_) = files_shown
         && let Some(order) = session.details().file_order()
     {
-        let mut tree = FileTree::new(Arc::clone(order));
-        tree.set_mode(chosen_mode);
-        tree.set_filter(&view.commit_files.filter);
+        let mut tree =
+            FileTree::shown_as(Arc::clone(order), chosen_mode, &view.commit_files.filter);
         tree.select_first();
         view.commit_files.tree = Some(tree);
         view.commit_files.list = ListState::default();
@@ -475,41 +476,60 @@ impl Counted {
     }
 }
 
+/// The least room a file row keeps for its marker and the start of its
+/// path; the numbers of its changed lines give way to them.
+const PATH_ROOM: f32 = 64.0;
+
+/// The word that says a file is binary, laid out as a file row shows it.
+fn binary_text(ui: &Ui, texts: &Texts, palette: &Palette) -> Arc<egui::Galley> {
+    ui.painter().layout_no_wrap(
+        texts.binary.clone(),
+        TextStyle::Body.resolve(ui.style()),
+        color(palette.text_muted),
+    )
+}
+
+/// The width `counted` takes at the end of a file row.
+fn counted_width(ui: &Ui, counted: Counted, texts: &Texts, palette: &Palette) -> f32 {
+    match counted {
+        Counted::Lines(added, removed) => components::changed_lines_width(ui, added, removed),
+        Counted::Binary => binary_text(ui, texts, palette).size().x,
+    }
+}
+
 /// Paints `counted` at the right end of `rect`, the inside of a file row,
 /// and returns where it begins.
 fn paint_counted(ui: &Ui, rect: Rect, counted: Counted, texts: &Texts, palette: &Palette) -> f32 {
-    let painter = ui.painter();
     let middle = rect.center().y;
     match counted {
         Counted::Lines(added, removed) => {
             components::paint_changed_lines(ui, rect.right(), middle, added, removed)
         }
         Counted::Binary => {
-            let muted = color(palette.text_muted);
-            let galley = painter.layout_no_wrap(
-                texts.binary.clone(),
-                TextStyle::Body.resolve(ui.style()),
-                muted,
-            );
+            let galley = binary_text(ui, texts, palette);
             let left = rect.right() - galley.size().x;
-            painter.galley(pos2(left, middle - galley.size().y / 2.0), galley, muted);
+            ui.painter().galley(
+                pos2(left, middle - galley.size().y / 2.0),
+                galley,
+                color(palette.text_muted),
+            );
             left
         }
     }
 }
 
 /// What the buttons of the title row copy.
-struct Copies {
+struct Copies<'a> {
     full: String,
     short: String,
     /// The message without its trailing line break, once it has loaded.
-    message: Option<String>,
+    message: Option<&'a str>,
 }
 
 /// The title of the panel and, while a commit is shown, the buttons that
 /// copy its hash and message at its right. The row is as high as the
 /// buttons also without them, so that the panel does not move.
-fn title_row(ui: &mut Ui, texts: &Texts, copies: Option<&Copies>) {
+fn title_row(ui: &mut Ui, texts: &Texts, copies: Option<&Copies<'_>>) {
     ui.horizontal(|ui| {
         ui.set_min_height(SHAPE.target);
         ui.label(section_text(texts.title.as_str()));
@@ -524,7 +544,7 @@ fn title_row(ui: &mut Ui, texts: &Texts, copies: Option<&Copies>) {
                 icons::MESSAGE,
                 &texts.copy_message,
                 copied,
-                copies.message.as_deref(),
+                copies.message,
             );
             components::copy_button(
                 ui,
@@ -720,7 +740,7 @@ fn files(
         .tree
         .as_ref()
         .map(|tree| Arc::clone(tree.order()));
-    let Some(shown) = file_list::show(
+    let Some(output) = file_list::show(
         ui,
         Id::new(AREA_COMMIT_PANEL),
         &texts.title,
@@ -748,7 +768,7 @@ fn files(
     };
     let path_of = |index: usize| files.get(index).map(|change| change.path.to_string());
     let mut opened = None;
-    shown.output.response.context_menu(|ui| {
+    output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
             let index = match menu {
                 Some(Row::File { index, .. }) => index,
@@ -804,28 +824,6 @@ pub(crate) fn path_job(old_path: Option<&str>, path: &str, ui: &Ui) -> egui::tex
     job
 }
 
-/// The path of a file as its row shows it: the full path in the flat
-/// list, the name in the tree, each after where a renamed or copied file
-/// came from.
-fn row_paths(
-    change: &FileChange,
-    order: &gitbull_core::file_tree::FileOrder,
-    row: FileRow,
-) -> (Option<String>, String) {
-    match row.mode {
-        Mode::Flat => (
-            change.old_path.as_ref().map(ToString::to_string),
-            change.path.to_string(),
-        ),
-        Mode::Tree => (
-            order
-                .came_from(row.group, row.index)
-                .map(|came| came.into_owned()),
-            order.file_name(row.group, row.index).into_owned(),
-        ),
-    }
-}
-
 #[expect(clippy::too_many_arguments, reason = "the parts of one row")]
 fn file_row(
     ui: &mut Ui,
@@ -842,7 +840,7 @@ fn file_row(
         ui.painter()
             .rect_filled(rect, 0.0, color(palette.selection));
     }
-    let (old, path) = row_paths(change, order, row);
+    let (old, path) = row.paths(order);
     let shown = shown_path(old.as_deref(), &path);
     let response = ui.interact(rect, ui.id().with("file"), Sense::hover());
     let counted = Counted::of(count);
@@ -858,7 +856,11 @@ fn file_row(
     let mut inner = rect;
     inner.min.x += row.indent();
     inner.max.x -= 6.0;
-    if let Some(counted) = counted {
+    // Where the row is too narrow, the numbers give way to the path; its
+    // label for assistive technology keeps them.
+    if let Some(counted) = counted
+        && counted_width(ui, counted, texts, palette) + SHAPE.space[1] + PATH_ROOM <= inner.width()
+    {
         inner.max.x = paint_counted(ui, inner, counted, texts, palette) - SHAPE.space[1];
     }
     ui.scope_builder(

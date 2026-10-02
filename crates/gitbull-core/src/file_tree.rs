@@ -82,9 +82,23 @@ impl FileOrder {
         self.groups.len()
     }
 
+    /// The files of `group` in the order of Git, as their path and the path
+    /// a renamed or copied file came from.
+    pub fn files(&self, group: usize) -> impl Iterator<Item = (&RepoPath, Option<&RepoPath>)> {
+        self.groups[group]
+            .files
+            .iter()
+            .map(|file| (&file.path, file.old_path.as_ref()))
+    }
+
     /// The path of the file at `index` of `group`.
     pub fn file_path(&self, group: usize, index: usize) -> &RepoPath {
         &self.groups[group].files[index].path
+    }
+
+    /// The path the renamed or copied file at `index` of `group` came from.
+    pub fn file_old_path(&self, group: usize, index: usize) -> Option<&RepoPath> {
+        self.groups[group].files[index].old_path.as_ref()
     }
 
     /// The name of the file at `index` of `group`, the last part of its
@@ -318,6 +332,8 @@ pub struct FileTree {
     /// Kept while the filter shows nothing, so that it returns with the
     /// files.
     selected: Option<Selected>,
+    /// The first file shown is to be selected once the filter shows one.
+    wants_first: bool,
     rows: Vec<Row>,
     /// Per row, the row of the folder that holds it.
     parents: Vec<Option<u32>>,
@@ -333,13 +349,26 @@ pub struct FileTree {
 impl FileTree {
     /// The rows of `order`, flat, with every folder expanded.
     pub fn new(order: Arc<FileOrder>) -> FileTree {
-        let mut tree = FileTree {
+        FileTree::shown_as(order, Mode::Flat, "")
+    }
+
+    /// The rows of `order` in `mode`, narrowed by `filter`, with every
+    /// folder expanded; the rows are built once.
+    pub fn shown_as(order: Arc<FileOrder>, mode: Mode, filter: &str) -> FileTree {
+        let mut tree = FileTree::unbuilt(order, mode, filter);
+        tree.build();
+        tree
+    }
+
+    fn unbuilt(order: Arc<FileOrder>, mode: Mode, filter: &str) -> FileTree {
+        FileTree {
             order,
-            mode: Mode::Flat,
-            filter: String::new(),
-            lower_filter: String::new(),
+            mode,
+            filter: filter.to_owned(),
+            lower_filter: filter.to_lowercase(),
             collapsed: Collapsed::default(),
             selected: None,
+            wants_first: false,
             rows: Vec::new(),
             parents: Vec::new(),
             file_rows: Vec::new(),
@@ -347,14 +376,18 @@ impl FileTree {
             first_file: None,
             selected_row: None,
             builds: 0,
-        };
-        tree.build();
-        tree
+        }
+    }
+
+    /// Whether anything is selected: shown, kept while the filter hides
+    /// it, or the first file waited for.
+    pub fn holds_selection(&self) -> bool {
+        self.selected.is_some() || self.wants_first
     }
 
     /// The rows of `order`, a list read again, with the mode, the filter,
-    /// the collapsed folders that still hold files and a selected folder of
-    /// this tree. A selected file is not kept: its index may have moved.
+    /// the collapsed folders that still hold files and the selection of
+    /// this tree; a selected file is found again by its path in its group.
     pub fn renewed(&self, order: Arc<FileOrder>) -> FileTree {
         let holds = |(group, path): &FolderKey| {
             order
@@ -365,15 +398,25 @@ impl FileTree {
         let mut collapsed = self.collapsed.clone();
         collapsed.plain.retain(holds);
         collapsed.filtered.retain(holds);
-        let mut tree = FileTree::new(order);
-        tree.mode = self.mode;
-        tree.filter = self.filter.clone();
-        tree.lower_filter = self.lower_filter.clone();
-        tree.collapsed = collapsed;
-        tree.selected = match &self.selected {
+        let selected = match &self.selected {
             Some(folder @ Selected::Folder { .. }) => Some(folder.clone()),
-            _ => None,
+            Some(Selected::File { group, index }) => {
+                let path = self.order.file_path(*group, *index);
+                order
+                    .groups
+                    .get(*group)
+                    .and_then(|g| g.files.iter().position(|file| file.path == *path))
+                    .map(|index| Selected::File {
+                        group: *group,
+                        index,
+                    })
+            }
+            None => None,
         };
+        let mut tree = FileTree::unbuilt(order, self.mode, &self.filter);
+        tree.collapsed = collapsed;
+        tree.selected = selected;
+        tree.wants_first = self.wants_first;
         tree.build();
         tree
     }
@@ -530,21 +573,25 @@ impl FileTree {
         };
         self.selected = Some(selected);
         self.selected_row = Some(row);
+        self.wants_first = false;
     }
 
     /// Selects the file at `index` of `group`; when it is not shown, the
     /// first file shown.
     pub fn select_file(&mut self, group: usize, index: usize) {
         self.selected = Some(Selected::File { group, index });
+        self.wants_first = false;
         self.find_selection();
     }
 
-    /// Selects the first file shown, or nothing.
+    /// Selects the first file shown; while the filter shows none, the
+    /// first one it shows again.
     pub fn select_first(&mut self) {
         self.selected = None;
         self.selected_row = None;
-        if let Some(row) = self.first_file {
-            self.select_row(row);
+        match self.first_file {
+            Some(row) => self.select_row(row),
+            None => self.wants_first = true,
         }
     }
 
@@ -744,13 +791,13 @@ impl FileTree {
 
     /// Finds the selection in the rows just built; when they hide it, the
     /// first file shown takes its place, and when there is none, it waits
-    /// for the files to show again.
+    /// for the files to show again, as the first file waited for does.
     fn find_selection(&mut self) {
         self.selected_row = self
             .selected
             .as_ref()
             .and_then(|selected| self.row_of(selected));
-        if self.selected.is_some()
+        if self.holds_selection()
             && self.selected_row.is_none()
             && let Some(row) = self.first_file
         {
@@ -1061,6 +1108,82 @@ mod tests {
             })
         );
         assert_eq!(renewed.selected_row(), Some(4));
+    }
+
+    #[test]
+    fn a_selected_file_carries_into_the_tree_of_a_list_read_again_by_its_path() {
+        let mut tree = tree(&APP);
+        tree.select_file(0, 1);
+        let renewed = tree.renewed(order(&["a.txt", "src/app/main.rs", "src/app/view.rs"]));
+        assert_eq!(renewed.selected_file(), Some((0, 2)));
+    }
+
+    #[test]
+    fn a_selected_file_the_filter_hides_carries_into_a_list_read_again() {
+        let mut tree = tree(&APP);
+        tree.select_file(0, 1);
+        tree.set_filter("zzz");
+        let mut renewed = tree.renewed(order(&["a.txt", "src/app/main.rs", "src/app/view.rs"]));
+        assert!(renewed.holds_selection());
+        assert_eq!(renewed.selected_row(), None);
+        renewed.set_filter("");
+        assert_eq!(renewed.selected_file(), Some((0, 2)));
+    }
+
+    #[test]
+    fn a_selected_file_gone_from_the_list_read_again_leaves_nothing_selected() {
+        let mut tree = tree(&APP);
+        tree.select_file(0, 1);
+        let renewed = tree.renewed(order(&["src/app/main.rs", "README.md"]));
+        assert!(!renewed.holds_selection());
+        assert_eq!(renewed.selected_row(), None);
+    }
+
+    #[test]
+    fn the_first_file_waits_for_a_filter_that_shows_nothing() {
+        let mut tree = FileTree::new(order(&APP));
+        tree.set_filter("zzz");
+        tree.select_first();
+        assert!(tree.holds_selection());
+        assert_eq!(tree.selected_row(), None);
+        tree.set_filter("");
+        assert_eq!(tree.selected_file(), Some((0, 0)));
+    }
+
+    #[test]
+    fn the_first_file_waited_for_is_the_first_one_a_filter_shows() {
+        let mut tree = FileTree::new(order(&APP));
+        tree.set_filter("zzz");
+        tree.select_first();
+        tree.set_filter("view");
+        assert_eq!(tree.selected_file(), Some((0, 1)));
+    }
+
+    #[test]
+    fn the_first_file_waited_for_carries_into_a_list_read_again() {
+        let mut tree = FileTree::new(order(&APP));
+        tree.set_filter("zzz");
+        tree.select_first();
+        let mut renewed = tree.renewed(order(&APP));
+        assert!(renewed.holds_selection());
+        renewed.set_filter("");
+        assert_eq!(renewed.selected_file(), Some((0, 0)));
+    }
+
+    #[test]
+    fn a_tree_shown_with_its_mode_and_filter_builds_its_rows_once() {
+        let tree = FileTree::shown_as(order(&APP), Mode::Tree, "view");
+        assert_eq!(tree.builds(), 1);
+        assert_eq!(shown(&tree), ["src/app/", "  view.rs"]);
+    }
+
+    #[test]
+    fn a_list_read_again_builds_its_rows_once() {
+        let mut tree = tree(&APP);
+        tree.set_filter("view");
+        let renewed = tree.renewed(order(&APP));
+        assert_eq!(renewed.builds(), 1);
+        assert_eq!(shown(&renewed), ["src/app/", "  view.rs"]);
     }
 
     #[test]

@@ -1042,6 +1042,22 @@ fn the_filter_stays_while_other_commits_are_selected() {
 }
 
 #[test]
+fn a_commit_the_filter_hides_selects_its_first_file_once_the_filter_is_cleared() {
+    let mut harness = open_newest(tree_backend());
+    // Emptied letter by letter, the field shows both files of the root
+    // commit first at `r`.
+    type_filter(&mut harness, "rzzz");
+    select(&mut harness, "First commit");
+    wait_until(&mut harness, |h| {
+        h.query_by_label("No file matches the filter.").is_some()
+    });
+    assert_eq!(shown_file(&harness), None);
+    clear_filter(&mut harness);
+    assert_eq!(selected_item(&harness).as_deref(), Some("Added: README.md"));
+    assert_eq!(shown_file(&harness), Some(0));
+}
+
+#[test]
 fn in_the_tree_the_first_file_of_the_tree_is_selected() {
     let mut harness = open_newest(tree_backend());
     show_tree(&mut harness);
@@ -1254,6 +1270,78 @@ fn enter_in_the_filter_returns_to_the_list_and_escape_empties_it() {
     press(&mut harness, eframe::egui::Key::Escape);
     assert_eq!(filter_text(&harness), "");
     assert_eq!(items(&harness).len(), 3);
+}
+
+#[test]
+fn down_in_the_filter_leaves_the_selection_of_the_list_where_it_was() {
+    let mut harness = open_newest(tree_backend());
+    type_filter(&mut harness, "src");
+    assert_eq!(
+        selected_item(&harness).as_deref(),
+        Some("Modified: src/app/main.rs")
+    );
+    press(&mut harness, eframe::egui::Key::ArrowDown);
+    assert!(list_has_focus(&harness));
+    assert_eq!(
+        selected_item(&harness).as_deref(),
+        Some("Modified: src/app/main.rs")
+    );
+}
+
+#[test]
+fn enter_in_the_filter_leaves_the_folder_selected_as_it_was() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    click_item(&mut harness, "Modified: main.rs");
+    press(&mut harness, eframe::egui::Key::ArrowUp);
+    assert_eq!(selected_item(&harness).as_deref(), Some("src/app"));
+    type_filter(&mut harness, "a");
+    press(&mut harness, eframe::egui::Key::Enter);
+    assert!(list_has_focus(&harness));
+    assert_eq!(selected_item(&harness).as_deref(), Some("src/app"));
+    assert_eq!(
+        items(&harness),
+        [
+            "src/app",
+            "Modified: main.rs",
+            "Modified: view.rs",
+            "Added: README.md"
+        ]
+    );
+}
+
+#[test]
+fn control_l_leaves_the_focus_where_it_was_while_no_filter_is_shown() {
+    let status = WorkingStatus {
+        unstaged: vec![StatusEntry {
+            kind: StatusKind::Changed(ChangeKind::Modified),
+            path: RepoPath::new("edit.txt"),
+            old_path: None,
+            submodule: false,
+        }],
+        ..WorkingStatus::default()
+    };
+    let mut harness = open_with(backend().with_status(root(), status), roomy());
+    wait_until(&mut harness, |h| {
+        commit_row(h, "Uncommitted changes").is_some()
+    });
+    select(&mut harness, "Fix the parser");
+    harness.key_press(eframe::egui::Key::ArrowUp);
+    harness.run();
+    wait_until(&mut harness, |h| {
+        h.query_by_label("Open File status").is_some()
+    });
+    let commit_list = eframe::egui::Id::new(gitbull_app::ui::COMMIT_LIST);
+    assert_eq!(
+        harness.ctx.memory(|memory| memory.focused()),
+        Some(commit_list)
+    );
+    harness.key_press_modifiers(Modifiers::COMMAND, eframe::egui::Key::L);
+    harness.run();
+    assert_eq!(
+        harness.ctx.memory(|memory| memory.focused()),
+        Some(commit_list)
+    );
 }
 
 #[test]
@@ -1754,6 +1842,43 @@ fn the_numbers_follow_the_list() {
     wait_until(&mut harness, |h| {
         items(h).contains(&"Modified: src/parser.rs, +12 −3".to_owned())
     });
+}
+
+#[test]
+fn in_a_row_too_narrow_for_them_the_numbers_give_way_to_the_path() {
+    // A file six folders deep, each folder also holding a file so that
+    // none shares its row with the next.
+    let folders = ["a", "a/b", "a/b/c", "a/b/c/d", "a/b/c/d/e", "a/b/c/d/e/f"];
+    let mut changes: Vec<FileChange> = folders
+        .iter()
+        .map(|folder| change(ChangeKind::Modified, &format!("{folder}/x.rs"), None))
+        .collect();
+    changes.push(change(ChangeKind::Modified, "a/b/c/d/e/f/g/deep.rs", None));
+    let backend = backend()
+        .with_changes(fake_id("c"), changes)
+        .with_line_counts(
+            fake_id("c"),
+            vec![counted(
+                "a/b/c/d/e/f/g/deep.rs",
+                None,
+                lines_of(12345, 6789),
+            )],
+        );
+    let mut harness = open_with(
+        backend,
+        Layout {
+            commit_panel_width: Some(200.0),
+            ..roomy()
+        },
+    );
+    select(&mut harness, "Fix the parser");
+    wait_until(&mut harness, has_items);
+    show_tree(&mut harness);
+    let label = "Modified: deep.rs, +12345 −6789";
+    wait_until(&mut harness, |h| items(h).contains(&label.to_owned()));
+    let row = item(&harness, label).rect();
+    assert_eq!(bar(&harness, row), (0, 0, 0));
+    assert_eq!(drawn_in(&harness, row), ["M", "deep.rs"]);
 }
 
 #[test]

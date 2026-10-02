@@ -5,8 +5,8 @@ use std::ops::Range;
 
 /// The byte ranges of the `http://` and `https://` addresses in `text`.
 /// An address ends before whitespace; closing punctuation at its end and a
-/// `)` that closes no `(` of the address are left out, as long as either
-/// applies.
+/// `)`, `]` or `}` that closes no bracket of the address are left out, as
+/// long as either applies.
 pub fn find(text: &str) -> Vec<Range<usize>> {
     let mut links = Vec::new();
     let mut from = 0;
@@ -37,18 +37,26 @@ pub fn find(text: &str) -> Vec<Range<usize>> {
 /// address.
 const CLOSING: &[char] = &['.', ',', ';', ':', '!', '?', '\'', '"', '>'];
 
-/// `link` without closing punctuation and unbalanced `)` at its end.
+/// Brackets an address may hold in pairs, as `(` and `)`.
+const PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
+
+/// `link` without closing punctuation and unbalanced closing brackets at
+/// its end.
 fn trimmed(mut link: &str) -> &str {
-    loop {
+    'trim: loop {
         if let Some(rest) = link.strip_suffix(CLOSING) {
             link = rest;
-        } else if let Some(rest) = link.strip_suffix(')')
-            && link.matches('(').count() < link.matches(')').count()
-        {
-            link = rest;
-        } else {
-            return link;
+            continue;
         }
+        for (open, close) in PAIRS {
+            if let Some(rest) = link.strip_suffix(close)
+                && link.matches(open).count() < link.matches(close).count()
+            {
+                link = rest;
+                continue 'trim;
+            }
+        }
+        return link;
     }
 }
 
@@ -102,6 +110,16 @@ mod tests {
                 "http://b.example",
                 "https://c.example"
             ]
+        );
+    }
+
+    #[test]
+    fn brackets_that_close_nothing_of_the_address_are_left_out() {
+        assert_eq!(links("[https://a.example/x]"), ["https://a.example/x"]);
+        assert_eq!(links("{https://a.example/x}."), ["https://a.example/x"]);
+        assert_eq!(
+            links("See http://[::1]:8080/a[1] and https://a.example/{id}"),
+            ["http://[::1]:8080/a[1]", "https://a.example/{id}"]
         );
     }
 

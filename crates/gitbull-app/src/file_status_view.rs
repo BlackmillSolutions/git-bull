@@ -169,22 +169,17 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     );
 
     // A status read again may have moved the file chosen, which stays
-    // selected; the rows keep the folders collapsed and a folder selected.
-    // The first file is selected when nothing is.
+    // selected, also while the filter hides it; the rows keep the folders
+    // collapsed. The first file is selected when nothing is.
     if view.status_version != Some(file_status.version())
         && let Some(order) = file_status.file_order()
     {
         view.status_version = Some(file_status.version());
         let mut tree = match &view.status_files.tree {
             Some(tree) => tree.renewed(Arc::clone(order)),
-            None => {
-                let mut tree = FileTree::new(Arc::clone(order));
-                tree.set_mode(chosen_mode);
-                tree.set_filter(&view.status_files.filter);
-                tree
-            }
+            None => FileTree::shown_as(Arc::clone(order), chosen_mode, &view.status_files.filter),
         };
-        if tree.selected().is_none() {
+        if !tree.holds_selection() {
             match file_status.chosen() {
                 Some((group, index)) => tree.select_file(group_index(group), index),
                 None => tree.select_first(),
@@ -198,7 +193,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         .tree
         .as_ref()
         .map(|tree| Arc::clone(tree.order()));
-    let Some(shown) = file_list::show(
+    let Some(output) = file_list::show(
         ui,
         Id::new(STATUS_LIST),
         &texts.name,
@@ -219,7 +214,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
 
     // The menu acts on the entry it was opened for, wherever a refresh
     // moves it meanwhile, and on the path the last commit had of it then.
-    if shown.output.menu_opened.is_some() {
+    if output.menu_opened.is_some() {
         view.status_menu = match view.status_files.menu {
             Some(Row::File { group, index, .. }) => {
                 let group = GROUPS[group];
@@ -242,7 +237,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         _ => None,
     };
     let mut opened = None;
-    shown.output.response.context_menu(|ui| {
+    output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
             // A folder offers its path alone.
             if let Some(path) = menu_folder {
@@ -342,18 +337,7 @@ fn entry_row(
         ui.painter()
             .rect_filled(rect, 0.0, color(palette.selection));
     }
-    let (old, path) = match row.mode {
-        Mode::Flat => (
-            entry.old_path.as_ref().map(ToString::to_string),
-            entry.path.to_string(),
-        ),
-        Mode::Tree => (
-            order
-                .came_from(row.group, row.index)
-                .map(|came| came.into_owned()),
-            order.file_name(row.group, row.index).into_owned(),
-        ),
-    };
+    let (old, path) = row.paths(order);
     let label = format!(
         "{}: {}",
         texts.kind(entry.kind),

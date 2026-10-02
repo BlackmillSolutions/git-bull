@@ -945,6 +945,30 @@ pub fn bar_boxes(added: u64, removed: u64) -> (usize, usize) {
     (green, filled - green)
 }
 
+/// The width of the bar of five boxes.
+const BAR_WIDTH: f32 = BOXES as f32 * BOX + (BOXES - 1) as f32 * BOX_GAP;
+
+/// The numbers of the lines removed and added, in this order, as they are
+/// drawn from the right, laid out in the colours of the markers.
+fn changed_line_numbers(ui: &Ui, added: u64, removed: u64) -> [(Arc<Galley>, Color32); 2] {
+    let (added_colour, removed_colour) = line_colours(active_palette(ui.ctx()));
+    let font = egui::FontId::monospace(12.0);
+    [
+        (format!("−{removed}"), removed_colour),
+        (format!("+{added}"), added_colour),
+    ]
+    .map(|(text, colour)| {
+        let galley = ui.painter().layout_no_wrap(text, font.clone(), colour);
+        (galley, colour)
+    })
+}
+
+/// The width [`paint_changed_lines`] takes for `added` and `removed`.
+pub fn changed_lines_width(ui: &Ui, added: u64, removed: u64) -> f32 {
+    let [(removed, _), (added, _)] = changed_line_numbers(ui, added, removed);
+    BAR_WIDTH + SHAPE.space[1] + removed.size().x + SHAPE.space[0] + added.size().x
+}
+
 /// Paints the lines added and removed as `+12 −3` in the colours of the
 /// markers, and the bar of five boxes after them, ending at `right` and
 /// centred on `middle`. Returns where the numbers begin.
@@ -952,7 +976,7 @@ pub fn paint_changed_lines(ui: &Ui, right: f32, middle: f32, added: u64, removed
     let palette = active_palette(ui.ctx());
     let painter = ui.painter();
     let (added_colour, removed_colour) = line_colours(palette);
-    let left = right - (BOXES as f32 * BOX + (BOXES - 1) as f32 * BOX_GAP);
+    let left = right - BAR_WIDTH;
     let (green, red) = bar_boxes(added, removed);
     for index in 0..BOXES {
         let at = egui::pos2(left + index as f32 * (BOX + BOX_GAP), middle - BOX / 2.0);
@@ -970,13 +994,8 @@ pub fn paint_changed_lines(ui: &Ui, right: f32, middle: f32, added: u64, removed
             );
         }
     }
-    let font = egui::FontId::monospace(12.0);
     let mut start = left - SHAPE.space[1];
-    for (text, colour) in [
-        (format!("−{removed}"), removed_colour),
-        (format!("+{added}"), added_colour),
-    ] {
-        let galley = painter.layout_no_wrap(text, font.clone(), colour);
+    for (galley, colour) in changed_line_numbers(ui, added, removed) {
         start -= galley.size().x;
         painter.galley(
             egui::pos2(start, middle - galley.size().y / 2.0),

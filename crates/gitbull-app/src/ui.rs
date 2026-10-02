@@ -180,7 +180,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         .iter()
         .any(|action| matches!(action, Action::FocusFilter))
     {
-        // The filter above the file list of the view shown.
+        // The filter above the file list of the view shown. Without a list,
+        // such as for the row of uncommitted changes, there is no field,
+        // and the focus stays where it is.
         let field = match app
             .workspace()
             .and_then(|workspace| workspace.active())
@@ -189,7 +191,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             Some(View::FileStatus) => file_status_view::STATUS_FILTER,
             _ => commit_panel::FILES_FILTER,
         };
-        ui.memory_mut(|memory| memory.request_focus(Id::new(field)));
+        let field = Id::new(field);
+        if ui.ctx().read_response(field).is_some() {
+            ui.memory_mut(|memory| memory.request_focus(field));
+        }
     }
     // The diff drawn in this frame takes the move, and none is left over
     // for a diff drawn later.

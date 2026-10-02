@@ -28,13 +28,13 @@ SHALL be shown as links, in the colour of links and underlined, also
 without the pointer over them. Clicking a link SHALL open the address in
 the system's browser. A link SHALL end before whitespace and before
 closing punctuation such as `.`, `,`, `;`, `:`, `!`, `?`, `'`, `"` and `>`
-at its end, and before a `)` that closes no `(` inside it, also where
-these follow each other, as in `.)`. The tooltip of a link SHALL show its
-address, and assistive technology SHALL learn it as a link. Other text,
-including addresses of other schemes, SHALL stay plain text. The text of
-the message SHALL follow its links without a gap, and the message SHALL
-keep its line breaks and wrap as before, also when it loads after the
-commit was selected.
+at its end, and before a `)`, `]` or `}` that closes no `(`, `[` or `{`
+inside it, also where these follow each other, as in `.)`. The tooltip
+of a link SHALL show its address, and assistive technology SHALL learn it
+as a link. Other text, including addresses of other schemes, SHALL stay
+plain text. The text of the message SHALL follow its links without a gap,
+and the message SHALL keep its line breaks and wrap as before, also when
+it loads after the commit was selected.
 
 #### Scenario: Open a link
 - **WHEN** a message says `See https://example.com/issue/12. Thanks` and the user clicks the link
@@ -46,6 +46,10 @@ commit was selected.
 
 #### Scenario: Link at the end of parentheses
 - **WHEN** a message contains `(see https://example.com/page.)`
+- **THEN** the link is `https://example.com/page`
+
+#### Scenario: Link in square brackets
+- **WHEN** a message contains `[https://example.com/page]`
 - **THEN** the link is `https://example.com/page`
 
 #### Scenario: Other schemes stay text
@@ -62,8 +66,10 @@ instead; a file without added or removed lines, such as one whose mode
 alone changed, SHALL show neither numbers nor a bar. The numbers SHALL be
 counted against the first parent, as the list is. The
 list SHALL appear without waiting for the numbers, and the numbers SHALL
-follow without blocking the interface. Assistive technology SHALL learn
-the numbers with the name of the file.
+follow without blocking the interface. Where an entry is too narrow for
+them and the start of its path, as deep in the tree of a narrow panel, the
+numbers and the bar SHALL give way to the path. Assistive technology SHALL
+learn the numbers with the name of the file, also where they give way.
 
 #### Scenario: Numbers of a file
 - **WHEN** a commit adds 12 lines to a file and removes 3
@@ -80,6 +86,10 @@ the numbers with the name of the file.
 #### Scenario: Mode changed alone
 - **WHEN** a commit changes only the mode of a file
 - **THEN** its entry shows neither numbers nor a bar
+
+#### Scenario: Entry too narrow for the numbers
+- **WHEN** the commit panel is at its least width and shows a file six folders deep in the tree
+- **THEN** its entry shows the marker and the name of the file, and neither numbers nor a bar
 
 #### Scenario: Numbers follow the list
 - **WHEN** the user selects a commit whose numbers take noticeable time to count

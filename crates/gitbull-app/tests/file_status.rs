@@ -1064,6 +1064,53 @@ fn folders_stay_as_they_were_when_the_status_is_read_again() {
 }
 
 #[test]
+fn a_file_the_filter_hides_stays_selected_when_the_status_is_read_again() {
+    let status = WorkingStatus {
+        staged: vec![changed(MODIFIED, "src/a.rs")],
+        unstaged: vec![changed(MODIFIED, "src/b.rs")],
+        ..WorkingStatus::default()
+    };
+    let live = LiveRepo::new();
+    live.set_status(status);
+    let backend = backend().with_live(root(), &live);
+    let probe = backend.probe();
+    let mut harness = open_with(backend);
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    chosen(&mut harness, "Modified: src/b.rs");
+    let field = |harness: &mut Harness<'_, App>| {
+        harness
+            .get_by_role_and_label(Role::TextInput, FILTER)
+            .click();
+        harness.run();
+    };
+    field(&mut harness);
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .type_text("zzz");
+    harness.run();
+    assert!(shown_rows(&harness).is_empty());
+
+    let reads = status_reads(&probe);
+    harness.event(Event::WindowFocused(true));
+    wait_until(&mut harness, |_| status_reads(&probe) > reads);
+    for _ in 0..5 {
+        harness.step();
+    }
+    field(&mut harness);
+    for _ in 0..3 {
+        harness.key_press(Key::Backspace);
+    }
+    harness.run();
+    let selected: Vec<String> = harness
+        .query_all_by_role(Role::ListItem)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect();
+    assert_eq!(selected, ["Modified: src/b.rs"]);
+}
+
+#[test]
 fn the_tree_holds_for_both_lists_and_survives_a_restart() {
     let status = WorkingStatus {
         untracked: vec![entry(StatusKind::Untracked, "new/one.txt")],

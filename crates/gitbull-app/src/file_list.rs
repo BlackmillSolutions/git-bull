@@ -3,11 +3,13 @@
 //! the tree above a list, the rows of its folders, and one selection that
 //! the list and the rows of its [`FileTree`] keep together.
 
+use std::borrow::Cow;
+
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    EventFilter, Id, Key, Response, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2,
+    EventFilter, Id, Key, Modifiers, Response, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2,
 };
-use gitbull_core::file_tree::{FileTree, Mode, Row};
+use gitbull_core::file_tree::{FileOrder, FileTree, Mode, Row};
 
 use crate::app::App;
 use crate::commit_list::{color, take_copy};
@@ -64,7 +66,9 @@ pub(crate) fn mode(app: &App) -> Mode {
 ///
 /// Down and Enter in the field give the list the focus, Escape empties the
 /// field, and Tab moves on from it as from the list, which
-/// `ui::move_between_areas` does.
+/// `ui::move_between_areas` does. The field takes the keys it acts on: the
+/// list, drawn later in the frame with the focus already, would act on
+/// them again.
 pub(crate) fn header(
     ui: &mut Ui,
     field: Id,
@@ -91,10 +95,10 @@ pub(crate) fn header(
         ui.ctx()
             .accesskit_node_builder(response.id, |node| node.set_label(texts.filter.as_str()));
         if response.has_focus() {
-            let (down, escape) = ui.input(|input| {
+            let (down, escape) = ui.input_mut(|input| {
                 (
-                    input.key_pressed(Key::ArrowDown),
-                    input.key_pressed(Key::Escape),
+                    input.consume_key(Modifiers::NONE, Key::ArrowDown),
+                    input.consume_key(Modifiers::NONE, Key::Escape),
                 )
             });
             if escape {
@@ -104,7 +108,9 @@ pub(crate) fn header(
                 ui.memory_mut(|memory| memory.request_focus(list));
             }
         }
-        if response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
+        if response.lost_focus()
+            && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter))
+        {
             ui.memory_mut(|memory| memory.request_focus(list));
         }
         components::toggle_icon_button(ui, icons::TREE, &texts.tree, &mut tree);
@@ -134,6 +140,24 @@ impl FileRow {
         }
     }
 
+    /// The path of the file as its row shows it, after where a renamed or
+    /// copied file came from: full paths in the flat list, the name in the
+    /// tree, and of where it came from the name alone when it stayed in its
+    /// folder.
+    pub(crate) fn paths(self, order: &FileOrder) -> (Option<String>, String) {
+        let (group, index) = (self.group, self.index);
+        match self.mode {
+            Mode::Flat => (
+                order.file_old_path(group, index).map(ToString::to_string),
+                order.file_path(group, index).to_string(),
+            ),
+            Mode::Tree => (
+                order.came_from(group, index).map(Cow::into_owned),
+                order.file_name(group, index).into_owned(),
+            ),
+        }
+    }
+
     /// Tells assistive technology that `row` is this file, in a list or at
     /// its level of the tree.
     pub(crate) fn describe(self, ui: &Ui, row: &Response, selected: bool) {
@@ -150,15 +174,10 @@ impl FileRow {
     }
 }
 
-/// What a file list did in a frame.
-pub(crate) struct Shown {
-    pub(crate) output: ListOutput,
-}
-
 /// Draws the rows of the tree of `state` in a list called `name`, files
 /// with `file` and the titles of groups with `title`, and keeps the
-/// selection of the list and of the tree together. Without rows to show,
-/// returns nothing.
+/// selection of the list and of the tree together. Returns what the list
+/// did, and nothing without rows to show.
 #[expect(clippy::too_many_arguments, reason = "the parts of one list")]
 pub(crate) fn show(
     ui: &mut Ui,
@@ -170,7 +189,7 @@ pub(crate) fn show(
     palette: &Palette,
     mut file: impl FnMut(&mut Ui, FileRow, bool),
     mut title: impl FnMut(&mut Ui, usize),
-) -> Option<Shown> {
+) -> Option<ListOutput> {
     let FileList {
         tree,
         filter,
@@ -272,7 +291,7 @@ pub(crate) fn show(
     {
         ui.ctx().copy_text(path.to_string());
     }
-    Some(Shown { output })
+    Some(output)
 }
 
 /// Selects in `list` the row the tree has selected.
@@ -356,5 +375,27 @@ mod tests {
         assert_eq!(past_title(&rows, 0, None), Some(1));
         assert_eq!(past_title(&rows, 2, Some(1)), Some(3));
         assert_eq!(past_title(&rows, 2, Some(3)), Some(1));
+    }
+
+    #[test]
+    fn a_renamed_file_shows_its_paths_in_the_list_and_its_names_in_the_tree() {
+        use gitbull_git::path::RepoPath;
+
+        let (path, old) = (RepoPath::from("src/new.rs"), RepoPath::from("src/old.rs"));
+        let order = FileOrder::new([[(&path, Some(&old))]], false);
+        let row = |mode| FileRow {
+            group: 0,
+            index: 0,
+            depth: 1,
+            mode,
+        };
+        assert_eq!(
+            row(Mode::Flat).paths(&order),
+            (Some("src/old.rs".to_owned()), "src/new.rs".to_owned())
+        );
+        assert_eq!(
+            row(Mode::Tree).paths(&order),
+            (Some("old.rs".to_owned()), "new.rs".to_owned())
+        );
     }
 }

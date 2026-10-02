@@ -178,12 +178,12 @@ impl FileStatus {
         self.work.is_running()
     }
 
-    /// Whether the status is known and has uncommitted changes.
     /// The prepared order of the files of the status shown.
     pub fn file_order(&self) -> Option<&Arc<FileOrder>> {
         self.order.as_ref()
     }
 
+    /// Whether the status is known and has uncommitted changes.
     pub fn has_changes(&self) -> bool {
         matches!(&self.state, StatusState::Loaded(status) if !status.is_clean())
     }
