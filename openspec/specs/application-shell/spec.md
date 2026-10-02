@@ -59,8 +59,8 @@ Settings SHALL show an icon, with a tooltip that names them.
 git-bull SHALL show each open repository in its own tab. Tabs SHALL be
 independent of each other: each keeps its own selection, scroll position,
 filter and search. The user SHALL be able to change the order of the tabs
-by dragging a tab to another place, and by moving the active tab one place
-to the left or right with the keyboard. A repository opened in a new tab
+by dragging a tab to another place with the primary mouse button, and by
+moving the active tab one place to the left or right with the keyboard. A repository opened in a new tab
 SHALL appear after the last tab. git-bull SHALL restore the tabs in the
 order the user left them.
 
@@ -83,6 +83,14 @@ order the user left them.
 #### Scenario: Tab dragged to another place
 - **WHEN** three tabs are open and the user drags the first tab past the third
 - **THEN** the tabs are in the order second, third, first, and the dragged tab is active
+
+#### Scenario: Tab dropped outside the window
+- **WHEN** three tabs are open and the user drags the first tab past the third, moves the pointer out of the window and releases the button there
+- **THEN** the tabs are in the order second, third, first
+
+#### Scenario: Tab dragged with the secondary button
+- **WHEN** three tabs are open and the user drags the first tab past the third with the secondary mouse button
+- **THEN** the order of the tabs does not change
 
 #### Scenario: Active tab moved with the keyboard
 - **WHEN** three tabs are open, the second is active, and the user presses Ctrl+Shift+Page Down
@@ -352,15 +360,22 @@ adapter of a computer that has an integrated and a dedicated one.
 On Windows and on Linux, git-bull SHALL draw its own title bar in place of
 the system's. It SHALL show the tabs, the button for a new tab, and buttons
 that minimize the window, maximize it or restore its size, and close it.
-Dragging an edge or a corner of the window SHALL resize it. On macOS,
-git-bull SHALL keep the system's buttons in the title bar and show the tabs
-beside them. On every platform, dragging the free space of the title bar
+Dragging an edge or a corner of the window with the primary mouse button
+SHALL resize it. On macOS, git-bull SHALL keep the system's buttons in the
+title bar and show the tabs beside them; in full screen, where macOS hides
+its buttons, the tabs SHALL begin at the left edge. On every platform,
+dragging the free space of the title bar with the primary mouse button
 SHALL move the window, and a double click on it SHALL maximize the window
-or restore its size. When the tabs do not fit, they SHALL become narrower
-down to a minimum width and then scroll, while the window buttons and free
-space to move the window stay visible. With the setting "Use the system
-title bar", git-bull SHALL show the system's title bar instead, and the
-tabs in a tab bar of their own below it.
+or restore its size. Moving, resizing, minimizing, maximizing and closing
+the window this way SHALL also work while the settings dialog is open. The
+free space of the title bar and the edges of the window SHALL take no
+keyboard focus. When the tabs do not fit, they SHALL become narrower down
+to a minimum width and then scroll sideways, also with the mouse wheel; the
+active tab SHALL come into view when it becomes active, when it is moved
+and when the window changes its width. The window buttons and free space to
+move the window SHALL stay visible. With the setting "Use the system title
+bar", git-bull SHALL show the system's title bar instead, and the tabs in a
+tab bar of their own below it.
 
 #### Scenario: Title bar on Windows and Linux
 - **WHEN** git-bull starts on Windows or on Linux
@@ -369,6 +384,10 @@ tabs in a tab bar of their own below it.
 #### Scenario: Title bar on macOS
 - **WHEN** git-bull starts on macOS
 - **THEN** the system's buttons to close, minimize and zoom the window are at the left of the title bar, and the tabs are beside them
+
+#### Scenario: Title bar on macOS in full screen
+- **WHEN** the window is in full screen on macOS
+- **THEN** the first tab begins at the left edge of the window
 
 #### Scenario: Maximize and restore
 - **WHEN** the user clicks Maximize
@@ -387,9 +406,33 @@ tabs in a tab bar of their own below it.
 - **WHEN** the user drags the right edge of the window on Windows or on Linux
 - **THEN** the window becomes wider
 
+#### Scenario: Resizing only with the primary button
+- **WHEN** the user presses the secondary mouse button on the right edge of the window on Windows or on Linux
+- **THEN** the window is not resized
+
+#### Scenario: Window controls while the settings dialog is open
+- **WHEN** the settings dialog is open on Windows or on Linux and the user drags the free space of the title bar, clicks Close window, or drags the right edge of the window
+- **THEN** the window moves, closes, or becomes wider
+
+#### Scenario: Keyboard focus in the title bar
+- **WHEN** the user moves the focus with Tab through the main window
+- **THEN** the focus reaches the tabs and the buttons of the title bar, but never its free space or an edge of the window
+
 #### Scenario: Many tabs
 - **WHEN** 30 tabs are open in a window of the smallest size
 - **THEN** the window buttons and free space to move the window are visible, and so is the active tab
+
+#### Scenario: Wheel over many tabs
+- **WHEN** 30 tabs are open in a window of the smallest size and the user turns the mouse wheel over the tabs
+- **THEN** the row of tabs scrolls sideways
+
+#### Scenario: Active tab moved in a row that scrolls
+- **WHEN** 30 tabs are open in a window of the smallest size, the first of them is active, and the user moves it with Ctrl+Shift+Page Down to the end
+- **THEN** the active tab is visible
+
+#### Scenario: Window made narrower
+- **WHEN** the last of 30 tabs is active in a wide window and the window becomes as small as it can be
+- **THEN** the active tab is visible
 
 #### Scenario: Window buttons for assistive technology
 - **WHEN** a screen reader reaches the buttons of the title bar on Windows or on Linux
