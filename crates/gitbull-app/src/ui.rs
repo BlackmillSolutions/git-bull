@@ -1050,7 +1050,9 @@ fn place_tabs(
         .collect();
 
     // The tab being dragged, where it is drawn, and its place among the
-    // others: after each one whose centre it has passed.
+    // others: another tab makes room as soon as the dragged one covers half
+    // of it, judged by where the others were before the drag, so that the
+    // place does not swing back and forth (design, decision 5).
     let drag_id = Id::new(TAB_DRAG);
     let latest = ui.input(|input| input.pointer.latest_pos());
     let mut state = ui.data(|data| data.get_temp::<TabDrag>(drag_id));
@@ -1061,15 +1063,18 @@ fn place_tabs(
     }
     let drag = state.and_then(|drag| {
         let index = tabs.iter().position(|tab| tab.id == drag.id)?;
-        let left = drag.pointer - drag.grab;
-        // Its place by where the pointer holds it, so that a wide tab
-        // passes a narrow one at the end of the row, though it is drawn
+        // Its place by where the pointer holds it, though it is drawn
         // within the row.
-        let centre = left + sizes[index].x / 2.0;
+        let left = drag.pointer - drag.grab;
+        let right = left + sizes[index].x;
+        let centre = |other: usize| lefts[other] + sizes[other].x / 2.0;
+        // Dragged to the left, its left edge passes the centres of those
+        // before it; dragged to the right, its right edge those after it.
+        let place = (0..index).filter(|&other| left >= centre(other)).count()
+            + (index + 1..tabs.len())
+                .filter(|&other| right > centre(other))
+                .count();
         let left = left.clamp(row.left(), row.right() - sizes[index].x);
-        let place = (0..tabs.len())
-            .filter(|&other| other != index && lefts[other] + sizes[other].x / 2.0 < centre)
-            .count();
         Some((index, left, place))
     });
 

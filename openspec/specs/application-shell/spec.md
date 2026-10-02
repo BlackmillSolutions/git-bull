@@ -84,6 +84,10 @@ order the user left them.
 - **WHEN** three tabs are open and the user drags the first tab past the third
 - **THEN** the tabs are in the order second, third, first, and the dragged tab is active
 
+#### Scenario: Tab dragged over half of a narrower one
+- **WHEN** two tabs are open, the first wider than the second, and the user drags the first over half of the second and releases it
+- **THEN** the second tab is the first
+
 #### Scenario: Tab dropped outside the window
 - **WHEN** three tabs are open and the user drags the first tab past the third, moves the pointer out of the window and releases the button there
 - **THEN** the tabs are in the order second, third, first

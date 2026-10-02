@@ -98,7 +98,15 @@ fn tab(harness: &Harness<'_, App>, title: &str) -> Rect {
 /// `past`, presses Escape there if `escape`, and releases the button.
 fn drag_tab(harness: &mut Harness<'_, App>, title: &str, past: &str, to: f32, escape: bool) {
     let start = tab(harness, title).center();
-    let end = pos2(tab(harness, past).center().x + to, start.y);
+    let distance = tab(harness, past).center().x + to - start.x;
+    drag_tab_by(harness, title, distance, escape);
+}
+
+/// Like [`drag_tab`], moving the pointer `distance` points to the right,
+/// or to the left if negative.
+fn drag_tab_by(harness: &mut Harness<'_, App>, title: &str, distance: f32, escape: bool) {
+    let start = tab(harness, title).center();
+    let end = pos2(start.x + distance, start.y);
     harness.hover_at(start);
     harness.drag_at(start);
     harness.step();
@@ -128,6 +136,63 @@ fn a_tab_dragged_past_the_last_becomes_the_last_and_is_active() {
         ["linux", "chromium", "git-bull"]
     );
     assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
+}
+
+/// A repository with a long name and one with a short name, whose tabs
+/// differ much in width.
+const WIDE: &str = "a-repository-with-a-long-name";
+const NARROW: &str = "ui";
+
+/// The repositories named `first` and `second` open in that order, the
+/// first active.
+fn tabs_of(first: &str, second: &str) -> Setup {
+    let (first, second) = (path(&["work", first]), path(&["work", second]));
+    Setup {
+        settings: Settings {
+            tabs: vec![first.clone(), second.clone()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: FakeBackend::default()
+            .with_repository(first)
+            .with_repository(second),
+        ..Setup::default()
+    }
+}
+
+#[test]
+fn a_wide_tab_dragged_to_the_right_over_half_of_a_narrow_one_swaps_with_it() {
+    let mut harness = window(build(tabs_of(WIDE, NARROW)).app);
+    settle_window(&mut harness);
+    let (wide, narrow) = (tab(&harness, WIDE), tab(&harness, NARROW));
+    assert!(wide.width() > 2.0 * narrow.width(), "{wide:?}, {narrow:?}");
+
+    // Its right edge just past the centre of the narrow tab, while its own
+    // centre stays far left of it.
+    drag_tab_by(
+        &mut harness,
+        WIDE,
+        narrow.center().x - wide.right() + 4.0,
+        false,
+    );
+
+    assert_eq!(tab_titles(harness.state()), [NARROW, WIDE]);
+}
+
+#[test]
+fn a_wide_tab_dragged_to_the_left_over_half_of_a_narrow_one_swaps_with_it() {
+    let mut harness = window(build(tabs_of(NARROW, WIDE)).app);
+    settle_window(&mut harness);
+    let (narrow, wide) = (tab(&harness, NARROW), tab(&harness, WIDE));
+
+    drag_tab_by(
+        &mut harness,
+        WIDE,
+        narrow.center().x - wide.left() - 4.0,
+        false,
+    );
+
+    assert_eq!(tab_titles(harness.state()), [WIDE, NARROW]);
 }
 
 fn button(button: PointerButton, at: Pos2, pressed: bool) -> Event {
