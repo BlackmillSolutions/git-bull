@@ -19,8 +19,8 @@ Each task names the test that shows it works.
 
 ## 3. Columns of the file history
 
-- [ ] 3.1 Add `column-path = Path` to `crates/gitbull-app/i18n/en-US.ftl` and `Msg::ColumnPath` (design, decision 2); verify the unit test `every_text_of_the_ui_exists_in_english` of `i18n.rs`
-- [ ] 3.2 Give the list of the file history a header through `columns::header` with Description, Path, Date, Author and Commit, and draw its rows from `cells`, with `path_column` and the shared `date_column`, `author_column` and `hash_column`, Author 160 points wide by default (design, decisions 2 and 7); verify UI tests in `tests/file_history.rs` for the scenarios "Headers are shown", "Path column is resized", "Widths shared with the commit list" and "Path width survives a restart" of `file-history`, with the saved width of Path after the drag, and that `each_entry_shows_its_description_and_the_path_the_file_had`, `every_widget_tab_reaches_in_the_file_history_has_a_role_and_a_name` and the other tests of `tests/file_history.rs` pass
+- [x] 3.1 Add `column-path = Path` to `crates/gitbull-app/i18n/en-US.ftl` and `Msg::ColumnPath` (design, decision 2); verify the unit test `every_text_of_the_ui_exists_in_english` of `i18n.rs`
+- [x] 3.2 Give the list of the file history a header through `columns::header` with Description, Path, Date, Author and Commit, and draw its rows from `cells`, with `path_column` and the shared `date_column`, `author_column` and `hash_column`, Author 160 points wide by default (design, decisions 2 and 7); verify UI tests in `tests/file_history.rs` for the scenarios "Headers are shown", "Path column is resized", "Widths shared with the commit list" and "Path width survives a restart" of `file-history`, with the saved width of Path after the drag, and that `each_entry_shows_its_description_and_the_path_the_file_had`, `every_widget_tab_reaches_in_the_file_history_has_a_role_and_a_name` and the other tests of `tests/file_history.rs` pass
 
 ## 4. Divider in the commit panel
 
