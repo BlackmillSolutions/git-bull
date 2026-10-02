@@ -159,7 +159,7 @@ pub(crate) struct TabView {
     pub(crate) status_version: Option<u64>,
     /// The entry of the File status view whose context menu was opened
     /// last, with the path the last commit has of it.
-    pub(crate) status_menu: Option<(StatusEntry, Option<RepoPath>)>,
+    pub(crate) status_menu: Option<StatusMenu>,
     /// The full name of the branch or remote branch whose context menu was
     /// opened last in the sidebar.
     pub(crate) sidebar_menu: Option<String>,
@@ -181,6 +181,14 @@ impl TabView {
     pub(crate) fn uncommitted_selected(&self) -> bool {
         self.uncommitted.is_some() && self.commits.selected() == self.uncommitted
     }
+}
+
+/// What the context menu of the File status view was opened for.
+pub(crate) enum StatusMenu {
+    /// An entry, with the path the last commit has of it.
+    File(StatusEntry, Option<RepoPath>),
+    /// A folder of the tree, by its path.
+    Folder(RepoPath),
 }
 
 /// A view opened from the context menu of a file.

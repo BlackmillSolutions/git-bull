@@ -1065,3 +1065,212 @@ fn a_selected_folder_shows_no_diff() {
     assert_eq!(selected_item(&harness).as_deref(), Some("src/app"));
     assert_eq!(shown_file(&harness), None);
 }
+
+// Moving in the tree with the keyboard (spec `file-lists`).
+
+fn list_has_focus(harness: &Harness<'_, App>) -> bool {
+    harness.ctx.memory(|memory| memory.focused())
+        == Some(eframe::egui::Id::new(gitbull_app::ui::AREA_COMMIT_PANEL))
+}
+
+fn press(harness: &mut Harness<'_, App>, key: eframe::egui::Key) {
+    harness.key_press(key);
+    harness.run();
+}
+
+#[test]
+fn left_selects_the_folder_of_a_file_and_then_collapses_it() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    click_item(&mut harness, "Modified: main.rs");
+    press(&mut harness, eframe::egui::Key::ArrowLeft);
+    assert_eq!(selected_item(&harness).as_deref(), Some("src/app"));
+    assert!(list_has_focus(&harness));
+    press(&mut harness, eframe::egui::Key::ArrowLeft);
+    assert_eq!(items(&harness), ["src/app", "Added: README.md"]);
+    assert_eq!(selected_item(&harness).as_deref(), Some("src/app"));
+    assert!(list_has_focus(&harness));
+}
+
+#[test]
+fn right_expands_a_folder_and_then_moves_into_it() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    click_item(&mut harness, "src/app");
+    assert_eq!(items(&harness), ["src/app", "Added: README.md"]);
+    press(&mut harness, eframe::egui::Key::ArrowRight);
+    assert_eq!(items(&harness).len(), 4);
+    assert_eq!(selected_item(&harness).as_deref(), Some("src/app"));
+    press(&mut harness, eframe::egui::Key::ArrowRight);
+    assert_eq!(
+        selected_item(&harness).as_deref(),
+        Some("Modified: main.rs")
+    );
+    assert_eq!(shown_file(&harness), Some(0));
+    assert!(list_has_focus(&harness));
+}
+
+#[test]
+fn enter_and_space_collapse_and_expand_the_folder_selected() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    click_item(&mut harness, "Modified: main.rs");
+    press(&mut harness, eframe::egui::Key::ArrowUp);
+    assert_eq!(selected_item(&harness).as_deref(), Some("src/app"));
+    press(&mut harness, eframe::egui::Key::Enter);
+    assert_eq!(items(&harness), ["src/app", "Added: README.md"]);
+    press(&mut harness, eframe::egui::Key::Space);
+    assert_eq!(items(&harness).len(), 4);
+    assert!(list_has_focus(&harness));
+}
+
+#[test]
+fn a_double_click_on_a_folder_leaves_it_as_it_was() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    let at = item(&harness, "src/app").rect().center();
+    harness.hover_at(at);
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            harness.event(Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        harness.step();
+    }
+    harness.run();
+    assert_eq!(items(&harness).len(), 4);
+}
+
+#[test]
+fn left_and_right_keep_the_focus_in_the_commit_list() {
+    let mut harness = open_newest(tree_backend());
+    let at = commit_row(&harness, "Fix the parser")
+        .expect("row")
+        .rect()
+        .center();
+    click_at(&mut harness, at, PointerButton::Primary);
+    let commit_list = eframe::egui::Id::new(gitbull_app::ui::COMMIT_LIST);
+    assert_eq!(
+        harness.ctx.memory(|memory| memory.focused()),
+        Some(commit_list)
+    );
+    for key in [eframe::egui::Key::ArrowRight, eframe::egui::Key::ArrowLeft] {
+        press(&mut harness, key);
+        assert_eq!(
+            harness.ctx.memory(|memory| memory.focused()),
+            Some(commit_list),
+            "{key:?}"
+        );
+    }
+}
+
+// Copying the path of a folder (spec `commit-details`).
+
+#[test]
+fn the_context_menu_of_a_folder_copies_its_path() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    let at = item(&harness, "src/app").rect().center();
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(harness.query_by_label("File history").is_none());
+    assert!(harness.query_by_label("Blame").is_none());
+    harness.get_by_label("Copy path").click();
+    harness.step();
+    assert_eq!(copied(&harness), Some("src/app".to_owned()));
+}
+
+#[test]
+fn control_c_copies_the_path_of_the_folder_selected() {
+    let mut harness = open_newest(tree_backend());
+    show_tree(&mut harness);
+    click_item(&mut harness, "Modified: main.rs");
+    harness.key_press(eframe::egui::Key::ArrowUp);
+    harness.run();
+    assert_eq!(selected_item(&harness).as_deref(), Some("src/app"));
+    for pressed in [true, false] {
+        harness.input_mut().events.push(Event::Key {
+            key: eframe::egui::Key::C,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        });
+    }
+    harness.step();
+    assert_eq!(copied(&harness), Some("src/app".to_owned()));
+}
+
+// The filter with the keyboard (spec `file-lists`).
+
+fn field_has_focus(harness: &Harness<'_, App>) -> bool {
+    harness.ctx.memory(|memory| memory.focused())
+        == Some(eframe::egui::Id::new(
+            gitbull_app::commit_panel::FILES_FILTER,
+        ))
+}
+
+fn filter_text(harness: &Harness<'_, App>) -> String {
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .accesskit_node()
+        .value()
+        .unwrap_or_default()
+}
+
+#[test]
+fn control_l_types_into_the_filter_and_down_returns_to_the_list() {
+    let mut harness = open_newest(tree_backend());
+    harness.key_press_modifiers(Modifiers::COMMAND, eframe::egui::Key::L);
+    harness.run();
+    assert!(field_has_focus(&harness));
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .type_text("view");
+    harness.run();
+    press(&mut harness, eframe::egui::Key::ArrowDown);
+    assert_eq!(filter_text(&harness), "view");
+    assert!(list_has_focus(&harness));
+    assert_eq!(
+        selected_item(&harness).as_deref(),
+        Some("Modified: src/app/view.rs")
+    );
+}
+
+#[test]
+fn enter_in_the_filter_returns_to_the_list_and_escape_empties_it() {
+    let mut harness = open_newest(tree_backend());
+    type_filter(&mut harness, "view");
+    press(&mut harness, eframe::egui::Key::Enter);
+    assert!(list_has_focus(&harness));
+    assert_eq!(filter_text(&harness), "view");
+
+    harness.key_press_modifiers(Modifiers::COMMAND, eframe::egui::Key::L);
+    harness.run();
+    press(&mut harness, eframe::egui::Key::Escape);
+    assert_eq!(filter_text(&harness), "");
+    assert_eq!(items(&harness).len(), 3);
+}
+
+#[test]
+fn tab_moves_on_from_the_filter_as_from_its_list() {
+    let mut harness = open_newest(tree_backend());
+    harness.key_press_modifiers(Modifiers::COMMAND, eframe::egui::Key::L);
+    harness.run();
+    press(&mut harness, eframe::egui::Key::Tab);
+    assert_eq!(
+        harness.ctx.memory(|memory| memory.focused()),
+        Some(eframe::egui::Id::new(gitbull_app::ui::AREA_DIFF))
+    );
+    harness.key_press_modifiers(Modifiers::COMMAND, eframe::egui::Key::L);
+    harness.run();
+    harness.key_press_modifiers(Modifiers::SHIFT, eframe::egui::Key::Tab);
+    harness.run();
+    assert_eq!(
+        harness.ctx.memory(|memory| memory.focused()),
+        Some(eframe::egui::Id::new(gitbull_app::ui::COMMIT_LIST))
+    );
+}

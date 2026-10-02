@@ -17,7 +17,7 @@ use gitbull_git::changes::ChangeKind;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 
-use crate::app::{App, FileAction};
+use crate::app::{App, FileAction, StatusMenu};
 use crate::commit_list::color;
 use crate::commit_panel::{kind_index, marker, marker_color, path_job, shown_path};
 use crate::components;
@@ -162,6 +162,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let chosen_mode = file_list::header(
         ui,
         Id::new(STATUS_FILTER),
+        Id::new(STATUS_LIST),
         &mut view.status_files.filter,
         mode,
         &list_texts,
@@ -222,21 +223,35 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         view.status_menu = match view.status_files.menu {
             Some(Row::File { group, index, .. }) => {
                 let group = GROUPS[group];
-                status
-                    .group(group)
-                    .get(index)
-                    .map(|entry| (entry.clone(), last_commit_path(status, group, entry)))
+                status.group(group).get(index).map(|entry| {
+                    StatusMenu::File(entry.clone(), last_commit_path(status, group, entry))
+                })
             }
-            _ => None,
+            Some(Row::Folder { group, folder, .. }) => order
+                .as_ref()
+                .map(|order| StatusMenu::Folder(order.folder_path(group, folder).clone())),
+            Some(Row::Title(_)) | None => None,
         };
     }
     let (menu_entry, in_last_commit) = match &view.status_menu {
-        Some((entry, path)) => (Some(entry), path.as_ref()),
-        None => (None, None),
+        Some(StatusMenu::File(entry, path)) => (Some(entry), path.as_ref()),
+        Some(StatusMenu::Folder(_)) | None => (None, None),
+    };
+    let menu_folder = match &view.status_menu {
+        Some(StatusMenu::Folder(path)) => Some(path),
+        _ => None,
     };
     let mut opened = None;
     shown.output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
+            // A folder offers its path alone.
+            if let Some(path) = menu_folder {
+                if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
+                    ui.ctx().copy_text(path.to_string());
+                    ui.close();
+                }
+                return;
+            }
             let Some(entry) = menu_entry else {
                 return;
             };

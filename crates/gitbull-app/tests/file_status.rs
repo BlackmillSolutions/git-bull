@@ -1115,3 +1115,59 @@ fn the_tree_holds_for_both_lists_and_survives_a_restart() {
         ["Untracked files (1)", "new", "Untracked: one.txt"]
     );
 }
+
+fn copied(harness: &Harness<'_, App>) -> Option<String> {
+    harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+}
+
+/// A tree of an untracked file in `notes`, whose folder is selected.
+fn folder_selected() -> Harness<'static, App> {
+    let status = WorkingStatus {
+        untracked: vec![entry(StatusKind::Untracked, "notes/plan.md")],
+        ..WorkingStatus::default()
+    };
+    let mut harness = open_with(backend().with_status(root(), status));
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    show_tree(&mut harness);
+    let at = nth_row(&harness, "Untracked: plan.md", 0).rect().center();
+    click_at(&mut harness, at, PointerButton::Primary);
+    harness.key_press(Key::ArrowUp);
+    harness.run();
+    harness
+}
+
+#[test]
+fn control_c_copies_the_path_of_a_folder_of_the_file_status() {
+    let mut harness = folder_selected();
+    for pressed in [true, false] {
+        harness.input_mut().events.push(Event::Key {
+            key: Key::C,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        });
+    }
+    harness.step();
+    assert_eq!(copied(&harness), Some("notes".to_owned()));
+}
+
+#[test]
+fn the_context_menu_of_a_folder_of_the_file_status_copies_its_path() {
+    let mut harness = folder_selected();
+    let at = nth_row(&harness, "notes", 0).rect().center();
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(harness.query_by_label("File history").is_none());
+    harness.get_by_label("Copy path").click();
+    harness.step();
+    assert_eq!(copied(&harness), Some("notes".to_owned()));
+}

@@ -72,6 +72,7 @@ const NEW_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key:
 const CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 const REFRESH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
 const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const FILTER_FILES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::L);
 const LARGER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
 const LARGER_TOO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals);
 const SMALLER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
@@ -126,6 +127,8 @@ enum Action {
     PreviousMatch,
     /// Give the search field the keyboard focus.
     FocusSearch,
+    /// Give the filter of the file list shown the keyboard focus.
+    FocusFilter,
     /// Move the diff shown to the next or the previous hunk.
     MoveHunk(HunkMove),
 }
@@ -173,6 +176,21 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let focus_search = actions
         .iter()
         .any(|action| matches!(action, Action::FocusSearch));
+    if actions
+        .iter()
+        .any(|action| matches!(action, Action::FocusFilter))
+    {
+        // The filter above the file list of the view shown.
+        let field = match app
+            .workspace()
+            .and_then(|workspace| workspace.active())
+            .map(|tab| tab.view())
+        {
+            Some(View::FileStatus) => file_status_view::STATUS_FILTER,
+            _ => commit_panel::FILES_FILTER,
+        };
+        ui.memory_mut(|memory| memory.request_focus(Id::new(field)));
+    }
     // The diff drawn in this frame takes the move, and none is left over
     // for a diff drawn later.
     let hunk_move = actions.iter().find_map(|action| match action {
@@ -266,7 +284,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::NextMatch => app.next_match(),
             Action::PreviousMatch => app.previous_match(),
             // The toolbar has taken it.
-            Action::FocusSearch | Action::MoveHunk(_) => {}
+            Action::FocusSearch | Action::FocusFilter | Action::MoveHunk(_) => {}
             Action::CheckGitAgain => app.check_again(),
             Action::ChooseGit => app.choose_git(),
             Action::SetTheme(theme) => app.set_theme(theme),
@@ -512,6 +530,9 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
         }
         if input.consume_shortcut(&FIND) {
             actions.push(Action::FocusSearch);
+        }
+        if input.consume_shortcut(&FILTER_FILES) {
+            actions.push(Action::FocusFilter);
         }
         // The variant with Shift first, as Ctrl+Tab would also match it.
         if input.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) {
@@ -1864,7 +1885,19 @@ pub(crate) fn lock_tab(ui: &Ui, id: Id) {
 /// Tab and Shift+Tab move the focus from one of `areas` to the next or
 /// back.
 fn move_between_areas(ui: &Ui, areas: &[&str]) {
-    let focused = ui.memory(|memory| memory.focused());
+    // The filter above a file list moves on as the list does.
+    let focused = ui.memory(|memory| memory.focused()).map(|id| {
+        match [
+            (commit_panel::FILES_FILTER, AREA_COMMIT_PANEL),
+            (file_status_view::STATUS_FILTER, STATUS_LIST),
+        ]
+        .into_iter()
+        .find(|(field, _)| Id::new(*field) == id)
+        {
+            Some((_, area)) => Id::new(area),
+            None => id,
+        }
+    });
     let areas: Vec<Id> = areas.iter().map(Id::new).collect();
     let Some(position) = focused.and_then(|id| areas.iter().position(|area| *area == id)) else {
         return;

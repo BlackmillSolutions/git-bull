@@ -4,7 +4,9 @@
 //! the list and the rows of its [`FileTree`] keep together.
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Id, Response, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2};
+use eframe::egui::{
+    EventFilter, Id, Key, Response, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2,
+};
 use gitbull_core::file_tree::{FileTree, Mode, Row};
 
 use crate::app::App;
@@ -13,7 +15,7 @@ use crate::components::{self, TREE_INDENT, TREE_LEFT};
 use crate::i18n::Msg;
 use crate::icons;
 use crate::theme::{Palette, SHAPE};
-use crate::virtual_list::{ListOutput, ListState, VirtualList};
+use crate::virtual_list::{ListKey, ListOutput, ListState, VirtualList};
 
 /// The height the row of the filter field and the toggle takes above a
 /// list, with the space below it.
@@ -57,11 +59,16 @@ pub(crate) fn mode(app: &App) -> Mode {
 }
 
 /// The filter field, with the id `field`, and the toggle of the tree in one
-/// row. Returns the mode of the lists, another one when the user clicked
-/// the toggle.
+/// row above the list `list`. Returns the mode of the lists, another one
+/// when the user clicked the toggle.
+///
+/// Down and Enter in the field give the list the focus, Escape empties the
+/// field, and Tab moves on from it as from the list, which
+/// `ui::move_between_areas` does.
 pub(crate) fn header(
     ui: &mut Ui,
     field: Id,
+    list: Id,
     filter: &mut String,
     mode: Mode,
     texts: &ListTexts,
@@ -69,10 +76,37 @@ pub(crate) fn header(
     let mut tree = mode == Mode::Tree;
     ui.horizontal(|ui| {
         let width = ui.available_width() - SHAPE.control_height - ui.spacing().item_spacing.x;
-        let response = ui.add(components::text_edit(filter, &texts.filter, width).id(field));
+        let keys = EventFilter {
+            horizontal_arrows: true,
+            vertical_arrows: true,
+            tab: true,
+            escape: true,
+        };
+        let response = ui.add(
+            components::text_edit(filter, &texts.filter, width)
+                .id(field)
+                .event_filter(keys),
+        );
         // The field has no label of its own: its hint names it.
         ui.ctx()
             .accesskit_node_builder(response.id, |node| node.set_label(texts.filter.as_str()));
+        if response.has_focus() {
+            let (down, escape) = ui.input(|input| {
+                (
+                    input.key_pressed(Key::ArrowDown),
+                    input.key_pressed(Key::Escape),
+                )
+            });
+            if escape {
+                filter.clear();
+            }
+            if down {
+                ui.memory_mut(|memory| memory.request_focus(list));
+            }
+        }
+        if response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
+            ui.memory_mut(|memory| memory.request_focus(list));
+        }
         components::toggle_icon_button(ui, icons::TREE, &texts.tree, &mut tree);
     });
     ui.add_space(SHAPE.space[1] - ui.spacing().item_spacing.y);
@@ -209,6 +243,23 @@ pub(crate) fn show(
     {
         tree.toggle(group, folder);
     }
+    // Left and Right move in the tree, Enter and Space toggle a folder; a
+    // double click, which also sets `activated`, toggles it twice.
+    if let (Some(key), Some(row)) = (output.key, tree.selected_row()) {
+        match key {
+            ListKey::Left => {
+                tree.left(row);
+            }
+            ListKey::Right => {
+                tree.right(row);
+            }
+            ListKey::Enter | ListKey::Space => {
+                if let Some(&Row::Folder { group, folder, .. }) = tree.rows().get(row) {
+                    tree.toggle(group, folder);
+                }
+            }
+        }
+    }
     if let Some(row) = output.menu_opened {
         *menu = tree.rows().get(row as usize).copied();
     }
@@ -216,7 +267,6 @@ pub(crate) fn show(
 
     if output.response.has_focus()
         && let Some(row) = tree.selected_row()
-        && matches!(tree.rows().get(row), Some(Row::File { .. }))
         && ui.input_mut(take_copy)
         && let Some(path) = tree.path(row)
     {

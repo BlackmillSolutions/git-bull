@@ -279,6 +279,16 @@ pub(crate) const SCROLLBAR_WIDTH: f32 = 10.0;
 /// The scrollbar thumb never gets shorter than this.
 const MIN_THUMB: f32 = 24.0;
 
+/// A key the list reports for its caller to act on, such as a tree that
+/// collapses and expands its folders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListKey {
+    Left,
+    Right,
+    Enter,
+    Space,
+}
+
 /// What happened in the list this frame.
 pub struct ListOutput {
     pub response: Response,
@@ -288,6 +298,9 @@ pub struct ListOutput {
     pub selection_changed: bool,
     /// The row the user double-clicked, or pressed Enter on.
     pub activated: Option<u64>,
+    /// The key pressed while the list had the focus, apart from a double
+    /// click, which also sets `activated`.
+    pub key: Option<ListKey>,
     /// The row whose context menu the user opened. The caller keeps what
     /// the row shows now, as the rows may change while the menu is open.
     pub menu_opened: Option<u64>,
@@ -379,6 +392,7 @@ impl VirtualList {
 
         let mut clicked = None;
         let mut activated = None;
+        let mut key = None;
         let mut menu_opened = None;
         let secondary = response.secondary_clicked();
         if response.clicked() || secondary {
@@ -407,9 +421,11 @@ impl VirtualList {
             ui.memory_mut(|memory| {
                 memory.set_focus_lock_filter(
                     self.id,
-                    // Tab moves between the areas of the window instead.
+                    // Tab moves between the areas of the window instead,
+                    // and Left and Right stay with the list.
                     EventFilter {
                         vertical_arrows: true,
+                        horizontal_arrows: true,
                         tab: true,
                         ..EventFilter::default()
                     },
@@ -432,6 +448,16 @@ impl VirtualList {
             }
             if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter)) {
                 activated = state.selected();
+                key = Some(ListKey::Enter);
+            }
+            for (pressed, reported) in [
+                (Key::ArrowLeft, ListKey::Left),
+                (Key::ArrowRight, ListKey::Right),
+                (Key::Space, ListKey::Space),
+            ] {
+                if ui.input_mut(|input| input.consume_key(Modifiers::NONE, pressed)) {
+                    key = Some(reported);
+                }
             }
         }
 
@@ -475,6 +501,7 @@ impl VirtualList {
             clicked,
             selection_changed: state.selected() != before,
             activated,
+            key,
             menu_opened,
         }
     }

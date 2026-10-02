@@ -216,6 +216,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let chosen_mode = file_list::header(
         ui,
         Id::new(FILES_FILTER),
+        Id::new(AREA_COMMIT_PANEL),
         &mut view.commit_files.filter,
         mode,
         &list_texts,
@@ -450,16 +451,29 @@ fn files(
         return (false, None);
     };
 
-    let menu_file = match view.commit_files.menu {
-        Some(Row::File { index, .. }) => Some(index),
-        _ => None,
+    let menu = view.commit_files.menu;
+    let folder_path = |group, folder| {
+        order
+            .as_ref()
+            .map(|order| order.folder_path(group, folder).to_string())
     };
     let path_of = |index: usize| files.get(index).map(|change| change.path.to_string());
     let mut opened = None;
     shown.output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
-            let Some(index) = menu_file else {
-                return;
+            let index = match menu {
+                Some(Row::File { index, .. }) => index,
+                // A folder offers its path alone.
+                Some(Row::Folder { group, folder, .. }) => {
+                    if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
+                        if let Some(path) = folder_path(group, folder) {
+                            ui.ctx().copy_text(path);
+                        }
+                        ui.close();
+                    }
+                    return;
+                }
+                Some(Row::Title(_)) | None => return,
             };
             if components::menu_item(ui, None, &texts.file_history, None).clicked() {
                 opened = Some((index, false));
