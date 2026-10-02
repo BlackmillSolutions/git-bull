@@ -4,8 +4,8 @@ mod support;
 
 use eframe::egui::accesskit::{Role, Toggled};
 use eframe::egui::{
-    Event, Key, Modifiers, MouseWheelUnit, OutputCommand, PointerButton, Pos2, Rect, TouchPhase,
-    pos2, vec2,
+    Color32, Event, Key, Modifiers, MouseWheelUnit, OutputCommand, PointerButton, Pos2, Rect,
+    TouchPhase, pos2, vec2,
 };
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
@@ -13,7 +13,7 @@ use gitbull_app::app::App;
 use gitbull_app::theme::LIGHT;
 use gitbull_app::ui::color;
 use gitbull_core::details::DiffState;
-use gitbull_core::diff_document::DiffDocument;
+use gitbull_core::diff_document::{DiffDocument, Row};
 use gitbull_core::settings::{Settings, SettingsFile, ThemeSetting};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
@@ -24,7 +24,8 @@ use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, Gate, LiveRepo, Probe, fake_id};
 use support::{
     BURST, Setup, build, commit_list_scroll, find_row, long_history, marked_texts, path,
-    settle_window, texts_in, turn_wheel, unnamed_tab_stops, wait_for_row, window, window_at_60_fps,
+    settle_window, sized_window, texts_in, turn_wheel, unnamed_tab_stops, wait_for_row, window,
+    window_at_60_fps,
 };
 use tempfile::TempDir;
 
@@ -657,6 +658,14 @@ fn added_lines(count: u32) -> FileDiff {
 /// The File status view of a repository whose only change is `edit.txt`,
 /// with the diff `live` gives it shown.
 fn open_status(live: &LiveRepo) -> (Harness<'static, App>, Probe) {
+    open_status_with(live, |backend| backend)
+}
+
+/// As [`open_status`], with what `extend` adds to the backend.
+fn open_status_with(
+    live: &LiveRepo,
+    extend: impl FnOnce(FakeBackend) -> FakeBackend,
+) -> (Harness<'static, App>, Probe) {
     live.set_status(WorkingStatus {
         unstaged: vec![StatusEntry {
             kind: StatusKind::Changed(ChangeKind::Modified),
@@ -686,6 +695,7 @@ fn open_status(live: &LiveRepo) -> (Harness<'static, App>, Probe) {
             },
         )
         .with_live(root(), live);
+    let backend = extend(backend);
     let probe = backend.probe();
     let test = build(Setup {
         settings: Settings {
@@ -1090,12 +1100,26 @@ fn open_totals(fake: FakeBackend) -> Harness<'static, App> {
 /// The window with the diff of commit w and `settings`, and the folder of
 /// its settings file.
 fn open_totals_with(fake: FakeBackend, settings: Settings) -> (Harness<'static, App>, TempDir) {
+    open_totals_sized(fake, settings, (1280.0, 800.0))
+}
+
+/// The window with the diff of commit w in a window twice as high, in
+/// which the diff shows all rows of hidden lines of a short file.
+fn open_totals_tall(fake: FakeBackend) -> Harness<'static, App> {
+    open_totals_sized(fake, totals_settings(), (1280.0, 1200.0)).0
+}
+
+fn open_totals_sized(
+    fake: FakeBackend,
+    settings: Settings,
+    size: (f32, f32),
+) -> (Harness<'static, App>, TempDir) {
     let test = build(Setup {
         settings,
         backend: fake,
         ..Setup::default()
     });
-    let mut harness = window(test.app);
+    let mut harness = sized_window(size, test.app);
     settle_window(&mut harness);
     wait_until(&mut harness, |h| {
         row_of(h, Role::Row, "Change the totals").is_some()
@@ -1486,4 +1510,375 @@ fn moving_between_hunks_keeps_the_focus_and_the_selected_lines() {
     press_f7(&mut harness, Modifiers::SHIFT);
     assert_eq!(focused(&harness), before);
     assert_eq!(selected_rows(&harness), selected);
+}
+
+// Expanding context.
+
+/// The label of the row of hidden lines that names `count` of them.
+fn hidden(count: u32) -> String {
+    if count == 1 {
+        "1 hidden line".to_owned()
+    } else {
+        format!("{count} hidden lines")
+    }
+}
+
+fn shows_label(harness: &Harness<'_, App>, label: &str) -> bool {
+    harness.query_by_label(label).is_some()
+}
+
+/// Scrolls the diff with the wheel until what the label of which starts
+/// with `prefix` names is drawn above the status bar, and returns where.
+fn bring_into_view(harness: &mut Harness<'_, App>, prefix: &str) -> Rect {
+    let find = |harness: &Harness<'_, App>| {
+        harness
+            .query_all_by(|node| {
+                // A label carries its text as its value.
+                (node.label().or_else(|| node.value())).is_some_and(|text| text.starts_with(prefix))
+            })
+            .next()
+            .map(|node| node.rect())
+    };
+    for _ in 0..300 {
+        let status_bar = harness.get_by_label("Git 2.55.0").rect().top();
+        if let Some(rect) = find(harness)
+            && rect.bottom() < status_bar - 8.0
+        {
+            return rect;
+        }
+        // Low in the diff, which lies just above the status bar.
+        let column = harness
+            .query_all_by_role(Role::Code)
+            .next()
+            .expect("a row of the diff")
+            .rect()
+            .center()
+            .x;
+        harness.hover_at(pos2(column, status_bar - 40.0));
+        harness.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, -18.0),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run();
+    }
+    panic!("{prefix} did not come into view");
+}
+
+/// Chooses the offer `name` of a row of hidden lines, scrolling it into
+/// view first, as a user would.
+fn offer(harness: &mut Harness<'_, App>, name: &str) {
+    bring_into_view(harness, name);
+    harness.get_by_role_and_label(Role::Button, name).click();
+    harness.run();
+}
+
+fn offered(harness: &Harness<'_, App>, name: &str) -> bool {
+    harness
+        .query_by_role_and_label(Role::Button, name)
+        .is_some()
+}
+
+const AFTER_PREVIOUS: &str = "Show 20 lines after the previous hunk";
+const BEFORE_NEXT: &str = "Show 20 lines before the next hunk";
+
+/// Changes at lines 20 and 77 of 100: hunks over 17 to 23 and 74 to 80,
+/// with 50 lines between them.
+fn two_hunks() -> Harness<'static, App> {
+    let mut harness = open_totals_tall(totals_backend(100, &[change_at(20), change_at(77)]));
+    wait_until(&mut harness, |h| document_of(h, DiffDocument::has_text));
+    harness.run();
+    harness
+}
+
+#[test]
+fn a_row_names_the_lines_between_two_hunks_and_offers_both_sides() {
+    let harness = two_hunks();
+    assert!(shows_label(&harness, &hidden(50)));
+    assert!(offered(&harness, AFTER_PREVIOUS));
+    assert!(offered(&harness, BEFORE_NEXT));
+}
+
+#[test]
+fn revealing_the_top_of_a_gap_shows_the_lines_after_the_first_hunk() {
+    let mut harness = two_hunks();
+    offer(&mut harness, AFTER_PREVIOUS);
+    let rows = document_of(&harness, |d| d.rows().to_vec());
+    let last = rows.iter().position(|row| *row == Row::Line(0, 7)).unwrap();
+    assert_eq!(
+        rows[last + 1..last + 21],
+        (24..44).map(Row::Revealed).collect::<Vec<_>>()[..]
+    );
+    assert_eq!(document_of(&harness, |d| d.gaps()[1].hidden()), 30);
+    bring_into_view(&mut harness, "Unchanged, 24, 24: let line_24 = 24;");
+    bring_into_view(&mut harness, &hidden(30));
+}
+
+#[test]
+fn a_small_gap_is_revealed_at_once_and_its_row_goes() {
+    let mut harness = open_totals_tall(totals_backend(60, &[change_at(20), change_at(39)]));
+    wait_until(&mut harness, |h| document_of(h, DiffDocument::has_text));
+    harness.run();
+    bring_into_view(&mut harness, &hidden(12));
+    offer(&mut harness, "Show all 12 lines");
+    assert!(!shows_label(&harness, &hidden(12)));
+    let rows = document_of(&harness, |d| d.rows().to_vec());
+    let header = rows.iter().position(|row| *row == Row::Header(1)).unwrap();
+    assert_eq!(rows[header - 1], Row::Revealed(35));
+    assert!(!rows.contains(&Row::Gap(1)));
+    bring_into_view(&mut harness, "@@ -36,7");
+}
+
+#[test]
+fn rows_before_the_first_and_after_the_last_hunk_offer_their_side() {
+    // The first hunk begins at line 40, the last ends 100 lines before the
+    // end of the file.
+    let mut harness = open_totals_tall(totals_backend(146, &[change_at(43)]));
+    wait_until(&mut harness, |h| document_of(h, DiffDocument::has_text));
+    harness.run();
+    assert!(shows_label(&harness, &hidden(39)));
+    assert!(shows_label(&harness, &hidden(100)));
+    let names: Vec<String> = harness
+        .query_all_by_role(Role::Button)
+        .filter_map(|node| node.accesskit_node().label())
+        .filter(|label| label.starts_with("Show 20"))
+        .collect();
+    assert_eq!(names, [BEFORE_NEXT, AFTER_PREVIOUS]);
+}
+
+#[test]
+fn an_added_file_shows_no_row_of_hidden_lines() {
+    let mut test = open();
+    choose(&mut test, "Added: added.txt");
+    assert!(!test.harness.query_all_by_role(Role::Label).any(|node| {
+        node.accesskit_node()
+            .label()
+            .is_some_and(|label| label.ends_with("hidden lines"))
+    }));
+}
+
+fn large_blob() -> Vec<u8> {
+    (1..=60_000)
+        .map(|n| format!("let line_{n} = {n};\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+#[test]
+fn a_large_new_version_names_its_hidden_lines_without_offers() {
+    let fake = totals_backend(100, &[change_at(20), change_at(77)])
+        .with_blob(fake_id("new-totals"), &large_blob());
+    let mut harness = open_totals_tall(fake);
+    wait_until(&mut harness, |h| {
+        !document_of(h, |d| d.has_text()) && !is_reading(h)
+    });
+    harness.run();
+    assert!(shows_label(&harness, &hidden(16)));
+    assert!(shows_label(&harness, &hidden(50)));
+    assert!(!offered(&harness, AFTER_PREVIOUS));
+    assert!(!offered(&harness, "Show all 16 lines"));
+}
+
+#[test]
+fn a_large_old_version_still_offers_to_reveal_lines() {
+    let fake = totals_backend(100, &[change_at(20), change_at(77)])
+        .with_blob(fake_id("old-totals"), &large_blob());
+    let mut harness = open_totals_tall(fake);
+    wait_until(&mut harness, |h| {
+        document_of(h, DiffDocument::has_text) && !is_reading(h)
+    });
+    harness.run();
+    assert!(offered(&harness, AFTER_PREVIOUS));
+    assert!(
+        !coloured(&harness),
+        "a version over the limit is not highlighted"
+    );
+}
+
+/// Whether the versions of the diff of the commit details are still being
+/// read or highlighted.
+fn is_reading(harness: &Harness<'_, App>) -> bool {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| session.details().is_highlighting())
+}
+
+/// Where the text `text` is drawn from, left.
+fn text_left(harness: &Harness<'_, App>, text: &str) -> Option<f32> {
+    use eframe::egui::epaint::Shape;
+    fn find(shape: &Shape, text: &str) -> Option<f32> {
+        match shape {
+            Shape::Text(shape) if shape.galley.text() == text => Some(shape.pos.x),
+            Shape::Vec(shapes) => shapes.iter().find_map(|shape| find(shape, text)),
+            _ => None,
+        }
+    }
+    harness
+        .output()
+        .shapes
+        .iter()
+        .find_map(|clipped| find(&clipped.shape, text))
+}
+
+#[test]
+fn revealed_lines_with_more_digits_leave_the_text_in_place() {
+    let mut harness = open_totals_tall(totals_backend(1030, &[change_at(992)]));
+    wait_until(&mut harness, |h| document_of(h, DiffDocument::has_text));
+    harness.run();
+    bring_into_view(&mut harness, "Unchanged, 993");
+    let left = text_left(&harness, "let line_993 = 993;").expect("line 993 shows");
+    offer(&mut harness, AFTER_PREVIOUS);
+    let row = bring_into_view(&mut harness, "Unchanged, 1015, 1015");
+    assert!(texts_in(harness.output(), row).contains(&"1015".to_owned()));
+    // Every line begins its text in the same column, which did not move.
+    assert_eq!(text_left(&harness, "let line_1015 = 1015;"), Some(left));
+}
+
+#[test]
+fn revealed_lines_take_their_syntax_colours() {
+    let mut harness = two_hunks();
+    wait_until(&mut harness, coloured);
+    harness.run();
+    offer(&mut harness, AFTER_PREVIOUS);
+    bring_into_view(&mut harness, "Unchanged, 30, 30");
+    let colours: Vec<Color32> = harness
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            eframe::egui::epaint::Shape::Text(text)
+                if text.galley.text() == "let line_30 = 30;" =>
+            {
+                Some(
+                    text.galley
+                        .job
+                        .sections
+                        .iter()
+                        .map(|s| s.format.color)
+                        .collect::<Vec<_>>(),
+                )
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let distinct: std::collections::HashSet<_> = colours.iter().collect();
+    assert!(
+        distinct.len() > 1,
+        "highlighted in several colours: {colours:?}"
+    );
+}
+
+/// The diff of `edit.txt` in the working copy: a change at line 20 of 60.
+fn working_change() -> FileDiff {
+    let mut diff = totals_diff(60, &[change_at(20)]);
+    diff.old_path = Some("edit.txt".into());
+    diff.new_path = Some("edit.txt".into());
+    diff.new_blob = None;
+    diff.new_in_working_copy = true;
+    diff
+}
+
+#[test]
+fn a_refresh_keeps_revealed_lines_and_never_hides_them() {
+    let live = LiveRepo::new();
+    live.set_working_diff(Group::Unstaged, "edit.txt", working_change());
+    let file = version(60, &[change_at(20)], true);
+    let (mut harness, probe) = open_status_with(&live, |backend| {
+        backend
+            .with_working_file("edit.txt", &file)
+            .with_blob(fake_id("old-totals"), &version(60, &[change_at(20)], false))
+    });
+    wait_until(&mut harness, |h| offered(h, "Show all 16 lines"));
+    offer(&mut harness, "Show all 16 lines");
+    let revealed = |harness: &Harness<'_, App>| {
+        diff_rows(harness)
+            .iter()
+            .any(|row| row.starts_with("Unchanged, 5, 5"))
+    };
+    assert!(revealed(&harness));
+
+    let reads = probe.working_diffs().len();
+    harness.key_press(Key::F5);
+    for _ in 0..200 {
+        assert!(revealed(&harness), "the revealed lines stay in every frame");
+        if probe.working_diffs().len() > reads {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    for _ in 0..10 {
+        harness.step();
+        assert!(revealed(&harness), "the revealed lines stay in every frame");
+    }
+}
+
+// Copying and the selection with revealed lines.
+
+#[test]
+fn revealed_lines_are_copied_with_their_text() {
+    let mut harness = two_hunks();
+    offer(&mut harness, AFTER_PREVIOUS);
+    let first = row_of(&harness, Role::Code, "Unchanged, 24, 24")
+        .unwrap()
+        .center();
+    let last = row_of(&harness, Role::Code, "Unchanged, 25, 25")
+        .unwrap()
+        .center();
+    click(&mut harness, first, PointerButton::Primary);
+    click_with(&mut harness, last, PointerButton::Primary, Modifiers::SHIFT);
+    press_copy(&mut harness);
+    assert_eq!(
+        copied(&harness).as_deref(),
+        Some("let line_24 = 24;\nlet line_25 = 25;")
+    );
+}
+
+#[test]
+fn revealing_lines_above_keeps_the_same_lines_selected() {
+    let mut harness = two_hunks();
+    let line = bring_into_view(&mut harness, "Added, –, 77").center();
+    click(&mut harness, line, PointerButton::Primary);
+    let selected = selected_rows(&harness);
+    assert!(selected[0].starts_with("Added, –, 77"), "{selected:?}");
+    offer(&mut harness, BEFORE_NEXT);
+    bring_into_view(&mut harness, "Added, –, 77");
+    assert_eq!(selected_rows(&harness), selected);
+}
+
+#[test]
+fn a_click_on_a_row_of_hidden_lines_leaves_the_selection() {
+    let mut harness = two_hunks();
+    let line = row_of(&harness, Role::Code, "Added, –, 20")
+        .unwrap()
+        .center();
+    click(&mut harness, line, PointerButton::Primary);
+    let gap = bring_into_view(&mut harness, &hidden(50));
+    // Right of the offers, on the text of the row.
+    click(
+        &mut harness,
+        pos2(gap.right() - 20.0, gap.center().y),
+        PointerButton::Primary,
+    );
+    bring_into_view(&mut harness, "Added, –, 20");
+    let selected = selected_rows(&harness);
+    assert_eq!(selected.len(), 1, "{selected:?}");
+    assert!(selected[0].starts_with("Added, –, 20"));
+    press_copy(&mut harness);
+    assert_eq!(copied(&harness).as_deref(), Some("let value = 2;"));
+}
+
+#[test]
+fn the_menu_of_a_revealed_line_offers_no_hunk() {
+    let mut harness = two_hunks();
+    offer(&mut harness, AFTER_PREVIOUS);
+    let at = bring_into_view(&mut harness, "Unchanged, 30, 30").center();
+    click(&mut harness, at, PointerButton::Secondary);
+    assert!(harness.query_by_label("Copy lines").is_some());
+    assert!(harness.query_by_label("Copy hunk").is_none());
 }
