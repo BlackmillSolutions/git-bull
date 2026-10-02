@@ -30,4 +30,4 @@ Each task names the test that shows it works.
 ## 5. Check with the user
 
 - [ ] 5.1 The user approves the snapshots of tasks 2.4 and 4.2 and checks on Windows with a release build: dragging the divider in the commit panel, selecting commits with short and long messages, dragging every edge of the headers of the commit list and of the file history, a narrow window, and that every divider and width is as left after a restart; verify that the result and the date are recorded in this task
-- [ ] 5.2 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate dividers-and-columns --strict`; verify all succeed and CI is green on Linux, Windows and macOS
+- [x] 5.2 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate dividers-and-columns --strict`; verify all succeed and CI is green on Linux, Windows and macOS. All succeed here with 1071 tests, and CI run 37005317781 of commit ecf5b61 is green on Linux, Windows and macOS.
