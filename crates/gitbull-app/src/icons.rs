@@ -4,6 +4,8 @@
 //! own on some of these code points. Views name icons here, not by the
 //! crate's constants.
 
+use std::sync::LazyLock;
+
 use eframe::egui::{Context, FontFamily, FontId, RichText};
 use egui_phosphor::regular as phosphor;
 
@@ -14,14 +16,12 @@ pub const FAMILY: &str = "icons";
 /// which at start-up happens before the first frame, the proportional
 /// family stands in, because egui cannot draw a family it does not know.
 pub fn font(ctx: &Context, size: f32) -> FontId {
-    let family = FontFamily::Name(FAMILY.into());
-    let known = ctx.fonts(|fonts| fonts.definitions().families.contains_key(&family));
+    static ICONS: LazyLock<FontFamily> = LazyLock::new(|| FontFamily::Name(FAMILY.into()));
     FontId::new(
         size,
-        if known {
-            family
-        } else {
-            FontFamily::Proportional
+        match crate::fonts::loaded(ctx) {
+            true => ICONS.clone(),
+            false => FontFamily::Proportional,
         },
     )
 }

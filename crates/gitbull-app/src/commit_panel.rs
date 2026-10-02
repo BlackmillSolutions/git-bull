@@ -259,37 +259,48 @@ fn fields(
     palette: &Palette,
 ) -> Option<ObjectId> {
     let mut chosen = None;
-    field(ui, &texts.commit, |ui| {
-        // Small enough for the whole hash to fit a panel of the default width.
-        ui.label(RichText::new(commit.to_string()).monospace().size(11.0));
-    });
-    if !parents.is_empty() {
-        field(ui, &texts.parents, |ui| {
-            for parent in parents {
-                let link = ui
-                    .link(RichText::new(parent.short(10)).monospace())
-                    .on_hover_text(parent.to_string());
-                if link.clicked() {
-                    chosen = Some(*parent);
+    close_fields(ui, |ui| {
+        field(ui, &texts.commit, |ui| {
+            // Small enough for the whole hash to fit a panel of the default width.
+            ui.label(RichText::new(commit.to_string()).monospace().size(11.0));
+        });
+        if !parents.is_empty() {
+            field(ui, &texts.parents, |ui| {
+                for parent in parents {
+                    let link = ui
+                        .link(RichText::new(parent.short(10)).monospace())
+                        .on_hover_text(parent.to_string());
+                    if link.clicked() {
+                        chosen = Some(*parent);
+                    }
                 }
-            }
-        });
-    }
-    for (label, person) in [
-        (&texts.author, content.map(|c| &c.author)),
-        (&texts.committer, content.map(|c| &c.committer)),
-    ] {
-        field(ui, label, |ui| match person {
-            Some(person) => signature(ui, person, zone),
-            None => {
-                ui.weak(&texts.loading);
-            }
-        });
-    }
-    if !badges.is_empty() {
-        field(ui, &texts.references, |ui| references(ui, badges, palette));
-    }
+            });
+        }
+        for (label, person) in [
+            (&texts.author, content.map(|c| &c.author)),
+            (&texts.committer, content.map(|c| &c.committer)),
+        ] {
+            field(ui, label, |ui| match person {
+                Some(person) => signature(ui, person, zone),
+                None => {
+                    ui.weak(&texts.loading);
+                }
+            });
+        }
+        if !badges.is_empty() {
+            field(ui, &texts.references, |ui| references(ui, badges, palette));
+        }
+    });
     chosen
+}
+
+/// Draws `fields`, the fields of a commit, which are read together and so
+/// stand close; the widgets after them keep the spacing of the style.
+fn close_fields(ui: &mut Ui, fields: impl FnOnce(&mut Ui)) {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = SHAPE.space[0];
+        fields(ui);
+    });
 }
 
 /// The width of the names of the fields.
@@ -299,8 +310,6 @@ const FIELD_NAME_WIDTH: f32 = 76.0;
 /// wrap within the rest. A grid would size its columns by contents that
 /// wrap by the column size, and never settle.
 fn field(ui: &mut Ui, name: &str, contents: impl FnOnce(&mut Ui)) {
-    // The fields of a commit are read together, so they stand close.
-    ui.spacing_mut().item_spacing.y = SHAPE.space[0];
     ui.horizontal_top(|ui| {
         ui.allocate_ui(vec2(FIELD_NAME_WIDTH, 0.0), |ui| {
             ui.set_width(FIELD_NAME_WIDTH);
@@ -503,6 +512,26 @@ fn file_row(ui: &mut Ui, change: &FileChange, selected: bool, texts: &Texts, pal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fields_stand_close_and_leave_the_spacing_after_them_as_it_was() {
+        let ctx = egui::Context::default();
+        let (mut first, mut second, mut after) = (None, None, None);
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            // The spacing of the style.
+            ui.spacing_mut().item_spacing.y = 8.0;
+            close_fields(ui, |ui| {
+                field(ui, "First", |ui| first = Some(ui.label("one").rect));
+                field(ui, "Second", |ui| second = Some(ui.label("two").rect));
+            });
+            after = Some(ui.label("after").rect);
+        })
+        .textures_delta
+        .clear();
+        let (first, second, after) = (first.unwrap(), second.unwrap(), after.unwrap());
+        assert_eq!(second.top() - first.bottom(), SHAPE.space[0]);
+        assert_eq!(after.top() - second.bottom(), 8.0);
+    }
 
     #[test]
     fn a_renamed_file_shows_its_old_and_new_path() {

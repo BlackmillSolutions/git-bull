@@ -38,7 +38,7 @@ use crate::paths::System;
 use crate::search_view::{self, SEARCH_RESULTS};
 use crate::sidebar_view::{self, SidebarAction};
 use crate::style;
-use crate::theme::{self, Appearance, Palette, Rgb, SHAPE};
+use crate::theme::{Appearance, Palette, Rgb, SHAPE};
 use crate::virtual_list;
 use gitbull_core::search::{Search, SearchMode, SearchState};
 use gitbull_core::session::{BranchFilter, LoadState, Session};
@@ -928,7 +928,7 @@ fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
 /// The tabs of `workspace` and the button for a new tab, leaving `reserve`
 /// points free right of them.
 fn tabs(app: &App, workspace: &Workspace, ui: &mut Ui, reserve: f32, actions: &mut Vec<Action>) {
-    let palette = palette(app, ui);
+    let palette = style::active_palette(ui.ctx());
     ui.spacing_mut().item_spacing.x = SHAPE.space[0];
     let active = workspace.active().map(|tab| tab.id());
     let tabs: Vec<TabLabel> = workspace
@@ -1674,7 +1674,7 @@ fn status_bar(app: &App, ui: &mut Ui) {
 
 fn history(app: &mut App, ui: &mut Ui) {
     let layout = app.settings().layout;
-    let palette = palette(app, ui);
+    let palette = style::active_palette(ui.ctx());
     app.poll_navigation();
     app.poll_search();
     // The search starts once its text has settled, and its matches arrive
@@ -1878,12 +1878,6 @@ fn move_between_areas(ui: &Ui, areas: &[&str]) {
         return;
     };
     ui.memory_mut(|memory| memory.request_focus(areas[target % areas.len()]));
-}
-
-/// The palette of the appearance and the colour vision in use. Syntax
-/// highlighting takes the appearance alone.
-fn palette(app: &App, ui: &Ui) -> &'static Palette {
-    theme::palette(appearance(app, ui), app.settings().colour_vision)
 }
 
 /// The appearance the window is drawn with.

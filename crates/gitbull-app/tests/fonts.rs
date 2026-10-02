@@ -203,6 +203,39 @@ fn an_icon_is_drawn_in_the_icon_family() {
     assert_eq!(drawable, Some(true));
 }
 
+#[test]
+fn the_fonts_are_asked_only_until_the_bundled_ones_are_known() {
+    let icons = FontFamily::Name(gitbull_app::icons::FAMILY.into());
+    let mut loaded = Vec::new();
+    let mut families = Vec::new();
+    let mut frame = 0;
+    let mut harness = Harness::new_ui(|ui| {
+        let ctx = ui.ctx().clone();
+        loaded.push(gitbull_app::fonts::loaded(&ctx));
+        families.push(gitbull_app::icons::font(&ctx, 14.0).family);
+        match frame {
+            0 => ctx.set_fonts(definitions()),
+            // Nothing takes the bundled fonts away; were the fonts asked
+            // again, egui's own would answer that they are gone.
+            1 => ctx.set_fonts(egui::FontDefinitions::default()),
+            _ => {}
+        }
+        frame += 1;
+    });
+    for _ in 0..3 {
+        harness.step();
+    }
+    drop(harness);
+    assert!(loaded.len() >= 3, "{loaded:?}");
+    assert!(!loaded[0], "before the fonts");
+    assert!(loaded[1..].iter().all(|known| *known), "{loaded:?}");
+    assert_eq!(families[0], FontFamily::Proportional);
+    assert!(
+        families[1..].iter().all(|family| *family == icons),
+        "{families:?}"
+    );
+}
+
 /// The width of `text` in `family` at 14 points, with the bundled fonts.
 fn width(family: FontFamily, text: &str) -> f32 {
     let mut found = None;
