@@ -119,6 +119,8 @@ pub struct Layout {
     pub date_column: Option<f32>,
     pub author_column: Option<f32>,
     pub hash_column: Option<f32>,
+    pub commit_details_height: Option<f32>,
+    pub path_column: Option<f32>,
 }
 
 /// Everything git-bull remembers between runs.
@@ -558,10 +560,9 @@ mod tests {
         let file = file_in(&dir);
         write(
             &file,
-            "theme = \"dark\"
-             system_title_bar = true
-             tabs = [\"/work/git-bull\"]
-",
+            "theme = \"dark\"\n\
+             system_title_bar = true\n\
+             tabs = [\"/work/git-bull\"]\n",
         );
 
         let loaded = file.load();
@@ -585,6 +586,61 @@ mod tests {
 
         let text = std::fs::read_to_string(file.path()).unwrap();
         assert!(text.contains("show_invisibles = true"), "{text}");
+        assert_eq!(file.load().settings, settings);
+    }
+
+    #[test]
+    fn a_layout_without_the_commit_details_and_the_path_column_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(
+            &file,
+            "[layout]\n\
+             sidebar_width = 220.0\n\
+             details_height = 300.0\n\
+             commit_panel_width = 420.0\n\
+             graph_column = 96.0\n\
+             date_column = 140.0\n\
+             author_column = 180.0\n\
+             hash_column = 90.0\n",
+        );
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert_eq!(
+            loaded.settings.layout,
+            Layout {
+                sidebar_width: Some(220.0),
+                details_height: Some(300.0),
+                commit_panel_width: Some(420.0),
+                graph_column: Some(96.0),
+                date_column: Some(140.0),
+                author_column: Some(180.0),
+                hash_column: Some(90.0),
+                commit_details_height: None,
+                path_column: None,
+            }
+        );
+    }
+
+    #[test]
+    fn the_commit_details_and_the_path_column_survive_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            layout: Layout {
+                commit_details_height: Some(150.0),
+                path_column: Some(240.0),
+                ..example().layout
+            },
+            ..example()
+        };
+        file.save(&settings).unwrap();
+
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.contains("commit_details_height = 150.0"), "{text}");
+        assert!(text.contains("path_column = 240.0"), "{text}");
         assert_eq!(file.load().settings, settings);
     }
 

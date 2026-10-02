@@ -50,6 +50,9 @@ pub struct FakeBackend {
     failures: Vec<(PathBuf, Failure)>,
     histories: Vec<(PathBuf, History)>,
     references: Vec<(PathBuf, Vec<Reference>)>,
+    /// The answer to the first read of the references, held by a gate;
+    /// taken by that read.
+    first_references: Mutex<Vec<(PathBuf, Vec<Reference>, Gate)>>,
     counts: Vec<(PathBuf, u64)>,
     /// Histories for one set of revisions, by their arguments.
     histories_for: Vec<(PathBuf, Vec<String>, Vec<CommitLine>)>,
@@ -253,6 +256,22 @@ impl FakeBackend {
         let root = root.into();
         self.references.retain(|(known, _)| *known != root);
         self.references.push((root, references));
+        self
+    }
+
+    /// The first read of the references of `root` answers `references`, as
+    /// if it had read them at once, but only once the test opens `gate`;
+    /// later reads answer at once with the references of the moment.
+    pub fn with_first_references(
+        self,
+        root: impl Into<PathBuf>,
+        references: Vec<Reference>,
+        gate: &Gate,
+    ) -> FakeBackend {
+        self.first_references
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((root.into(), references, gate.clone()));
         self
     }
 
@@ -563,6 +582,20 @@ impl Backend for FakeBackend {
     fn references(&self, repo: &Path) -> Result<Vec<Reference>, Error> {
         self.probe.record("references", repo);
         self.gone(repo)?;
+        let first = {
+            let mut held = self
+                .first_references
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let at = (!held.is_empty())
+                .then(|| self.root_of(repo))
+                .and_then(|root| held.iter().position(|(known, ..)| *known == root));
+            at.map(|at| held.remove(at))
+        };
+        if let Some((_, references, gate)) = first {
+            gate.wait();
+            return Ok(references);
+        }
         if let Some(references) = self.live_of(repo).and_then(|live| live.references.clone()) {
             return Ok(references);
         }

@@ -3,8 +3,8 @@
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    self, Align, Color32, Id, Label, Layout, RichText, ScrollArea, Sense, TextStyle, Ui, UiBuilder,
-    WidgetInfo, WidgetType, pos2, vec2,
+    self, Align, Color32, Frame, Id, Label, Layout, Margin, Panel, RichText, ScrollArea, Sense,
+    TextStyle, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 use gitbull_core::badges::Badge;
 use gitbull_core::details::ChangedFiles;
@@ -112,6 +112,11 @@ fn shown_path(change: &FileChange) -> String {
 
 /// The height the file list keeps below the details: four rows.
 const MIN_FILE_ROOM: f32 = 4.0 * 24.0;
+/// The height the details keep above the file list: two lines.
+const MIN_DETAILS: f32 = 40.0;
+/// The room on each side of the divider between the details and the file
+/// list, as a separator leaves it.
+const DIVIDER_GAP: i8 = 6;
 
 /// Draws the panel for the selected commit of the active tab. Returns
 /// whether it drew the file list, which then takes the focus of the panel;
@@ -121,6 +126,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let zone = app.time_zone.clone();
     let uncommitted = app.texts.text(Msg::HistoryUncommitted);
     let open_file_status = app.texts.text(Msg::OpenFileStatus);
+    let saved_height = app.settings().layout.commit_details_height;
     let Some((_, view)) = app.active_view() else {
         return false;
     };
@@ -160,34 +166,46 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let content = session.content(&commit).cloned();
 
     let mut parent_chosen = None;
-    // The file list keeps room for a few rows; the details take the rest,
-    // so that the message shows in a panel of the default height.
-    let height = ui.available_height();
-    let details_height = (height - MIN_FILE_ROOM).max(height * 0.4);
-    ScrollArea::vertical()
-        .id_salt("commit-details")
-        .max_height(details_height)
-        .auto_shrink([false, true])
+    // The details stay as high as the user left the divider below them,
+    // whatever the length of the message; the file list keeps room for a
+    // few rows. Until the user moves it, the details take what the file
+    // list leaves, so that the message shows in a panel of the default
+    // height.
+    let height = ui.available_height() - f32::from(DIVIDER_GAP);
+    let details = Panel::top("commit_details")
+        .resizable(true)
+        .frame(Frame::NONE.inner_margin(Margin {
+            bottom: DIVIDER_GAP,
+            ..Margin::ZERO
+        }))
+        .default_size(saved_height.unwrap_or((height - MIN_FILE_ROOM).max(height * 0.4)))
+        .size_range(MIN_DETAILS..=(height - MIN_FILE_ROOM).max(MIN_DETAILS))
         .show(ui, |ui| {
-            // The message first: in a panel of the default height the
-            // fields below it may need scrolling.
-            match &content {
-                Some(content) => ui.add(Label::new(content.message.trim_end()).wrap()),
-                None => ui.weak(&texts.loading),
-            };
-            ui.separator();
-            parent_chosen = fields(
-                ui,
-                &texts,
-                &commit,
-                &parents,
-                &badges,
-                content.as_ref(),
-                &zone,
-                palette,
-            );
+            ScrollArea::vertical()
+                .id_salt("commit-details")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // The message first: in a panel of the default height
+                    // the fields below it may need scrolling.
+                    match &content {
+                        Some(content) => ui.add(Label::new(content.message.trim_end()).wrap()),
+                        None => ui.weak(&texts.loading),
+                    };
+                    ui.separator();
+                    parent_chosen = fields(
+                        ui,
+                        &texts,
+                        &commit,
+                        &parents,
+                        &badges,
+                        content.as_ref(),
+                        &zone,
+                        palette,
+                    );
+                });
         });
-    ui.separator();
+    let details_height = details.response.rect.height();
+    ui.add_space(f32::from(DIVIDER_GAP));
 
     let files_shown = session.details().files();
     // The first file of each commit is selected once its files are known.
@@ -224,6 +242,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     if let Some(action) = action {
         app.open_file_action(action);
     }
+    app.update_layout(|layout| layout.commit_details_height = Some(details_height));
     has_list
 }
 

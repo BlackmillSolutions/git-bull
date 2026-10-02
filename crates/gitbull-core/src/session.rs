@@ -2,15 +2,16 @@
 //!
 //! Loading starts when the tab is first shown: references, stashes and
 //! submodules, the structure stream and the commit count run in parallel on
-//! worker threads. The structure arrives in batches, so the first rows show
-//! early. Content is read only for rows in view. Dropping the session stops
-//! all of it.
+//! worker threads; the structure and the count start once the references are
+//! read. The structure arrives in batches, so the first rows show early.
+//! Content is read only for rows in view. Dropping the session stops all of
+//! it.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use gitbull_git::backend::ContentSource;
@@ -154,6 +155,9 @@ pub struct Session {
     boundaries: HashSet<ObjectId>,
     boundaries_result: Option<Receiver<Result<Vec<ObjectId>, Failure>>>,
     sidebar_result: Option<Receiver<Result<Sidebar, Failure>>>,
+    /// A history loads only after the first read of the references, so
+    /// that it is never older than the references a refresh compares with.
+    references_read: ReferencesRead,
     count: Option<u64>,
     count_result: Option<Receiver<Result<u64, Error>>>,
     content: Option<Box<dyn ContentSource>>,
@@ -234,6 +238,7 @@ impl Session {
             boundaries: HashSet::new(),
             boundaries_result: None,
             sidebar_result: None,
+            references_read: ReferencesRead::default(),
             count: None,
             count_result: None,
             content: None,
@@ -263,9 +268,10 @@ impl Session {
         self.started = true;
 
         let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
+        let read = self.references_read.clone();
         self.sidebar_result = Some(self.in_background(move || {
             Ok(Sidebar {
-                references: backend.references(&root)?,
+                references: read.open_after(|| backend.references(&root))?,
                 stashes: backend.stashes(&root)?,
                 submodules: backend.submodules(&root)?,
             })
@@ -310,8 +316,9 @@ impl Session {
         let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
         let (count_revisions, cancel) = (revisions.clone(), self.load_cancel.clone());
         let (sender, receiver) = mpsc::channel();
-        let notify = Arc::clone(&self.notify);
+        let (notify, read) = (Arc::clone(&self.notify), self.references_read.clone());
         std::thread::spawn(move || {
+            read.wait();
             if sender
                 .send(backend.count(&root, &count_revisions, &cancel))
                 .is_ok()
@@ -322,12 +329,14 @@ impl Session {
         self.count_result = Some(receiver);
 
         let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
-        let (history, cancel, notify) = (
+        let (history, cancel, notify, read) = (
             Arc::clone(&self.history),
             self.load_cancel.clone(),
             Arc::clone(&self.notify),
+            self.references_read.clone(),
         );
         std::thread::spawn(move || {
+            read.wait();
             let loaded = catch_failure(|| {
                 load(
                     backend.as_ref(),
@@ -615,6 +624,9 @@ impl Session {
     /// Takes over what a refresh found; the history loads again only when
     /// HEAD or the references changed.
     fn apply_refresh(&mut self, head: Head, sidebar: Sidebar) {
+        // A first read of the sidebar still running may have read older
+        // references; it must not replace these.
+        self.sidebar_result = None;
         let known = self.sidebar.as_ref().and_then(|known| known.as_ref().ok());
         let history_changed =
             head != self.opened.head || known.map(|k| &k.references) != Some(&sidebar.references);
@@ -1038,6 +1050,38 @@ impl Drop for Session {
         self.graph_cancel.cancel();
         self.load_cancel.cancel();
         self.cancel.cancel();
+    }
+}
+
+/// Opens once the first read of the references has ended, however it
+/// ended. Clones share the same state.
+#[derive(Clone, Default)]
+struct ReferencesRead(Arc<(Mutex<bool>, Condvar)>);
+
+impl ReferencesRead {
+    /// Runs `read` and opens, also when `read` panics.
+    fn open_after<T>(&self, read: impl FnOnce() -> T) -> T {
+        struct Opens<'a>(&'a ReferencesRead);
+        impl Drop for Opens<'_> {
+            fn drop(&mut self) {
+                let (open, opened) = &*self.0.0;
+                *open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                opened.notify_all();
+            }
+        }
+        let _opens = Opens(self);
+        read()
+    }
+
+    /// Returns once open.
+    fn wait(&self) {
+        let (open, opened) = &*self.0;
+        let open = open.lock().unwrap_or_else(|e| e.into_inner());
+        drop(
+            opened
+                .wait_while(open, |open| !*open)
+                .unwrap_or_else(|e| e.into_inner()),
+        );
     }
 }
 
@@ -1955,6 +1999,60 @@ mod tests {
         assert_eq!(names, ["HEAD", "main"]);
         let main = session.sidebar().unwrap().as_ref().unwrap().references[0].clone();
         assert_eq!(main.commit, Some(fake_id("f").to_string()));
+    }
+
+    #[test]
+    fn a_commit_made_while_the_tab_is_first_shown_is_not_missed() {
+        let gate = Gate::new();
+        let live = LiveRepo::new();
+        live.set_references(vec![branch("main", "e")]);
+        live.set_lines(five_lines());
+        // The first read of the references already sees the new commit.
+        let backend = backend().with_live(root(), &live).with_first_references(
+            root(),
+            vec![branch("main", "f")],
+            &gate,
+        );
+        let probe = backend.probe();
+        let mut session = session(backend);
+        session.show();
+        // Long enough for a history that does not wait to read the old lines.
+        std::thread::sleep(Duration::from_millis(50));
+        let calls = probe.calls(&root());
+        assert!(
+            !calls.iter().any(|c| c == "history" || c == "count"),
+            "started before the references were read: {calls:?}"
+        );
+        with_new_commit(&live);
+        gate.open();
+        wait_until(&mut session, |s| loaded(s) && s.sidebar().is_some());
+        session.refresh();
+        wait_until(&mut session, |s| s.refresh_result.is_none() && loaded(s));
+        assert_eq!(rows(&session), 6);
+        assert_eq!(session.history().store.id(0), fake_id("f"));
+    }
+
+    #[test]
+    fn a_refresh_done_before_the_first_read_of_the_references_keeps_what_it_read() {
+        let gate = Gate::new();
+        let live = LiveRepo::new();
+        live.set_references(vec![branch("main", "e")]);
+        live.set_lines(five_lines());
+        let backend = backend().with_live(root(), &live).with_first_references(
+            root(),
+            vec![branch("main", "e")],
+            &gate,
+        );
+        let mut session = session(backend);
+        session.show();
+        with_new_commit(&live);
+        session.refresh();
+        wait_until(&mut session, |s| s.sidebar().is_some());
+        gate.open();
+        wait_until(&mut session, |s| s.sidebar_result.is_none() && loaded(s));
+        let main = session.sidebar().unwrap().as_ref().unwrap().references[0].clone();
+        assert_eq!(main.commit, Some(fake_id("f").to_string()));
+        assert_eq!(rows(&session), 6);
     }
 
     #[test]

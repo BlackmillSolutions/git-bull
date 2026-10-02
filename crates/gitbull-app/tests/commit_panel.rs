@@ -4,7 +4,7 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Modifiers, OutputCommand, PointerButton};
+use eframe::egui::{CursorIcon, Event, Modifiers, OutputCommand, PointerButton, Pos2, Rect, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
@@ -13,11 +13,13 @@ use gitbull_core::settings::{Layout, Settings};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::history::CommitLine;
+use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
+use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, fake_id};
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
-use support::{Setup, build, path, settle_window, wait_for_references, window};
+use support::{Setup, build, drag_by, path, settle_window, wait_for_references, window};
 
 fn seconds(text: &str) -> i64 {
     text.parse::<Timestamp>().unwrap().as_second()
@@ -550,4 +552,174 @@ fn choosing_another_commit_closes_the_context_menu_of_a_file() {
             .any(|node| node.accesskit_node().label().as_deref() == Some("Added: two.txt"))
     });
     assert!(harness.query_by_label("Copy path").is_none());
+}
+
+/// The list of changed files, which starts below the divider.
+fn file_list(harness: &Harness<'_, App>) -> Rect {
+    harness.get_by_role_and_label(Role::List, "COMMIT").rect()
+}
+
+/// The divider between the details and the files: the list starts 6
+/// points below it. A press on it takes the divider to the pointer.
+fn divider(harness: &Harness<'_, App>) -> Pos2 {
+    let list = file_list(harness);
+    Pos2::new(list.center().x, list.top() - 6.0)
+}
+
+/// Room for the details to grow and shrink: a panel 500 points high, with
+/// the details 200 high in it.
+fn roomy() -> Layout {
+    Layout {
+        details_height: Some(500.0),
+        commit_details_height: Some(200.0),
+        ..Layout::default()
+    }
+}
+
+#[test]
+fn dragging_the_divider_below_the_details_moves_it_and_keeps_its_height() {
+    let mut harness = open_with(backend(), roomy());
+    select(&mut harness, "Fix the parser");
+    let before = file_list(&harness);
+    let at = divider(&harness);
+    drag_by(&mut harness, at, vec2(0.0, 40.0));
+
+    let after = file_list(&harness);
+    assert!(
+        (after.top() - before.top() - 40.0).abs() < 1.0,
+        "{before:?} {after:?}"
+    );
+    assert!(
+        (after.bottom() - before.bottom()).abs() < 1.0,
+        "{before:?} {after:?}"
+    );
+    let kept = harness.state().settings().layout.commit_details_height;
+    assert!(
+        kept.is_some_and(|height| (height - 240.0).abs() < 1.0),
+        "{kept:?}"
+    );
+}
+
+#[test]
+fn a_saved_height_of_the_details_is_used_at_start() {
+    let tops = [150.0, 200.0].map(|height| {
+        let layout = Layout {
+            commit_details_height: Some(height),
+            ..roomy()
+        };
+        let mut harness = open_with(backend(), layout);
+        select(&mut harness, "Fix the parser");
+        file_list(&harness).top()
+    });
+    assert!((tops[1] - tops[0] - 50.0).abs() < 0.5, "{tops:?}");
+}
+
+#[test]
+fn the_divider_stays_where_it_was_for_a_message_of_one_line() {
+    let long = (1..=20)
+        .map(|n| {
+            format!(
+                "Line {n} of the body.
+"
+            )
+        })
+        .collect::<String>();
+    let backend = backend()
+        .with_content(
+            fake_id("c"),
+            CommitContent {
+                author: person("Ada Lovelace", C_DATE),
+                committer: person("Ada Lovelace", C_DATE),
+                message: format!(
+                    "Fix the parser
+
+{long}"
+                ),
+            },
+        )
+        .with_content(
+            fake_id("a"),
+            CommitContent {
+                author: person("Alan Turing", A_DATE),
+                committer: person("Alan Turing", A_DATE),
+                message: "First commit
+"
+                .to_owned(),
+            },
+        );
+    let mut harness = open_with(backend, roomy());
+    select(&mut harness, "Fix the parser");
+    let long_message = file_list(&harness).top();
+    select(&mut harness, "First commit");
+    wait_until(&mut harness, has_files);
+    assert!((file_list(&harness).top() - long_message).abs() < 0.5);
+}
+
+#[test]
+fn the_divider_keeps_room_for_four_files() {
+    let mut harness = open_with(backend(), roomy());
+    select(&mut harness, "Fix the parser");
+    let at = divider(&harness);
+    drag_by(&mut harness, at, vec2(0.0, 1000.0));
+    let list = file_list(&harness);
+    assert!(list.height() >= 4.0 * 24.0 - 1.0, "{list:?}");
+}
+
+#[test]
+fn the_pointer_over_the_divider_shows_that_it_can_be_dragged() {
+    let mut harness = open_with(backend(), roomy());
+    select(&mut harness, "Fix the parser");
+    let at = divider(&harness);
+    harness.hover_at(at);
+    harness.run();
+    assert_eq!(
+        harness.output().platform_output.cursor_icon,
+        CursorIcon::ResizeVertical
+    );
+}
+
+/// Whether the pointer finds a divider to drag anywhere in the commit
+/// panel below its title.
+fn divider_found(harness: &mut Harness<'_, App>) -> bool {
+    let title = harness.get_by_role_and_label(Role::Label, "COMMIT").rect();
+    let diff = harness.get_by_role_and_label(Role::Label, "DIFF").rect();
+    let x = (title.left() + diff.left()) / 2.0;
+    let mut y = title.bottom();
+    while y < title.top() + 500.0 {
+        harness.hover_at(Pos2::new(x, y));
+        harness.run();
+        if harness.output().platform_output.cursor_icon == CursorIcon::ResizeVertical {
+            return true;
+        }
+        y += 2.0;
+    }
+    false
+}
+
+#[test]
+fn the_row_of_uncommitted_changes_shows_no_divider() {
+    let status = WorkingStatus {
+        unstaged: vec![StatusEntry {
+            kind: StatusKind::Changed(ChangeKind::Modified),
+            path: RepoPath::new("edit.txt"),
+            old_path: None,
+            submodule: false,
+        }],
+        ..WorkingStatus::default()
+    };
+    let mut harness = open_with(backend().with_status(root(), status), roomy());
+    wait_until(&mut harness, |h| {
+        commit_row(h, "Uncommitted changes").is_some()
+    });
+    select(&mut harness, "Fix the parser");
+    assert!(divider_found(&mut harness), "a commit shows the divider");
+
+    // A click on the row opens the File status view; the keyboard only
+    // selects it.
+    harness.key_press(eframe::egui::Key::ArrowUp);
+    harness.run();
+    wait_until(&mut harness, |h| {
+        h.query_by_label("Open File status").is_some()
+    });
+    assert!(!divider_found(&mut harness));
 }

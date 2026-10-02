@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Modifiers, MouseWheelUnit, Rect, TouchPhase, vec2};
+use eframe::egui::{Event, Modifiers, MouseWheelUnit, Pos2, Rect, TouchPhase, Vec2, vec2};
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder};
 use gitbull_app::app::{App, GitChecker, GitStatus, Parts, Picker};
@@ -350,6 +350,38 @@ pub fn wait_for_row(harness: &mut Harness<'_, App>, prefix: &str) {
         harness.step();
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// Drags with the primary button from `at` by `by` points, in steps as a
+/// hand does, and lets go.
+pub fn drag_by(harness: &mut Harness<'_, App>, at: Pos2, by: Vec2) {
+    harness.hover_at(at);
+    harness.drag_at(at);
+    harness.run();
+    for step in 1..=4 {
+        harness.hover_at(at + by * step as f32 / 4.0);
+        harness.run();
+    }
+    harness.drop_at(at + by);
+    harness.run();
+}
+
+/// The title of a column in the row of headers that holds `Description`;
+/// the commit panel names some of its fields as the columns are named.
+pub fn column_header(harness: &Harness<'_, App>, title: &str) -> Rect {
+    let row = harness.get_by_label("Description").rect().center().y;
+    harness
+        .get_all_by_label(title)
+        .map(|node| node.rect())
+        .find(|rect| (rect.center().y - row).abs() < 2.0)
+        .unwrap_or_else(|| panic!("no header {title}"))
+}
+
+/// The edge left of the column `title` in the row of headers, where it can
+/// be dragged: its title stands 4 points right of it.
+pub fn edge_left_of(harness: &Harness<'_, App>, title: &str) -> Pos2 {
+    let header = column_header(harness, title);
+    Pos2::new(header.left() - 4.0, header.center().y)
 }
 
 /// The largest burst of the touchpad the probe recorded, in points.
