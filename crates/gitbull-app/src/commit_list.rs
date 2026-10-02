@@ -24,7 +24,7 @@ use crate::graph_view::{self, LANE_WIDTH, Shape as GraphShape};
 use crate::i18n::Msg;
 use crate::icons;
 use crate::theme::{Palette, Rgb};
-use crate::ui::COMMIT_LIST;
+use crate::ui::{COMMIT_LIST, focus_area};
 use crate::virtual_list::VirtualList;
 
 /// `YYYY-MM-DD HH:MM` of `seconds` in `zone`, the local time zone.
@@ -157,6 +157,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         matched: app.texts.text(Msg::SearchMatch),
     };
     let uncommitted_text = app.texts.text(Msg::HistoryUncommitted);
+    let name = app.texts.text(Msg::ViewHistory);
     let empty = app.texts.text(Msg::HistoryEmpty);
     let copy_label = app.texts.text(Msg::CopyFullHash);
     let titles = [
@@ -246,6 +247,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     if list.commits == 0 && matches!(session.history().state, LoadState::Loaded) {
         ui.add_space(24.0);
         ui.vertical_centered(|ui| ui.label(RichText::new(empty).weak()));
+        // The list stays an area that Tab moves to.
+        focus_area(ui, COMMIT_LIST, &name);
         return;
     }
     let height = f64::from(ui.available_height());
@@ -269,7 +272,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         .unwrap_or(1);
     let lanes = graph_view::shown_lanes(graph_width, needed);
 
-    let output = VirtualList::new(Id::new(COMMIT_LIST), rows).show(
+    // Its rows are rows of a grid, with the columns of the header.
+    let output = VirtualList::new(Id::new(COMMIT_LIST), Role::Grid, name, rows).show(
         ui,
         &mut view.commits,
         |ui, row, selected| {

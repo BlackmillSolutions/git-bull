@@ -9,10 +9,12 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2};
+use eframe::egui::{Event, Id, Key, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_app::search_view::SEARCH_RESULTS;
+use gitbull_app::ui::AREA_SIDEBAR;
 use gitbull_core::settings::Settings;
 use gitbull_git::content::CommitContent;
 use gitbull_git::history::CommitLine;
@@ -20,7 +22,7 @@ use gitbull_git::object_id::ObjectId;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_testkit::{FakeBackend, HistoryFeed, Probe, commit_line, fake_id};
-use support::{Setup, build, path, settle_window, window};
+use support::{Setup, build, path, settle_window, unnamed_tab_stops, window};
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -432,6 +434,43 @@ fn a_search_without_matches_says_so_in_the_search_view() {
     let search = sidebar_item(&harness, "Search");
     click_at(&mut harness, search);
     wait_until(&mut harness, |h| text_shown(h, "Nothing was found."));
+}
+
+fn focused(harness: &Harness<'_, App>) -> Option<Id> {
+    harness.ctx.memory(|memory| memory.focused())
+}
+
+/// The areas of the Search view are the sidebar and the matches; the
+/// commit list and the panels below it are not drawn there.
+#[test]
+fn tab_moves_between_the_sidebar_and_the_matches_of_the_search_view() {
+    let backend = backend().with_matches(SearchKind::Message, "work", ids(&["x", "c"]));
+    let mut harness = open(backend);
+    type_text(&mut harness, "work");
+    wait_until(&mut harness, |h| text_shown(h, "2 matches"));
+    let search = sidebar_item(&harness, "Search");
+    click_at(&mut harness, search);
+    wait_until(&mut harness, |h| {
+        h.query_all_by_role(Role::ListItem).count() == 2
+    });
+    assert_eq!(focused(&harness), Some(Id::new(AREA_SIDEBAR)));
+
+    let mut unnamed = unnamed_tab_stops(&mut harness, 1);
+    assert_eq!(focused(&harness), Some(Id::new(SEARCH_RESULTS)));
+    unnamed.extend(unnamed_tab_stops(&mut harness, 1));
+    assert_eq!(focused(&harness), Some(Id::new(AREA_SIDEBAR)));
+    assert!(unnamed.is_empty(), "{unnamed:#?}");
+}
+
+#[test]
+fn tab_in_the_search_view_without_matches_reaches_only_named_areas() {
+    let mut harness = open(backend());
+    type_text(&mut harness, "nothing");
+    let search = sidebar_item(&harness, "Search");
+    click_at(&mut harness, search);
+    wait_until(&mut harness, |h| text_shown(h, "Nothing was found."));
+    let unnamed = unnamed_tab_stops(&mut harness, 4);
+    assert!(unnamed.is_empty(), "{unnamed:#?}");
 }
 
 #[test]

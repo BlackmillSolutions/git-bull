@@ -1,10 +1,11 @@
 //! The list for millions of rows, driven like a user would.
 
+use eframe::egui::accesskit::Role;
 use eframe::egui::{
     Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, TouchPhase, Vec2, pos2, vec2,
 };
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::virtual_list::{ListState, ROW_HEIGHT, VirtualList};
 
 const ROWS: u64 = 2_000_000;
@@ -30,10 +31,13 @@ fn harness(rows: u64) -> Harness<'static, Test> {
         .with_max_steps(120)
         .build_ui_state(
             |ui, test: &mut Test| {
-                let output =
-                    VirtualList::new("list", test.rows).show(ui, &mut test.list, |ui, row, _| {
+                let output = VirtualList::new("list", Role::List, "Numbers", test.rows).show(
+                    ui,
+                    &mut test.list,
+                    |ui, row, _| {
                         ui.label(format!("Row {row}"));
-                    });
+                    },
+                );
                 test.rect = output.response.rect;
                 test.clicked.extend(output.clicked);
             },
@@ -87,6 +91,15 @@ fn rows_are_drawn_exactly_in_place_at_row_one_and_a_half_million() {
         center_y(&harness, "Row 1500005"),
         top + 115.0 + ROW_HEIGHT / 2.0
     );
+}
+
+/// The list takes the focus, so assistive technology announces it.
+#[test]
+fn the_list_tells_assistive_technology_what_it_is_and_its_name() {
+    let mut harness = harness(ROWS);
+    harness.run();
+    let list = harness.get_by_label("Numbers");
+    assert_eq!(list.accesskit_node().role(), Role::List);
 }
 
 #[test]
@@ -264,30 +277,28 @@ fn several_presses_in_one_frame_move_several_rows() {
 
 #[test]
 fn arrow_keys_stay_in_the_list_when_other_widgets_can_take_focus() {
-    let mut harness = Harness::builder()
-        .with_size(vec2(400.0, 400.0))
-        .build_ui_state(
-            |ui, test: &mut Test| {
-                let _ = ui.button("Above");
-                ui.allocate_ui(vec2(380.0, 240.0), |ui| {
-                    let output = VirtualList::new("list", test.rows).show(
-                        ui,
-                        &mut test.list,
-                        |ui, row, _| {
-                            ui.label(format!("Row {row}"));
-                        },
-                    );
-                    test.rect = output.response.rect;
-                });
-                let _ = ui.button("Below");
-            },
-            Test {
-                list: ListState::default(),
-                rows: ROWS,
-                rect: Rect::NOTHING,
-                clicked: Vec::new(),
-            },
-        );
+    let mut harness =
+        Harness::builder()
+            .with_size(vec2(400.0, 400.0))
+            .build_ui_state(
+                |ui, test: &mut Test| {
+                    let _ = ui.button("Above");
+                    ui.allocate_ui(vec2(380.0, 240.0), |ui| {
+                        let output = VirtualList::new("list", Role::List, "Numbers", test.rows)
+                            .show(ui, &mut test.list, |ui, row, _| {
+                                ui.label(format!("Row {row}"));
+                            });
+                        test.rect = output.response.rect;
+                    });
+                    let _ = ui.button("Below");
+                },
+                Test {
+                    list: ListState::default(),
+                    rows: ROWS,
+                    rect: Rect::NOTHING,
+                    clicked: Vec::new(),
+                },
+            );
     click(&mut harness, 0.0);
     for _ in 0..3 {
         harness.key_press(Key::ArrowDown);

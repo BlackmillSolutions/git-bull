@@ -7,17 +7,18 @@ use std::slice;
 use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
 use eframe::egui::{
-    CursorIcon, Event, FontFamily, Key, Modifiers, PointerButton, Pos2, Rect, ResizeDirection,
+    CursorIcon, Event, FontFamily, Id, Key, Modifiers, PointerButton, Pos2, Rect, ResizeDirection,
     ViewportCommand, ViewportId, pos2, vec2,
 };
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_app::ui::COMMIT_LIST;
 use gitbull_app::{fonts, icons};
 use gitbull_core::settings::{Layout, Settings};
 use support::{
-    Answer, Scripted, Setup, app_with_open_repository, build, window, window_at_60_fps,
-    window_at_60_fps_on, window_on,
+    Answer, Scripted, Setup, app_with_open_repository, build, unnamed_tab_stops, window,
+    window_at_60_fps, window_at_60_fps_on, window_on,
 };
 
 #[test]
@@ -32,8 +33,8 @@ fn history_view_shows_every_area() {
     assert!(tab.bottom() <= open.top(), "tab {tab:?}, Open {open:?}");
     harness.get_by_label("WORKSPACE"); // sidebar
     harness.get_by_label("Description"); // commit list
-    harness.get_by_label("COMMIT"); // commit panel
-    harness.get_by_label("DIFF"); // diff panel
+    harness.get_by_role_and_label(Role::Label, "COMMIT"); // commit panel
+    harness.get_by_role_and_label(Role::Label, "DIFF"); // diff panel
     harness.get_by_label("Git 2.55.0"); // status bar
 }
 
@@ -44,8 +45,8 @@ fn commit_and_diff_panels_sit_side_by_side_below_the_commit_list() {
     harness.run();
 
     let list = harness.get_by_label("Description").rect();
-    let commit = harness.get_by_label("COMMIT").rect();
-    let diff = harness.get_by_label("DIFF").rect();
+    let commit = harness.get_by_role_and_label(Role::Label, "COMMIT").rect();
+    let diff = harness.get_by_role_and_label(Role::Label, "DIFF").rect();
     assert!(
         commit.top() > list.bottom(),
         "commit panel {commit:?} below list {list:?}"
@@ -794,4 +795,33 @@ fn tab_through_the_title_bar_reaches_only_widgets_that_say_what_they_are() {
         }
     }
     panic!("Tab never reached the search field");
+}
+
+/// Once round the window of a repository without commits: past the stops
+/// before the areas, and then round the areas, whose commit list shows
+/// only that there are no commits.
+#[test]
+fn every_widget_tab_reaches_has_a_role_and_a_name() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    let unnamed = unnamed_tab_stops(&mut harness, 40);
+    assert!(unnamed.is_empty(), "{unnamed:#?}");
+}
+
+/// The commit list stays an area while it has no commits to list, so that
+/// Tab reaches what it says instead.
+#[test]
+fn tab_reaches_the_commit_list_of_a_repository_without_commits() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    for _ in 0..40 {
+        harness.key_press(Key::Tab);
+        harness.run();
+        if harness.ctx.memory(|memory| memory.focused()) == Some(Id::new(COMMIT_LIST)) {
+            return;
+        }
+    }
+    panic!("Tab never reached the commit list");
 }

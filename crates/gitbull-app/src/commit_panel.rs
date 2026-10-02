@@ -28,6 +28,8 @@ use crate::virtual_list::VirtualList;
 
 /// The texts of the panel, read before the tab is borrowed.
 struct Texts {
+    /// The title of the panel, which names its list of files.
+    title: String,
     commit: String,
     parents: String,
     author: String,
@@ -46,6 +48,7 @@ impl Texts {
     fn new(app: &App) -> Texts {
         let text = |msg| app.texts.text(msg);
         Texts {
+            title: text(Msg::PanelCommit),
             commit: text(Msg::DetailCommit),
             parents: text(Msg::DetailParents),
             author: text(Msg::DetailAuthor),
@@ -363,15 +366,17 @@ fn files(
         ChangedFiles::Loaded(files) => files,
     };
 
-    let output = VirtualList::new(Id::new(AREA_COMMIT_PANEL), files.len() as u64).show(
-        ui,
-        &mut view.files,
-        |ui, row, selected| {
-            if let Some(change) = files.get(row as usize) {
-                file_row(ui, change, selected, texts, palette);
-            }
-        },
+    let list = VirtualList::new(
+        Id::new(AREA_COMMIT_PANEL),
+        Role::List,
+        texts.title.as_str(),
+        files.len() as u64,
     );
+    let output = list.show(ui, &mut view.files, |ui, row, selected| {
+        if let Some(change) = files.get(row as usize) {
+            file_row(ui, change, selected, texts, palette);
+        }
+    });
 
     let path_of = |row: u64| {
         files

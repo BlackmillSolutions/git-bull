@@ -45,6 +45,8 @@ notice-not-in-history = The commit { $commit } exists but is not part of the dis
 ## Search
 
 search-hint = Search commits…
+# The name of the choice of what to search, for screen readers.
+search-mode = Search by
 search-mode-hash = Hash
 search-mode-message = Message
 search-mode-author = Author
@@ -83,6 +85,8 @@ sidebar-tags = TAGS
 sidebar-remotes = REMOTES
 sidebar-stashes = STASHES
 sidebar-submodules = SUBMODULES
+# The name of the sidebar, for screen readers.
+sidebar = Sidebar
 view-history = History
 view-file-status = File status
 view-search = Search

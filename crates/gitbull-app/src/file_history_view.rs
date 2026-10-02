@@ -98,9 +98,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         .default_size(height * 0.55)
         .size_range(80.0..=(height - 80.0).max(80.0))
         .show(ui, |ui| {
-            section_title(ui, diff_title);
+            section_title(ui, diff_title.clone());
             if !diff_view::show(app, ui, palette, Pane::FileHistory) {
-                focus_area(ui, AREA_DIFF);
+                focus_area(ui, AREA_DIFF, &diff_title);
             }
         });
 
@@ -124,7 +124,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             }
             HistoryState::Failed(_) => {}
         }
-        focus_area(ui, FILE_HISTORY_LIST);
+        focus_area(ui, FILE_HISTORY_LIST, &title);
         return;
     }
     // The newest commit is chosen once it has arrived.
@@ -157,7 +157,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             }
         })
         .collect();
-    VirtualList::new(Id::new(FILE_HISTORY_LIST), count).show(
+    VirtualList::new(Id::new(FILE_HISTORY_LIST), Role::List, title, count).show(
         ui,
         &mut view.file_commits,
         |ui, row, selected| {

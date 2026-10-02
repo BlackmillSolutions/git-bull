@@ -29,6 +29,8 @@ pub(crate) const FONT_SIZE: f32 = 12.5;
 
 /// The texts of the panel, read before the tab is borrowed.
 struct Texts {
+    /// The title of the panel, which names the diff.
+    title: String,
     missing_content: String,
     load_all: String,
     truncated: String,
@@ -49,6 +51,7 @@ impl Texts {
         let mut args = FluentArgs::new();
         args.set("lines", LINE_LIMIT);
         Texts {
+            title: text(Msg::PanelDiff),
             missing_content: text(Msg::DiffMissingContent),
             load_all: text(Msg::DiffLoadAll),
             truncated: app.texts.text_with(Msg::DiffTruncated, Some(&args)),
@@ -319,6 +322,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
     // top and take their own clicks.
     let area = ui.available_rect_before_wrap();
     let background = ui.interact(area, Id::new(AREA_DIFF), Sense::click());
+    background.widget_info(|| WidgetInfo::labeled(WidgetType::Panel, true, &texts.title));
     if background.clicked() {
         background.request_focus();
     }

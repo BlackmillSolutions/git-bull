@@ -412,6 +412,25 @@ impl Scripted {
     }
 }
 
+/// Presses Tab `presses` times and describes each widget it focused that
+/// does not tell assistive technology what it is and what it is called: a
+/// screen reader announces whatever Tab focuses.
+pub fn unnamed_tab_stops(harness: &mut Harness<'_, App>, presses: usize) -> Vec<String> {
+    let mut unnamed = Vec::new();
+    for press in 1..=presses {
+        harness.key_press(eframe::egui::Key::Tab);
+        harness.run();
+        let focused = harness.get_by(|node| node.is_focused_in_tree());
+        let node = focused.accesskit_node();
+        let label = node.label().unwrap_or_default();
+        if node.role() == Role::Unknown || label.trim().is_empty() {
+            let id = harness.ctx.memory(|memory| memory.focused());
+            unnamed.push(format!("Tab {press}: {:?} {label:?} {id:?}", node.role()));
+        }
+    }
+    unnamed
+}
+
 /// Every rectangle drawn with the focus ring of either appearance.
 pub fn focus_rings(output: &eframe::egui::FullOutput) -> Vec<eframe::egui::Rect> {
     focus_strokes(output)

@@ -22,7 +22,9 @@ use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, Gate, LiveRepo, Probe, commit_line, fake_id};
-use support::{Setup, build, path, settle_window, turn_wheel, window, window_at_60_fps};
+use support::{
+    Setup, build, path, settle_window, turn_wheel, unnamed_tab_stops, window, window_at_60_fps,
+};
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -268,6 +270,17 @@ fn each_file_is_listed_in_its_group_with_its_marker() {
             "Untracked: new/two.txt",
         ]
     );
+}
+
+/// Twice round the areas from the sidebar, which has the focus: the
+/// files, the diff and the sidebar again.
+#[test]
+fn every_area_of_the_file_status_has_a_role_and_a_name() {
+    let mut harness = open_with(backend().with_status(root(), mixed()));
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    let unnamed = unnamed_tab_stops(&mut harness, 6);
+    assert!(unnamed.is_empty(), "{unnamed:#?}");
 }
 
 #[test]
