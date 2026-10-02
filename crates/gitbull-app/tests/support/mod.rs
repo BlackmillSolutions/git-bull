@@ -600,3 +600,34 @@ pub fn text_colours(output: &eframe::egui::FullOutput, text: &str) -> Vec<eframe
     }
     found
 }
+
+/// The pieces of text drawn on a background of their own, such as the
+/// changed words of the diff, with that background.
+pub fn marked_texts(output: &eframe::egui::FullOutput) -> Vec<(String, eframe::egui::Color32)> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, found: &mut Vec<(String, eframe::egui::Color32)>) {
+        match shape {
+            Shape::Text(shape) => {
+                let job = &shape.galley.job;
+                for section in &job.sections {
+                    let background = section.format.background;
+                    if background != eframe::egui::Color32::TRANSPARENT {
+                        let range = section.byte_range.start.0..section.byte_range.end.0;
+                        found.push((job.text[range].to_owned(), background));
+                    }
+                }
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &mut found);
+    }
+    found
+}

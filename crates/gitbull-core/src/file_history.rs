@@ -201,6 +201,12 @@ impl FileHistory {
     pub fn highlighting(&self) -> Option<&Highlighting> {
         self.pane.highlighting()
     }
+
+    /// Whether the versions of the diff shown are being read or
+    /// highlighted.
+    pub fn is_highlighting(&self) -> bool {
+        self.pane.is_highlighting()
+    }
 }
 
 impl Drop for FileHistory {

@@ -10,17 +10,21 @@ use eframe::egui::{
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
-use gitbull_core::settings::Settings;
+use gitbull_app::theme::LIGHT;
+use gitbull_app::ui::color;
+use gitbull_core::details::DiffState;
+use gitbull_core::diff_document::DiffDocument;
+use gitbull_core::settings::{Settings, ThemeSetting};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
 use gitbull_git::history::CommitLine;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
-use gitbull_testkit::{FakeBackend, LiveRepo, Probe, fake_id};
+use gitbull_testkit::{FakeBackend, Gate, LiveRepo, Probe, fake_id};
 use support::{
-    BURST, Setup, build, commit_list_scroll, find_row, long_history, path, settle_window,
-    turn_wheel, unnamed_tab_stops, wait_for_row, window, window_at_60_fps,
+    BURST, Setup, build, commit_list_scroll, find_row, long_history, marked_texts, path,
+    settle_window, turn_wheel, unnamed_tab_stops, wait_for_row, window, window_at_60_fps,
 };
 
 fn root() -> std::path::PathBuf {
@@ -969,4 +973,192 @@ fn the_lines_of_a_long_diff_fill_it_down_to_its_bottom() {
         lowest >= status_bar - 2.0 * 18.0,
         "the lines end at {lowest}, the status bar begins at {status_bar}"
     );
+}
+
+// The comforts of the diff (change `diff-comforts`).
+
+const TOTALS: &str = "src/total.rs";
+
+/// Line `n` of both versions where nothing changed.
+fn numbered(n: u32) -> String {
+    format!("let line_{n} = {n};")
+}
+
+/// What a commit changes in one line: its text before and after.
+struct Change {
+    at: u32,
+    old: &'static str,
+    new: &'static str,
+}
+
+const TOTAL: Change = Change {
+    at: 20,
+    old: "let total = price * count;",
+    new: "let total = price * amount;",
+};
+
+/// The hunk of `change` in a file of `lines` lines, with three lines of
+/// context on each side.
+fn change_hunk(change: &Change, lines: u32) -> Hunk {
+    use LineKind::*;
+    let first = change.at.saturating_sub(3).max(1);
+    let last = (change.at + 3).min(lines);
+    let context = |n: u32| line(Context, Some(n), Some(n), &numbered(n));
+    let mut hunk_lines: Vec<DiffLine> = (first..change.at).map(context).collect();
+    hunk_lines.push(line(Removed, Some(change.at), None, change.old));
+    hunk_lines.push(line(Added, None, Some(change.at), change.new));
+    hunk_lines.extend((change.at + 1..=last).map(context));
+    let count = last - first + 1;
+    Hunk {
+        header: format!("@@ -{first},{count} +{first},{count} @@"),
+        old_start: first,
+        new_start: first,
+        lines: hunk_lines,
+    }
+}
+
+/// The old or the new version of a file of `lines` lines with `changes`.
+fn version(lines: u32, changes: &[Change], new: bool) -> Vec<u8> {
+    (1..=lines)
+        .map(|n| match changes.iter().find(|change| change.at == n) {
+            Some(change) if new => change.new.to_owned(),
+            Some(change) => change.old.to_owned(),
+            None => numbered(n),
+        })
+        .map(|line| line + "\n")
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// Commit w changes the lines `changes` of `TOTALS`, a Rust file of
+/// `lines` lines.
+fn totals_backend(lines: u32, changes: &[Change]) -> FakeBackend {
+    let w = fake_id("w");
+    let mut diff = diff(
+        Some(TOTALS),
+        Some(TOTALS),
+        Content::Text(changes.iter().map(|c| change_hunk(c, lines)).collect()),
+    );
+    diff.old_blob = Some(fake_id("old-totals"));
+    diff.new_blob = Some(fake_id("new-totals"));
+    FakeBackend::default()
+        .with_repository(root())
+        .with_history(
+            root(),
+            vec![CommitLine {
+                timestamp: 1_767_268_800,
+                id: w,
+                parents: Vec::new(),
+            }],
+        )
+        .with_content(
+            w,
+            CommitContent {
+                author: person(),
+                committer: person(),
+                message: "Change the totals\n".to_owned(),
+            },
+        )
+        .with_changes(w, vec![change(ChangeKind::Modified, TOTALS, None)])
+        .with_diff(w, TOTALS, diff)
+        .with_blob(fake_id("old-totals"), &version(lines, changes, false))
+        .with_blob(fake_id("new-totals"), &version(lines, changes, true))
+}
+
+/// The window with the diff of commit w, in the light theme.
+fn open_totals(fake: FakeBackend) -> Harness<'static, App> {
+    let test = build(Setup {
+        settings: Settings {
+            theme: ThemeSetting::Light,
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: fake,
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    wait_until(&mut harness, |h| {
+        row_of(h, Role::Row, "Change the totals").is_some()
+    });
+    let at = row_of(&harness, Role::Row, "Change the totals")
+        .unwrap()
+        .center();
+    click(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |h| !diff_rows(h).is_empty());
+    harness
+}
+
+/// The diff document of the commit details.
+fn document_of<T>(harness: &Harness<'_, App>, read: impl Fn(&DiffDocument) -> T) -> T {
+    let session = harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .expect("a session");
+    match session.details().diff() {
+        DiffState::Loaded(document) => read(document),
+        other => panic!("no diff: {other:?}"),
+    }
+}
+
+/// Whether the colours of the diff of the commit details have arrived.
+fn coloured(harness: &Harness<'_, App>) -> bool {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| session.details().highlighting().is_some())
+}
+
+#[test]
+fn the_changed_words_are_drawn_in_the_colours_of_the_palette() {
+    let mut harness = open_totals(totals_backend(40, &[TOTAL]));
+    wait_until(&mut harness, |h| !marked_texts(h.output()).is_empty());
+    harness.run();
+    let marked = marked_texts(harness.output());
+    assert_eq!(
+        marked,
+        [
+            ("count".to_owned(), color(LIGHT.diff_removed_word)),
+            ("amount".to_owned(), color(LIGHT.diff_added_word)),
+        ]
+    );
+}
+
+#[test]
+fn the_marks_follow_a_diff_shown_without_them_and_wait_for_no_colours() {
+    let gate = Gate::new();
+    let mut harness = open_totals(totals_backend(40, &[TOTAL]).with_blob_gate(&gate));
+    if !document_of(&harness, DiffDocument::has_marks) {
+        assert!(marked_texts(harness.output()).is_empty());
+    }
+    wait_until(&mut harness, |h| !marked_texts(h.output()).is_empty());
+    // The versions are still held back: the marks did not wait for them.
+    assert!(!coloured(&harness));
+    gate.open();
+    wait_until(&mut harness, coloured);
+}
+
+#[test]
+fn drawing_frames_without_a_change_does_not_build_the_rows_again() {
+    let mut harness = open_totals(totals_backend(40, &[TOTAL]));
+    wait_until(&mut harness, |h| {
+        coloured(h) && document_of(h, DiffDocument::has_text)
+    });
+    harness.run();
+    let builds = document_of(&harness, DiffDocument::builds);
+    let over_the_diff = row_of(&harness, Role::Code, "Unchanged, 17")
+        .unwrap()
+        .center();
+    harness.hover_at(over_the_diff);
+    for _ in 0..10 {
+        turn_wheel(&mut harness, -1.0, Modifiers::NONE);
+        harness.step();
+    }
+    harness.run();
+    assert_eq!(document_of(&harness, DiffDocument::builds), builds);
 }

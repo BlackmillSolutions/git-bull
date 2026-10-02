@@ -204,9 +204,13 @@ indentation.
 background colour in their `TextFormat`, over the background of the line,
 while the syntax colours stay. Every palette gets `diff_added_word` and
 `diff_removed_word`; their values are chosen so that the tests of
-decision 9 pass: text and muted text on them at 4.5:1, also under the
-selection, and a difference in CIELAB L* of at least 8 from `diff_added`
-and `diff_removed`.
+decision 9 pass: text on them at 4.5:1, also under the selection, and a
+difference in CIELAB L* of at least 8 from `diff_added` and
+`diff_removed`. Muted text is never drawn on them: the marks of invisible
+characters inside a changed word, and a changed line ending, take the
+text colour (decision 5). In the light palettes a background 8 darker
+than its line leaves too little contrast for muted text, as the
+implementation found.
 
 ### 5. Line endings and invisible characters
 
@@ -226,10 +230,11 @@ When invisible characters are shown, `line_job` lays the line out from a
 copy in which each space is `·` and each tab `→` followed by spaces to the
 width a tab has now, and moves the byte ranges of the spans and the marks
 onto that copy. The copy is built in one pass over the characters, and only
-for the rows in view. The end of the line follows as `↵` or `␍↵` in the
-muted text colour, marked like a changed word when decision 3 marked the
-line ending. The accessible label of the row and every copy keep using
-`text`.
+for the rows in view. The end of the line follows as `↵` or `␍↵`. The
+marks `·`, `→`, `↵` and `␍↵` are drawn in the muted text colour; inside a
+changed word, and when decision 3 marked the line ending, they take the
+text colour on the background of a changed word. The accessible label of
+the row and every copy keep using `text`.
 
 The choice is a new setting `show_invisibles`, read with `or_default`
 like `system_title_bar`, set through `App::set_show_invisibles` and an
@@ -256,17 +261,24 @@ buttons push the same actions. `apply` stores the request in
 for `next_hunk` or `previous_hunk` of the first visible row and lets
 `rows_area` scroll there.
 
-`components::rows_area` gets an optional row to scroll to, which it turns
-into a vertical offset of the `ScrollArea` (the row times the row height),
-and returns the first visible row and whether the area can scroll further
-down. The diff keeps that answer of the last frame to enable or disable its
+`components::rows_area` gets a variant `rows_area_in` that places its rows
+by a `RowLayout` (the top of a row, and the row at a height, both without
+work that grows with the number of rows), takes an optional row to scroll
+to, which it turns into a vertical offset of the `ScrollArea` (the top of
+the row), and returns the first visible row and whether the area can
+scroll further down. The diff keeps that answer of the last frame to enable or disable its
 buttons and to ignore F7 and Shift+F7 when there is nowhere to go. The
 lists, which also use `rows_area`, pass no row and are unaffected.
 
 ### 8. Gaps, the selection and the gutter
 
-A `Gap` row shows "⋯ N hidden lines" and the offers of `gaps()` as icon
-buttons: "Show 20 lines after the previous hunk", "Show 20 lines before
+A `Gap` row shows "N hidden lines" and the offers of `gaps()` as icon
+buttons, flush right in the columns of the line numbers. It is
+`SHAPE.target` + 4 points high instead of 18, so that each offer has a
+click target of 24 by 24 points as the design system asks; the area of
+rows finds its rows through a `RowLayout`, in which the rows of the gaps,
+which the document prepares, are the only taller ones (decision 7). The
+offers are "Show 20 lines after the previous hunk", "Show 20 lines before
 the next hunk", or "Show all N lines". Without the text of the new version
 it shows the number only, with a tooltip that the file is too large. A
 click calls `expand` on the pane through the session, like `load_whole`.

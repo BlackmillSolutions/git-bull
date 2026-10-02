@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gitbull_core::diff_document::RowKey;
 use gitbull_core::git_setup::GitCheck;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
@@ -194,8 +195,9 @@ pub(crate) enum FileAction {
 /// What a diff panel keeps for the diff it shows.
 #[derive(Default)]
 pub(crate) struct DiffView {
-    /// The rows selected, from where the selection began to where it ends.
-    pub(crate) selection: Option<(usize, usize)>,
+    /// The lines selected, from where the selection began to where it
+    /// ends, by keys that stay with their lines when lines are revealed.
+    pub(crate) selection: Option<(RowKey, RowKey)>,
     /// The diff the selection belongs to.
     pub(crate) key: Option<DiffKey>,
 }

@@ -73,6 +73,10 @@ pub struct Palette {
     pub diff_added_marker: Rgb,
     /// The marker `-` of a removed line.
     pub diff_removed_marker: Rgb,
+    /// The background of a changed word in an added line.
+    pub diff_added_word: Rgb,
+    /// The background of a changed word in a removed line.
+    pub diff_removed_word: Rgb,
     pub diff_hunk: Rgb,
     pub badge_head: Rgb,
     pub badge_branch: Rgb,
@@ -177,6 +181,8 @@ pub const LIGHT: Palette = Palette {
     diff_removed: Rgb(0xff, 0xeb, 0xe9),
     diff_added_marker: Rgb(0x16, 0x70, 0x2e),
     diff_removed_marker: Rgb(0xc4, 0x20, 0x2b),
+    diff_added_word: Rgb(0xb1, 0xde, 0xbc),
+    diff_removed_word: Rgb(0xf4, 0xc5, 0xc5),
     diff_hunk: Rgb(0xdd, 0xf4, 0xff),
     badge_head: Rgb(0x09, 0x69, 0xda),
     badge_branch: Rgb(0x1a, 0x7f, 0x37),
@@ -226,6 +232,8 @@ pub const DARK: Palette = Palette {
     diff_removed: Rgb(0x42, 0x1b, 0x1e),
     diff_added_marker: Rgb(0x56, 0xd3, 0x64),
     diff_removed_marker: Rgb(0xff, 0x8a, 0x80),
+    diff_added_word: Rgb(0x1e, 0x52, 0x2b),
+    diff_removed_word: Rgb(0x65, 0x30, 0x30),
     diff_hunk: Rgb(0x12, 0x2d, 0x42),
     badge_head: Rgb(0x58, 0xa6, 0xff),
     badge_branch: Rgb(0x3f, 0xb9, 0x50),
@@ -256,6 +264,8 @@ pub const LIGHT_RED_GREEN: Palette = Palette {
     diff_removed: Rgb(0xff, 0xe7, 0xcc),
     diff_added_marker: Rgb(0x0b, 0x5c, 0xad),
     diff_removed_marker: Rgb(0x9c, 0x45, 0x00),
+    diff_added_word: Rgb(0xb0, 0xcc, 0xee),
+    diff_removed_word: Rgb(0xea, 0xc5, 0xa2),
     badge_head: Rgb(0x0b, 0x5c, 0xad),
     badge_branch: Rgb(0x00, 0x70, 0x4f),
     badge_remote: Rgb(0x9c, 0x45, 0x00),
@@ -284,6 +294,8 @@ pub const DARK_RED_GREEN: Palette = Palette {
     diff_removed: Rgb(0x3d, 0x2a, 0x0c),
     diff_added_marker: Rgb(0x5a, 0xa9, 0xff),
     diff_removed_marker: Rgb(0xff, 0xa9, 0x4d),
+    diff_added_word: Rgb(0x1e, 0x43, 0x6d),
+    diff_removed_word: Rgb(0x5f, 0x40, 0x17),
     badge_head: Rgb(0x5a, 0xa9, 0xff),
     badge_branch: Rgb(0x56, 0xb4, 0xe9),
     badge_remote: Rgb(0xe6, 0x9f, 0x00),
@@ -313,6 +325,8 @@ pub const LIGHT_BLUE_YELLOW: Palette = Palette {
     diff_removed: Rgb(0xff, 0xe3, 0xe3),
     diff_added_marker: Rgb(0x0b, 0x5c, 0xad),
     diff_removed_marker: Rgb(0xc4, 0x20, 0x2b),
+    diff_added_word: Rgb(0xb0, 0xcc, 0xee),
+    diff_removed_word: Rgb(0xf3, 0xbd, 0xbf),
     badge_head: Rgb(0x0b, 0x5c, 0xad),
     badge_branch: Rgb(0x0e, 0x7c, 0x86),
     badge_remote: Rgb(0xc4, 0x20, 0x2b),
@@ -341,6 +355,8 @@ pub const DARK_BLUE_YELLOW: Palette = Palette {
     diff_removed: Rgb(0x42, 0x1b, 0x1e),
     diff_added_marker: Rgb(0x5a, 0xa9, 0xff),
     diff_removed_marker: Rgb(0xff, 0x8a, 0x80),
+    diff_added_word: Rgb(0x1e, 0x43, 0x6d),
+    diff_removed_word: Rgb(0x65, 0x30, 0x30),
     badge_head: Rgb(0x5a, 0xa9, 0xff),
     badge_branch: Rgb(0x39, 0xc5, 0xcf),
     badge_remote: Rgb(0xff, 0x7b, 0x72),
@@ -441,7 +457,7 @@ pub fn portal_appearance(reply: &str) -> Option<Appearance> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vision::{Deficiency, seen_difference};
+    use crate::vision::{Deficiency, lab, seen_difference};
 
     #[test]
     fn portal_reply_asking_for_dark_is_dark() {
@@ -630,6 +646,44 @@ mod tests {
             );
         }
         pairs.assert_none();
+    }
+
+    #[test]
+    fn changed_words_stand_out_from_their_line_and_keep_text_readable() {
+        let selected = f64::from(crate::diff_view::SELECTION_OVER_DIFF) / 255.0;
+        let lightness = |c: Rgb| lab([c.0, c.1, c.2].map(|v| f64::from(v) / 255.0)).l;
+        let mut pairs = Pairs::default();
+        let mut close = Vec::new();
+        for (name, _, p) in PALETTES {
+            for (word, background, line) in [
+                ("diff_added_word", p.diff_added_word, p.diff_added),
+                ("diff_removed_word", p.diff_removed_word, p.diff_removed),
+            ] {
+                let selected_word = format!("{word} under the selection");
+                pairs.need(name, ("text", p.text), (word, background), 4.5);
+                pairs.need(
+                    name,
+                    ("text", p.text),
+                    (&selected_word, over(p.selection, background, selected)),
+                    4.5,
+                );
+                let difference = (lightness(background) - lightness(line)).abs();
+                if difference < 8.0 {
+                    close.push(format!(
+                        "{name}: {word} differs from its line by {difference:.1} in L*, needs 8"
+                    ));
+                }
+            }
+        }
+        pairs.assert_none();
+        assert!(
+            close.is_empty(),
+            "{}",
+            close.join(
+                "
+"
+            )
+        );
     }
 
     #[test]

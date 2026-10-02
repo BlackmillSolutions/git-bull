@@ -271,9 +271,12 @@ impl Extent {
     fn of(hunk: &Hunk) -> Extent {
         let olds = hunk.lines.iter().filter(|l| l.old_number.is_some()).count() as u32;
         let news = hunk.lines.iter().filter(|l| l.new_number.is_some()).count() as u32;
-        // A side without lines names the line before the place of the hunk.
-        let first = |start: u32, count: u32| if count == 0 { start + 1 } else { start };
-        let (old_first, new_first) = (first(hunk.old_start, olds), first(hunk.new_start, news));
+        // The numbers of its lines, where it has any; a side without lines
+        // names the line before the place of the hunk.
+        let old_first =
+            (hunk.lines.iter().find_map(|l| l.old_number)).unwrap_or(hunk.old_start + 1);
+        let new_first =
+            (hunk.lines.iter().find_map(|l| l.new_number)).unwrap_or(hunk.new_start + 1);
         Extent {
             old_after: old_first + olds,
             new_first,
@@ -299,6 +302,8 @@ pub struct DiffDocument {
     rows: Vec<Row>,
     /// The rows of the headers, in order.
     headers: Vec<usize>,
+    /// The rows of the gaps, in order.
+    gap_rows: Vec<usize>,
     /// The largest number of a line in the hunks.
     widest_in_hunks: u32,
     widest: u32,
@@ -340,6 +345,7 @@ impl DiffDocument {
             gaps,
             rows: Vec::new(),
             headers: Vec::new(),
+            gap_rows: Vec::new(),
             widest_in_hunks,
             widest: 0,
             builds: 0,
@@ -432,6 +438,11 @@ impl DiffDocument {
 
     pub fn gaps(&self) -> &[Gap] {
         &self.gaps
+    }
+
+    /// The rows of the gaps, in order, for rows of another height.
+    pub fn gap_rows(&self) -> &[usize] {
+        &self.gap_rows
     }
 
     /// How often the rows were built, so that tests can see that drawing
@@ -598,11 +609,13 @@ impl DiffDocument {
         let revealed: u32 = self.gaps.iter().map(|gap| gap.top + gap.bottom + 1).sum();
         let mut rows = Vec::with_capacity(lines + revealed as usize);
         let mut headers = Vec::with_capacity(hunks.len());
+        let mut gap_rows = Vec::with_capacity(self.gaps.len());
         let mut gaps = self.gaps.iter().enumerate().peekable();
         for slot in 0..=hunks.len() {
             while let Some((index, gap)) = gaps.next_if(|(_, gap)| gap.slot == slot) {
                 rows.extend((gap.first..gap.first + gap.top).map(Row::Revealed));
                 if gap.hidden() > 0 {
+                    gap_rows.push(rows.len());
                     rows.push(Row::Gap(index));
                 }
                 rows.extend((gap.end() - gap.bottom..gap.end()).map(Row::Revealed));
@@ -620,6 +633,7 @@ impl DiffDocument {
             .fold(self.widest_in_hunks, u32::max);
         self.rows = rows;
         self.headers = headers;
+        self.gap_rows = gap_rows;
         self.builds += 1;
     }
 }
@@ -938,6 +952,7 @@ mod tests {
         assert_eq!(rows[10], Row::Gap(1));
         assert_eq!(rows[11], Row::Header(1));
         assert_eq!(rows.last(), Some(&Row::Gap(2)));
+        assert_eq!(document.gap_rows(), [0, 10, rows.len() - 1]);
     }
 
     #[test]
