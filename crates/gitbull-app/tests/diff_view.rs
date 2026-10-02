@@ -1467,7 +1467,9 @@ fn at_the_end_of_the_diff_next_hunk_is_disabled_and_f7_does_nothing() {
 
 #[test]
 fn both_buttons_are_disabled_for_a_diff_that_fits() {
-    let harness = open_totals(totals_backend(10, &[change_at(5)]));
+    // One hunk over the whole file of five lines: seven rows, no gaps.
+    let harness = open_totals(totals_backend(5, &[change_at(2)]));
+    assert_eq!(document_of(&harness, |d| d.rows().len()), 7);
     assert!(!hunk_button_enabled(&harness, "Next hunk"));
     assert!(!hunk_button_enabled(&harness, "Previous hunk"));
 }
