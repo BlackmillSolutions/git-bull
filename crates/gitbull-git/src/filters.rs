@@ -8,13 +8,27 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::cancel::CancelToken;
 use crate::config;
 use crate::error::Error;
 use crate::invoke::{ConfigOverride, Git};
 
 /// The overrides that neutralise the filters of the repository at `repo`.
 pub fn neutralised_filters(git: &Git, repo: &Path) -> Result<Vec<ConfigOverride>, Error> {
-    let output = git.run(repo, &[], config::LIST)?;
+    overrides_from(git.run(repo, &[], config::LIST)?)
+}
+
+/// Like [`neutralised_filters`], but `cancel` stops Git; the result is then
+/// [`Error::Cancelled`].
+pub fn neutralised_filters_cancellable(
+    git: &Git,
+    repo: &Path,
+    cancel: &CancelToken,
+) -> Result<Vec<ConfigOverride>, Error> {
+    overrides_from(git.run_cancellable(repo, &[], config::LIST, cancel)?)
+}
+
+fn overrides_from(output: Vec<u8>) -> Result<Vec<ConfigOverride>, Error> {
     let names = repository_filter_names(&output).map_err(|message| Error::Parse {
         command: format!("git {}", config::LIST.join(" ")),
         message,

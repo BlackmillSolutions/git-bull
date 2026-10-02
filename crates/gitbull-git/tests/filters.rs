@@ -143,3 +143,14 @@ fn driver_from_the_worktree_configuration_is_neutralised() {
     assert!(unprotected > 0, "the setup must trigger the filter");
     assert_eq!(protected, 0);
 }
+
+#[test]
+fn reading_the_filters_can_be_cancelled() {
+    let repo = repository_with_file();
+    let cancel = gitbull_git::cancel::CancelToken::new();
+    cancel.cancel();
+    assert!(matches!(
+        gitbull_git::filters::neutralised_filters_cancellable(&git(), repo.path(), &cancel),
+        Err(gitbull_git::Error::Cancelled)
+    ));
+}

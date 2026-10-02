@@ -32,8 +32,10 @@ pub mod search;
 pub mod shallow;
 pub mod stashes;
 pub mod status;
+pub mod summary;
 pub mod version;
 pub mod working_copy;
+pub mod worktrees;
 
 pub use backend::{Backend, CliBackend};
 pub use error::Error;
