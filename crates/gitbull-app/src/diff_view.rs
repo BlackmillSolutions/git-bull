@@ -22,7 +22,7 @@ use gitbull_git::Error;
 use gitbull_git::diff::{Content, FileDiff, Hunk, LINE_LIMIT, LineKind};
 use gitbull_git::path::RepoPath;
 
-use crate::app::{App, DiffKey, DiffView, HunkMove};
+use crate::app::{App, DiffKey, DiffView, HunkMove, TabView};
 use crate::commit_list::{color, take_copy};
 use crate::components::{self, RowLayout, RowsShown};
 use crate::i18n::Msg;
@@ -280,7 +280,8 @@ fn offer_texts(app: &App, document: &DiffDocument) -> Vec<GapLabels> {
 }
 
 /// The names of a row of hidden lines and of its offers.
-struct GapLabels {
+#[derive(Default)]
+pub(crate) struct GapLabels {
     hidden: String,
     top: String,
     bottom: String,
@@ -318,27 +319,34 @@ fn draw(
     texts: &Texts,
     invisibles: &mut bool,
 ) -> bool {
-    let (notes, gap_labels) = match app
-        .workspace()
-        .and_then(|workspace| workspace.active())
-        .and_then(|tab| tab.session())
-        .and_then(|session| shown(session, pane))
-    {
-        Some((DiffState::Loaded(document), _, _)) => (
+    let (notes, labels_for) = match shown_in(app, pane) {
+        Some((DiffState::Loaded(document), _, key)) => (
             Some(NoteData::of(document.diff()).texts(app)),
-            offer_texts(app, document),
+            Some((key, document.builds())),
         ),
-        _ => (None, Vec::new()),
+        _ => (None, None),
     };
+    // The names of the gaps are made again only when the gaps changed.
+    let stale = labels_for.is_some()
+        && app
+            .active_view()
+            .is_some_and(|(_, view)| diff_view_of(view, pane).labels_for != labels_for);
+    if stale {
+        let labels = match shown_in(app, pane) {
+            Some((DiffState::Loaded(document), _, _)) => offer_texts(app, document),
+            _ => Vec::new(),
+        };
+        if let Some((_, view)) = app.active_view() {
+            let state = diff_view_of(view, pane);
+            state.gap_labels = labels;
+            state.labels_for = labels_for;
+        }
+    }
     let Some((session, view)) = app.active_view() else {
         return false;
     };
     let mut hunk_move = view.hunk_move.take();
-    let state = match pane {
-        Pane::Commit => &mut view.commit_diff,
-        Pane::FileStatus => &mut view.status_diff,
-        Pane::FileHistory => &mut view.history_diff,
-    };
+    let state = diff_view_of(view, pane);
     let reading = reading(session, pane);
     let Some((diff, highlighting, key)) = shown(session, pane) else {
         return false;
@@ -452,7 +460,7 @@ fn draw(
             selection,
             shown: key,
             texts,
-            gap_labels: &gap_labels,
+            gap_labels: &state.gap_labels,
             too_large: !document.has_text() && !reading,
             invisibles: *invisibles,
             palette,
@@ -508,6 +516,20 @@ fn draw(
         expand(session, pane, gap, part);
     }
     true
+}
+
+/// The diff `pane` of the active tab shows, if a session is ready.
+fn shown_in(app: &App, pane: Pane) -> Option<(&DiffState, Option<&Highlighting>, DiffKey)> {
+    shown(app.workspace()?.active()?.session()?, pane)
+}
+
+/// What the panel of `pane` keeps for its diff.
+fn diff_view_of(view: &mut TabView, pane: Pane) -> &mut DiffView {
+    match pane {
+        Pane::Commit => &mut view.commit_diff,
+        Pane::FileStatus => &mut view.status_diff,
+        Pane::FileHistory => &mut view.history_diff,
+    }
 }
 
 fn load_whole(session: &mut Session, pane: Pane) {
@@ -671,7 +693,8 @@ fn draw_rows(ui: &mut Ui, scroll_to: Option<usize>, drawn: &Drawn<'_>) -> (Outco
                             )
                         }
                         Row::Gap(gap) => {
-                            let labels = &drawn.gap_labels[gap];
+                            let fallback = GapLabels::default();
+                            let labels = drawn.gap_labels.get(gap).unwrap_or(&fallback);
                             let too_large = drawn.too_large.then_some(texts.too_large.as_str());
                             let (response, part) = gap_row(
                                 ui,

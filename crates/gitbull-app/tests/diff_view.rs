@@ -666,10 +666,19 @@ fn open_status_with(
     live: &LiveRepo,
     extend: impl FnOnce(FakeBackend) -> FakeBackend,
 ) -> (Harness<'static, App>, Probe) {
+    open_status_of(live, "edit.txt", extend)
+}
+
+/// As [`open_status_with`], with `path` as the only change.
+fn open_status_of(
+    live: &LiveRepo,
+    path: &str,
+    extend: impl FnOnce(FakeBackend) -> FakeBackend,
+) -> (Harness<'static, App>, Probe) {
     live.set_status(WorkingStatus {
         unstaged: vec![StatusEntry {
             kind: StatusKind::Changed(ChangeKind::Modified),
-            path: RepoPath::new("edit.txt"),
+            path: RepoPath::new(path),
             old_path: None,
             submodule: false,
         }],
@@ -1881,4 +1890,100 @@ fn the_menu_of_a_revealed_line_offers_no_hunk() {
     click(&mut harness, at, PointerButton::Secondary);
     assert!(harness.query_by_label("Copy lines").is_some());
     assert!(harness.query_by_label("Copy hunk").is_none());
+}
+
+// A fluid diff.
+
+/// The colours the text of the line `text` is drawn in.
+fn colours_of(harness: &Harness<'_, App>, text: &str) -> std::collections::HashSet<Color32> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, text: &str, found: &mut std::collections::HashSet<Color32>) {
+        match shape {
+            Shape::Text(shape) if shape.galley.text() == text => {
+                found.extend(shape.galley.job.sections.iter().map(|s| s.format.color));
+            }
+            Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, text, found)),
+            _ => {}
+        }
+    }
+    let mut found = std::collections::HashSet::new();
+    for clipped in &harness.output().shapes {
+        walk(&clipped.shape, text, &mut found);
+    }
+    found
+}
+
+#[test]
+fn a_refresh_of_the_same_diff_keeps_marks_and_colours_in_every_frame() {
+    let live = LiveRepo::new();
+    live.set_working_diff(Group::Unstaged, "edit.txt", working_change());
+    let file = version(60, &[change_at(20)], true);
+    let (mut harness, probe) = open_status_with(&live, |backend| {
+        backend
+            .with_working_file("edit.txt", &file)
+            .with_blob(fake_id("old-totals"), &version(60, &[change_at(20)], false))
+    });
+    // `edit.txt` has no type of its own, so the line takes the colours of
+    // its words alone: its marks show here, and colours below.
+    wait_until(&mut harness, |h| !marked_texts(h.output()).is_empty());
+    harness.run();
+    let marked = marked_texts(harness.output());
+
+    let reads = probe.working_diffs().len();
+    harness.key_press(Key::F5);
+    for _ in 0..200 {
+        assert_eq!(marked_texts(harness.output()), marked, "the marks stay");
+        if probe.working_diffs().len() > reads {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    for _ in 0..10 {
+        harness.step();
+        assert_eq!(marked_texts(harness.output()), marked, "the marks stay");
+    }
+}
+
+#[test]
+fn a_refresh_of_the_same_diff_keeps_its_syntax_colours_in_every_frame() {
+    let mut diff = working_change();
+    diff.old_path = Some("src/edit.rs".into());
+    diff.new_path = Some("src/edit.rs".into());
+    let live = LiveRepo::new();
+    live.set_working_diff(Group::Unstaged, "src/edit.rs", diff);
+    let file = version(60, &[change_at(20)], true);
+    let (mut harness, probe) = open_status_of(&live, "src/edit.rs", |backend| {
+        backend
+            .with_working_file("src/edit.rs", &file)
+            .with_blob(fake_id("old-totals"), &version(60, &[change_at(20)], false))
+    });
+    wait_until(&mut harness, |h| {
+        colours_of(h, "let line_18 = 18;").len() > 1
+    });
+    harness.run();
+    let colours = colours_of(&harness, "let line_18 = 18;");
+
+    let reads = probe.working_diffs().len();
+    harness.key_press(Key::F5);
+    for _ in 0..200 {
+        assert_eq!(
+            colours_of(&harness, "let line_18 = 18;"),
+            colours,
+            "the colours stay"
+        );
+        if probe.working_diffs().len() > reads {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    for _ in 0..10 {
+        harness.step();
+        assert_eq!(
+            colours_of(&harness, "let line_18 = 18;"),
+            colours,
+            "the colours stay"
+        );
+    }
 }

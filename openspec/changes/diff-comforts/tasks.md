@@ -38,8 +38,8 @@ behaviour fails before its code.
 
 ## 6. A fluid diff
 
-- [ ] 6.1 Add the benchmark `diff` to `tests/benchmarks.rs`, which generates its repository into `target/bench-diff` and measures the time to the diff, its marks and its colours, and the frames while scrolling, moving through every hunk, revealing every gap and toggling invisible characters in the diff of 400 hunks, and while scrolling and dragging the scrollbar in the full diff of 100,000 changed lines (design, decision 10); verify that it passes in a release build, for the scenarios "Long diff with many hunks" and "Full diff of a large file" of `diff-view`, and that its table and the machine are recorded in `docs/benchmarks.md`
-- [ ] 6.2 Verify a UI test in `tests/diff_view.rs` for the scenario "Refresh without flicker" of `diff-view`: after a refresh that reads the same diff, every frame draws the marks and the syntax colours
+- [x] 6.1 Add the benchmark `diff` to `tests/benchmarks.rs`, which generates its repository into `target/bench-diff` and measures the time to the diff, its marks and its colours, and the frames while scrolling, moving through every hunk, revealing every gap and toggling invisible characters in the diff of 400 hunks, and while scrolling and dragging the scrollbar in the full diff of 100,000 changed lines (design, decision 10); verify that it passes in a release build, for the scenarios "Long diff with many hunks" and "Full diff of a large file" of `diff-view`, and that its table and the machine are recorded in `docs/benchmarks.md`
+- [x] 6.2 Verify a UI test in `tests/diff_view.rs` for the scenario "Refresh without flicker" of `diff-view`: after a refresh that reads the same diff, every frame draws the marks and the syntax colours
 
 ## 7. Snapshots and manual check
 

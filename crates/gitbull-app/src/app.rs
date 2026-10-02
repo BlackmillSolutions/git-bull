@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use gitbull_core::diff_document::RowKey;
 
 use crate::components::RowsShown;
+use crate::diff_view::GapLabels;
 use gitbull_core::git_setup::GitCheck;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
@@ -215,6 +216,11 @@ pub(crate) struct DiffView {
     /// What its rows showed in the last frame: where the hunk buttons and
     /// F7 can move from.
     pub(crate) shown: RowsShown,
+    /// The names of the rows of hidden lines and their offers, made when
+    /// the gaps change rather than in every frame.
+    pub(crate) gap_labels: Vec<GapLabels>,
+    /// The diff and the build of its rows `gap_labels` were made for.
+    pub(crate) labels_for: Option<(DiffKey, u64)>,
 }
 
 /// Which diff a diff panel shows. The last field counts how often a diff

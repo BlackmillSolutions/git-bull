@@ -87,6 +87,11 @@ benchmark prints a table in the form used below.
   frames in which the spring moves the list are measured too. It measures
   the time egui needs per frame; drawing on the graphics adapter is not
   included, so the frame times of the real window are somewhat higher.
+- `diff` generates a repository with two commits into `target/bench-diff`
+  once and measures the diff of the second: a Rust file of 10,000 lines in
+  which one word of every 25th line changed, and the whole diff of a file
+  of 100,000 lines that changed wholly. See the section on the comforts
+  of the diff below.
 - `searching` opens the repository in the window, waits until the history
   has loaded and searches by message twice, typing into the search field.
   While each search runs it scrolls with the mouse wheel and selects a
@@ -358,3 +363,48 @@ list keeps moving and draws new rows in most frames.
 - The test window steps the time by 0.25 s per frame, of which the spring
   counts at most 0.1 s, so the list moves further per frame than at 60
   frames per second and draws more new rows in each.
+
+## The comforts of the diff (change `diff-comforts`, task 6.1)
+
+Measured on 2026-10-02 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, NVMe SSD, Git 2.55.0.windows.5, release build, with
+`cargo test --release -p gitbull-app --test benchmarks diff -- --ignored --nocapture`.
+
+The repository of the benchmark has two commits. The second changes one
+word in every 25th line of `src/totals.rs`, a Rust file of 10,000 lines
+under 512 KiB, which gives 400 hunks with hidden lines between them, and
+every line of `data/large.txt`, a file of 100,000 lines over 512 KiB.
+
+| Diff of 10,000 lines with 400 hunks | Result |
+|---|---|
+| Diff shown after choosing the file | 73 ms |
+| Changed words, after the diff | 1 ms |
+| Text to reveal, after the diff | 88 ms |
+| Syntax colours, after the diff | 2.50 s |
+
+| Whole diff of 100,000 changed lines | Result |
+|---|---|
+| Rows | 200,001 |
+| Whole diff shown after "Load full diff" | 111 ms |
+| Changed words, after "Load full diff" | 205 ms |
+
+| Diff | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Mouse wheel through 400 hunks | 400 | 1.0 ms | 1.2 ms | 1.2 ms | yes |
+| F7 through every hunk | 405 | 0.6 ms | 0.9 ms | 1.0 ms | yes |
+| Shift+F7 back | 405 | 1.2 ms | 1.4 ms | 1.5 ms | yes |
+| Revealing every gap, one in each frame | 400 | 1.0 ms | 1.0 ms | 1.3 ms | yes |
+| Toggling invisible characters while scrolling | 400 | 0.6 ms | 1.9 ms | 3.1 ms | yes |
+| Mouse wheel through 200,000 lines | 400 | 0.6 ms | 0.6 ms | 1.8 ms | yes |
+| Scrollbar from top to bottom, 200,000 lines | 200 | 0.6 ms | 0.8 ms | 0.8 ms | yes |
+
+- Every frame stays far below the target of 16.7 ms. The diff document
+  prepares its rows, the rows of its keys and headers and the width of
+  its line numbers when it changes, so a frame finds what it draws by
+  lookups and binary searches whatever the length of the diff.
+- A first run formatted the names of all rows of hidden lines in every
+  frame, 1,600 texts for 400 gaps: the median frame of the wheel took
+  1.7 ms and of F7 1.9 ms. The names are now made when the gaps change.
+- The syntax colours of the Rust file take 2.5 s in the background, as
+  before this change; the diff, its changed words and the text to reveal
+  do not wait for them.
