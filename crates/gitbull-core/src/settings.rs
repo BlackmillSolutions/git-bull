@@ -21,6 +21,83 @@ pub enum ThemeSetting {
     Dark,
 }
 
+/// The colour vision the palettes are made for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColourVision {
+    #[default]
+    Standard,
+    /// Protanopia and deuteranopia.
+    RedGreen,
+    /// Tritanopia.
+    BlueYellow,
+}
+
+/// How large the whole interface is drawn, on top of the scaling of the
+/// operating system. Stored as the number of percent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u16", into = "u16")]
+pub enum InterfaceSize {
+    #[default]
+    Percent100,
+    Percent115,
+    Percent130,
+    Percent150,
+}
+
+impl InterfaceSize {
+    /// Every size, from the smallest to the largest.
+    pub const ALL: [InterfaceSize; 4] = [
+        InterfaceSize::Percent100,
+        InterfaceSize::Percent115,
+        InterfaceSize::Percent130,
+        InterfaceSize::Percent150,
+    ];
+
+    /// The next larger size; the largest stays.
+    pub fn larger(self) -> InterfaceSize {
+        let index = Self::ALL.iter().position(|size| *size == self).unwrap_or(0);
+        Self::ALL[(index + 1).min(Self::ALL.len() - 1)]
+    }
+
+    /// The next smaller size; the smallest stays.
+    pub fn smaller(self) -> InterfaceSize {
+        let index = Self::ALL.iter().position(|size| *size == self).unwrap_or(0);
+        Self::ALL[index.saturating_sub(1)]
+    }
+
+    /// How much larger than 100 % the interface is drawn.
+    pub fn factor(self) -> f32 {
+        f32::from(self.percent()) / 100.0
+    }
+
+    pub fn percent(self) -> u16 {
+        match self {
+            InterfaceSize::Percent100 => 100,
+            InterfaceSize::Percent115 => 115,
+            InterfaceSize::Percent130 => 130,
+            InterfaceSize::Percent150 => 150,
+        }
+    }
+}
+
+impl From<InterfaceSize> for u16 {
+    fn from(size: InterfaceSize) -> u16 {
+        size.percent()
+    }
+}
+
+impl TryFrom<u16> for InterfaceSize {
+    type Error = String;
+
+    fn try_from(percent: u16) -> Result<InterfaceSize, String> {
+        InterfaceSize::ALL
+            .into_iter()
+            .find(|size| size.percent() == percent)
+            .ok_or_else(|| format!("no interface size of {percent} %"))
+    }
+}
+
 /// Size and position of the main window, in logical pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowGeometry {
@@ -48,7 +125,16 @@ pub struct Layout {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(deserialize_with = "or_default")]
     pub theme: ThemeSetting,
+    #[serde(deserialize_with = "or_default")]
+    pub colour_vision: ColourVision,
+    #[serde(deserialize_with = "or_default")]
+    pub interface_size: InterfaceSize,
+    /// Whether the window keeps the system's title bar instead of git-bull's
+    /// own; it takes effect at the next start.
+    #[serde(deserialize_with = "or_default")]
+    pub system_title_bar: bool,
     /// A language tag such as `en-US`.
     pub language: String,
     /// The Git executable chosen by the user, if any.
@@ -78,6 +164,9 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             theme: ThemeSetting::System,
+            colour_vision: ColourVision::Standard,
+            interface_size: InterfaceSize::Percent100,
+            system_title_bar: false,
             language: "en-US".to_owned(),
             git_path: None,
             recent: Vec::new(),
@@ -199,6 +288,18 @@ fn storable(settings: &Settings) -> Settings {
     }
 }
 
+/// Reads a choice, or its default when the value is one this version does
+/// not know, such as one of a later version, or has the wrong type. The
+/// other settings are kept, and the file is not treated as invalid.
+fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(value.try_into().unwrap_or_default())
+}
+
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
@@ -216,6 +317,9 @@ mod tests {
     fn example() -> Settings {
         Settings {
             theme: ThemeSetting::Dark,
+            colour_vision: ColourVision::Standard,
+            interface_size: InterfaceSize::Percent100,
+            system_title_bar: false,
             language: "de-DE".to_owned(),
             git_path: Some(PathBuf::from("/opt/git/bin/git")),
             recent: vec![
@@ -306,6 +410,174 @@ mod tests {
         assert_eq!(loaded.settings.theme, ThemeSetting::Light);
         assert_eq!(loaded.settings.language, "en-US");
         assert!(!loaded.reset);
+    }
+
+    fn write(file: &SettingsFile, text: &str) {
+        std::fs::create_dir_all(file.path().parent().unwrap()).unwrap();
+        std::fs::write(file.path(), text).unwrap();
+    }
+
+    #[test]
+    fn colour_vision_and_interface_size_survive_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            colour_vision: ColourVision::RedGreen,
+            interface_size: InterfaceSize::Percent115,
+            ..example()
+        };
+        file.save(&settings).unwrap();
+
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.contains("colour_vision = \"red_green\""), "{text}");
+        assert!(text.contains("interface_size = 115"), "{text}");
+        assert_eq!(file.load().settings, settings);
+    }
+
+    #[test]
+    fn interface_sizes_step_up_and_down_and_stop_at_the_ends() {
+        use InterfaceSize::*;
+        assert_eq!(Percent100.larger(), Percent115);
+        assert_eq!(Percent115.larger(), Percent130);
+        assert_eq!(Percent130.larger(), Percent150);
+        assert_eq!(Percent150.larger(), Percent150);
+        assert_eq!(Percent150.smaller(), Percent130);
+        assert_eq!(Percent115.smaller(), Percent100);
+        assert_eq!(Percent100.smaller(), Percent100);
+    }
+
+    #[test]
+    fn an_interface_size_scales_by_its_percent() {
+        for (size, factor) in [
+            (InterfaceSize::Percent100, 1.0),
+            (InterfaceSize::Percent115, 1.15),
+            (InterfaceSize::Percent130, 1.3),
+            (InterfaceSize::Percent150, 1.5),
+        ] {
+            assert!((size.factor() - factor).abs() < 1e-6, "{size:?}");
+        }
+    }
+
+    #[test]
+    fn every_colour_vision_and_interface_size_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        for (text, vision) in [
+            ("standard", ColourVision::Standard),
+            ("red_green", ColourVision::RedGreen),
+            ("blue_yellow", ColourVision::BlueYellow),
+        ] {
+            write(&file, &format!("colour_vision = \"{text}\"\n"));
+            assert_eq!(file.load().settings.colour_vision, vision, "{text}");
+        }
+        for (number, size) in [
+            (100, InterfaceSize::Percent100),
+            (115, InterfaceSize::Percent115),
+            (130, InterfaceSize::Percent130),
+            (150, InterfaceSize::Percent150),
+        ] {
+            write(&file, &format!("interface_size = {number}\n"));
+            assert_eq!(file.load().settings.interface_size, size, "{number}");
+        }
+    }
+
+    #[test]
+    fn a_file_of_the_first_milestone_loads_with_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(
+            &file,
+            "theme = \"dark\"\n\
+             language = \"de-DE\"\n\
+             git_path = \"/opt/git/bin/git\"\n\
+             recent = [\"/work/git-bull\", \"/work/linux\"]\n\
+             tabs = [\"/work/git-bull\"]\n\
+             active_tab = 0\n\
+             \n\
+             [window]\n\
+             width = 1280.0\n\
+             height = 800.0\n\
+             position = [40.0, 60.0]\n\
+             \n\
+             [layout]\n\
+             sidebar_width = 220.0\n\
+             details_height = 300.0\n",
+        );
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert_eq!(loaded.settings.colour_vision, ColourVision::Standard);
+        assert_eq!(loaded.settings.interface_size, InterfaceSize::Percent100);
+        assert_eq!(loaded.settings, example());
+    }
+
+    #[test]
+    fn a_file_without_the_title_bar_setting_uses_the_own_title_bar() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(
+            &file,
+            "theme = \"dark\"\n\
+             colour_vision = \"blue_yellow\"\n\
+             tabs = [\"/work/git-bull\"]\n",
+        );
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert!(!loaded.settings.system_title_bar);
+        assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
+        assert_eq!(loaded.settings.colour_vision, ColourVision::BlueYellow);
+        assert_eq!(loaded.settings.tabs, [PathBuf::from("/work/git-bull")]);
+    }
+
+    #[test]
+    fn the_title_bar_setting_survives_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            system_title_bar: true,
+            ..example()
+        };
+        file.save(&settings).unwrap();
+
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.contains("system_title_bar = true"), "{text}");
+        assert_eq!(file.load().settings, settings);
+    }
+
+    #[test]
+    fn an_unknown_value_takes_its_default_alone_and_leaves_the_file_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        for unknown in [
+            "theme = \"sepia\"",
+            "theme = 3",
+            "colour_vision = \"monochrome\"",
+            "colour_vision = true",
+            "interface_size = 120",
+            "interface_size = \"large\"",
+            "system_title_bar = \"yes\"",
+            "system_title_bar = 1",
+        ] {
+            let text = format!("{unknown}\nlanguage = \"de-DE\"\nactive_tab = 2\n");
+            write(&file, &text);
+
+            let loaded = file.load();
+
+            assert!(!loaded.reset, "{unknown}");
+            assert_eq!(
+                loaded.settings,
+                Settings {
+                    language: "de-DE".to_owned(),
+                    active_tab: Some(2),
+                    ..Settings::default()
+                },
+                "{unknown}"
+            );
+            assert_eq!(std::fs::read_to_string(file.path()).unwrap(), text);
+        }
     }
 
     #[test]

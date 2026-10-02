@@ -13,7 +13,10 @@ use gitbull_git::content::CommitContent;
 use gitbull_git::history::CommitLine;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_testkit::{FakeBackend, LiveRepo, Probe, commit_line, fake_id};
-use support::{Setup, build, path, settle_window, window_on};
+use support::{
+    BURST, Setup, build, commit_list_scroll, long_history, path, settle_window, turn_wheel,
+    wait_for_row, window_at_60_fps, window_on,
+};
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -249,6 +252,58 @@ fn a_selected_commit_that_no_longer_exists_leaves_nothing_selected() {
     test.harness.run();
     wait_for(&mut test.harness, |h| !has_row(h, "Side work"));
     wait_for(&mut test.harness, |h| selected(h).is_empty());
+}
+
+#[test]
+fn a_history_read_during_a_motion_lets_the_commit_list_rest_where_the_wheel_asked() {
+    let live = LiveRepo::new();
+    live.set_references(main_at("n0"));
+    let backend = long_history(FakeBackend::default().with_repository(root()), &root(), 200)
+        .with_live(root(), &live);
+    let probe = backend.probe();
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window_at_60_fps(test.app);
+    settle_window(&mut harness);
+    wait_for_row(&mut harness, "Commit 0, ");
+    // The selection is what a reload selects again.
+    let first = row_rect(&harness, "Commit 0, ").center();
+    harness.get_by_label_contains("Commit 0, ").click();
+    harness.step();
+    let start = commit_list_scroll(&harness);
+
+    harness.hover_at(first);
+    harness.step();
+    turn_wheel(&mut harness, -BURST / 40.0, Modifiers::NONE);
+    for _ in 0..5 {
+        harness.step();
+    }
+    // A new branch: the same commits are read again.
+    let mut references = main_at("n0");
+    references.push(Reference {
+        name: "refs/heads/side".into(),
+        short: "side".into(),
+        kind: RefKind::Branch,
+        commit: Some(fake_id("n150").to_string()),
+        upstream: None,
+    });
+    live.set_references(references);
+    harness.key_press(Key::F5);
+    for _ in 0..120 {
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    assert_eq!(count(&probe, "history"), 2);
+    let moved = commit_list_scroll(&harness) - start;
+    assert!((moved - BURST).abs() < 0.5, "{moved}");
 }
 
 #[test]

@@ -5,13 +5,13 @@ use std::path::PathBuf;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    Align2, Color32, Id, Sense, Shape, Stroke, TextEdit, TextStyle, Ui, WidgetInfo, WidgetType,
-    pos2, vec2,
+    Align2, Color32, Id, Sense, Shape, Stroke, TextStyle, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use gitbull_core::sidebar_tree::{self, Section, SidebarRow, SidebarState};
 use gitbull_core::workspace::View;
 
 use crate::app::{App, TabView};
+use crate::components;
 use crate::i18n::Msg;
 use crate::theme::{Palette, Rgb};
 use crate::ui::AREA_SIDEBAR;
@@ -78,11 +78,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         ..
     } = view;
 
-    ui.add(
-        TextEdit::singleline(&mut sidebar.filter)
-            .hint_text(hint)
-            .desired_width(f32::INFINITY),
-    );
+    let width = ui.available_width();
+    components::text_field(ui, &mut sidebar.filter, &hint, width);
     ui.add_space(4.0);
 
     // Laying out thousands of references each frame would cost more than
@@ -149,10 +146,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     }
     if let Some(name) = sidebar_menu.clone() {
         output.response.context_menu(|ui| {
-            if ui.button(&texts.show_only).clicked() {
-                actions.push(SidebarAction::ShowOnly(name.clone()));
-                ui.close();
-            }
+            components::menu(ui, |ui| {
+                if components::menu_item(ui, None, &texts.show_only, None).clicked() {
+                    actions.push(SidebarAction::ShowOnly(name.clone()));
+                    ui.close();
+                }
+            });
         });
     }
     actions

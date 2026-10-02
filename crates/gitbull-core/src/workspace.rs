@@ -233,6 +233,36 @@ impl Workspace {
         self.active = Some(self.tabs[(position + step) % count].id);
     }
 
+    /// Moves the tab to `index` among the tabs, or to the end past it. The
+    /// active tab and the state of every tab stay.
+    pub fn move_tab(&mut self, id: TabId, index: usize) {
+        let Some(position) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        let tab = self.tabs.remove(position);
+        let index = index.min(self.tabs.len());
+        self.tabs.insert(index, tab);
+    }
+
+    /// Moves the active tab `step` places to the right, or to the left for
+    /// a negative step; at either end it stays.
+    pub fn move_active(&mut self, step: isize) {
+        let Some(position) = self
+            .active
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+        else {
+            return;
+        };
+        let Some(index) = position
+            .checked_add_signed(step)
+            .filter(|index| *index < self.tabs.len())
+        else {
+            return;
+        };
+        let id = self.tabs[position].id;
+        self.move_tab(id, index);
+    }
+
     /// Closes the tab; its background work stops.
     pub fn close(&mut self, id: TabId) {
         let Some(position) = self.tabs.iter().position(|tab| tab.id == id) else {
@@ -700,6 +730,67 @@ mod tests {
         workspace.activate_previous();
         assert_eq!(active_title(&workspace).as_deref(), Some("chromium"));
         workspace.activate_previous();
+        assert_eq!(active_title(&workspace).as_deref(), Some("linux"));
+    }
+
+    /// git-bull, linux and chromium open in that order; chromium is active.
+    fn three_tabs() -> (Workspace, [TabId; 3]) {
+        let backend = two_repositories().with_repository(path(&["work", "chromium"]));
+        let mut workspace = workspace(backend);
+        let ids = [
+            workspace.open(path(&["work", "git-bull"])),
+            workspace.open(path(&["work", "linux"])),
+            workspace.open(path(&["work", "chromium"])),
+        ];
+        settle(&mut workspace);
+        (workspace, ids)
+    }
+
+    #[test]
+    fn a_tab_moves_to_another_place_and_every_tab_keeps_its_state() {
+        let (mut workspace, [first, second, _]) = three_tabs();
+        workspace.set_view(second, View::FileStatus);
+
+        workspace.move_tab(first, 2);
+
+        assert_eq!(titles(&workspace), ["linux", "chromium", "git-bull"]);
+        assert_eq!(active_title(&workspace).as_deref(), Some("chromium"));
+        assert_eq!(workspace.tabs()[0].view(), View::FileStatus);
+    }
+
+    #[test]
+    fn a_tab_moved_past_the_end_becomes_the_last() {
+        let (mut workspace, [first, ..]) = three_tabs();
+        workspace.move_tab(first, 10);
+        assert_eq!(titles(&workspace), ["linux", "chromium", "git-bull"]);
+    }
+
+    #[test]
+    fn the_active_tab_moves_one_place_and_stops_at_either_end() {
+        let (mut workspace, [first, ..]) = three_tabs();
+        workspace.move_active(1);
+        assert_eq!(titles(&workspace), ["git-bull", "linux", "chromium"]);
+        workspace.move_active(-1);
+        assert_eq!(titles(&workspace), ["git-bull", "chromium", "linux"]);
+        assert_eq!(active_title(&workspace).as_deref(), Some("chromium"));
+
+        workspace.activate(first);
+        workspace.move_active(-1);
+        assert_eq!(titles(&workspace), ["git-bull", "chromium", "linux"]);
+        workspace.move_active(1);
+        assert_eq!(titles(&workspace), ["chromium", "git-bull", "linux"]);
+        assert_eq!(active_title(&workspace).as_deref(), Some("git-bull"));
+    }
+
+    #[test]
+    fn a_tab_still_opening_moves_like_any_other() {
+        let mut workspace = workspace(two_repositories());
+        workspace.open(path(&["work", "git-bull"]));
+        let opening = workspace.open(path(&["work", "linux"]));
+        assert!(matches!(workspace.tabs()[1].state(), TabState::Opening));
+        workspace.move_tab(opening, 0);
+        settle(&mut workspace);
+        assert_eq!(titles(&workspace), ["linux", "git-bull"]);
         assert_eq!(active_title(&workspace).as_deref(), Some("linux"));
     }
 

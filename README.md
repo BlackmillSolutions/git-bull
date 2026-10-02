@@ -6,9 +6,12 @@ remotes and stashes, a commit list with graph, and commit details with diffs
 below. It is built to stay fluid on repositories with more than a million
 commits.
 
-git-bull is in early development. The first milestone is a read-only viewer;
-its plan lives in [`openspec/changes/add-repository-viewer`](openspec/changes/add-repository-viewer),
-and the architecture decisions in [`docs/adr`](docs/adr).
+git-bull is in early development. The first milestone is a read-only viewer,
+and the second, now under way, improves its interface. What git-bull does is
+specified in [`openspec/specs`](openspec/specs), the changes being planned
+or built are in [`openspec/changes`](openspec/changes), the architecture
+decisions are in [`docs/adr`](docs/adr), and the plan ahead is on the
+[roadmap](https://github.com/users/BlackmillSolutions/projects/1).
 
 ## Installation
 
@@ -39,6 +42,11 @@ choose the Git executable.
 
 git-bull draws with Vulkan, Metal, DirectX 12 or OpenGL, whichever the system
 offers; the graphics drivers that come with the systems above are enough.
+It asks for the power-saving graphics adapter. On a computer with an
+integrated and a dedicated adapter, such as many laptops, that is the
+integrated one where the system lets an application choose. To draw with
+the dedicated adapter instead, start git-bull with the environment variable
+`WGPU_POWER_PREF=high`.
 
 ### Windows
 

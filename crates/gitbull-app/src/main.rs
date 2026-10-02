@@ -5,8 +5,9 @@
 
 use std::sync::Arc;
 
+use eframe::egui::os::OperatingSystem;
 use gitbull_app::app::{App, Parts, SystemPicker};
-use gitbull_app::native::{NativeApp, find_fonts_in_background, viewport};
+use gitbull_app::native::{NativeApp, find_fonts_in_background, viewport, wgpu_setup};
 use gitbull_app::paths::{AppPaths, System};
 use gitbull_app::theme::ThemeFollower;
 use gitbull_core::git_setup::check_git;
@@ -39,14 +40,18 @@ fn main() -> eframe::Result {
     // `git-bull <path>` opens that repository.
     let open_at_start = std::env::args_os().nth(1).map(std::path::PathBuf::from);
 
-    let options = eframe::NativeOptions {
-        viewport: viewport(&loaded.settings),
+    let mut options = eframe::NativeOptions {
+        viewport: viewport(&loaded.settings, OperatingSystem::from_target_os()),
         ..Default::default()
     };
+    options.wgpu_options.wgpu_setup = wgpu_setup();
     eframe::run_native(
         "git-bull",
         options,
         Box::new(move |creation| {
+            creation
+                .egui_ctx
+                .set_fonts(gitbull_app::fonts::definitions());
             let context = creation.egui_ctx.clone();
             let fonts_context = creation.egui_ctx.clone();
             let fonts = find_fonts_in_background(move || fonts_context.request_repaint());

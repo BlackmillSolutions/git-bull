@@ -80,10 +80,13 @@ benchmark prints a table in the form used below.
   list with Page Down and the mouse wheel in turn.
 - `scrolling` opens the repository in the window without a graphics
   adapter and scrolls with Page Down and the mouse wheel in turn, while the
-  history loads and afterwards, then drags the scrollbar from the top to
-  the bottom. It measures the time egui needs per frame; drawing on the
-  graphics adapter is not included, so the frame times of the real window
-  are somewhat higher.
+  history loads and afterwards, then with the mouse wheel alone, then drags
+  the scrollbar from the top to the bottom. Page Down ends each motion of
+  the spring of the list a frame after the wheel started it; the pass with
+  the wheel alone turns it by one notch every fourth frame, so that the
+  frames in which the spring moves the list are measured too. It measures
+  the time egui needs per frame; drawing on the graphics adapter is not
+  included, so the frame times of the real window are somewhat higher.
 - `searching` opens the repository in the window, waits until the history
   has loaded and searches by message twice, typing into the search field.
   While each search runs it scrolls with the mouse wheel and selects a
@@ -328,3 +331,30 @@ marked. The search itself takes seconds, as ADR 0004 accepts: Git reads the
 message of every commit. The first match comes when the walk reaches it;
 the newest commit with `commit 7` in its message is about 200,000 commits
 down.
+
+## Smooth scrolling (change `smooth-scrolling`, task 1.4)
+
+Measured on 2026-10-01 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, NVMe SSD, Git 2.55.0.windows.5, release build,
+against the generated repository of task 4.21 with its commit-graph file,
+with
+`cargo test --release -p gitbull-app --test benchmarks scrolling -- --ignored --nocapture`.
+
+The lists now follow the mouse wheel and the touchpad with a spring that
+moves them over the frames after the input. The new pass turns the mouse
+wheel alone, one notch of 40 points every fourth frame, so that the commit
+list keeps moving and draws new rows in most frames.
+
+| Scrolling | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| While loading | 11,522 | 0.1 ms | 2.5 ms | 7.3 ms | yes |
+| After loading | 400 | 0.8 ms | 1.0 ms | 3.1 ms | yes |
+| Mouse wheel alone, after loading | 400 | 0.5 ms | 0.6 ms | 1.6 ms | yes |
+| Scrollbar from top to bottom | 200 | 0.4 ms | 0.6 ms | 1.1 ms | yes |
+
+- The frames in which the spring moves the list are cheaper than those of
+  the pass before, in which Page Down selects another commit in every
+  second frame and starts loading its details.
+- The test window steps the time by 0.25 s per frame, of which the spring
+  counts at most 0.1 s, so the list moves further per frame than at 60
+  frames per second and draws more new rows in each.

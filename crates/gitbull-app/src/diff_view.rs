@@ -4,8 +4,7 @@
 use eframe::egui::accesskit::Role;
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
-    self, Color32, FontId, Id, Label, ScrollArea, Sense, Stroke, StrokeKind, Ui, WidgetInfo,
-    WidgetType, pos2, vec2,
+    self, Color32, FontId, Id, Label, Sense, Stroke, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::details::{DiffState, Highlighting};
@@ -18,8 +17,9 @@ use gitbull_git::path::RepoPath;
 
 use crate::app::{App, DiffKey, DiffView};
 use crate::commit_list::{color, take_copy};
+use crate::components;
 use crate::i18n::Msg;
-use crate::theme::{Appearance, Palette};
+use crate::theme::{Appearance, Palette, Rgb};
 use crate::ui::{AREA_DIFF, appearance, lock_tab};
 
 /// The height of a row of the diff, and of blame.
@@ -282,7 +282,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
                 Failure::Git(error) => error.to_string(),
                 Failure::Panic(message) => message.clone(),
             };
-            ui.colored_label(color(palette.status_deleted), error);
+            components::error_text(ui, error);
             return false;
         }
         DiffState::Loaded(diff) => diff,
@@ -302,7 +302,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
     if diff.truncated {
         ui.horizontal(|ui| {
             ui.weak(&texts.truncated);
-            load_all = ui.button(&texts.load_all).clicked();
+            load_all = components::Button::new(&texts.load_all).show(ui).clicked();
         });
     }
     let hunks = match &diff.content {
@@ -370,12 +370,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
     }
     if focused {
         lock_tab(ui, background.id);
-        ui.painter().rect_stroke(
-            area.shrink(1.0),
-            0.0,
-            ui.visuals().selection.stroke,
-            StrokeKind::Inside,
-        );
+        components::area_focus_ring(ui, area, true);
     }
     if load_all {
         load_whole(session, pane);
@@ -448,46 +443,47 @@ fn draw_rows(
         marker: 2.0 * digit,
     };
     let mut outcome = Outcome::default();
-    ScrollArea::both()
-        .id_salt(("diff", shown))
-        .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, all.len(), |ui, range| {
-            // Rows are exactly as high as `show_rows` expects.
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for index in range {
-                let is_selected = selected(selection, index);
-                let response = match all[index] {
-                    Row::Header(hunk) => {
-                        header_row(ui, &hunks[hunk].header, is_selected, &font, palette)
-                    }
-                    Row::Line(hunk, line) => {
-                        let line = &hunks[hunk].lines[line];
-                        let spans = highlighting.and_then(|h| h.spans(line));
-                        line_row(ui, line, spans, is_selected, &gutter, &font, texts, palette)
-                    }
-                };
-                if response.clicked() {
-                    let extend = ui.input(|input| input.modifiers.shift);
-                    outcome.clicked = Some((index, extend));
+    components::rows_area(ui, ("diff", shown), ROW_HEIGHT, all.len(), |ui, range| {
+        for index in range {
+            let is_selected = selected(selection, index);
+            // A row is known by its diff and its index, so that the
+            // row of a new diff at the same place does not take over
+            // the state of the one before, such as its open menu.
+            let row = ui.push_id((shown, index), |ui| match all[index] {
+                Row::Header(hunk) => {
+                    header_row(ui, &hunks[hunk].header, is_selected, &font, palette)
                 }
-                if response.secondary_clicked() {
-                    outcome.menu = Some(index);
+                Row::Line(hunk, line) => {
+                    let line = &hunks[hunk].lines[line];
+                    let spans = highlighting.and_then(|h| h.spans(line));
+                    line_row(ui, line, spans, is_selected, &gutter, &font, texts, palette)
                 }
-                let hunk = match all[index] {
-                    Row::Header(hunk) | Row::Line(hunk, _) => hunk,
-                };
-                response.context_menu(|ui| {
-                    if ui.button(&texts.copy_lines).clicked() {
+            });
+            let response = row.inner;
+            if response.clicked() {
+                let extend = ui.input(|input| input.modifiers.shift);
+                outcome.clicked = Some((index, extend));
+            }
+            if response.secondary_clicked() {
+                outcome.menu = Some(index);
+            }
+            let hunk = match all[index] {
+                Row::Header(hunk) | Row::Line(hunk, _) => hunk,
+            };
+            response.context_menu(|ui| {
+                components::menu(ui, |ui| {
+                    if components::menu_item(ui, None, &texts.copy_lines, None).clicked() {
                         outcome.copy = Some(Copy::Lines);
                         ui.close();
                     }
-                    if ui.button(&texts.copy_hunk).clicked() {
+                    if components::menu_item(ui, None, &texts.copy_hunk, None).clicked() {
                         outcome.copy = Some(Copy::Hunk(hunk));
                         ui.close();
                     }
                 });
-            }
-        });
+            });
+        }
+    });
     outcome
 }
 
@@ -501,11 +497,7 @@ fn row_rect(
 ) -> (egui::Rect, egui::Response) {
     let width = ui.available_width().max(content_width);
     let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::hover());
-    let response = ui.interact(
-        rect,
-        ui.id().with(("diff-row", rect.top() as i64)),
-        Sense::click(),
-    );
+    let response = ui.interact(rect, ui.id().with("diff-row"), Sense::click());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, label));
     ui.ctx().accesskit_node_builder(response.id, |node| {
         node.set_role(Role::Code);
@@ -514,11 +506,27 @@ fn row_rect(
     (rect, response)
 }
 
+/// The colour of the marker `+` or `-` of a line; a line of context has
+/// none and draws its blank marker in the weak text colour.
+fn marker_colour(kind: LineKind, palette: &Palette) -> Option<Rgb> {
+    match kind {
+        LineKind::Added => Some(palette.diff_added_marker),
+        LineKind::Removed => Some(palette.diff_removed_marker),
+        LineKind::Context => None,
+    }
+}
+
+/// The opacity of the selection over a row, out of 255.
+pub(crate) const SELECTION_OVER_DIFF: u8 = 90;
+
 /// Marks a selected row, leaving the colour of its kind visible.
 fn selection_fill(ui: &Ui, rect: egui::Rect, palette: &Palette) {
     let [r, g, b, _] = color(palette.selection).to_array();
-    ui.painter()
-        .rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(r, g, b, 90));
+    ui.painter().rect_filled(
+        rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(r, g, b, SELECTION_OVER_DIFF),
+    );
 }
 
 fn header_row(
@@ -632,7 +640,7 @@ fn line_row(
         egui::Align2::CENTER_CENTER,
         marker(line.kind),
         font.clone(),
-        weak,
+        marker_colour(line.kind, palette).map_or(weak, color),
     );
     let text_x = rect.left() + text_left;
     let text_width = galley.size().x;
@@ -708,6 +716,22 @@ pub(crate) fn line_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markers_of_added_and_removed_lines_take_their_colours() {
+        use crate::theme::{DARK_RED_GREEN, LIGHT};
+        for palette in [&LIGHT, &DARK_RED_GREEN] {
+            assert_eq!(
+                marker_colour(LineKind::Added, palette),
+                Some(palette.diff_added_marker)
+            );
+            assert_eq!(
+                marker_colour(LineKind::Removed, palette),
+                Some(palette.diff_removed_marker)
+            );
+            assert_eq!(marker_colour(LineKind::Context, palette), None);
+        }
+    }
 
     fn line(kind: LineKind, text: &str, no_newline: bool) -> DiffLine {
         DiffLine {

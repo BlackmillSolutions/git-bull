@@ -7,6 +7,7 @@ use eframe::egui::{Event, Id, Key, Modifiers, OutputCommand, PointerButton};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_app::icons;
 use gitbull_app::ui::{AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST};
 use gitbull_core::settings::Settings;
 use gitbull_git::content::{CommitContent, Signature};
@@ -18,7 +19,10 @@ use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, HistoryFeed, LiveRepo, fake_id};
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
-use support::{Setup, build, path, settle_window, window};
+use support::{
+    BURST, Setup, build, commit_list_scroll, find_row, long_history, path, settle_window,
+    turn_wheel, wait_for_row, window, window_at_60_fps,
+};
 
 fn seconds(text: &str) -> i64 {
     text.parse::<Timestamp>().unwrap().as_second()
@@ -207,6 +211,23 @@ fn head_branch_and_remote_branch_are_badges_before_the_description() {
     badge(&harness, "v1.0", first);
 }
 
+#[test]
+fn each_kind_of_reference_shows_its_icon_in_its_badge() {
+    let harness = open(backend());
+    let top = harness.get_by_label("Fix the parser").rect();
+    let bottom = harness.get_by_label("First commit").rect();
+    for (name, icon, row) in [
+        ("HEAD", icons::HEAD, top),
+        ("main", icons::BRANCH, top),
+        ("origin/main", icons::REMOTE_BRANCH, top),
+        ("v1.0", icons::TAG, bottom),
+    ] {
+        let rect = badge(&harness, name, row);
+        let texts = support::texts_in(harness.output(), rect);
+        assert!(texts.iter().any(|text| text == icon), "{name}: {texts:?}");
+    }
+}
+
 /// Where the badge `name` is drawn, if it is.
 fn badge_node(harness: &Harness<'_, App>, name: &str) -> Option<eframe::egui::Rect> {
     harness
@@ -251,7 +272,7 @@ fn badges_that_do_not_fit_are_counted_and_the_description_stays_visible() {
         harness.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    // The count reads "+<number>"; the tab bar has a "+" button too.
+    // The count reads "+<number>".
     let rest: usize = harness
         .get_all_by_role(Role::Label)
         .filter_map(|node| node.accesskit_node().value())
@@ -577,6 +598,44 @@ fn tab_moves_focus_through_the_areas() {
 }
 
 #[test]
+fn each_area_shows_the_focus_ring_when_tab_reaches_it() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    for area in [AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST] {
+        press(&mut harness, Modifiers::NONE);
+        assert_eq!(focused(&harness), Some(Id::new(area)));
+        assert!(
+            !support::focus_rings(harness.output()).is_empty(),
+            "no ring in {area}"
+        );
+    }
+}
+
+/// Scenario "No focus ring after a click".
+#[test]
+fn a_click_focuses_the_list_without_a_focus_ring() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    assert_eq!(focused(&harness), Some(Id::new(COMMIT_LIST)));
+    assert_eq!(support::focus_rings(harness.output()), []);
+}
+
+/// Scenario "Focus ring after a key": the ring of an area is thinner than
+/// that of a control.
+#[test]
+fn a_key_after_a_click_shows_a_thin_focus_ring_on_the_list() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    let widths: Vec<f32> = support::focus_strokes(harness.output())
+        .into_iter()
+        .map(|(_, width)| width)
+        .collect();
+    assert_eq!(widths, [1.0]);
+}
+
+#[test]
 fn shift_tab_moves_focus_back_through_the_areas() {
     let mut harness = open(backend());
     click_row(&mut harness, "Fix the parser", PointerButton::Primary);
@@ -653,4 +712,68 @@ fn arrow_keys_move_the_selection_in_the_focused_commit_list() {
             .is_selected(),
         Some(true)
     );
+}
+
+/// The rows of the commit list that are selected.
+fn selected_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::Row)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+#[test]
+fn a_click_or_a_tap_during_a_motion_stops_the_commit_list_on_the_commit_pressed_on() {
+    for tap in [false, true] {
+        let test = build(Setup {
+            settings: Settings {
+                tabs: vec![root()],
+                active_tab: Some(0),
+                ..Settings::default()
+            },
+            backend: long_history(FakeBackend::default().with_repository(root()), &root(), 200),
+            ..Setup::default()
+        });
+        let mut harness = window_at_60_fps(test.app);
+        settle_window(&mut harness);
+        wait_for_row(&mut harness, "Commit 0, ");
+        let at = find_row(&harness, "Commit 3, ")
+            .expect("the row of Commit 3")
+            .center();
+        harness.hover_at(at);
+        harness.step();
+        turn_wheel(&mut harness, -BURST / 40.0, Modifiers::NONE);
+        for _ in 0..5 {
+            harness.step();
+        }
+        let scroll = commit_list_scroll(&harness);
+        let pressed_on = harness
+            .query_all_by_role(Role::Row)
+            .find(|node| node.rect().contains(at))
+            .and_then(|node| node.accesskit_node().label())
+            .expect("a row under the pointer");
+
+        for pressed in [true, false] {
+            let event = Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            // A tap on a touchpad presses and releases in the same frame.
+            if tap {
+                harness.input_mut().events.push(event);
+            } else {
+                harness.event(event);
+                harness.step();
+            }
+        }
+        for _ in 0..30 {
+            harness.step();
+        }
+
+        assert_eq!(commit_list_scroll(&harness), scroll, "tap: {tap}");
+        assert_eq!(selected_rows(&harness), [pressed_on], "tap: {tap}");
+    }
 }

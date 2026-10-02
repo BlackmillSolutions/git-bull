@@ -4,7 +4,7 @@
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    Align2, Color32, FontId, Id, Rect, ScrollArea, Sense, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    Align2, Color32, FontId, Id, Rect, Sense, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::blame::{BlameContent, BlameState};
@@ -14,6 +14,7 @@ use gitbull_git::object_id::ObjectId;
 
 use crate::app::App;
 use crate::commit_list::{SHORT_HASH, color, local_date};
+use crate::components;
 use crate::diff_view::{FONT_SIZE, ROW_HEIGHT, line_job};
 use crate::file_history_view::header;
 use crate::i18n::Msg;
@@ -25,12 +26,15 @@ pub const BLAME_AREA: &str = "blame-area";
 /// The width of the margin with hash, author and date.
 const MARGIN_WIDTH: f32 = 320.0;
 
+/// How strongly a lane colour tints the band of a commit.
+pub(crate) const BAND_TINT: f32 = 0.22;
+
 /// The colour of the band of the lines of `commit`: the same for every
 /// block of one commit.
 pub(crate) fn band_color(commit: &ObjectId, palette: &Palette) -> Color32 {
     let lanes = &palette.lanes;
     let index = commit.as_bytes().first().copied().unwrap_or(0) as usize % lanes.len();
-    color(lanes[index]).gamma_multiply(0.22)
+    color(lanes[index]).gamma_multiply(BAND_TINT)
 }
 
 /// The text of a margin entry.
@@ -114,13 +118,13 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             return;
         }
         BlameContent::Failed(failure) => {
-            ui.colored_label(color(palette.status_deleted), failure_text(failure));
+            components::error_text(ui, failure_text(failure));
             return;
         }
         BlameContent::Text(lines) => lines,
     };
     if let Some(failed) = blame_failed {
-        ui.colored_label(color(palette.status_deleted), failed);
+        components::error_text(ui, failed);
     }
 
     let font = FontId::monospace(FONT_SIZE);
@@ -133,11 +137,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let text_color = ui.visuals().text_color();
     let weak = ui.visuals().weak_text_color();
     let mut chosen = None;
-    ScrollArea::both()
-        .id_salt(Id::new(BLAME_AREA))
-        .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, lines.len(), |ui, range| {
-            ui.spacing_mut().item_spacing.y = 0.0;
+    components::rows_area(
+        ui,
+        Id::new(BLAME_AREA),
+        ROW_HEIGHT,
+        lines.len(),
+        |ui, range| {
             for index in range {
                 let commit = blame.line_commit(index);
                 // A block begins where the commit of the line above differs.
@@ -218,7 +223,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
                 ui.ctx()
                     .accesskit_node_builder(line.id, |node| node.set_role(Role::Code));
             }
-        });
+        },
+    );
     if let Some(commit) = chosen {
         // The History view shows the commit, or tells why it cannot.
         app.show_view(gitbull_core::workspace::View::History);
@@ -229,12 +235,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::Appearance;
+    use crate::theme::LIGHT;
     use gitbull_testkit::fake_id;
 
     #[test]
     fn blocks_of_one_commit_share_their_colour() {
-        let palette = Appearance::Light.palette();
+        let palette = &LIGHT;
         let (a, b) = (fake_id("a"), fake_id("b"));
         assert_eq!(band_color(&a, palette), band_color(&a, palette));
         assert_ne!(band_color(&a, palette), band_color(&b, palette));

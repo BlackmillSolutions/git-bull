@@ -17,10 +17,15 @@ start-check-again = Check again
 start-set-path = Set path to Git…
 start-details = Details
 
-## Tab bar
+## Title bar
 
 tab-new = New tab
+tab-close = Close { $title }
 tab-opening = Opening { $folder }…
+window-minimize = Minimize
+window-maximize = Maximize
+window-restore = Restore
+window-close = Close window
 
 ## Repository chooser
 
@@ -187,6 +192,18 @@ error-close = Close
 ## Settings dialog
 
 settings-title = Settings
+settings-close = Close settings
+settings-appearance = Appearance
+settings-colour-vision = Colour vision
+settings-interface-size = Interface size
+settings-title-bar = Title bar
+settings-system-title-bar = Use the system title bar
+settings-at-next-start = Takes effect when git-bull starts next.
+settings-section-git = Git
+colour-vision-standard = Standard
+colour-vision-red-green = Red-green
+colour-vision-blue-yellow = Blue-yellow
+interface-size = { $percent } %
 settings-theme = Theme
 settings-language = Language
 settings-git = Git executable

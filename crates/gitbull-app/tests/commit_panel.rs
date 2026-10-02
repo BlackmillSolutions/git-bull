@@ -8,7 +8,8 @@ use eframe::egui::{Event, Modifiers, OutputCommand, PointerButton};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
-use gitbull_core::settings::Settings;
+use gitbull_app::icons;
+use gitbull_core::settings::{Layout, Settings};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::history::CommitLine;
@@ -121,10 +122,15 @@ fn backend() -> FakeBackend {
 }
 
 fn open(backend: FakeBackend) -> Harness<'static, App> {
+    open_with(backend, Layout::default())
+}
+
+fn open_with(backend: FakeBackend, layout: Layout) -> Harness<'static, App> {
     let test = build(Setup {
         settings: Settings {
             tabs: vec![root()],
             active_tab: Some(0),
+            layout,
             ..Settings::default()
         },
         backend,
@@ -461,6 +467,55 @@ fn a_commit_with_many_references_shows_the_first_and_counts_the_rest() {
     let badges = texts.iter().filter(|t| t.starts_with('v')).count();
     assert_eq!(badges, 20, "{texts:?}");
     assert!(texts.iter().any(|t| t == "+80"), "{texts:?}");
+}
+
+#[test]
+fn each_kind_of_reference_shows_its_icon_in_its_badge() {
+    let reference = |name: &str, short: &str, kind| Reference {
+        name: name.to_owned(),
+        short: short.to_owned(),
+        kind,
+        commit: Some(fake_id("c").to_string()),
+        upstream: None,
+    };
+    let references = vec![
+        reference("refs/heads/main", "main", RefKind::Branch),
+        reference(
+            "refs/remotes/origin/main",
+            "origin/main",
+            RefKind::RemoteBranch,
+        ),
+        reference("refs/tags/v1.0", "v1.0", RefKind::Tag),
+    ];
+    // Room for every field without scrolling them.
+    let tall = Layout {
+        details_height: Some(420.0),
+        ..Layout::default()
+    };
+    let mut harness = open_with(backend().with_references(root(), references), tall);
+    select(&mut harness, "Fix the parser");
+    let field = harness.get_by_label("References").rect();
+    for (name, icon) in [
+        ("HEAD", icons::HEAD),
+        ("main", icons::BRANCH),
+        ("origin/main", icons::REMOTE_BRANCH),
+        ("v1.0", icons::TAG),
+    ] {
+        // The badge in the field of the panel; the list and the status bar
+        // name the branch too.
+        let label = harness
+            .get_all_by_label(name)
+            .map(|node| node.rect())
+            .find(|rect| (rect.center().y - field.center().y).abs() < 12.0)
+            .unwrap_or_else(|| panic!("no badge {name} in the panel"));
+        // The icon stands left of the name inside the badge.
+        let badge = eframe::egui::Rect::from_min_max(
+            label.left_top() - eframe::egui::vec2(24.0, 4.0),
+            label.right_bottom() + eframe::egui::vec2(0.0, 4.0),
+        );
+        let texts = support::texts_in(harness.output(), badge);
+        assert!(texts.iter().any(|text| text == icon), "{name}: {texts:?}");
+    }
 }
 
 #[test]
