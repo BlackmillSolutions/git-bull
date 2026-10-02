@@ -7,11 +7,11 @@ git-bull SHALL persist the following in one file in the operating system's
 configuration directory for applications: theme, colour vision, interface
 size, whether to use the system title bar, whether the diff shows invisible
 characters, whether file lists show a tree of folders, language, the path
-to the Git executable, recently opened and pinned repositories, open tabs
-in their order and the active tab, which may be the home tab, window size
-and position, divider positions and column widths. A path that is not valid
-UTF-8 SHALL be left out of the saved settings; the other settings SHALL
-still be saved.
+to the Git executable, recently opened and pinned repositories with the
+worktrees last found in them, open tabs in their order and the active tab,
+which may be the home tab, window size and position, divider positions and
+column widths. A path that is not valid UTF-8 SHALL be left out of the
+saved settings; the other settings SHALL still be saved.
 
 #### Scenario: Layout survives a restart
 - **WHEN** the user changes a divider position and a column width, closes git-bull and starts it again
@@ -55,15 +55,16 @@ still be saved.
 - **THEN** the window starts again with the size and position it had
 
 #### Scenario: Settings file without pinned repositories
-- **WHEN** git-bull starts with a settings file that names no pinned repositories
-- **THEN** no repository is pinned, and every other setting from the file is kept
+- **WHEN** git-bull starts with a settings file that names no pinned repositories and no worktrees
+- **THEN** no repository is pinned, the home tab finds the worktrees when it reads the repositories, and every other setting from the file is kept
 
 ### Requirement: Recently opened repositories
 git-bull SHALL remember the 20 most recently opened repositories, most
-recent first. Pinned repositories SHALL be kept apart from this limit, in
-the order the user pinned them. Removing a repository from the list of the
-home tab SHALL remove it from the recently opened and from the pinned
-repositories.
+recent first. Opening a worktree SHALL count as opening its repository, so
+that the worktrees of one repository take one place. Pinned repositories
+SHALL be kept apart from this limit, in the order the user pinned them.
+Removing a repository from the list of the home tab SHALL remove every path
+of it from the recently opened and from the pinned repositories.
 
 #### Scenario: List is capped
 - **WHEN** 20 repositories are in the list and the user opens another one
@@ -72,6 +73,10 @@ repositories.
 #### Scenario: Reopening moves an entry to the top
 - **WHEN** the user opens a repository that is already in the list
 - **THEN** that entry moves to the first position and appears only once
+
+#### Scenario: Worktrees take the place of their repository
+- **WHEN** the user opens three worktrees of the same repository one after the other
+- **THEN** the repository is first in the list and takes one place in it
 
 #### Scenario: Pinned repository outlasts the limit
 - **WHEN** a repository is pinned and the user opens 20 other repositories
