@@ -42,7 +42,7 @@ before its code.
 
 ## 5. Performance
 
-- [ ] 5.1 Extend the benchmark `wide_commit`: the frame in which the commit's 50,000 files arrive, the files as a tree, scrolled with Page Down and the wheel, a folder collapsed and expanded, a filter typed character by character and cleared, and the time to the line counts (design, decision 8); verify that it passes in a release build, for the scenario "Large commit as a tree" of `file-lists`, and that its table and the machine are recorded in `docs/benchmarks.md`
+- [x] 5.1 Extend the benchmark `wide_commit`: the frame in which the commit's 50,000 files arrive, the files as a tree, scrolled with Page Down and the wheel, a folder collapsed and expanded, a filter typed character by character and cleared, and the time to the line counts (design, decision 8); verify that it passes in a release build, for the scenario "Large commit as a tree" of `file-lists`, and that its table and the machine are recorded in `docs/benchmarks.md`
 
 ## 6. Snapshots and manual check
 
