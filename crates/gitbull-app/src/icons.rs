@@ -60,9 +60,15 @@ pub const REVEAL_UP: &str = phosphor::ARROW_LINE_UP;
 pub const REVEAL_ALL: &str = phosphor::ARROWS_OUT_LINE_VERTICAL;
 /// Shows a file list as a tree of folders.
 pub const TREE: &str = phosphor::TREE_STRUCTURE;
+/// Copies the full hash of a commit.
+pub const COPY: &str = phosphor::COPY_SIMPLE;
+/// Copies the short hash of a commit.
+pub const HASH: &str = phosphor::HASH;
+/// Copies the message of a commit.
+pub const MESSAGE: &str = phosphor::TEXT_ALIGN_LEFT;
 
 /// Every icon with its name.
-pub const ALL: [(&str, &str); 24] = [
+pub const ALL: [(&str, &str); 27] = [
     ("folder", FOLDER),
     ("refresh", REFRESH),
     ("sun", SUN),
@@ -87,4 +93,7 @@ pub const ALL: [(&str, &str); 24] = [
     ("reveal up", REVEAL_UP),
     ("reveal all", REVEAL_ALL),
     ("tree", TREE),
+    ("copy", COPY),
+    ("hash", HASH),
+    ("message", MESSAGE),
 ];

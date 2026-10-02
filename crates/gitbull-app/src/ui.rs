@@ -1792,8 +1792,9 @@ fn history(app: &mut App, ui: &mut Ui) {
                         .size_range(200.0..=f32::INFINITY)
                         .show(ui, |ui| {
                             fill(ui);
+                            // The panel draws its title, with the buttons
+                            // that copy what it shows.
                             let title = app.texts.text(Msg::PanelCommit);
-                            section_title(ui, title.clone());
                             if !commit_panel::show(app, ui, palette) {
                                 focus_area(ui, AREA_COMMIT_PANEL, &title);
                             }

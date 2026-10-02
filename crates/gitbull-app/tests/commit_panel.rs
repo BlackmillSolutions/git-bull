@@ -10,7 +10,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
 use gitbull_app::icons;
 use gitbull_core::settings::{Layout, Settings};
-use gitbull_git::changes::{ChangeKind, FileChange};
+use gitbull_git::changes::{ChangeKind, FileChange, FileLines, LineCount};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::history::CommitLine;
 use gitbull_git::path::RepoPath;
@@ -494,7 +494,8 @@ fn each_kind_of_reference_shows_its_icon_in_its_badge() {
     ];
     // Room for every field without scrolling them.
     let tall = Layout {
-        details_height: Some(420.0),
+        details_height: Some(560.0),
+        commit_details_height: Some(330.0),
         ..Layout::default()
     };
     let mut harness = open_with(backend().with_references(root(), references), tall);
@@ -1273,4 +1274,497 @@ fn tab_moves_on_from_the_filter_as_from_its_list() {
         harness.ctx.memory(|memory| memory.focused()),
         Some(eframe::egui::Id::new(gitbull_app::ui::COMMIT_LIST))
     );
+}
+
+// Copying hash and message (spec `commit-details`).
+
+fn copy_button<'a>(harness: &'a Harness<'_, App>, name: &'a str) -> egui_kittest::Node<'a> {
+    harness.get_by_role_and_label(Role::Button, name)
+}
+
+/// Clicks the button `name`, leaves the pointer on it and returns what it
+/// copied.
+fn copy_with(harness: &mut Harness<'_, App>, name: &str) -> Option<String> {
+    let at = copy_button(harness, name).rect().center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.step();
+    let copied = copied(harness);
+    harness.run();
+    copied
+}
+
+#[test]
+fn the_buttons_copy_the_full_and_the_short_hash() {
+    let mut harness = open_newest(backend());
+    assert_eq!(
+        copy_with(&mut harness, "Copy full hash"),
+        Some(fake_id("c").to_string())
+    );
+    assert_eq!(
+        copy_with(&mut harness, "Copy short hash"),
+        Some(fake_id("c").to_string()[..7].to_owned())
+    );
+}
+
+#[test]
+fn the_button_copies_the_message_without_its_trailing_line_break() {
+    let mut harness = open_newest(backend());
+    assert_eq!(
+        copy_with(&mut harness, "Copy message"),
+        Some("Fix the parser\n\nThe body explains why.".to_owned())
+    );
+}
+
+#[test]
+fn the_tooltip_says_copied_until_the_pointer_leaves() {
+    let mut harness = open_newest(backend());
+    copy_button(&harness, "Copy full hash").hover();
+    harness.run();
+    assert!(harness.query_by_label("Copied").is_none());
+    copy_with(&mut harness, "Copy full hash");
+    assert!(harness.query_by_label("Copied").is_some());
+
+    let elsewhere = harness
+        .get_by_role_and_label(Role::Label, "DIFF")
+        .rect()
+        .center();
+    harness.hover_at(elsewhere);
+    harness.run();
+    copy_button(&harness, "Copy full hash").hover();
+    harness.run();
+    assert!(harness.query_by_label("Copied").is_none());
+    // The name: on the button and in its tooltip.
+    assert_eq!(
+        harness
+            .query_all_by_label("Copy full hash")
+            .filter(|node| node.accesskit_node().role() != Role::MenuItem)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn copy_message_waits_for_the_message() {
+    let mut harness = open_with(backend().with_changes(fake_id("x"), Vec::new()), roomy());
+    // b has a message; a commit whose content has not arrived has none.
+    select(&mut harness, "Rebased change");
+    assert!(
+        !copy_button(&harness, "Copy message")
+            .accesskit_node()
+            .is_disabled()
+    );
+    let lines = vec![line("lonely", &[], C_DATE)];
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            layout: roomy(),
+            ..Settings::default()
+        },
+        backend: FakeBackend::default()
+            .with_repository(root())
+            .with_history(root(), lines),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    wait_until(&mut harness, |h| {
+        h.query_all_by_role(Role::Row).next().is_some()
+    });
+    let row = harness
+        .query_all_by_role(Role::Row)
+        .next()
+        .unwrap()
+        .rect()
+        .center();
+    click_at(&mut harness, row, PointerButton::Primary);
+    assert!(
+        copy_button(&harness, "Copy message")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(
+        !copy_button(&harness, "Copy full hash")
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
+#[test]
+fn the_row_of_uncommitted_changes_offers_no_copy_buttons() {
+    let status = WorkingStatus {
+        unstaged: vec![StatusEntry {
+            kind: StatusKind::Changed(ChangeKind::Modified),
+            path: RepoPath::new("edit.txt"),
+            old_path: None,
+            submodule: false,
+        }],
+        ..WorkingStatus::default()
+    };
+    let mut harness = open_with(backend().with_status(root(), status), roomy());
+    wait_until(&mut harness, |h| {
+        commit_row(h, "Uncommitted changes").is_some()
+    });
+    select(&mut harness, "Fix the parser");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Copy full hash")
+            .is_some()
+    );
+    harness.key_press(eframe::egui::Key::ArrowUp);
+    harness.run();
+    wait_until(&mut harness, |h| {
+        h.query_by_label("Open File status").is_some()
+    });
+    for name in ["Copy full hash", "Copy short hash", "Copy message"] {
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, name)
+                .is_none(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn the_hash_keeps_its_line_at_the_default_width() {
+    let mut harness = open(backend());
+    select(&mut harness, "Fix the parser");
+    let hash = harness.get_by_label(&fake_id("c").to_string()).rect();
+    // The name of the field, left of the hash on its line.
+    let name = harness
+        .query_all_by_label("Commit")
+        .map(|node| node.rect())
+        .filter(|rect| rect.right() <= hash.left())
+        .min_by(|a, b| {
+            (a.center().y - hash.center().y)
+                .abs()
+                .total_cmp(&(b.center().y - hash.center().y).abs())
+        })
+        .expect("the name of the field");
+    // On the line of its name, and on that line alone.
+    assert!((hash.top() - name.top()).abs() < 1.0, "{hash:?} {name:?}");
+    assert!(hash.height() < 2.0 * name.height(), "{hash:?} {name:?}");
+}
+
+// Links in the message (spec `commit-details`).
+
+/// `backend` with the message of c replaced by `message`.
+fn with_message(message: &str) -> FakeBackend {
+    backend().with_content(
+        fake_id("c"),
+        CommitContent {
+            author: person("Ada Lovelace", C_DATE),
+            committer: person("Ada Lovelace", C_DATE),
+            message: message.to_owned(),
+        },
+    )
+}
+
+fn link<'a>(harness: &'a Harness<'_, App>, url: &'a str) -> egui_kittest::Node<'a> {
+    harness.get_by_role_and_label(Role::Link, url)
+}
+
+fn opened(harness: &Harness<'_, App>) -> Option<String> {
+    harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+            _ => None,
+        })
+}
+
+/// Whether `text` is drawn underlined somewhere.
+fn underlined(output: &eframe::egui::FullOutput, text: &str) -> bool {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, text: &str) -> bool {
+        match shape {
+            Shape::Text(shape) if shape.galley.text() == text => {
+                shape.underline.width > 0.0
+                    || shape
+                        .galley
+                        .job
+                        .sections
+                        .iter()
+                        .any(|section| section.format.underline.width > 0.0)
+            }
+            Shape::Vec(shapes) => shapes.iter().any(|shape| walk(shape, text)),
+            _ => false,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .any(|clipped| walk(&clipped.shape, text))
+}
+
+#[test]
+fn a_link_in_the_message_opens_its_address_without_the_full_stop() {
+    let mut harness = open_with(
+        with_message("Fix the parser\n\nSee https://example.com/issue/12. Thanks\n"),
+        roomy(),
+    );
+    select(&mut harness, "Fix the parser");
+    let url = "https://example.com/issue/12";
+    let at = link(&harness, url).rect().center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.step();
+    assert_eq!(opened(&harness).as_deref(), Some(url));
+}
+
+#[test]
+fn a_link_is_underlined_and_followed_by_its_text_without_a_gap() {
+    let mut harness = open_with(
+        with_message("Fix the parser\n\nSee https://example.com/issue/12. Thanks\n"),
+        roomy(),
+    );
+    select(&mut harness, "Fix the parser");
+    let away = harness
+        .get_by_role_and_label(Role::Label, "DIFF")
+        .rect()
+        .center();
+    harness.hover_at(away);
+    harness.run();
+    let url = "https://example.com/issue/12";
+    assert!(underlined(harness.output(), url));
+    let link = link(&harness, url).rect();
+    let after = harness.get_by_label(". Thanks").rect();
+    assert!(
+        (after.left() - link.right()).abs() < 0.5,
+        "{link:?} {after:?}"
+    );
+    assert!((after.top() - link.top()).abs() < 0.5, "{link:?} {after:?}");
+}
+
+#[test]
+fn other_schemes_in_the_message_stay_text() {
+    let mut harness = open_with(
+        with_message("Fix the parser\n\nFetch ftp://example.com/file and file:///etc/passwd\n"),
+        roomy(),
+    );
+    select(&mut harness, "Fix the parser");
+    assert_eq!(harness.query_all_by_role(Role::Link).count(), 0);
+}
+
+#[test]
+fn a_message_with_links_keeps_its_text_and_line_breaks() {
+    let message = "Fix the parser\n\nSee https://a.example/x for it.\nLast line\n";
+    let mut harness = open_with(with_message(message), roomy());
+    select(&mut harness, "Fix the parser");
+    let subject = harness.get_by_label("Fix the parser\n").rect();
+    let link = link(&harness, "https://a.example/x").rect();
+    let last = harness.get_by_label("Last line").rect();
+    let line = subject.height() / 2.0;
+    assert!(
+        (link.top() - subject.top() - 2.0 * line).abs() < 1.0,
+        "{subject:?} {link:?}"
+    );
+    assert!(
+        (last.top() - link.top() - line).abs() < 1.0,
+        "{link:?} {last:?}"
+    );
+    assert!(
+        harness.query_by_label("See ").is_some() && harness.query_by_label(" for it.").is_some()
+    );
+}
+
+#[test]
+fn the_links_follow_the_message_of_each_commit() {
+    let mut harness = open_with(
+        with_message("Fix the parser\n\nSee https://example.com/issue/12. Thanks\n"),
+        roomy(),
+    );
+    select(&mut harness, "Fix the parser");
+    assert_eq!(harness.query_all_by_role(Role::Link).count(), 1);
+    select(&mut harness, "Rebased change");
+    assert_eq!(harness.query_all_by_role(Role::Link).count(), 0);
+    select(&mut harness, "Fix the parser");
+    link(&harness, "https://example.com/issue/12");
+}
+
+// Changed lines per file (spec `commit-details`).
+
+fn counted(path: &str, old_path: Option<&str>, count: LineCount) -> FileLines {
+    FileLines {
+        path: path.into(),
+        old_path: old_path.map(Into::into),
+        count,
+    }
+}
+
+fn lines_of(added: u64, removed: u64) -> LineCount {
+    LineCount::Lines { added, removed }
+}
+
+/// The files of c with their lines counted, and the readme of the root
+/// commit with its mode changed alone.
+fn counted_backend() -> FakeBackend {
+    backend()
+        .with_line_counts(
+            fake_id("c"),
+            vec![
+                counted("src/parser.rs", None, lines_of(12, 3)),
+                counted("src/b.rs", Some("src/a.rs"), lines_of(1, 1)),
+                counted("old.txt", None, LineCount::Binary),
+            ],
+        )
+        .with_line_counts(
+            fake_id("a"),
+            vec![
+                counted("README.md", None, lines_of(0, 0)),
+                counted("src/main.rs", None, lines_of(5, 0)),
+            ],
+        )
+}
+
+/// The boxes of a bar drawn in `rect`: their fills, and whether each is
+/// only outlined.
+fn boxes_in(output: &eframe::egui::FullOutput, rect: Rect) -> Vec<(eframe::egui::Color32, bool)> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, rect: Rect, found: &mut Vec<(eframe::egui::Color32, bool)>) {
+        match shape {
+            Shape::Rect(shape)
+                if rect.expand(1.0).contains_rect(shape.rect)
+                    && (shape.rect.width() - 8.0).abs() < 0.5
+                    && (shape.rect.height() - 8.0).abs() < 0.5 =>
+            {
+                found.push((shape.fill, shape.stroke.width > 0.0));
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, rect, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, rect, &mut found);
+    }
+    found
+}
+
+fn palette(harness: &Harness<'_, App>) -> &'static gitbull_app::theme::Palette {
+    gitbull_app::style::active_palette(&harness.ctx)
+}
+
+/// How many boxes of `rect` are filled with the colour of added lines, of
+/// removed lines, and are empty.
+fn bar(harness: &Harness<'_, App>, rect: Rect) -> (usize, usize, usize) {
+    let palette = palette(harness);
+    let added = gitbull_app::ui::color(palette.diff_added_marker);
+    let removed = gitbull_app::ui::color(palette.diff_removed_marker);
+    let boxes = boxes_in(harness.output(), rect);
+    let count = |wanted: &dyn Fn(&(eframe::egui::Color32, bool)) -> bool| {
+        boxes.iter().filter(|b| wanted(b)).count()
+    };
+    (
+        count(&|(fill, _)| *fill == added),
+        count(&|(fill, _)| *fill == removed),
+        count(&|(fill, outlined)| *outlined && *fill == eframe::egui::Color32::TRANSPARENT),
+    )
+}
+
+fn drawn_in(harness: &Harness<'_, App>, rect: Rect) -> Vec<String> {
+    support::texts_in(harness.output(), rect)
+}
+
+#[test]
+fn a_file_shows_its_numbers_and_a_bar_of_five_boxes() {
+    let mut harness = open_newest(counted_backend());
+    wait_until(&mut harness, |h| {
+        items(h).contains(&"Modified: src/parser.rs, +12 −3".to_owned())
+    });
+    let row = item(&harness, "Modified: src/parser.rs, +12 −3").rect();
+    let texts = drawn_in(&harness, row);
+    assert!(texts.contains(&"+12".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"−3".to_owned()), "{texts:?}");
+    assert_eq!(bar(&harness, row), (4, 1, 0));
+    let palette = palette(&harness);
+    assert!(
+        support::text_colours(harness.output(), "+12")
+            .contains(&gitbull_app::ui::color(palette.diff_added_marker))
+    );
+    assert!(
+        support::text_colours(harness.output(), "−3")
+            .contains(&gitbull_app::ui::color(palette.diff_removed_marker))
+    );
+}
+
+#[test]
+fn a_small_change_fills_one_box_of_each_and_leaves_three_empty() {
+    let mut harness = open_newest(counted_backend());
+    wait_until(&mut harness, |h| {
+        items(h).contains(&"Renamed: src/a.rs → src/b.rs, +1 −1".to_owned())
+    });
+    let row = item(&harness, "Renamed: src/a.rs → src/b.rs, +1 −1").rect();
+    assert_eq!(bar(&harness, row), (1, 1, 3));
+}
+
+#[test]
+fn a_binary_file_says_so() {
+    let mut harness = open_newest(counted_backend());
+    wait_until(&mut harness, |h| {
+        items(h).contains(&"Deleted: old.txt, binary".to_owned())
+    });
+    let row = item(&harness, "Deleted: old.txt, binary").rect();
+    assert!(drawn_in(&harness, row).contains(&"binary".to_owned()));
+    assert_eq!(bar(&harness, row), (0, 0, 0));
+}
+
+#[test]
+fn a_file_whose_mode_alone_changed_shows_neither_numbers_nor_a_bar() {
+    let mut harness = open_newest(counted_backend());
+    select(&mut harness, "First commit");
+    wait_until(&mut harness, |h| {
+        items(h).contains(&"Added: src/main.rs, +5 −0".to_owned())
+    });
+    let row = item(&harness, "Added: README.md").rect();
+    assert_eq!(drawn_in(&harness, row), ["A", "README.md"]);
+    assert_eq!(bar(&harness, row), (0, 0, 0));
+}
+
+#[test]
+fn the_numbers_follow_the_list() {
+    let gate = gitbull_testkit::Gate::new();
+    let mut harness = open_newest(counted_backend().with_line_count_gate(&gate));
+    let row = item(&harness, "Modified: src/parser.rs").rect();
+    assert!(!drawn_in(&harness, row).contains(&"+12".to_owned()));
+    gate.open();
+    wait_until(&mut harness, |h| {
+        items(h).contains(&"Modified: src/parser.rs, +12 −3".to_owned())
+    });
+}
+
+#[test]
+fn the_details_show_the_number_of_files_and_the_totals() {
+    let mut harness = open_newest(counted_backend());
+    wait_until(&mut harness, |h| panel_texts(h).contains(&"+13".to_owned()));
+    let texts = panel_texts(&harness);
+    for expected in ["Changes", "3 files", "+13", "−4"] {
+        assert!(
+            texts.contains(&expected.to_owned()),
+            "{expected:?} in {texts:?}"
+        );
+    }
 }

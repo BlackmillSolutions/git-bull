@@ -358,11 +358,31 @@ fn copied(harness: &Harness<'_, App>) -> Option<String> {
         })
 }
 
+/// The entries of the context menu named "Copy full hash": the commit
+/// panel offers a small button of that name too, which is narrower.
+fn copy_full_hash_entries<'a>(
+    harness: &'a Harness<'_, App>,
+) -> impl Iterator<Item = egui_kittest::Node<'a>> {
+    harness
+        .query_all_by_label("Copy full hash")
+        .filter(|node| node.rect().width() > 40.0)
+}
+
+fn copy_full_hash_entry<'a>(harness: &'a Harness<'_, App>) -> egui_kittest::Node<'a> {
+    copy_full_hash_entries(harness)
+        .next()
+        .expect("the entry Copy full hash")
+}
+
+fn has_copy_full_hash_entry(harness: &Harness<'_, App>) -> bool {
+    copy_full_hash_entries(harness).next().is_some()
+}
+
 #[test]
 fn the_context_menu_copies_the_full_hash() {
     let mut harness = open(backend());
     click_row(&mut harness, "Rebased change", PointerButton::Secondary);
-    harness.get_by_label("Copy full hash").click();
+    copy_full_hash_entry(&harness).click();
     harness.step();
     assert_eq!(copied(&harness), Some(fake_id("b").to_string()));
 }
@@ -466,7 +486,7 @@ fn the_menu_copies_the_hash_of_its_commit_after_the_history_was_replaced() {
     harness.key_press(Key::End);
     harness.run();
     click_list_row(&mut harness, "Commit 199", PointerButton::Secondary);
-    assert!(harness.query_by_label("Copy full hash").is_some());
+    assert!(has_copy_full_hash_entry(&harness));
 
     // Another branch makes the history load again; the new one has 50 of
     // its commits so far when it takes the place of the one shown.
@@ -488,7 +508,7 @@ fn the_menu_copies_the_hash_of_its_commit_after_the_history_was_replaced() {
     assert_eq!(loaded(&harness), 50);
     harness.run();
 
-    harness.get_by_label("Copy full hash").click();
+    copy_full_hash_entry(&harness).click();
     harness.step();
     assert_eq!(copied(&harness), Some(fake_id("n199").to_string()));
 }
@@ -498,7 +518,7 @@ fn the_menu_copies_the_hash_of_its_commit_when_uncommitted_changes_appear_above_
     let live = LiveRepo::new();
     let mut harness = open_long(&live);
     click_list_row(&mut harness, "Commit 3", PointerButton::Secondary);
-    assert!(harness.query_by_label("Copy full hash").is_some());
+    assert!(has_copy_full_hash_entry(&harness));
 
     live.set_status(WorkingStatus {
         unstaged: vec![StatusEntry {
@@ -524,7 +544,7 @@ fn the_menu_copies_the_hash_of_its_commit_when_uncommitted_changes_appear_above_
     }
     harness.run();
 
-    harness.get_by_label("Copy full hash").click();
+    copy_full_hash_entry(&harness).click();
     harness.step();
     assert_eq!(copied(&harness), Some(fake_id("n3").to_string()));
 }

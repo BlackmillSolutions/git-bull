@@ -3,27 +3,36 @@
 
 use std::sync::Arc;
 
+use eframe::egui::accesskit::Role;
+use eframe::egui::epaint::StrokeKind;
 use eframe::egui::{
-    self, Align, Color32, Frame, Id, Label, Layout, Margin, Panel, RichText, ScrollArea, Sense,
-    TextStyle, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
+    self, Align, Color32, Frame, Hyperlink, Id, Label, Layout, Margin, Panel, Rect, RichText,
+    ScrollArea, Sense, Stroke, TextStyle, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
+use fluent_bundle::FluentArgs;
 use gitbull_core::badges::Badge;
 use gitbull_core::details::ChangedFiles;
+use gitbull_core::details::LineCounts;
 use gitbull_core::file_tree::{FileTree, Mode, Row};
+use gitbull_core::links;
 use gitbull_core::store::Parent;
 use gitbull_core::workspace::{Failure, View};
+use gitbull_git::changes::LineCount;
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::object_id::ObjectId;
 use jiff::tz::TimeZone;
 
 use crate::app::{App, FileAction};
-use crate::commit_list::{BadgeLook, badge_size, color, local_date, original_date, paint_badge};
+use crate::commit_list::{
+    BadgeLook, SHORT_HASH, badge_size, color, local_date, original_date, paint_badge,
+};
 use crate::components;
 use crate::file_list::{self, FileRow, ListTexts};
 use crate::i18n::Msg;
+use crate::icons;
 use crate::theme::{Palette, SHAPE};
-use crate::ui::AREA_COMMIT_PANEL;
+use crate::ui::{AREA_COMMIT_PANEL, section_text};
 use crate::virtual_list::{ListState, ROW_HEIGHT};
 
 /// The id of the filter field above the files.
@@ -38,11 +47,19 @@ struct Texts {
     author: String,
     committer: String,
     references: String,
+    changes: String,
+    /// The number of files the commit changed, once they are listed.
+    file_count: Option<String>,
+    binary: String,
     loading: String,
     none: String,
     file_history: String,
     blame: String,
     copy_path: String,
+    copy_full_hash: String,
+    copy_short_hash: String,
+    copy_message: String,
+    copied: String,
     /// The names of the kinds of change, for assistive technology.
     kinds: [String; 6],
 }
@@ -57,11 +74,30 @@ impl Texts {
             author: text(Msg::DetailAuthor),
             committer: text(Msg::DetailCommitter),
             references: text(Msg::DetailReferences),
+            changes: text(Msg::DetailChanges),
+            file_count: app
+                .workspace()
+                .and_then(|workspace| workspace.active())
+                .and_then(|tab| tab.session())
+                .and_then(|session| match session.details().files() {
+                    ChangedFiles::Loaded(files) => Some(files.len()),
+                    _ => None,
+                })
+                .map(|count| {
+                    let mut args = FluentArgs::new();
+                    args.set("count", count);
+                    app.texts.text_with(Msg::DetailFiles, Some(&args))
+                }),
+            binary: text(Msg::LinesBinary),
             loading: text(Msg::RowLoading),
             none: text(Msg::FilesNone),
             file_history: text(Msg::FileHistory),
             blame: text(Msg::FileBlame),
             copy_path: text(Msg::CopyPath),
+            copy_full_hash: text(Msg::CopyFullHash),
+            copy_short_hash: text(Msg::CopyShortHash),
+            copy_message: text(Msg::CopyMessage),
+            copied: text(Msg::Copied),
             kinds: [
                 Msg::ChangeAdded,
                 Msg::ChangeModified,
@@ -133,6 +169,20 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let uncommitted = app.texts.text(Msg::HistoryUncommitted);
     let open_file_status = app.texts.text(Msg::OpenFileStatus);
     let saved_height = app.settings().layout.commit_details_height;
+    let copies = app.active_view().and_then(|(session, view)| {
+        if view.uncommitted_selected() {
+            return None;
+        }
+        let commit = session.details().commit()?;
+        Some(Copies {
+            full: commit.to_string(),
+            short: commit.short(SHORT_HASH),
+            message: session
+                .content(&commit)
+                .map(|content| content.message.trim_end_matches(['\n', '\r']).to_owned()),
+        })
+    });
+    title_row(ui, &texts, copies.as_ref());
     let Some((_, view)) = app.active_view() else {
         return false;
     };
@@ -170,6 +220,19 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     };
     let badges = session.badges(&commit).to_vec();
     let content = session.content(&commit).cloned();
+    let counts = session.details().line_counts().cloned();
+    let changes = texts.file_count.as_deref().map(|files| Changes {
+        files,
+        totals: counts.as_ref().map(|counts| (counts.added, counts.removed)),
+    });
+    // The links of a message are found once, when it has arrived.
+    if view.message_for != Some(commit)
+        && let Some(content) = &content
+    {
+        view.message_parts = message_parts(&content.message);
+        view.message_for = Some(commit);
+    }
+    let parts = view.message_parts.as_deref();
 
     let mut parent_chosen = None;
     // The details stay as high as the user left the divider below them,
@@ -194,15 +257,18 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
                     // The message first: in a panel of the default height
                     // the fields below it may need scrolling.
                     match &content {
-                        Some(content) => ui.add(Label::new(content.message.trim_end()).wrap()),
-                        None => ui.weak(&texts.loading),
-                    };
+                        Some(content) => message(ui, &content.message, parts),
+                        None => {
+                            ui.weak(&texts.loading);
+                        }
+                    }
                     ui.separator();
                     parent_chosen = fields(
                         ui,
                         &texts,
                         &commit,
                         &parents,
+                        changes,
                         &badges,
                         content.as_ref(),
                         &zone,
@@ -240,6 +306,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let (has_list, action) = files(
         ui,
         files_shown,
+        counts.as_deref(),
         view,
         chosen_mode,
         &texts,
@@ -278,6 +345,271 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     has_list
 }
 
+/// A message split where its lines have links.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MessagePart {
+    /// Lines without links, drawn together as one label.
+    Text(String),
+    /// A line with links: its text and its links in turn.
+    Line(Vec<Run>),
+}
+
+/// A piece of a line with links.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Run {
+    Text(String),
+    Link(String),
+}
+
+/// The parts of `message`, or none when it has no links, which leaves it
+/// one label.
+fn message_parts(message: &str) -> Option<Vec<MessagePart>> {
+    let message = message.trim_end();
+    if links::find(message).is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut lines: Vec<&str> = Vec::new();
+    for line in message.split('\n').map(|line| line.trim_end_matches('\r')) {
+        let found = links::find(line);
+        if found.is_empty() {
+            lines.push(line);
+            continue;
+        }
+        if !lines.is_empty() {
+            parts.push(MessagePart::Text(lines.join("\n")));
+            lines.clear();
+        }
+        let mut runs = Vec::new();
+        let mut at = 0;
+        for range in found {
+            if range.start > at {
+                runs.push(Run::Text(line[at..range.start].to_owned()));
+            }
+            runs.push(Run::Link(line[range.clone()].to_owned()));
+            at = range.end;
+        }
+        if at < line.len() {
+            runs.push(Run::Text(line[at..].to_owned()));
+        }
+        parts.push(MessagePart::Line(runs));
+    }
+    if !lines.is_empty() {
+        parts.push(MessagePart::Text(lines.join("\n")));
+    }
+    Some(parts)
+}
+
+/// The message of a commit, wrapped: as one label without links, else in
+/// its `parts`, with no space between them, so that a full stop follows its
+/// link and the lines stand as in one label. A link is underlined also
+/// without the pointer, which egui does only under the pointer.
+fn message(ui: &mut Ui, text: &str, parts: Option<&[MessagePart]>) {
+    let Some(parts) = parts else {
+        ui.add(Label::new(text.trim_end()).wrap());
+        return;
+    };
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        for part in parts {
+            match part {
+                MessagePart::Text(text) => {
+                    ui.add(Label::new(text.as_str()).wrap());
+                }
+                MessagePart::Line(runs) => {
+                    // A wrapping row without the least height of a row of
+                    // controls, which `horizontal_wrapped` gives it.
+                    let layout = Layout::left_to_right(Align::Min).with_main_wrap(true);
+                    ui.allocate_ui_with_layout(vec2(ui.available_width(), 0.0), layout, |ui| {
+                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                        for run in runs {
+                            match run {
+                                Run::Text(text) => {
+                                    ui.add(Label::new(text.as_str()).wrap());
+                                }
+                                Run::Link(url) => {
+                                    let link = RichText::new(url.as_str()).underline();
+                                    let response = ui
+                                        .add(Hyperlink::from_label_and_url(link, url.as_str()))
+                                        .on_hover_text(url.as_str());
+                                    // The selectable text of the link would
+                                    // make it a label.
+                                    ui.ctx().accesskit_node_builder(response.id, |node| {
+                                        node.set_role(Role::Link);
+                                        node.set_url(url.as_str());
+                                    });
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    });
+}
+
+/// The field "Changes": the number of files, and the lines added and
+/// removed in them once they are counted.
+#[derive(Clone, Copy)]
+struct Changes<'a> {
+    files: &'a str,
+    totals: Option<(u64, u64)>,
+}
+
+/// The colours of added and removed lines, as the markers of the diff
+/// draw them.
+fn line_colours(palette: &Palette) -> (Color32, Color32) {
+    (
+        color(palette.diff_added_marker),
+        color(palette.diff_removed_marker),
+    )
+}
+
+/// The side of a box of the bar of changed lines, the room between two
+/// boxes, and how many boxes the bar has.
+const BOX: f32 = 8.0;
+const BOX_GAP: f32 = 2.0;
+const BOXES: usize = 5;
+
+/// How many boxes of the bar show added and how many removed lines: as
+/// many as lines changed, at most five, filled in proportion, with at least
+/// one for each kind that changed.
+fn bar_boxes(added: u64, removed: u64) -> (usize, usize) {
+    let changed = added + removed;
+    if changed == 0 {
+        return (0, 0);
+    }
+    let filled = changed.min(BOXES as u64) as usize;
+    let mut green = (filled as f64 * added as f64 / changed as f64).round() as usize;
+    if added > 0 {
+        green = green.max(1);
+    }
+    if removed > 0 {
+        green = green.min(filled - 1);
+    }
+    (green, filled - green)
+}
+
+/// What the end of a file row shows of its changed lines: the numbers, or
+/// that the file is binary, and nothing for a file without changed lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Counted {
+    Lines(u64, u64),
+    Binary,
+}
+
+impl Counted {
+    fn of(count: Option<LineCount>) -> Option<Counted> {
+        match count? {
+            LineCount::Lines { added, removed } if added + removed > 0 => {
+                Some(Counted::Lines(added, removed))
+            }
+            LineCount::Lines { .. } => None,
+            LineCount::Binary => Some(Counted::Binary),
+        }
+    }
+}
+
+/// Paints `counted` at the right end of `rect`, the inside of a file row,
+/// and returns where it begins.
+fn paint_counted(ui: &Ui, rect: Rect, counted: Counted, texts: &Texts, palette: &Palette) -> f32 {
+    let painter = ui.painter();
+    let middle = rect.center().y;
+    match counted {
+        Counted::Lines(added, removed) => {
+            let (added_colour, removed_colour) = line_colours(palette);
+            let width = BOXES as f32 * BOX + (BOXES - 1) as f32 * BOX_GAP;
+            let left = rect.right() - width;
+            let (green, red) = bar_boxes(added, removed);
+            for index in 0..BOXES {
+                let at = pos2(left + index as f32 * (BOX + BOX_GAP), middle - BOX / 2.0);
+                let square = Rect::from_min_size(at, vec2(BOX, BOX));
+                if index < green {
+                    painter.rect_filled(square, 1.0, added_colour);
+                } else if index < green + red {
+                    painter.rect_filled(square, 1.0, removed_colour);
+                } else {
+                    painter.rect_stroke(
+                        square,
+                        1.0,
+                        Stroke::new(1.0, color(palette.border_strong)),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
+            let font = egui::FontId::monospace(12.0);
+            let mut right = left - SHAPE.space[1];
+            for (text, colour) in [
+                (format!("−{removed}"), removed_colour),
+                (format!("+{added}"), added_colour),
+            ] {
+                let galley = painter.layout_no_wrap(text, font.clone(), colour);
+                right -= galley.size().x;
+                painter.galley(pos2(right, middle - galley.size().y / 2.0), galley, colour);
+                right -= SHAPE.space[0];
+            }
+            right
+        }
+        Counted::Binary => {
+            let muted = color(palette.text_muted);
+            let galley = painter.layout_no_wrap(
+                texts.binary.clone(),
+                TextStyle::Body.resolve(ui.style()),
+                muted,
+            );
+            let left = rect.right() - galley.size().x;
+            painter.galley(pos2(left, middle - galley.size().y / 2.0), galley, muted);
+            left
+        }
+    }
+}
+
+/// What the buttons of the title row copy.
+struct Copies {
+    full: String,
+    short: String,
+    /// The message without its trailing line break, once it has loaded.
+    message: Option<String>,
+}
+
+/// The title of the panel and, while a commit is shown, the buttons that
+/// copy its hash and message at its right. The row is as high as the
+/// buttons also without them, so that the panel does not move.
+fn title_row(ui: &mut Ui, texts: &Texts, copies: Option<&Copies>) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(SHAPE.target);
+        ui.label(section_text(texts.title.as_str()));
+        let Some(copies) = copies else {
+            return;
+        };
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = SHAPE.space[0];
+            let copied = texts.copied.as_str();
+            components::copy_button(
+                ui,
+                icons::MESSAGE,
+                &texts.copy_message,
+                copied,
+                copies.message.as_deref(),
+            );
+            components::copy_button(
+                ui,
+                icons::HASH,
+                &texts.copy_short_hash,
+                copied,
+                Some(&copies.short),
+            );
+            components::copy_button(
+                ui,
+                icons::COPY,
+                &texts.copy_full_hash,
+                copied,
+                Some(&copies.full),
+            );
+        });
+    });
+}
+
 /// The fields above the message. Returns the parent the user chose.
 #[expect(clippy::too_many_arguments, reason = "the parts of one panel")]
 fn fields(
@@ -285,6 +617,7 @@ fn fields(
     texts: &Texts,
     commit: &ObjectId,
     parents: &[ObjectId],
+    changes: Option<Changes>,
     badges: &[Badge],
     content: Option<&CommitContent>,
     zone: &TimeZone,
@@ -305,6 +638,24 @@ fn fields(
                     if link.clicked() {
                         chosen = Some(*parent);
                     }
+                }
+            });
+        }
+        if let Some(changes) = changes {
+            field(ui, &texts.changes, |ui| {
+                ui.label(changes.files);
+                if let Some((added, removed)) = changes.totals {
+                    let (added_colour, removed_colour) = line_colours(palette);
+                    ui.label(
+                        RichText::new(format!("+{added}"))
+                            .monospace()
+                            .color(added_colour),
+                    );
+                    ui.label(
+                        RichText::new(format!("−{removed}"))
+                            .monospace()
+                            .color(removed_colour),
+                    );
                 }
             });
         }
@@ -399,9 +750,11 @@ fn signature(ui: &mut Ui, person: &Signature, zone: &TimeZone) {
 /// The list of changed files, or why there is none. Returns whether the
 /// list was drawn, and the index of the file whose history, or with
 /// `true` whose blame, the context menu opened.
+#[expect(clippy::too_many_arguments, reason = "the parts of one list")]
 fn files(
     ui: &mut Ui,
     files: &ChangedFiles,
+    counts: Option<&LineCounts>,
     view: &mut crate::app::TabView,
     mode: Mode,
     texts: &Texts,
@@ -443,7 +796,9 @@ fn files(
         palette,
         |ui, row, selected| {
             if let (Some(change), Some(order)) = (files.get(row.index), &order) {
-                file_row(ui, change, order, row, selected, texts, palette);
+                let count =
+                    counts.and_then(|counts| counts.files.get(row.index).copied().flatten());
+                file_row(ui, change, count, order, row, selected, texts, palette);
             }
         },
         |_, _| {},
@@ -537,9 +892,11 @@ fn row_paths(
     }
 }
 
+#[expect(clippy::too_many_arguments, reason = "the parts of one row")]
 fn file_row(
     ui: &mut Ui,
     change: &FileChange,
+    count: Option<LineCount>,
     order: &gitbull_core::file_tree::FileOrder,
     row: FileRow,
     selected: bool,
@@ -554,12 +911,22 @@ fn file_row(
     let (old, path) = row_paths(change, order, row);
     let shown = shown_path(old.as_deref(), &path);
     let response = ui.interact(rect, ui.id().with("file"), Sense::hover());
-    let label = format!("{}: {shown}", texts.kind(change.kind));
+    let counted = Counted::of(count);
+    let label = match counted {
+        Some(Counted::Lines(added, removed)) => {
+            format!("{}: {shown}, +{added} −{removed}", texts.kind(change.kind))
+        }
+        Some(Counted::Binary) => format!("{}: {shown}, {}", texts.kind(change.kind), texts.binary),
+        None => format!("{}: {shown}", texts.kind(change.kind)),
+    };
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
     row.describe(ui, &response, selected);
     let mut inner = rect;
     inner.min.x += row.indent();
     inner.max.x -= 6.0;
+    if let Some(counted) = counted {
+        inner.max.x = paint_counted(ui, inner, counted, texts, palette) - SHAPE.space[1];
+    }
     ui.scope_builder(
         UiBuilder::new()
             .max_rect(inner)
@@ -605,6 +972,48 @@ mod tests {
         let (first, second, after) = (first.unwrap(), second.unwrap(), after.unwrap());
         assert_eq!(second.top() - first.bottom(), SHAPE.space[0]);
         assert_eq!(after.top() - second.bottom(), 8.0);
+    }
+
+    #[test]
+    fn the_bar_fills_its_boxes_in_proportion_and_one_for_each_kind() {
+        assert_eq!(bar_boxes(12, 3), (4, 1));
+        assert_eq!(bar_boxes(1, 1), (1, 1));
+        assert_eq!(bar_boxes(3, 0), (3, 0));
+        assert_eq!(bar_boxes(0, 2), (0, 2));
+        assert_eq!(bar_boxes(1, 100), (1, 4));
+        assert_eq!(bar_boxes(100, 1), (4, 1));
+        assert_eq!(bar_boxes(0, 0), (0, 0));
+    }
+
+    #[test]
+    fn a_file_without_changed_lines_shows_nothing_of_them() {
+        let lines = |added, removed| Some(LineCount::Lines { added, removed });
+        assert_eq!(Counted::of(lines(0, 0)), None);
+        assert_eq!(Counted::of(None), None);
+        assert_eq!(Counted::of(lines(2, 1)), Some(Counted::Lines(2, 1)));
+        assert_eq!(Counted::of(Some(LineCount::Binary)), Some(Counted::Binary));
+    }
+
+    #[test]
+    fn a_message_without_links_stays_whole() {
+        assert_eq!(message_parts("Fix the parser\n\nNo links here.\n"), None);
+    }
+
+    #[test]
+    fn a_message_splits_where_its_lines_have_links() {
+        let text = |text: &str| MessagePart::Text(text.to_owned());
+        assert_eq!(
+            message_parts("Subject\r\n\r\nSee https://a.example/x for it.\nLast line\n"),
+            Some(vec![
+                text("Subject\n"),
+                MessagePart::Line(vec![
+                    Run::Text("See ".to_owned()),
+                    Run::Link("https://a.example/x".to_owned()),
+                    Run::Text(" for it.".to_owned()),
+                ]),
+                text("Last line"),
+            ])
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ use gitbull_git::{Backend, CliBackend};
 use jiff::tz::TimeZone;
 
 use crate::commit_list::{SHORT_HASH, list_row};
+use crate::commit_panel::MessagePart;
 use crate::file_list::FileList;
 use crate::i18n::Translations;
 use crate::theme::{Appearance, ThemeFollower};
@@ -140,6 +141,11 @@ pub(crate) struct TabView {
     /// The commit whose files `commit_files` lists, to select the first
     /// file of the next one.
     pub(crate) files_for: Option<ObjectId>,
+    /// The parts of the message of the commit shown where it has links,
+    /// found once the message has arrived; none for a message without.
+    pub(crate) message_parts: Option<Vec<MessagePart>>,
+    /// The commit whose message `message_parts` splits.
+    pub(crate) message_for: Option<ObjectId>,
     /// The matches of the Search view.
     pub(crate) search_results: ListState,
     /// A view opened from the context menu of a file, shown instead of the

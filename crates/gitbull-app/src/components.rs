@@ -164,6 +164,61 @@ pub fn icon_button(
     tooltip(response, name, shortcut)
 }
 
+/// The record of the copy button clicked last, whose tooltip confirms the
+/// copy until the pointer leaves it.
+const COPIED: &str = "copied-button";
+
+/// A small icon button named `name` that copies `text`, and is disabled
+/// while there is none. After a click its tooltip says `copied` until the
+/// pointer leaves the button.
+pub fn copy_button(
+    ui: &mut Ui,
+    icon: &str,
+    name: &str,
+    copied: &str,
+    text: Option<&str>,
+) -> Response {
+    let palette = active_palette(ui.ctx());
+    let side = SHAPE.target;
+    let enabled = text.is_some();
+    let sense = match enabled {
+        true => Sense::click(),
+        false => Sense::hover(),
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), sense);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    let record = Id::new(COPIED);
+    if response.clicked()
+        && let Some(text) = text
+    {
+        ui.ctx().copy_text(text.to_owned());
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(record, response.id));
+    }
+    let confirmed = ui.ctx().data(|data| data.get_temp::<Id>(record)) == Some(response.id);
+    if confirmed && !response.hovered() {
+        ui.ctx().data_mut(|data| data.remove::<Id>(record));
+    }
+    let ink = match enabled {
+        true => color(palette.text),
+        false => color(palette.text_muted),
+    };
+    let colours = (
+        State::of(&response).fill(palette, Color32::TRANSPARENT),
+        ink,
+    );
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
+    // egui hides a tooltip after a click until the pointer moves; the
+    // confirmation shows at once.
+    if confirmed && response.hovered() {
+        response.show_tooltip_ui(|ui| {
+            ui.label(copied);
+        });
+        return response;
+    }
+    tooltip(response, name, None)
+}
+
 /// An [`icon_button`] that switches `value` on and off. While on it is
 /// drawn as selected, in the accent on its soft wash, and it reports
 /// itself to assistive technology as a button that is pressed or not.

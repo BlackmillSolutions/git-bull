@@ -118,6 +118,9 @@ graph-cancel = Cancel
 graph-generating = Generating the commit-graph
 graph-failed = The commit-graph could not be generated: { $error }
 copy-full-hash = Copy full hash
+copy-short-hash = Copy short hash
+copy-message = Copy message
+copied = Copied
 
 ## File status view
 
@@ -138,6 +141,12 @@ detail-parents = Parents
 detail-author = Author
 detail-committer = Committer
 detail-references = References
+detail-changes = Changes
+detail-files = { $count ->
+    [one] 1 file
+   *[other] { $count } files
+}
+lines-binary = binary
 files-none = No files changed.
 files-filter = Filter files
 files-show-tree = Show as tree

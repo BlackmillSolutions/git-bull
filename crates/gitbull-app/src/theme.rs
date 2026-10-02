@@ -649,6 +649,30 @@ mod tests {
     }
 
     #[test]
+    fn changed_lines_in_a_file_list_stand_out_from_its_rows() {
+        let mut pairs = Pairs::default();
+        for (name, _, p) in PALETTES {
+            for row in [
+                ("list", p.list),
+                ("selection", p.selection),
+                ("hover", p.hover),
+            ] {
+                for marker in [
+                    ("diff_added_marker", p.diff_added_marker),
+                    ("diff_removed_marker", p.diff_removed_marker),
+                ] {
+                    // The numbers as text, and the boxes of the bar.
+                    pairs.need(name, marker, row, 4.5);
+                    pairs.need(name, marker, row, 3.0);
+                }
+                // The outline of an empty box.
+                pairs.need(name, ("border_strong", p.border_strong), row, 3.0);
+            }
+        }
+        pairs.assert_none();
+    }
+
+    #[test]
     fn changed_words_stand_out_from_their_line_and_keep_text_readable() {
         let selected = f64::from(crate::diff_view::SELECTION_OVER_DIFF) / 255.0;
         let lightness = |c: Rgb| lab([c.0, c.1, c.2].map(|v| f64::from(v) / 255.0)).l;

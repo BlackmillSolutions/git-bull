@@ -56,7 +56,7 @@ pub struct Details {
     /// of their list.
     files_work: Pending<(Vec<FileChange>, Option<usize>, Arc<FileOrder>)>,
     order: Option<Arc<FileOrder>>,
-    counts: Option<LineCounts>,
+    counts: Option<Arc<LineCounts>>,
     counts_work: Pending<LineCounts>,
     /// The index of the chosen file among `files`.
     file: Option<usize>,
@@ -300,7 +300,7 @@ impl Details {
         }
         if let Some(counts) = self.counts_work.take() {
             // Without numbers the list still serves; a failure shows none.
-            self.counts = counts.ok();
+            self.counts = counts.ok().map(Arc::new);
             changed = true;
         }
         changed |= self.pane.poll();
@@ -364,7 +364,7 @@ impl Details {
 
     /// The lines the commit changed, once they are counted; never when
     /// counting failed.
-    pub fn line_counts(&self) -> Option<&LineCounts> {
+    pub fn line_counts(&self) -> Option<&Arc<LineCounts>> {
         self.counts.as_ref()
     }
 
