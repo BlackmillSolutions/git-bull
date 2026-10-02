@@ -423,19 +423,27 @@ pub fn focus_rings(output: &eframe::egui::FullOutput) -> Vec<eframe::egui::Rect>
 /// Every rectangle drawn with the focus ring of either appearance, with the
 /// width of its stroke: 2 points around a control, 1 around an area.
 pub fn focus_strokes(output: &eframe::egui::FullOutput) -> Vec<(eframe::egui::Rect, f32)> {
+    focus_ring_shapes(output)
+        .into_iter()
+        .map(|ring| (ring.rect, ring.stroke.width))
+        .collect()
+}
+
+/// Every rectangle drawn with the focus ring of either appearance, as it
+/// was drawn.
+pub fn focus_ring_shapes(
+    output: &eframe::egui::FullOutput,
+) -> Vec<eframe::egui::epaint::RectShape> {
     use eframe::egui::epaint::{RectShape, Shape};
     use gitbull_app::theme::{DARK, LIGHT};
     let colours = [LIGHT.focus, DARK.focus].map(gitbull_app::ui::color);
-    fn walk(
-        shape: &Shape,
-        colours: &[eframe::egui::Color32],
-        found: &mut Vec<(eframe::egui::Rect, f32)>,
-    ) {
+    fn walk(shape: &Shape, colours: &[eframe::egui::Color32], found: &mut Vec<RectShape>) {
         match shape {
-            Shape::Rect(RectShape { rect, stroke, .. })
-                if [1.0, 2.0].contains(&stroke.width) && colours.contains(&stroke.color) =>
+            Shape::Rect(ring)
+                if [1.0, 2.0].contains(&ring.stroke.width)
+                    && colours.contains(&ring.stroke.color) =>
             {
-                found.push((*rect, stroke.width));
+                found.push(ring.clone());
             }
             Shape::Vec(shapes) => {
                 for shape in shapes {

@@ -10,7 +10,7 @@ use eframe::egui::{
     RichText, Sense, Ui,
 };
 use fluent_bundle::FluentArgs;
-use gitbull_core::workspace::{Failure, Tab, TabId, TabState, View};
+use gitbull_core::workspace::{Failure, Tab, TabId, TabState, View, Workspace};
 use gitbull_git::Error;
 
 use std::path::PathBuf;
@@ -33,6 +33,7 @@ use crate::file_status_view::{self, STATUS_LIST};
 use crate::i18n;
 use crate::i18n::Msg;
 use crate::icons;
+use crate::native::TitleBar;
 use crate::paths::System;
 use crate::search_view;
 use crate::sidebar_view::{self, SidebarAction};
@@ -142,11 +143,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     // Reads this pass's wheel input before any area scrolls by it.
     virtual_list::read_wheel(ui.ctx());
 
-    resize_bands(app, ui.ctx(), window);
-
     let mut actions = Vec::new();
     if let GitStatus::Problem(problem) = &app.git {
         title_bar(app, ui, &mut actions);
+        resize_bands(app, ui.ctx(), window);
         CentralPanel::default().show(ui, |ui| start_screen(app, problem, ui, &mut actions));
         apply(app, actions);
         return;
@@ -163,6 +163,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         .iter()
         .any(|action| matches!(action, Action::FocusSearch));
     title_bar(app, ui, &mut actions);
+    // After the window buttons, so that the bands lie above them.
+    resize_bands(app, ui.ctx(), window);
     Panel::top("toolbar").show(ui, |ui| toolbar(app, ui, focus_search, &mut actions));
     if app.dialog.is_some() {
         settings_dialog(app, ui, &mut actions);
@@ -642,117 +644,103 @@ fn notice_kind(notice: &Notice) -> BannerKind {
 }
 
 /// How far into the window the band along an edge that resizes it reaches,
-/// and how far along the edges from a corner the band of the corner does,
-/// in points (design, decision 3).
+/// and how far along the edges from a corner the band resizes towards the
+/// corner, in points (design, decision 3).
 const RESIZE_BAND: f32 = 4.0;
 const RESIZE_CORNER: f32 = 12.0;
+
+/// The layer of the window controls: the window buttons, the bands that
+/// resize the window, and the free space of the title bar while the
+/// settings dialog is open. It is raised above every other layer of egui's
+/// foreground order in each pass, so that the modal of the dialog lets it
+/// take input (design, decision 3). The `Ui` named `name` covers `rect` of
+/// it.
+fn window_controls(ctx: &egui::Context, name: &str, rect: egui::Rect) -> Ui {
+    let id = Id::new("window-controls");
+    let layer = egui::LayerId::new(egui::Order::Foreground, id);
+    ctx.move_to_top(layer);
+    Ui::new(
+        ctx.clone(),
+        id.with(name),
+        egui::UiBuilder::new().layer_id(layer).max_rect(rect),
+    )
+}
 
 /// Bands along the edges of `window` that resize it, with git-bull's own
 /// title bar on Windows and Linux while the window is not maximized: the
 /// system leaves a window without its frame no border to resize (design,
-/// decision 3). They lie in egui's foreground order, so that a press on
-/// them reaches nothing beneath.
+/// decision 3). They lie on the layer of the window controls, registered
+/// after the window buttons, so that a press on them reaches nothing
+/// beneath.
 fn resize_bands(app: &App, ctx: &egui::Context, window: egui::Rect) {
     let filled = ctx.input(|input| {
         let viewport = input.viewport();
         viewport.maximized.unwrap_or(false) || viewport.fullscreen.unwrap_or(false)
     });
-    if app.system_title_bar() || ctx.os() == egui::os::OperatingSystem::Mac || filled {
+    if title_bar_of(app, ctx) != TitleBar::Drawn || filled {
         return;
     }
-    let id = Id::new("resize-bands");
-    let layer = egui::LayerId::new(egui::Order::Foreground, id);
-    let ui = Ui::new(
-        ctx.clone(),
-        id,
-        egui::UiBuilder::new().layer_id(layer).max_rect(window),
-    );
-    let (band, corner) = (RESIZE_BAND, RESIZE_CORNER);
-    let w = window;
-    let rect = |left: f32, top: f32, right: f32, bottom: f32| {
-        egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
-    };
-    use egui::ResizeDirection::*;
-    let bands = [
-        // The edges between the corners.
-        (
-            rect(
-                w.left() + corner,
-                w.top(),
-                w.right() - corner,
-                w.top() + band,
-            ),
-            North,
-        ),
-        (
-            rect(
-                w.left() + corner,
-                w.bottom() - band,
-                w.right() - corner,
-                w.bottom(),
-            ),
-            South,
-        ),
-        (
-            rect(
-                w.left(),
-                w.top() + corner,
-                w.left() + band,
-                w.bottom() - corner,
-            ),
-            West,
-        ),
-        (
-            rect(
-                w.right() - band,
-                w.top() + corner,
-                w.right(),
-                w.bottom() - corner,
-            ),
-            East,
-        ),
-        // Each corner along both of its edges.
-        (
-            rect(w.left(), w.top(), w.left() + corner, w.top() + band),
-            NorthWest,
-        ),
-        (
-            rect(w.left(), w.top(), w.left() + band, w.top() + corner),
-            NorthWest,
-        ),
-        (
-            rect(w.right() - corner, w.top(), w.right(), w.top() + band),
-            NorthEast,
-        ),
-        (
-            rect(w.right() - band, w.top(), w.right(), w.top() + corner),
-            NorthEast,
-        ),
-        (
-            rect(w.left(), w.bottom() - band, w.left() + corner, w.bottom()),
-            SouthWest,
-        ),
-        (
-            rect(w.left(), w.bottom() - corner, w.left() + band, w.bottom()),
-            SouthWest,
-        ),
-        (
-            rect(w.right() - corner, w.bottom() - band, w.right(), w.bottom()),
-            SouthEast,
-        ),
-        (
-            rect(w.right() - band, w.bottom() - corner, w.right(), w.bottom()),
-            SouthEast,
-        ),
+    let ui = window_controls(ctx, "resize-bands", window);
+    let id = ui.id();
+    // A strip along each edge; where two meet, `resize_direction` tells the
+    // corner.
+    let strips = [
+        window.with_max_y(window.top() + RESIZE_BAND),
+        window.with_min_y(window.bottom() - RESIZE_BAND),
+        window.with_max_x(window.left() + RESIZE_BAND),
+        window.with_min_x(window.right() - RESIZE_BAND),
     ];
-    let pressed = ctx.input(|input| input.pointer.any_pressed());
-    for (index, (rect, direction)) in bands.into_iter().enumerate() {
-        let response = ui
-            .interact(rect, id.with(index), Sense::drag())
-            .on_hover_cursor(resize_cursor(direction));
+    let (pointer, pressed) =
+        ctx.input(|input| (input.pointer.hover_pos(), input.pointer.primary_pressed()));
+    let direction = pointer.and_then(|at| resize_direction(window, at));
+    for (index, strip) in strips.into_iter().enumerate() {
+        // Without the keyboard focus: Tab passes the bands by.
+        let response = ui.interact(strip, id.with(index), Sense::DRAG);
+        let Some(direction) = direction else {
+            continue;
+        };
+        let response = response.on_hover_cursor(resize_cursor(direction));
         if pressed && response.is_pointer_button_down_on() {
             ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
         }
+    }
+}
+
+/// The direction in which a press at `at` resizes `window`: towards the
+/// edge it is within [`RESIZE_BAND`] of, or towards the corner if it is
+/// also within [`RESIZE_CORNER`] of the edge across; `None` further inside
+/// (design, decision 3).
+fn resize_direction(window: egui::Rect, at: egui::Pos2) -> Option<egui::ResizeDirection> {
+    use egui::ResizeDirection::*;
+    use std::cmp::Ordering::*;
+    let (left, right) = (at.x - window.left(), window.right() - at.x);
+    let (top, bottom) = (at.y - window.top(), window.bottom() - at.y);
+    if [left, right, top, bottom]
+        .into_iter()
+        .all(|distance| distance > RESIZE_BAND)
+    {
+        return None;
+    }
+    // Towards the start or the end of an axis, or neither.
+    let side = |start: f32, end: f32| {
+        if start <= RESIZE_CORNER {
+            Less
+        } else if end <= RESIZE_CORNER {
+            Greater
+        } else {
+            Equal
+        }
+    };
+    match (side(left, right), side(top, bottom)) {
+        (Less, Less) => Some(NorthWest),
+        (Equal, Less) => Some(North),
+        (Greater, Less) => Some(NorthEast),
+        (Less, Equal) => Some(West),
+        (Greater, Equal) => Some(East),
+        (Less, Greater) => Some(SouthWest),
+        (Equal, Greater) => Some(South),
+        (Greater, Greater) => Some(SouthEast),
+        (Equal, Equal) => None,
     }
 }
 
@@ -770,6 +758,12 @@ fn resize_cursor(direction: egui::ResizeDirection) -> egui::CursorIcon {
         SouthEast => ResizeSouthEast,
         SouthWest => ResizeSouthWest,
     }
+}
+
+/// The title bar the window was built with, on the platform egui runs on
+/// (design, decision 1).
+fn title_bar_of(app: &App, ctx: &egui::Context) -> TitleBar {
+    TitleBar::new(app.system_title_bar(), ctx.os())
 }
 
 /// The room left of the tabs for the system's buttons on macOS, in points of
@@ -790,19 +784,27 @@ const WINDOW_BUTTON: f32 = 46.0;
 /// title bar only the tabs (design, decisions 2 and 3). Before Git is
 /// usable it has no tabs.
 fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
-    let own = !app.system_title_bar();
-    if !own && app.workspace().is_none() {
+    let kind = title_bar_of(app, ui.ctx());
+    if kind == TitleBar::System && app.workspace().is_none() {
         return;
     }
-    let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
-    let buttons = own && !mac;
+    let own = kind != TitleBar::System;
     let frame = egui::Frame::side_top_panel(ui.style());
     Panel::top("title_bar").frame(frame).show(ui, |ui| {
         if own {
             // First, so that the tabs and buttons on it take their own
-            // clicks; with the margin of the panel, to its edges.
+            // clicks; with the margin of the panel, to its edges. Without
+            // the keyboard focus, as it does nothing with keys.
             let whole = ui.max_rect() + frame.inner_margin;
-            let free = ui.interact(whole, Id::new("title-bar"), Sense::click_and_drag());
+            let (id, sense) = (Id::new("title-bar"), Sense::CLICK | Sense::DRAG);
+            let free = if app.dialog.is_some() {
+                // The modal of the dialog lets the panel take no input, but
+                // the layer of the window controls; the tabs take none then
+                // anyway.
+                window_controls(ui.ctx(), "free-space", whole).interact(whole, id, sense)
+            } else {
+                ui.interact(whole, id, sense)
+            };
             if free.drag_started_by(egui::PointerButton::Primary) {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
@@ -813,39 +815,46 @@ fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
             }
         }
         ui.horizontal(|ui| {
-            if own {
-                // As high as a tab, also without tabs, and on macOS at
-                // least as high as the system's title bar.
-                let tab = SHAPE.control_height + SHAPE.space[0];
-                ui.set_min_height(if mac { tab.max(MAC_TITLE_BAR) } else { tab });
+            // As high as a tab, also without tabs, and on macOS at least as
+            // high as the system's title bar.
+            let tab = SHAPE.control_height + SHAPE.space[0];
+            match kind {
+                TitleBar::System => {}
+                TitleBar::MacOverlay => {
+                    ui.set_min_height(tab.max(MAC_TITLE_BAR));
+                    // In full screen macOS hides its buttons.
+                    let fullscreen = ui.input(|input| input.viewport().fullscreen.unwrap_or(false));
+                    if !fullscreen {
+                        ui.add_space(MAC_BUTTONS / ui.ctx().zoom_factor());
+                    }
+                }
+                TitleBar::Drawn => ui.set_min_height(tab),
             }
-            if own && mac {
-                ui.add_space(MAC_BUTTONS / ui.ctx().zoom_factor());
-            }
-            if app.workspace().is_some() {
-                let reserve = match (own, buttons) {
-                    (false, _) => 0.0,
-                    (true, false) => FREE_SPACE,
-                    (true, true) => FREE_SPACE + 3.0 * WINDOW_BUTTON,
+            if let Some(workspace) = app.workspace() {
+                let reserve = match kind {
+                    TitleBar::System => 0.0,
+                    TitleBar::MacOverlay => FREE_SPACE,
+                    TitleBar::Drawn => FREE_SPACE + 3.0 * WINDOW_BUTTON,
                 };
-                tabs(app, ui, reserve, actions);
+                tabs(app, workspace, ui, reserve, actions);
             }
         });
-        if buttons {
+        if kind == TitleBar::Drawn {
             // As high as the bar, up to the edge of the window.
             let row = ui.min_rect();
             let bar = egui::Rect::from_min_max(
                 row.left_top(),
                 egui::pos2(ui.max_rect().right(), row.bottom()),
             ) + frame.inner_margin;
-            window_buttons(app, ui, bar);
+            window_buttons(app, ui.ctx(), bar);
         }
     });
 }
 
 /// Minimize, Maximize or Restore, and Close window at the right end of
-/// `bar` (design, decision 3).
-fn window_buttons(app: &App, ui: &mut Ui, bar: egui::Rect) {
+/// `bar`, on the layer of the window controls (design, decision 3).
+fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
+    let mut ui = window_controls(ctx, "window-buttons", bar);
     let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
     let size = if maximized {
         (
@@ -869,6 +878,8 @@ fn window_buttons(app: &App, ui: &mut Ui, bar: egui::Rect) {
         size,
         (icons::CLOSE, Msg::WindowClose, egui::ViewportCommand::Close),
     ];
+    // While the settings dialog is open, Tab stays in it.
+    let focusable = app.dialog.is_none();
     let count = buttons.len();
     for (index, (icon, name, command)) in buttons.into_iter().enumerate() {
         let right = bar.right() - WINDOW_BUTTON * (count - 1 - index) as f32;
@@ -877,43 +888,42 @@ fn window_buttons(app: &App, ui: &mut Ui, bar: egui::Rect) {
             egui::pos2(right, bar.bottom()),
         );
         let closes = matches!(command, egui::ViewportCommand::Close);
-        if components::window_button(ui, rect, icon, &app.texts.text(name), closes).clicked() {
-            ui.ctx().send_viewport_cmd(command);
+        let name = app.texts.text(name);
+        if components::window_button(&mut ui, rect, icon, &name, closes, focusable).clicked() {
+            ctx.send_viewport_cmd(command);
         }
     }
 }
 
-/// The tabs and the button for a new tab, leaving `reserve` points free
-/// right of them.
-fn tabs(app: &App, ui: &mut Ui, reserve: f32, actions: &mut Vec<Action>) {
+/// The tabs of `workspace` and the button for a new tab, leaving `reserve`
+/// points free right of them.
+fn tabs(app: &App, workspace: &Workspace, ui: &mut Ui, reserve: f32, actions: &mut Vec<Action>) {
     let palette = palette(app, ui);
     ui.spacing_mut().item_spacing.x = SHAPE.space[0];
-    if let Some(workspace) = app.workspace() {
-        let active = workspace.active().map(|tab| tab.id());
-        let tabs: Vec<TabLabel> = workspace
-            .tabs()
-            .iter()
-            .map(|tab| {
-                let title = match tab.state() {
-                    TabState::Opening => {
-                        let mut args = FluentArgs::new();
-                        args.set("folder", tab.title());
-                        app.texts.text_with(Msg::TabOpening, Some(&args))
-                    }
-                    _ => tab.title(),
-                };
-                let mut args = FluentArgs::new();
-                args.set("title", tab.title());
-                TabLabel {
-                    id: tab.id(),
-                    title,
-                    close: app.texts.text_with(Msg::TabClose, Some(&args)),
-                    active: Some(tab.id()) == active,
+    let active = workspace.active().map(|tab| tab.id());
+    let tabs: Vec<TabLabel> = workspace
+        .tabs()
+        .iter()
+        .map(|tab| {
+            let title = match tab.state() {
+                TabState::Opening => {
+                    let mut args = FluentArgs::new();
+                    args.set("folder", tab.title());
+                    app.texts.text_with(Msg::TabOpening, Some(&args))
                 }
-            })
-            .collect();
-        tab_row(ui, palette, &tabs, reserve, actions);
-    }
+                _ => tab.title(),
+            };
+            let mut args = FluentArgs::new();
+            args.set("title", tab.title());
+            TabLabel {
+                id: tab.id(),
+                title,
+                close: app.texts.text_with(Msg::TabClose, Some(&args)),
+                active: Some(tab.id()) == active,
+            }
+        })
+        .collect();
+    tab_row(ui, palette, &tabs, reserve, actions);
     let new_tab = app.texts.text(Msg::TabNew);
     if components::icon_button(ui, icons::PLUS, &new_tab, Some(NEW_TAB)).clicked() {
         actions.push(Action::ShowChooser);
@@ -938,6 +948,10 @@ const TAB_DRAG: &str = "tab-drag";
 struct TabDrag {
     id: TabId,
     grab: f32,
+    /// Where the pointer was last seen: egui forgets it once the pointer
+    /// leaves the window, as when the button is released outside (design,
+    /// decision 5).
+    pointer: f32,
 }
 
 /// The id of the tab with `id`, the same wherever the tab is drawn.
@@ -1038,22 +1052,26 @@ fn place_tabs(
     // The tab being dragged, where it is drawn, and its place among the
     // others: after each one whose centre it has passed.
     let drag_id = Id::new(TAB_DRAG);
-    let drag = ui
-        .data(|data| data.get_temp::<TabDrag>(drag_id))
-        .and_then(|drag| {
-            let index = tabs.iter().position(|tab| tab.id == drag.id)?;
-            let pointer = ui.input(|input| input.pointer.latest_pos())?;
-            let left = pointer.x - drag.grab;
-            // Its place by where the pointer holds it, so that a wide tab
-            // passes a narrow one at the end of the row, though it is drawn
-            // within the row.
-            let centre = left + sizes[index].x / 2.0;
-            let left = left.clamp(row.left(), row.right() - sizes[index].x);
-            let place = (0..tabs.len())
-                .filter(|&other| other != index && lefts[other] + sizes[other].x / 2.0 < centre)
-                .count();
-            Some((index, left, place))
-        });
+    let latest = ui.input(|input| input.pointer.latest_pos());
+    let mut state = ui.data(|data| data.get_temp::<TabDrag>(drag_id));
+    if let Some(state) = &mut state
+        && let Some(latest) = latest
+    {
+        state.pointer = latest.x;
+    }
+    let drag = state.and_then(|drag| {
+        let index = tabs.iter().position(|tab| tab.id == drag.id)?;
+        let left = drag.pointer - drag.grab;
+        // Its place by where the pointer holds it, so that a wide tab
+        // passes a narrow one at the end of the row, though it is drawn
+        // within the row.
+        let centre = left + sizes[index].x / 2.0;
+        let left = left.clamp(row.left(), row.right() - sizes[index].x);
+        let place = (0..tabs.len())
+            .filter(|&other| other != index && lefts[other] + sizes[other].x / 2.0 < centre)
+            .count();
+        Some((index, left, place))
+    });
 
     let mut order: Vec<usize> = (0..tabs.len()).collect();
     if let Some((index, _, place)) = drag {
@@ -1071,13 +1089,16 @@ fn place_tabs(
         index
     });
 
-    // A tab that became active, and a tab being dragged, scroll into view.
+    // The active tab scrolls into view when it became active, moved, or the
+    // row's view changed its width; in between, the row stays where the
+    // wheel left it. A tab being dragged scrolls into view as it moves.
     let shown_id = Id::new(TAB_ROW).with("active");
-    if let Some(index) = tabs.iter().position(|tab| tab.active)
-        && ui.data(|data| data.get_temp::<TabId>(shown_id)) != Some(tabs[index].id)
-    {
-        ui.scroll_to_rect(rects[index], None);
-        ui.data_mut(|data| data.insert_temp(shown_id, tabs[index].id));
+    if let Some(index) = tabs.iter().position(|tab| tab.active) {
+        let shown = (tabs[index].id, index, ui.clip_rect().width());
+        if ui.data(|data| data.get_temp::<(TabId, usize, f32)>(shown_id)) != Some(shown) {
+            ui.scroll_to_rect(rects[index], None);
+            ui.data_mut(|data| data.insert_temp(shown_id, shown));
+        }
     }
     if let Some(index) = dragged {
         ui.scroll_to_rect(rects[index], None);
@@ -1097,12 +1118,16 @@ fn place_tabs(
             None => {}
         }
         // Where the button went down, as egui sees a drag only once the
-        // pointer has moved away from there.
-        if response.drag_started()
+        // pointer has moved away from there. Only the primary button drags
+        // a tab.
+        if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(pressed) = ui.input(|input| input.pointer.press_origin())
         {
-            let grab = pressed.x - rects[index].left();
-            ui.data_mut(|data| data.insert_temp(drag_id, TabDrag { id: tab.id, grab }));
+            state = Some(TabDrag {
+                id: tab.id,
+                grab: pressed.x - rects[index].left(),
+                pointer: latest.map_or(pressed.x, |latest| latest.x),
+            });
             actions.push(Action::Activate(tab.id));
         }
         // egui ends a drag on Escape; the tab then stays where it was.
@@ -1114,13 +1139,18 @@ fn place_tabs(
             actions.push(Action::MoveTab(tab.id, place));
         }
     }
-    if drag.is_some()
-        && !tabs
-            .iter()
-            .any(|tab| ui.ctx().is_being_dragged(tab_id(tab.id)))
-    {
-        ui.data_mut(|data| data.remove::<TabDrag>(drag_id));
-    }
+    // The state of the drag lasts as long as the drag, whatever egui knows
+    // of the pointer meanwhile.
+    let dragging = tabs
+        .iter()
+        .any(|tab| ui.ctx().is_being_dragged(tab_id(tab.id)));
+    ui.data_mut(|data| {
+        if let Some(state) = state.filter(|_| dragging) {
+            data.insert_temp(drag_id, state);
+        } else {
+            data.remove::<TabDrag>(drag_id);
+        }
+    });
 }
 
 /// What the user did with a tab.
@@ -1839,6 +1869,34 @@ pub fn color(rgb: Rgb) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edges_resize_towards_themselves_and_their_ends_towards_the_corner() {
+        use egui::ResizeDirection::*;
+        let window = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 600.0));
+        for (at, direction) in [
+            ((500.0, 2.0), Some(North)),
+            ((500.0, 598.0), Some(South)),
+            ((2.0, 300.0), Some(West)),
+            ((998.0, 300.0), Some(East)),
+            // Within 12 points of a corner along either edge.
+            ((2.0, 11.0), Some(NorthWest)),
+            ((11.0, 2.0), Some(NorthWest)),
+            ((989.0, 2.0), Some(NorthEast)),
+            ((998.0, 11.0), Some(NorthEast)),
+            ((2.0, 589.0), Some(SouthWest)),
+            ((11.0, 598.0), Some(SouthWest)),
+            ((989.0, 598.0), Some(SouthEast)),
+            ((998.0, 589.0), Some(SouthEast)),
+            // Inside, and just beyond the bands.
+            ((500.0, 300.0), None),
+            ((500.0, 5.0), None),
+            ((5.0, 5.0), None),
+        ] {
+            let at = egui::pos2(at.0, at.1);
+            assert_eq!(resize_direction(window, at), direction, "{at:?}");
+        }
+    }
 
     #[test]
     fn tabs_that_fit_keep_their_widths_up_to_the_widest_a_tab_gets() {

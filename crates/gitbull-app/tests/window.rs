@@ -7,11 +7,11 @@ use std::slice;
 use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
 use eframe::egui::{
-    CursorIcon, Event, FontFamily, Modifiers, PointerButton, Pos2, Rect, ResizeDirection,
+    CursorIcon, Event, FontFamily, Key, Modifiers, PointerButton, Pos2, Rect, ResizeDirection,
     ViewportCommand, ViewportId, pos2, vec2,
 };
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
 use gitbull_app::{fonts, icons};
 use gitbull_core::settings::{Layout, Settings};
@@ -267,9 +267,13 @@ fn send(harness: &mut Harness<'_, App>, events: Vec<Event>) -> Vec<ViewportComma
 }
 
 fn button(at: Pos2, pressed: bool) -> Event {
+    button_of(PointerButton::Primary, at, pressed)
+}
+
+fn button_of(button: PointerButton, at: Pos2, pressed: bool) -> Event {
     Event::PointerButton {
         pos: at,
-        button: PointerButton::Primary,
+        button,
         pressed,
         modifiers: Modifiers::NONE,
     }
@@ -349,6 +353,23 @@ fn on_macos_the_tabs_leave_room_for_the_buttons_of_the_system() {
     let at = free_space(&harness);
     let sent = send(&mut harness, drag_from(at));
     assert!(sent.contains(&ViewportCommand::StartDrag), "{sent:?}");
+}
+
+#[test]
+fn on_macos_in_full_screen_the_tabs_begin_at_the_left_edge() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_on(OperatingSystem::Mac, test.app);
+    harness
+        .input_mut()
+        .viewports
+        .entry(ViewportId::ROOT)
+        .or_default()
+        .fullscreen = Some(true);
+    harness.run();
+    let tab = harness
+        .get_by_role_and_label(Role::Button, "git-bull")
+        .rect();
+    assert!(tab.left() < 72.0, "{tab:?}");
 }
 
 #[test]
@@ -540,6 +561,37 @@ fn window_buttons_name_their_action_in_a_tooltip() {
     }
 }
 
+#[test]
+fn the_focus_ring_of_a_window_button_has_its_square_corners() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    let focused = |harness: &Harness<'_, App>| {
+        harness
+            .get_by_role_and_label(Role::Button, "Minimize")
+            .accesskit_node()
+            .is_focused_in_tree()
+    };
+    // Past the tab, its close button and New tab.
+    for _ in 0..10 {
+        if focused(&harness) {
+            break;
+        }
+        harness.key_press(Key::Tab);
+        harness.run();
+    }
+    assert!(focused(&harness), "Tab did not reach Minimize");
+
+    let minimize = harness
+        .get_by_role_and_label(Role::Button, "Minimize")
+        .rect();
+    let ring = support::focus_ring_shapes(harness.output())
+        .into_iter()
+        .find(|ring| ring.rect.expand(1.0).contains_rect(minimize))
+        .expect("a focus ring around Minimize");
+    assert_eq!(ring.corner_radius, eframe::egui::CornerRadius::ZERO);
+}
+
 /// The window as git-bull draws it: egui_kittest leaves 8 points around it.
 const DRAWN: Rect = Rect {
     min: Pos2 { x: 8.0, y: 8.0 },
@@ -581,6 +633,78 @@ fn a_press_on_an_edge_or_a_corner_resizes_the_window() {
             "{at:?}: {sent:?}"
         );
     }
+}
+
+/// Opens the settings dialog, whose modal lets the window behind it take no
+/// input.
+fn open_settings(harness: &mut Harness<'_, App>) {
+    harness
+        .get_by_role_and_label(Role::Button, "Settings")
+        .click();
+    harness.run();
+    harness.get_by_label("Appearance");
+}
+
+#[test]
+fn the_title_bar_and_the_edges_work_while_the_settings_dialog_is_open() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_at_60_fps_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    open_settings(&mut harness);
+
+    let at = free_space(&harness);
+    let sent = send(&mut harness, drag_from(at));
+    assert!(sent.contains(&ViewportCommand::StartDrag), "{sent:?}");
+    let sent = press_at(&mut harness, pos2(DRAWN.right() - 2.0, 400.0));
+    assert!(
+        sent.contains(&ViewportCommand::BeginResize(ResizeDirection::East)),
+        "{sent:?}"
+    );
+    let sent = click_button(&mut harness, "Close window");
+    assert!(sent.contains(&ViewportCommand::Close), "{sent:?}");
+}
+
+#[test]
+fn tab_stays_in_the_settings_dialog_and_passes_the_window_buttons_by() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    open_settings(&mut harness);
+    // More presses than the dialog has controls.
+    for press in 1..=30 {
+        harness.key_press(Key::Tab);
+        harness.run();
+        for name in WINDOW_BUTTONS {
+            let focused = harness
+                .get_by_role_and_label(Role::Button, name)
+                .accesskit_node()
+                .is_focused_in_tree();
+            assert!(!focused, "Tab {press} focused {name}");
+        }
+    }
+}
+
+#[test]
+fn a_press_of_the_secondary_button_on_an_edge_resizes_nothing() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_at_60_fps_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    let at = pos2(DRAWN.right() - 2.0, 400.0);
+    let secondary = PointerButton::Secondary;
+    let sent = send(
+        &mut harness,
+        vec![
+            Event::PointerMoved(at),
+            button_of(secondary, at, true),
+            button_of(secondary, at, false),
+        ],
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|command| matches!(command, ViewportCommand::BeginResize(_))),
+        "{sent:?}"
+    );
 }
 
 #[test]
@@ -642,4 +766,32 @@ fn a_maximized_window_macos_and_the_system_title_bar_offer_no_band() {
             "{os:?}, system title bar {system_title_bar}, maximized {maximized}: {sent:?}"
         );
     }
+}
+
+/// Tab passes the free space of the title bar and the bands that resize
+/// the window by on its way through the title bar to the search field of
+/// the toolbar: they would take the focus without telling assistive
+/// technology what they are.
+#[test]
+fn tab_through_the_title_bar_reaches_only_widgets_that_say_what_they_are() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window_on(OperatingSystem::Windows, test.app);
+    harness.run();
+    for press in 1..=30 {
+        harness.key_press(Key::Tab);
+        harness.run();
+        let focused = harness
+            .query_by(|node| node.is_focused_in_tree())
+            .map(|node| node.accesskit_node());
+        let role = focused.as_ref().map(|node| node.role());
+        assert!(
+            role.is_some_and(|role| role != Role::Unknown),
+            "Tab {press} focused {:?}",
+            harness.ctx.memory(|memory| memory.focused())
+        );
+        if role == Some(Role::TextInput) {
+            return;
+        }
+    }
+    panic!("Tab never reached the search field");
 }

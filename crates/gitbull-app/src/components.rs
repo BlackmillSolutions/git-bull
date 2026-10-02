@@ -156,20 +156,38 @@ pub fn icon_button(
     let side = SHAPE.control_height;
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
-    if ui.is_rect_visible(rect) {
-        let fill = State::of(&response).fill(palette, Color32::TRANSPARENT);
-        let painter = ui.painter();
-        painter.rect_filled(rect, radius(), fill);
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            icon,
-            icons::font(ui.ctx(), ICON_SIZE),
-            color(palette.text),
-        );
-        focus_ring(ui, &response);
-    }
+    let colours = (
+        State::of(&response).fill(palette, Color32::TRANSPARENT),
+        color(palette.text),
+    );
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
     tooltip(response, name, shortcut)
+}
+
+/// Draws an icon button of `response` in `rect` with corners of `radius`:
+/// its surface and `icon` in `colours`, and its focus ring with the same
+/// corners.
+fn paint_icon_button(
+    ui: &Ui,
+    response: &Response,
+    rect: Rect,
+    icon: &str,
+    radius: CornerRadius,
+    (fill, ink): (Color32, Color32),
+) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, fill);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icon,
+        icons::font(ui.ctx(), ICON_SIZE),
+        ink,
+    );
+    focus_ring_with(ui, response, radius);
 }
 
 /// The surface of Close window under the pointer, and its icon there: the
@@ -180,32 +198,35 @@ const ON_CLOSE_WINDOW: Color32 = Color32::WHITE;
 
 /// A button of the title bar that acts on the window, filling `rect`: an
 /// icon button of a larger size, named `name` and red under the pointer if
-/// it `closes` the window (design, decision 3).
-pub fn window_button(ui: &mut Ui, rect: Rect, icon: &str, name: &str, closes: bool) -> Response {
+/// it `closes` the window, which takes the keyboard focus if `focusable`
+/// (design, decision 3).
+pub fn window_button(
+    ui: &mut Ui,
+    rect: Rect,
+    icon: &str,
+    name: &str,
+    closes: bool,
+    focusable: bool,
+) -> Response {
     let palette = active_palette(ui.ctx());
-    let response = ui.interact(rect, Id::new(("window-button", icon)), Sense::click());
+    let sense = if focusable {
+        Sense::click()
+    } else {
+        Sense::CLICK
+    };
+    let response = ui.interact(rect, Id::new(("window-button", icon)), sense);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
-    if ui.is_rect_visible(rect) {
-        let state = State::of(&response);
-        let (fill, ink) = if closes && state != State::Idle {
-            (CLOSE_WINDOW, ON_CLOSE_WINDOW)
-        } else {
-            (
-                state.fill(palette, Color32::TRANSPARENT),
-                color(palette.text),
-            )
-        };
-        let painter = ui.painter();
-        painter.rect_filled(rect, 0.0, fill);
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            icon,
-            icons::font(ui.ctx(), ICON_SIZE),
-            ink,
-        );
-        focus_ring(ui, &response);
-    }
+    let state = State::of(&response);
+    let colours = if closes && state != State::Idle {
+        (CLOSE_WINDOW, ON_CLOSE_WINDOW)
+    } else {
+        (
+            state.fill(palette, Color32::TRANSPARENT),
+            color(palette.text),
+        )
+    };
+    // Square, as the title bar is filled to its edges.
+    paint_icon_button(ui, &response, rect, icon, CornerRadius::ZERO, colours);
     tooltip(response, name, None)
 }
 
@@ -317,8 +338,6 @@ pub fn segmented<T: PartialEq + Copy>(
     response
 }
 
-/// A single-line text field of `width`, as high as a button, with `hint`
-/// while it is empty. Its focus ring comes from the style.
 /// The side of the box of a checkbox, in points.
 const CHECK_BOX: f32 = 16.0;
 
@@ -383,6 +402,8 @@ pub fn checkbox(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
     response
 }
 
+/// A single-line text field of `width`, as high as a button, with `hint`
+/// while it is empty. Its focus ring comes from the style.
 pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
     ui.add(text_edit(text, hint, width))
 }
@@ -592,10 +613,15 @@ pub fn focus_visible(ctx: &Context) -> bool {
 /// focus and rings show: the stroke of the selection, 2 points in the focus
 /// colour.
 pub fn focus_ring(ui: &Ui, response: &Response) {
+    focus_ring_with(ui, response, radius());
+}
+
+/// Like [`focus_ring`], with corners of `radius`, as the control has.
+fn focus_ring_with(ui: &Ui, response: &Response, radius: CornerRadius) {
     if response.has_focus() && focus_visible(ui.ctx()) {
         ui.painter().rect_stroke(
             response.rect,
-            radius(),
+            radius,
             ui.visuals().selection.stroke,
             StrokeKind::Inside,
         );

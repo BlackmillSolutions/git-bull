@@ -14,10 +14,33 @@ use crate::fonts::{self, Fallback};
 /// The window size on the first start.
 const FIRST_SIZE: [f32; 2] = [1280.0, 800.0];
 
-/// The window as the settings remember it, on `os`. Unless the settings ask
-/// for the system's title bar, it has none on Windows and Linux, where
-/// git-bull draws its own, and a transparent one with the system's buttons
-/// on macOS (design, decision 1).
+/// The title bar of the window (design, decision 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitleBar {
+    /// The system's, with the tabs in a row of their own below it.
+    System,
+    /// The system's on macOS, transparent, with its buttons left of the
+    /// tabs.
+    MacOverlay,
+    /// git-bull's own, with the window buttons and bands that resize the
+    /// window.
+    Drawn,
+}
+
+impl TitleBar {
+    /// The title bar on `os`, or the system's if `system_title_bar` asks for
+    /// it.
+    pub fn new(system_title_bar: bool, os: OperatingSystem) -> TitleBar {
+        match os {
+            _ if system_title_bar => TitleBar::System,
+            OperatingSystem::Mac => TitleBar::MacOverlay,
+            _ => TitleBar::Drawn,
+        }
+    }
+}
+
+/// The window as the settings remember it, on `os`, with the title bar of
+/// [`TitleBar::new`].
 pub fn viewport(settings: &Settings, os: OperatingSystem) -> ViewportBuilder {
     let (size, position) = match settings.window {
         Some(window) => ([window.width, window.height], window.position),
@@ -32,15 +55,13 @@ pub fn viewport(settings: &Settings, os: OperatingSystem) -> ViewportBuilder {
     if let Some([x, y]) = position {
         viewport = viewport.with_position(Pos2::new(x, y));
     }
-    if settings.system_title_bar {
-        return viewport;
-    }
-    match os {
-        OperatingSystem::Mac => viewport
+    match TitleBar::new(settings.system_title_bar, os) {
+        TitleBar::System => viewport,
+        TitleBar::MacOverlay => viewport
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
             .with_title_shown(false),
-        _ => viewport.with_decorations(false),
+        TitleBar::Drawn => viewport.with_decorations(false),
     }
 }
 
@@ -125,6 +146,26 @@ impl eframe::App for NativeApp {
 mod tests {
     use super::*;
     use eframe::egui::{Rect, pos2, vec2};
+
+    #[test]
+    fn the_title_bar_follows_the_platform_unless_the_setting_asks_for_the_systems() {
+        assert_eq!(
+            TitleBar::new(false, OperatingSystem::Windows),
+            TitleBar::Drawn
+        );
+        assert_eq!(TitleBar::new(false, OperatingSystem::Nix), TitleBar::Drawn);
+        assert_eq!(
+            TitleBar::new(false, OperatingSystem::Mac),
+            TitleBar::MacOverlay
+        );
+        for os in [
+            OperatingSystem::Windows,
+            OperatingSystem::Nix,
+            OperatingSystem::Mac,
+        ] {
+            assert_eq!(TitleBar::new(true, os), TitleBar::System, "{os:?}");
+        }
+    }
 
     #[test]
     fn on_windows_and_linux_the_window_has_no_title_bar_of_the_system() {

@@ -282,6 +282,44 @@ fn each_choice_of_appearance_applies_at_once_and_survives_a_restart() {
 }
 
 #[test]
+fn a_click_on_another_tab_activates_nothing_while_the_dialog_is_open() {
+    let (git_bull, linux) = (path(&["work", "git-bull"]), path(&["work", "linux"]));
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![git_bull.clone(), linux.clone()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: FakeBackend::default()
+            .with_repository(git_bull)
+            .with_repository(linux),
+        ..Setup::default()
+    });
+    let mut harness = window_on(OperatingSystem::Windows, test.app);
+    settle_window(&mut harness);
+    open_dialog(&mut harness);
+
+    // With the pointer, as assistive technology would reach the tab past
+    // the modal.
+    let at = harness
+        .get_by_role_and_label(Role::Button, "linux")
+        .rect()
+        .center();
+    harness.hover_at(at);
+    harness.drag_at(at);
+    harness.drop_at(at);
+    harness.run();
+
+    let active = harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .map(|tab| tab.title());
+    assert_eq!(active.as_deref(), Some("git-bull"));
+    harness.get_by_label("Appearance");
+}
+
+#[test]
 fn the_dialog_is_modal() {
     let root = path(&["work", "git-bull"]);
     let test = build(Setup {

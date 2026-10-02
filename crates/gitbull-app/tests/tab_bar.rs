@@ -7,14 +7,15 @@ use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
 use std::path::PathBuf;
 
-use eframe::egui::{self, Key, Rect, pos2};
+use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, Rect, pos2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use gitbull_app::app::App;
 use gitbull_core::settings::{Settings, SettingsFile};
 use gitbull_testkit::FakeBackend;
 use support::{
-    Setup, active_title, build, path, settle_window, sized_window, tab_titles, window, window_on,
+    Setup, active_title, build, path, settle_window, sized_window, tab_titles, turn_wheel, window,
+    window_on,
 };
 
 /// Two repositories open, the first active.
@@ -129,6 +130,69 @@ fn a_tab_dragged_past_the_last_becomes_the_last_and_is_active() {
     assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
 }
 
+fn button(button: PointerButton, at: Pos2, pressed: bool) -> Event {
+    Event::PointerButton {
+        pos: at,
+        button,
+        pressed,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+#[test]
+fn a_tab_released_outside_the_window_moves_where_it_was_last_drawn() {
+    let mut harness = window(build(three_tabs()).app);
+    settle_window(&mut harness);
+    let start = tab(&harness, "git-bull").center();
+    let past = pos2(tab(&harness, "chromium").center().x + 20.0, start.y);
+    harness.hover_at(start);
+    harness.drag_at(start);
+    harness.step();
+    for step in 1..=6 {
+        harness.hover_at(start + (past - start) * (step as f32 / 6.0));
+        harness.step();
+    }
+    // Above the window, where the system sends the release and then tells
+    // that the pointer has gone, in one frame: `Harness::event` would give
+    // each its own frame.
+    let outside = pos2(past.x, -20.0);
+    harness.hover_at(outside);
+    harness.step();
+    let input = harness.input_mut();
+    input
+        .events
+        .push(button(PointerButton::Primary, outside, false));
+    input.events.push(Event::PointerGone);
+    harness.run();
+
+    assert_eq!(
+        tab_titles(harness.state()),
+        ["linux", "chromium", "git-bull"]
+    );
+}
+
+#[test]
+fn a_tab_dragged_with_the_secondary_button_stays_in_place() {
+    let mut harness = window(build(three_tabs()).app);
+    settle_window(&mut harness);
+    let start = tab(&harness, "git-bull").center();
+    let past = pos2(tab(&harness, "chromium").center().x + 20.0, start.y);
+    harness.hover_at(start);
+    harness.event(button(PointerButton::Secondary, start, true));
+    harness.step();
+    for step in 1..=6 {
+        harness.hover_at(start + (past - start) * (step as f32 / 6.0));
+        harness.step();
+    }
+    harness.event(button(PointerButton::Secondary, past, false));
+    harness.run();
+
+    assert_eq!(
+        tab_titles(harness.state()),
+        ["git-bull", "linux", "chromium"]
+    );
+}
+
 #[test]
 fn escape_ends_the_drag_of_a_tab_without_moving_it() {
     let mut harness = window(build(three_tabs()).app);
@@ -175,27 +239,94 @@ fn the_tabs_are_saved_in_the_order_they_were_dragged_into() {
     );
 }
 
-/// `count` repositories open, `repository-with-a-long-name-00` and on,
-/// the last active, in a window of the smallest size.
+/// The smallest size of the window.
+const SMALLEST: (f32, f32) = (640.0, 400.0);
+
+/// The title of the tab at `index` among [`many_tabs_in`].
+fn long_name(index: usize) -> String {
+    format!("repository-with-a-long-name-{index:02}")
+}
+
+/// `count` repositories open, the last active, in a window of the smallest
+/// size.
 fn many_tabs(count: usize) -> Harness<'static, App> {
-    let paths: Vec<PathBuf> = (0..count)
-        .map(|i| path(&["work", &format!("repository-with-a-long-name-{i:02}")]))
-        .collect();
+    many_tabs_in(count, count - 1, SMALLEST)
+}
+
+/// `count` repositories open, named by [`long_name`], the one at `active`
+/// active, in a window of `size`.
+fn many_tabs_in(count: usize, active: usize, size: (f32, f32)) -> Harness<'static, App> {
+    let paths: Vec<PathBuf> = (0..count).map(|i| path(&["work", &long_name(i)])).collect();
     let backend = paths.iter().fold(FakeBackend::default(), |backend, path| {
         backend.with_repository(path)
     });
     let test = build(Setup {
         settings: Settings {
             tabs: paths,
-            active_tab: Some(count - 1),
+            active_tab: Some(active),
             ..Settings::default()
         },
         backend,
         ..Setup::default()
     });
-    let mut harness = sized_window((640.0, 400.0), test.app);
+    let mut harness = sized_window(size, test.app);
     settle_window(&mut harness);
     harness
+}
+
+/// Whether the tab named `title` lies wholly in a window of `size`.
+fn in_view(harness: &Harness<'_, App>, title: &str, size: (f32, f32)) -> bool {
+    Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(size.0, size.1))
+        .contains_rect(tab(harness, title))
+}
+
+#[test]
+fn the_active_tab_moved_to_the_end_of_a_row_that_scrolls_stays_in_view() {
+    let mut harness = many_tabs_in(30, 0, SMALLEST);
+    for _ in 0..29 {
+        harness.key_press_modifiers(Modifiers::CTRL | Modifiers::SHIFT, Key::PageDown);
+        harness.run();
+    }
+    let first = long_name(0);
+    assert_eq!(tab_titles(harness.state()).last(), Some(&first));
+    assert!(
+        in_view(&harness, &first, SMALLEST),
+        "{:?}",
+        tab(&harness, &first)
+    );
+}
+
+#[test]
+fn the_active_tab_stays_in_view_when_the_window_becomes_narrower() {
+    let wide = (1600.0, 800.0);
+    let mut harness = many_tabs_in(30, 29, wide);
+    let last = long_name(29);
+    assert!(in_view(&harness, &last, wide));
+
+    harness.set_size(egui::vec2(SMALLEST.0, SMALLEST.1));
+    harness.run();
+
+    assert!(
+        in_view(&harness, &last, SMALLEST),
+        "{:?}",
+        tab(&harness, &last)
+    );
+}
+
+#[test]
+fn the_wheel_scrolls_the_tabs_sideways_away_from_the_active_tab() {
+    let mut harness = many_tabs_in(30, 0, SMALLEST);
+    let first = tab(&harness, &long_name(0));
+    harness.hover_at(first.center());
+    harness.step();
+
+    turn_wheel(&mut harness, -3.0, Modifiers::NONE);
+    // In steps: the tooltip of the narrowed tab under the pointer asks for
+    // frame after frame.
+    harness.run_steps(30);
+
+    let moved = tab(&harness, &long_name(0));
+    assert!(moved.left() < first.left() - 40.0, "{first:?} to {moved:?}");
 }
 
 #[test]
