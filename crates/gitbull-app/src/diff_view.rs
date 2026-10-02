@@ -51,6 +51,7 @@ struct Texts {
     copy_lines: String,
     copy_hunk: String,
     too_large: String,
+    show_invisibles: String,
     /// The names of the kinds of line, for assistive technology.
     added: String,
     removed: String,
@@ -73,6 +74,7 @@ impl Texts {
             copy_lines: text(Msg::CopyLines),
             copy_hunk: text(Msg::CopyHunk),
             too_large: text(Msg::DiffTooLarge),
+            show_invisibles: text(Msg::DiffShowInvisibles),
             added: text(Msg::DiffLineAdded),
             removed: text(Msg::DiffLineRemoved),
             context: text(Msg::DiffLineContext),
@@ -295,6 +297,23 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
         };
         session.set_highlight_theme(theme);
     }
+    let mut invisibles = app.settings().show_invisibles;
+    let drew = draw(app, ui, palette, pane, &texts, &mut invisibles);
+    // The toggle in the header of the diff changed the setting.
+    app.set_show_invisibles(invisibles);
+    drew
+}
+
+/// Draws the diff `pane` shows below its header, whose toggle switches
+/// `invisibles`. Returns whether it drew one.
+fn draw(
+    app: &mut App,
+    ui: &mut Ui,
+    palette: &Palette,
+    pane: Pane,
+    texts: &Texts,
+    invisibles: &mut bool,
+) -> bool {
     let (notes, gap_labels) = match app
         .workspace()
         .and_then(|workspace| workspace.active())
@@ -344,9 +363,23 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
     }
     let diff = document.diff();
 
-    if let Some((old, new)) = paths(diff) {
-        ui.add(Label::new(path_job(old, new, ui)).truncate());
-    }
+    let path = paths(diff);
+    egui::Sides::new().shrink_left().truncate().show(
+        ui,
+        |ui| {
+            if let Some((old, new)) = path {
+                ui.add(Label::new(path_job(old, new, ui)).truncate());
+            }
+        },
+        |ui| {
+            components::toggle_icon_button(
+                ui,
+                icons::INVISIBLES,
+                &texts.show_invisibles,
+                invisibles,
+            );
+        },
+    );
     for note in notes.unwrap_or_default() {
         ui.label(note);
     }
@@ -385,9 +418,10 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette, pane: Pane) ->
             highlighting,
             selection,
             shown: key,
-            texts: &texts,
+            texts,
             gap_labels: &gap_labels,
             too_large: !document.has_text() && !reading,
+            invisibles: *invisibles,
             palette,
         },
     );
@@ -532,6 +566,8 @@ struct Drawn<'a> {
     gap_labels: &'a [GapLabels],
     /// The text of the new version will not come: it is too large.
     too_large: bool,
+    /// Spaces, tabs and line endings are shown.
+    invisibles: bool,
     palette: &'a Palette,
 }
 
@@ -586,7 +622,16 @@ fn draw_rows(ui: &mut Ui, drawn: &Drawn<'_>) -> Outcome {
                     ),
                     Row::Line(..) | Row::Revealed(_) => {
                         let line = line_view(document, highlighting, row);
-                        line_row(ui, &line, is_selected, &gutter, &font, texts, palette)
+                        line_row(
+                            ui,
+                            &line,
+                            is_selected,
+                            drawn.invisibles,
+                            &gutter,
+                            &font,
+                            texts,
+                            palette,
+                        )
                     }
                     Row::Gap(gap) => {
                         let labels = &drawn.gap_labels[gap];
@@ -819,10 +864,12 @@ fn gap_row(
     (response, chosen)
 }
 
+#[expect(clippy::too_many_arguments, reason = "the parts of one row")]
 fn line_row(
     ui: &mut Ui,
     line: &LineView<'_>,
     selected: bool,
+    invisibles: bool,
     gutter: &Gutter,
     font: &FontId,
     texts: &Texts,
@@ -830,11 +877,42 @@ fn line_row(
 ) -> egui::Response {
     let visuals = ui.visuals();
     let (text_color, weak) = (visuals.text_color(), visuals.weak_text_color());
-    let marks = line.marks.map_or(&[][..], |marks| marks.words.as_slice());
     let mark_fill = word_colour(line.kind, palette).map_or(Color32::TRANSPARENT, color);
-    let galley = ui.painter().layout_job(styled_job(
-        line.text, line.spans, marks, mark_fill, font, text_color,
-    ));
+    // Built only for the rows in view.
+    let visible = invisibles.then(|| {
+        Visible::of(
+            line.text,
+            line.spans.unwrap_or_default(),
+            line.marks,
+            line.end,
+        )
+    });
+    let job = match &visible {
+        Some(visible) => styled_job(
+            &visible.text,
+            &Styling {
+                spans: &visible.spans,
+                marks: &visible.marks,
+                mark_fill,
+                faint: &visible.faint,
+                faint_colour: weak,
+            },
+            font,
+            text_color,
+        ),
+        None => styled_job(
+            line.text,
+            &Styling {
+                spans: line.spans.unwrap_or_default(),
+                marks: line.marks.map_or(&[][..], |marks| marks.words.as_slice()),
+                mark_fill,
+                ..Styling::default()
+            },
+            font,
+            text_color,
+        ),
+    };
+    let galley = ui.painter().layout_job(job);
     let mut endings = Vec::new();
     if line.cut {
         endings.push(texts.cut.as_str());
@@ -947,21 +1025,47 @@ pub(crate) fn line_job(
     font: &FontId,
     default: Color32,
 ) -> LayoutJob {
-    styled_job(text, spans, &[], Color32::TRANSPARENT, font, default)
+    let styling = Styling {
+        spans: spans.unwrap_or_default(),
+        ..Styling::default()
+    };
+    styled_job(text, &styling, font, default)
 }
 
-/// The text of a line laid out in the monospace font: in the colours of
-/// `spans` where it is highlighted, and on `mark_fill` within `marks`, the
-/// byte ranges of its changed words. Both are in order and may reach past
-/// the text, which may have been cut.
-fn styled_job(
-    text: &str,
-    spans: Option<&[Span]>,
-    marks: &[Range<usize>],
+/// How the text of a line is coloured. Each list holds byte ranges in
+/// order, which may reach past the text, as the text may have been cut.
+#[derive(Default)]
+struct Styling<'a> {
+    /// The syntax colours.
+    spans: &'a [Span],
+    /// The changed words, on `mark_fill`.
+    marks: &'a [Range<usize>],
     mark_fill: Color32,
-    font: &FontId,
-    default: Color32,
-) -> LayoutJob {
+    /// The marks of invisible characters, in `faint_colour` outside changed
+    /// words and in the colour of the text inside them.
+    faint: &'a [Range<usize>],
+    faint_colour: Color32,
+}
+
+/// Ranges walked along a text, from its start.
+struct Walk<I: Iterator<Item = Range<usize>>>(std::iter::Peekable<I>);
+
+impl<I: Iterator<Item = Range<usize>>> Walk<I> {
+    /// Whether `at` lies in a range, and where the run from `at` must end
+    /// for this walk: at the end of that range or the start of the next.
+    fn at(&mut self, at: usize) -> (bool, Option<usize>) {
+        while self.0.next_if(|range| range.end <= at).is_some() {}
+        match self.0.peek() {
+            Some(range) if range.start <= at => (true, Some(range.end)),
+            Some(range) => (false, Some(range.start)),
+            None => (false, None),
+        }
+    }
+}
+
+/// The text of a line laid out in the monospace font, coloured as
+/// `styling` says.
+fn styled_job(text: &str, styling: &Styling<'_>, font: &FontId, default: Color32) -> LayoutJob {
     let clamp = |at: usize| {
         let mut at = at.min(text.len());
         while !text.is_char_boundary(at) {
@@ -969,43 +1073,118 @@ fn styled_job(
         }
         at
     };
-    let spans = spans.unwrap_or_default();
+    let clamped = |range: &Range<usize>| clamp(range.start)..clamp(range.end);
+    let spans = styling.spans;
+    let mut marks = Walk(styling.marks.iter().map(clamped).peekable());
+    let mut faint = Walk(styling.faint.iter().map(clamped).peekable());
     let mut job = LayoutJob::default();
-    let (mut span, mut mark, mut at) = (0, 0, 0);
+    let (mut span, mut at) = (0, 0);
     while at < text.len() {
         while spans.get(span).is_some_and(|s| clamp(s.range.end) <= at) {
             span += 1;
         }
-        while marks.get(mark).is_some_and(|m| clamp(m.end) <= at) {
-            mark += 1;
-        }
         let in_span = spans.get(span).filter(|s| clamp(s.range.start) <= at);
-        let in_mark = marks.get(mark).filter(|m| clamp(m.start) <= at);
-        // The run ends where a span or a mark begins or ends.
+        let (in_mark, mark_end) = marks.at(at);
+        let (in_faint, faint_end) = faint.at(at);
+        // The run ends where any range begins or ends.
         let end = [
             in_span.map(|s| clamp(s.range.end)),
             spans.get(span).map(|s| clamp(s.range.start)),
-            in_mark.map(|m| clamp(m.end)),
-            marks.get(mark).map(|m| clamp(m.start)),
+            mark_end,
+            faint_end,
         ]
         .into_iter()
         .flatten()
         .filter(|&end| end > at)
         .fold(text.len(), usize::min);
-        let mut format = TextFormat::simple(
-            font.clone(),
-            in_span.map_or(default, |s| {
-                Color32::from_rgb(s.color[0], s.color[1], s.color[2])
-            }),
-        );
-        format.italics = in_span.is_some_and(|s| s.italic);
-        if in_mark.is_some() {
-            format.background = mark_fill;
+        let colour = match (in_faint, in_mark, in_span) {
+            (true, false, _) => styling.faint_colour,
+            (true, true, _) | (false, _, None) => default,
+            (false, _, Some(s)) => Color32::from_rgb(s.color[0], s.color[1], s.color[2]),
+        };
+        let mut format = TextFormat::simple(font.clone(), colour);
+        format.italics = !in_faint && in_span.is_some_and(|s| s.italic);
+        if in_mark {
+            format.background = styling.mark_fill;
         }
         job.append(&text[at..end], 0.0, format);
         at = end;
     }
     job
+}
+
+/// What a tab is drawn as: an arrow and spaces up to the four columns egui
+/// gives a tab, so that the text does not move.
+const TAB: &str = "→   ";
+
+/// The text of a line with its invisible characters shown: each space as
+/// `·`, each tab as [`TAB`], and the end of the line as `↵` or `␍↵` after
+/// it. The byte ranges of its spans and marks are moved onto that text.
+struct Visible {
+    text: String,
+    spans: Vec<Span>,
+    marks: Vec<Range<usize>>,
+    /// The marks of the invisible characters.
+    faint: Vec<Range<usize>>,
+}
+
+impl Visible {
+    fn of(text: &str, spans: &[Span], marks: Option<&Marks>, end: LineEnd) -> Visible {
+        // Where each byte of `text` lies in the visible text, and its end.
+        let mut moved = Vec::with_capacity(text.len() + 1);
+        let mut visible = String::with_capacity(text.len() + 8);
+        let mut faint: Vec<Range<usize>> = Vec::new();
+        for (at, c) in text.char_indices() {
+            moved.resize(at, visible.len());
+            moved.push(visible.len());
+            let start = visible.len();
+            match c {
+                ' ' => visible.push('·'),
+                '\t' => visible.push_str(TAB),
+                c => {
+                    visible.push(c);
+                    continue;
+                }
+            }
+            match faint.last_mut() {
+                Some(last) if last.end == start => last.end = visible.len(),
+                _ => faint.push(start..visible.len()),
+            }
+        }
+        moved.resize(text.len() + 1, visible.len());
+        let shift = |range: &Range<usize>| {
+            moved[range.start.min(text.len())]..moved[range.end.min(text.len())]
+        };
+        let spans = spans
+            .iter()
+            .map(|span| Span {
+                range: shift(&span.range),
+                ..span.clone()
+            })
+            .collect();
+        let mut words: Vec<Range<usize>> = marks
+            .map(|marks| marks.words.iter().map(shift).collect())
+            .unwrap_or_default();
+        let ending = match end {
+            LineEnd::Lf => "↵",
+            LineEnd::Crlf => "␍↵",
+            LineEnd::None => "",
+        };
+        if !ending.is_empty() {
+            let start = visible.len();
+            visible.push_str(ending);
+            faint.push(start..visible.len());
+            if marks.is_some_and(|marks| marks.ending) {
+                words.push(start..visible.len());
+            }
+        }
+        Visible {
+            text: visible,
+            spans,
+            marks: words,
+            faint,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1120,20 +1299,84 @@ mod tests {
     }
 
     #[test]
+    fn invisible_characters_keep_the_colours_and_marks_on_their_characters() {
+        let font = FontId::monospace(12.0);
+        // `ä` and `ö` have two bytes each: "\tlet größe =  ä;"
+        let text = "\tlet größe =  ä;";
+        let word = text.find("größe").unwrap();
+        let spans = [span(1..4, 10), span(word..word + 7, 20)];
+        let marks = Marks {
+            words: std::iter::once(word..word + 7).collect(),
+            ending: false,
+        };
+        let visible = Visible::of(text, &spans, Some(&marks), LineEnd::Lf);
+        assert_eq!(visible.text, "→   let·größe·=··ä;↵");
+        let styling = Styling {
+            spans: &visible.spans,
+            marks: &visible.marks,
+            mark_fill: Color32::RED,
+            faint: &visible.faint,
+            faint_colour: Color32::from_rgb(5, 0, 0),
+        };
+        let job = styled_job(&visible.text, &styling, &font, Color32::from_rgb(99, 0, 0));
+        assert_eq!(
+            runs(&job),
+            [
+                ("→   ", 5, false),
+                ("let", 10, false),
+                ("·", 5, false),
+                ("größe", 20, true),
+                ("·", 5, false),
+                ("=", 99, false),
+                ("··", 5, false),
+                ("ä;", 99, false),
+                ("↵", 5, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn marks_of_invisible_characters_inside_a_changed_word_take_the_text_colour() {
+        let font = FontId::monospace(12.0);
+        let marks = Marks {
+            words: std::iter::once(1..3).collect(),
+            ending: true,
+        };
+        let visible = Visible::of("a  b", &[], Some(&marks), LineEnd::Crlf);
+        assert_eq!(visible.text, "a··b␍↵");
+        let styling = Styling {
+            marks: &visible.marks,
+            mark_fill: Color32::RED,
+            faint: &visible.faint,
+            faint_colour: Color32::from_rgb(5, 0, 0),
+            ..Styling::default()
+        };
+        let job = styled_job(&visible.text, &styling, &font, Color32::from_rgb(99, 0, 0));
+        assert_eq!(
+            runs(&job),
+            [
+                ("a", 99, false),
+                ("··", 99, true),
+                ("b", 99, false),
+                ("␍↵", 99, true),
+            ]
+        );
+    }
+
+    #[test]
     fn changed_words_take_their_background_over_the_syntax_colours() {
         let font = FontId::monospace(12.0);
         let text = "let total = count;";
         // `let` and `= count;` are coloured, `count` is marked.
         let spans = [span(0..3, 10), span(10..18, 20)];
         let count = 12..17;
-        let job = styled_job(
-            text,
-            Some(&spans),
-            std::slice::from_ref(&count),
-            Color32::RED,
-            &font,
-            Color32::from_rgb(99, 0, 0),
-        );
+        let styling = Styling {
+            spans: &spans,
+            marks: std::slice::from_ref(&count),
+            mark_fill: Color32::RED,
+            ..Styling::default()
+        };
+        let job = styled_job(text, &styling, &font, Color32::from_rgb(99, 0, 0));
         assert_eq!(
             runs(&job),
             [

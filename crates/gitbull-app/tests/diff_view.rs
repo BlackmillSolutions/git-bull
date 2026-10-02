@@ -2,7 +2,7 @@
 
 mod support;
 
-use eframe::egui::accesskit::Role;
+use eframe::egui::accesskit::{Role, Toggled};
 use eframe::egui::{
     Event, Key, Modifiers, MouseWheelUnit, OutputCommand, PointerButton, Pos2, Rect, TouchPhase,
     pos2, vec2,
@@ -14,7 +14,7 @@ use gitbull_app::theme::LIGHT;
 use gitbull_app::ui::color;
 use gitbull_core::details::DiffState;
 use gitbull_core::diff_document::DiffDocument;
-use gitbull_core::settings::{Settings, ThemeSetting};
+use gitbull_core::settings::{Settings, SettingsFile, ThemeSetting};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
@@ -24,8 +24,9 @@ use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, Gate, LiveRepo, Probe, fake_id};
 use support::{
     BURST, Setup, build, commit_list_scroll, find_row, long_history, marked_texts, path,
-    settle_window, turn_wheel, unnamed_tab_stops, wait_for_row, window, window_at_60_fps,
+    settle_window, texts_in, turn_wheel, unnamed_tab_stops, wait_for_row, window, window_at_60_fps,
 };
+use tempfile::TempDir;
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -1030,10 +1031,8 @@ fn version(lines: u32, changes: &[Change], new: bool) -> Vec<u8> {
         .into_bytes()
 }
 
-/// Commit w changes the lines `changes` of `TOTALS`, a Rust file of
-/// `lines` lines.
-fn totals_backend(lines: u32, changes: &[Change]) -> FakeBackend {
-    let w = fake_id("w");
+/// The diff of commit w: `changes` in `TOTALS`, a file of `lines` lines.
+fn totals_diff(lines: u32, changes: &[Change]) -> FileDiff {
     let mut diff = diff(
         Some(TOTALS),
         Some(TOTALS),
@@ -1041,6 +1040,14 @@ fn totals_backend(lines: u32, changes: &[Change]) -> FakeBackend {
     );
     diff.old_blob = Some(fake_id("old-totals"));
     diff.new_blob = Some(fake_id("new-totals"));
+    diff
+}
+
+/// Commit w changes the lines `changes` of `TOTALS`, a Rust file of
+/// `lines` lines.
+fn totals_backend(lines: u32, changes: &[Change]) -> FakeBackend {
+    let w = fake_id("w");
+    let diff = totals_diff(lines, changes);
     FakeBackend::default()
         .with_repository(root())
         .with_history(
@@ -1065,15 +1072,26 @@ fn totals_backend(lines: u32, changes: &[Change]) -> FakeBackend {
         .with_blob(fake_id("new-totals"), &version(lines, changes, true))
 }
 
+/// The settings of the window of commit w: the light theme and the tab.
+fn totals_settings() -> Settings {
+    Settings {
+        theme: ThemeSetting::Light,
+        tabs: vec![root()],
+        active_tab: Some(0),
+        ..Settings::default()
+    }
+}
+
 /// The window with the diff of commit w, in the light theme.
 fn open_totals(fake: FakeBackend) -> Harness<'static, App> {
+    open_totals_with(fake, totals_settings()).0
+}
+
+/// The window with the diff of commit w and `settings`, and the folder of
+/// its settings file.
+fn open_totals_with(fake: FakeBackend, settings: Settings) -> (Harness<'static, App>, TempDir) {
     let test = build(Setup {
-        settings: Settings {
-            theme: ThemeSetting::Light,
-            tabs: vec![root()],
-            active_tab: Some(0),
-            ..Settings::default()
-        },
+        settings,
         backend: fake,
         ..Setup::default()
     });
@@ -1087,7 +1105,7 @@ fn open_totals(fake: FakeBackend) -> Harness<'static, App> {
         .center();
     click(&mut harness, at, PointerButton::Primary);
     wait_until(&mut harness, |h| !diff_rows(h).is_empty());
-    harness
+    (harness, test.dir)
 }
 
 /// The diff document of the commit details.
@@ -1161,4 +1179,140 @@ fn drawing_frames_without_a_change_does_not_build_the_rows_again() {
     }
     harness.run();
     assert_eq!(document_of(&harness, DiffDocument::builds), builds);
+}
+
+// Invisible characters.
+
+const INVISIBLES: &str = "Show invisible characters";
+
+/// The texts drawn in the window.
+fn drawn(harness: &Harness<'_, App>) -> Vec<String> {
+    texts_in(harness.output(), Rect::EVERYTHING)
+}
+
+fn toggle_invisibles(harness: &mut Harness<'_, App>) {
+    harness
+        .get_by_role_and_label(Role::Button, INVISIBLES)
+        .click();
+    harness.run();
+}
+
+const INDENTED: Change = Change {
+    at: 20,
+    old: "\tlet  a = 1;",
+    new: "\tlet  a = 2;",
+};
+
+#[test]
+fn shown_invisible_characters_draw_tabs_as_arrows_and_spaces_as_dots() {
+    let mut harness = open_totals(totals_backend(40, &[INDENTED]));
+    assert!(!drawn(&harness).iter().any(|text| text.contains('·')));
+    toggle_invisibles(&mut harness);
+    let texts = drawn(&harness);
+    for line in ["→   let··a·=·1;↵", "→   let··a·=·2;↵", "let·line_17·=·17;↵"]
+    {
+        assert!(texts.contains(&line.to_owned()), "{line} in {texts:?}");
+    }
+    assert!(harness.state().settings().show_invisibles);
+}
+
+#[test]
+fn a_change_of_line_endings_is_shown_and_marked() {
+    let same = Change {
+        at: 20,
+        old: "let total = 1;",
+        new: "let total = 1;",
+    };
+    let mut diff = totals_diff(40, &[same]);
+    if let Content::Text(hunks) = &mut diff.content {
+        hunks[0].lines[3].crlf = true;
+    }
+    let fake = totals_backend(40, &[]).with_diff(fake_id("w"), TOTALS, diff);
+    let mut harness = open_totals(fake);
+    toggle_invisibles(&mut harness);
+    wait_until(&mut harness, |h| !marked_texts(h.output()).is_empty());
+    harness.run();
+    let texts = drawn(&harness);
+    assert!(texts.contains(&"let·total·=·1;␍↵".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"let·total·=·1;↵".to_owned()), "{texts:?}");
+    assert_eq!(
+        marked_texts(harness.output()),
+        [
+            ("␍↵".to_owned(), color(LIGHT.diff_removed_word)),
+            ("↵".to_owned(), color(LIGHT.diff_added_word)),
+        ]
+    );
+}
+
+#[test]
+fn revealed_lines_end_as_git_compares_them() {
+    // The file has CRLF where the diff, as Git compares it, has LF.
+    let crlf: Vec<u8> = String::from_utf8(version(40, &[TOTAL], true))
+        .unwrap()
+        .replace('\n', "\r\n")
+        .into_bytes();
+    let fake = totals_backend(40, &[TOTAL]).with_blob(fake_id("new-totals"), &crlf);
+    let mut harness = open_totals(fake);
+    wait_until(&mut harness, |h| document_of(h, DiffDocument::has_text));
+    harness.run();
+    toggle_invisibles(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Button, "Show all 16 lines")
+        .click();
+    harness.run();
+    let texts = drawn(&harness);
+    assert!(texts.contains(&"let·line_5·=·5;↵".to_owned()), "{texts:?}");
+    assert!(!texts.iter().any(|text| text.contains('␍')), "{texts:?}");
+}
+
+#[test]
+fn lines_copied_while_invisible_characters_are_shown_keep_their_real_text() {
+    let mut harness = open_totals(totals_backend(40, &[INDENTED]));
+    toggle_invisibles(&mut harness);
+    let removed = row_of(&harness, Role::Code, "Removed, 20")
+        .unwrap()
+        .center();
+    click(&mut harness, removed, PointerButton::Primary);
+    let added = row_of(&harness, Role::Code, "Added, –, 20")
+        .unwrap()
+        .center();
+    click_with(
+        &mut harness,
+        added,
+        PointerButton::Primary,
+        Modifiers::SHIFT,
+    );
+    press_copy(&mut harness);
+    assert_eq!(
+        copied(&harness).as_deref(),
+        Some("\tlet  a = 1;\n\tlet  a = 2;")
+    );
+}
+
+#[test]
+fn shown_invisible_characters_stay_shown_after_a_restart() {
+    let (mut harness, dir) = open_totals_with(totals_backend(40, &[TOTAL]), totals_settings());
+    toggle_invisibles(&mut harness);
+    harness.state_mut().save();
+    let saved = SettingsFile::new(dir.path().join("settings.toml"))
+        .load()
+        .settings;
+    assert!(saved.show_invisibles);
+
+    let (restarted, _dir) = open_totals_with(totals_backend(40, &[TOTAL]), saved);
+    assert!(drawn(&restarted).contains(&"let·line_17·=·17;↵".to_owned()));
+}
+
+#[test]
+fn the_toggle_names_itself_and_whether_invisible_characters_are_shown() {
+    let mut harness = open_totals(totals_backend(40, &[TOTAL]));
+    let state = |harness: &Harness<'_, App>| {
+        harness
+            .get_by_role_and_label(Role::Button, INVISIBLES)
+            .accesskit_node()
+            .toggled()
+    };
+    assert_eq!(state(&harness), Some(Toggled::False));
+    toggle_invisibles(&mut harness);
+    assert_eq!(state(&harness), Some(Toggled::True));
 }

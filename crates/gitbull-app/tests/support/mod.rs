@@ -631,3 +631,29 @@ pub fn marked_texts(output: &eframe::egui::FullOutput) -> Vec<(String, eframe::e
     }
     found
 }
+
+/// The colours of the filled rectangles drawn within `rect`.
+pub fn fills_in(
+    output: &eframe::egui::FullOutput,
+    rect: eframe::egui::Rect,
+) -> Vec<eframe::egui::Color32> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, rect: eframe::egui::Rect, found: &mut Vec<eframe::egui::Color32>) {
+        match shape {
+            Shape::Rect(shape) if rect.expand(1.0).contains_rect(shape.rect) => {
+                found.push(shape.fill);
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, rect, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, rect, &mut found);
+    }
+    found
+}

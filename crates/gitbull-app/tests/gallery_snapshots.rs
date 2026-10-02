@@ -25,6 +25,8 @@ struct Gallery {
     text: String,
     /// A checkbox ticked and one that is not.
     checks: [bool; 2],
+    /// A toggle icon button that is on and one that is off.
+    toggles: [bool; 2],
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
@@ -36,8 +38,16 @@ fn section(ui: &mut egui::Ui, title: &str) {
     );
 }
 
-/// A row of a diff, with its marker in the marker colour.
-fn diff_row(ui: &mut egui::Ui, palette: &Palette, marker: &str, text: &str, line: Rgb, mark: Rgb) {
+/// A row of a diff, with its marker in the marker colour and `word`, if
+/// any, as a changed word on the background `on` after `text`.
+fn diff_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    (marker, text): (&str, &str),
+    word: Option<(&str, Rgb)>,
+    line: Rgb,
+    mark: Rgb,
+) {
     Frame::new()
         .fill(color(line))
         .inner_margin(Margin::symmetric(8, 2))
@@ -45,7 +55,16 @@ fn diff_row(ui: &mut egui::Ui, palette: &Palette, marker: &str, text: &str, line
             ui.set_width(360.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(marker).monospace().color(color(mark)));
+                ui.spacing_mut().item_spacing.x = 0.0;
                 ui.label(RichText::new(text).monospace().color(color(palette.text)));
+                if let Some((word, on)) = word {
+                    let marked = RichText::new(word)
+                        .monospace()
+                        .color(color(palette.text))
+                        .background_color(color(on));
+                    ui.label(marked);
+                    ui.label(RichText::new(";").monospace().color(color(palette.text)));
+                }
             });
         });
 }
@@ -122,6 +141,9 @@ fn gallery(ui: &mut egui::Ui, state: &mut Gallery) {
                 let [ticked, unticked] = &mut state.checks;
                 components::checkbox(ui, ticked, "Ticked");
                 components::checkbox(ui, unticked, "Not ticked");
+                let [on, off] = &mut state.toggles;
+                components::toggle_icon_button(ui, icons::INVISIBLES, "On", on);
+                components::toggle_icon_button(ui, icons::INVISIBLES, "Off", off);
             });
 
             section(ui, "MENU");
@@ -180,24 +202,24 @@ fn gallery(ui: &mut egui::Ui, state: &mut Gallery) {
                     diff_row(
                         ui,
                         palette,
-                        "@@",
-                        "-1,2 +1,2 @@",
+                        ("@@", "-1,2 +1,2 @@"),
+                        None,
                         palette.diff_hunk,
                         palette.text_muted,
                     );
                     diff_row(
                         ui,
                         palette,
-                        "-",
-                        "let colour = red;",
+                        ("-", "let colour = "),
+                        Some(("red", palette.diff_removed_word)),
                         palette.diff_removed,
                         palette.diff_removed_marker,
                     );
                     diff_row(
                         ui,
                         palette,
-                        "+",
-                        "let colour = blue;",
+                        ("+", "let colour = "),
+                        Some(("blue", palette.diff_added_word)),
                         palette.diff_added,
                         palette.diff_added_marker,
                     );
@@ -254,6 +276,7 @@ fn snapshot(name: &str, appearance: Appearance, vision: ColourVision) {
         choice: "light",
         text: String::new(),
         checks: [true, false],
+        toggles: [true, false],
     };
     let mut harness = Harness::builder()
         .with_size((900.0, 860.0))

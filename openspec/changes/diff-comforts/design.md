@@ -237,8 +237,9 @@ text colour on the background of a changed word. The accessible label of
 the row and every copy keep using `text`.
 
 The choice is a new setting `show_invisibles`, read with `or_default`
-like `system_title_bar`, set through `App::set_show_invisibles` and an
-`Action`, and shown by a toggle in the header of the diff.
+like `system_title_bar`, shown by a toggle in the header of the diff and
+set by it through `App::set_show_invisibles`; the diff panel is drawn
+with the `App` at hand, so the toggle needs no `Action`.
 `components::icon_button` has no pressed state, so the design system gets
 `components::toggle_icon_button`: an icon button that is drawn as selected
 while on and reports itself to assistive technology as a toggle with its

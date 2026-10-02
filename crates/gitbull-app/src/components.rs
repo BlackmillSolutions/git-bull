@@ -164,6 +164,32 @@ pub fn icon_button(
     tooltip(response, name, shortcut)
 }
 
+/// An [`icon_button`] that switches `value` on and off. While on it is
+/// drawn as selected, in the accent on its soft wash, and it reports
+/// itself to assistive technology as a button that is pressed or not.
+pub fn toggle_icon_button(ui: &mut Ui, icon: &str, name: &str, value: &mut bool) -> Response {
+    let palette = active_palette(ui.ctx());
+    let side = SHAPE.control_height;
+    let (rect, mut response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), *value, name));
+    let state = State::of(&response);
+    let colours = if *value && state == State::Idle {
+        (color(palette.accent_soft), color(palette.accent))
+    } else {
+        (
+            state.fill(palette, Color32::TRANSPARENT),
+            color(palette.text),
+        )
+    };
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
+    tooltip(response, name, None)
+}
+
 /// An [`icon_button`] that fills `rect`, which is at least
 /// [`SHAPE`]`.target` on each side, as in a row of a list.
 pub fn icon_button_in(ui: &mut Ui, rect: Rect, icon: &str, name: &str) -> Response {

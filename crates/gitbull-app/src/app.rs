@@ -350,6 +350,14 @@ impl App {
         }
     }
 
+    /// Sets whether the diff shows spaces, tabs and line endings.
+    pub fn set_show_invisibles(&mut self, show: bool) {
+        if self.settings.show_invisibles != show {
+            self.settings.show_invisibles = show;
+            self.dirty = true;
+        }
+    }
+
     pub fn set_interface_size(&mut self, size: InterfaceSize) {
         if self.settings.interface_size != size {
             self.settings.interface_size = size;

@@ -179,6 +179,95 @@ fn a_checkbox_has_a_click_target_of_at_least_24() {
     assert!(size.x >= 24.0 && size.y >= 24.0, "{size:?}");
 }
 
+const INVISIBLES: &str = "Show invisible characters";
+
+/// Whether the toggle named `label` is on, as assistive technology learns
+/// it.
+fn pressed(harness: &Harness<'_, bool>, label: &str) -> Option<Toggled> {
+    harness
+        .get_by_role_and_label(Role::Button, label)
+        .accesskit_node()
+        .toggled()
+}
+
+fn toggle_harness() -> Harness<'static, bool> {
+    harness(false, |ui, on: &mut bool| {
+        components::toggle_icon_button(ui, icons::INVISIBLES, INVISIBLES, on);
+    })
+}
+
+#[test]
+fn a_toggle_icon_button_toggles_on_a_click_and_reports_its_state() {
+    let mut harness = toggle_harness();
+    harness.run();
+    assert_eq!(pressed(&harness, INVISIBLES), Some(Toggled::False));
+
+    harness
+        .get_by_role_and_label(Role::Button, INVISIBLES)
+        .click();
+    harness.run();
+    assert!(*harness.state());
+    assert_eq!(pressed(&harness, INVISIBLES), Some(Toggled::True));
+
+    harness
+        .get_by_role_and_label(Role::Button, INVISIBLES)
+        .click();
+    harness.run();
+    assert!(!*harness.state());
+    assert_eq!(pressed(&harness, INVISIBLES), Some(Toggled::False));
+}
+
+#[test]
+fn a_toggle_icon_button_that_is_on_looks_selected() {
+    let mut harness = toggle_harness();
+    harness.run();
+    let off = support::fills_in(
+        harness.output(),
+        harness
+            .get_by_role_and_label(Role::Button, INVISIBLES)
+            .rect(),
+    );
+    *harness.state_mut() = true;
+    harness.run();
+    let on = support::fills_in(
+        harness.output(),
+        harness
+            .get_by_role_and_label(Role::Button, INVISIBLES)
+            .rect(),
+    );
+    assert!(on.contains(&color(DARK.accent_soft)), "{on:?}");
+    assert!(!off.contains(&color(DARK.accent_soft)), "{off:?}");
+}
+
+#[test]
+fn tab_onto_a_toggle_icon_button_shows_the_focus_ring() {
+    let mut harness = toggle_harness();
+    harness.run();
+    let widget = harness
+        .get_by_role_and_label(Role::Button, INVISIBLES)
+        .rect();
+    harness.key_press(Key::Tab);
+    harness.run();
+    assert!(
+        has_focus_ring(&harness, widget),
+        "no ring around {widget:?}"
+    );
+    harness.key_press(Key::Space);
+    harness.run();
+    assert!(*harness.state(), "the keyboard toggles it");
+}
+
+#[test]
+fn a_toggle_icon_button_has_a_click_target_of_at_least_24() {
+    let mut harness = toggle_harness();
+    harness.run();
+    let size = harness
+        .get_by_role_and_label(Role::Button, INVISIBLES)
+        .rect()
+        .size();
+    assert!(size.x >= 24.0 && size.y >= 24.0, "{size:?}");
+}
+
 #[test]
 fn button_reports_its_click() {
     let mut harness = harness(0, |ui, clicks: &mut u32| {
