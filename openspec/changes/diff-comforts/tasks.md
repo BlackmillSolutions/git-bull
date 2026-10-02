@@ -43,7 +43,7 @@ behaviour fails before its code.
 
 ## 7. Snapshots and manual check
 
-- [ ] 7.1 Update the window snapshots, which now show the toolbar of the diff, and the gallery, which shows the toggle button; verify that `tests/window_snapshots.rs` and `tests/gallery_snapshots.rs` pass with the new images and that the user approves them
+- [x] 7.1 Update the window snapshots, which now show the toolbar of the diff, and the gallery, which shows the toggle button; verify that `tests/window_snapshots.rs` and `tests/gallery_snapshots.rs` pass with the new images and that the user approves them. The user approved the gallery and, after the merge with the dividers and column edges of `dev`, the window snapshots on 2026-10-02.
 - [ ] 7.2 The user checks on Windows with a release build: changed words in a few commits, invisible characters in a file with tabs and CRLF line endings, F7 and Shift+F7 and the buttons in a long diff, revealing lines between hunks and at both ends of a long file, and that scrolling, switching the window and changing the theme do not lag or flicker (design, decision 9); verify that the result and the date are recorded in this task
 
 ## 8. Final check
