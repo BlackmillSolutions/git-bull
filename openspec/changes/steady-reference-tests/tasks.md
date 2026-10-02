@@ -2,7 +2,7 @@
 
 ## 1. Core test
 
-- [ ] 1.1 In `workspace::tests::showing_a_tab_again_refreshes_it_but_the_first_showing_does_not`, after activating the second tab, wait until its session has its sidebar instead of its history, then assert that its references were read once (design, decision 1); verify that with a delay of 300 ms at the start of `FakeBackend::references` the test fails before the change with `left: 0, right: 1` and passes after, that it also passes with the delay in `FakeBackend::history` instead, and that without a delay it passes 300 times in a row
+- [x] 1.1 In `workspace::tests::showing_a_tab_again_refreshes_it_but_the_first_showing_does_not`, after activating the second tab, wait until its session has its sidebar instead of its history, then assert that its references were read once (design, decision 1); verify that with a delay of 300 ms at the start of `FakeBackend::references` the test fails before the change with `left: 0, right: 1` and passes after, that it also passes with the delay in `FakeBackend::history` instead, and that without a delay it passes 300 times in a row
 
 ## 2. UI tests
 

@@ -547,7 +547,11 @@ mod tests {
 
         let (first, second) = (workspace.tabs()[0].id(), workspace.tabs()[1].id());
         workspace.activate(second);
-        wait_for(&mut workspace, |w| loaded(w, "linux"));
+        // The references load beside the history, not before it; the
+        // sidebar holds them once they have.
+        wait_for(&mut workspace, |w| {
+            session_of(w, "linux").sidebar().is_some()
+        });
         assert_eq!(reference_reads(&probe, &["work", "linux"]), 1);
 
         workspace.activate(first);
