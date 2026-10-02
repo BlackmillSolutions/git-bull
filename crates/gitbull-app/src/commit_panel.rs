@@ -4,10 +4,9 @@
 use std::sync::Arc;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::epaint::StrokeKind;
 use eframe::egui::{
     self, Align, Color32, Frame, Hyperlink, Id, Label, Layout, Margin, Panel, Rect, RichText,
-    ScrollArea, Sense, Stroke, TextStyle, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
+    ScrollArea, Sense, TextStyle, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::badges::Badge;
@@ -456,40 +455,6 @@ struct Changes<'a> {
     totals: Option<(u64, u64)>,
 }
 
-/// The colours of added and removed lines, as the markers of the diff
-/// draw them.
-fn line_colours(palette: &Palette) -> (Color32, Color32) {
-    (
-        color(palette.diff_added_marker),
-        color(palette.diff_removed_marker),
-    )
-}
-
-/// The side of a box of the bar of changed lines, the room between two
-/// boxes, and how many boxes the bar has.
-const BOX: f32 = 8.0;
-const BOX_GAP: f32 = 2.0;
-const BOXES: usize = 5;
-
-/// How many boxes of the bar show added and how many removed lines: as
-/// many as lines changed, at most five, filled in proportion, with at least
-/// one for each kind that changed.
-fn bar_boxes(added: u64, removed: u64) -> (usize, usize) {
-    let changed = added + removed;
-    if changed == 0 {
-        return (0, 0);
-    }
-    let filled = changed.min(BOXES as u64) as usize;
-    let mut green = (filled as f64 * added as f64 / changed as f64).round() as usize;
-    if added > 0 {
-        green = green.max(1);
-    }
-    if removed > 0 {
-        green = green.min(filled - 1);
-    }
-    (green, filled - green)
-}
-
 /// What the end of a file row shows of its changed lines: the numbers, or
 /// that the file is binary, and nothing for a file without changed lines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -517,38 +482,7 @@ fn paint_counted(ui: &Ui, rect: Rect, counted: Counted, texts: &Texts, palette: 
     let middle = rect.center().y;
     match counted {
         Counted::Lines(added, removed) => {
-            let (added_colour, removed_colour) = line_colours(palette);
-            let width = BOXES as f32 * BOX + (BOXES - 1) as f32 * BOX_GAP;
-            let left = rect.right() - width;
-            let (green, red) = bar_boxes(added, removed);
-            for index in 0..BOXES {
-                let at = pos2(left + index as f32 * (BOX + BOX_GAP), middle - BOX / 2.0);
-                let square = Rect::from_min_size(at, vec2(BOX, BOX));
-                if index < green {
-                    painter.rect_filled(square, 1.0, added_colour);
-                } else if index < green + red {
-                    painter.rect_filled(square, 1.0, removed_colour);
-                } else {
-                    painter.rect_stroke(
-                        square,
-                        1.0,
-                        Stroke::new(1.0, color(palette.border_strong)),
-                        StrokeKind::Inside,
-                    );
-                }
-            }
-            let font = egui::FontId::monospace(12.0);
-            let mut right = left - SHAPE.space[1];
-            for (text, colour) in [
-                (format!("−{removed}"), removed_colour),
-                (format!("+{added}"), added_colour),
-            ] {
-                let galley = painter.layout_no_wrap(text, font.clone(), colour);
-                right -= galley.size().x;
-                painter.galley(pos2(right, middle - galley.size().y / 2.0), galley, colour);
-                right -= SHAPE.space[0];
-            }
-            right
+            components::paint_changed_lines(ui, rect.right(), middle, added, removed)
         }
         Counted::Binary => {
             let muted = color(palette.text_muted);
@@ -645,7 +579,7 @@ fn fields(
             field(ui, &texts.changes, |ui| {
                 ui.label(changes.files);
                 if let Some((added, removed)) = changes.totals {
-                    let (added_colour, removed_colour) = line_colours(palette);
+                    let (added_colour, removed_colour) = components::line_colours(palette);
                     ui.label(
                         RichText::new(format!("+{added}"))
                             .monospace()
@@ -972,17 +906,6 @@ mod tests {
         let (first, second, after) = (first.unwrap(), second.unwrap(), after.unwrap());
         assert_eq!(second.top() - first.bottom(), SHAPE.space[0]);
         assert_eq!(after.top() - second.bottom(), 8.0);
-    }
-
-    #[test]
-    fn the_bar_fills_its_boxes_in_proportion_and_one_for_each_kind() {
-        assert_eq!(bar_boxes(12, 3), (4, 1));
-        assert_eq!(bar_boxes(1, 1), (1, 1));
-        assert_eq!(bar_boxes(3, 0), (3, 0));
-        assert_eq!(bar_boxes(0, 2), (0, 2));
-        assert_eq!(bar_boxes(1, 100), (1, 4));
-        assert_eq!(bar_boxes(100, 1), (4, 1));
-        assert_eq!(bar_boxes(0, 0), (0, 0));
     }
 
     #[test]

@@ -910,3 +910,105 @@ pub(crate) fn triangle(
     };
     painter.add(Shape::convex_polygon(points, fill, Stroke::NONE));
 }
+
+/// The colours of added and removed lines, as the markers of the diff
+/// draw them.
+pub fn line_colours(palette: &Palette) -> (Color32, Color32) {
+    (
+        color(palette.diff_added_marker),
+        color(palette.diff_removed_marker),
+    )
+}
+
+/// The side of a box of the bar of changed lines, the room between two
+/// boxes, and how many boxes the bar has.
+const BOX: f32 = 8.0;
+const BOX_GAP: f32 = 2.0;
+const BOXES: usize = 5;
+
+/// How many boxes of the bar show added and how many removed lines: as
+/// many as lines changed, at most five, filled in proportion, with at least
+/// one for each kind that changed.
+pub fn bar_boxes(added: u64, removed: u64) -> (usize, usize) {
+    let changed = added + removed;
+    if changed == 0 {
+        return (0, 0);
+    }
+    let filled = changed.min(BOXES as u64) as usize;
+    let mut green = (filled as f64 * added as f64 / changed as f64).round() as usize;
+    if added > 0 {
+        green = green.max(1);
+    }
+    if removed > 0 {
+        green = green.min(filled - 1);
+    }
+    (green, filled - green)
+}
+
+/// Paints the lines added and removed as `+12 −3` in the colours of the
+/// markers, and the bar of five boxes after them, ending at `right` and
+/// centred on `middle`. Returns where the numbers begin.
+pub fn paint_changed_lines(ui: &Ui, right: f32, middle: f32, added: u64, removed: u64) -> f32 {
+    let palette = active_palette(ui.ctx());
+    let painter = ui.painter();
+    let (added_colour, removed_colour) = line_colours(palette);
+    let left = right - (BOXES as f32 * BOX + (BOXES - 1) as f32 * BOX_GAP);
+    let (green, red) = bar_boxes(added, removed);
+    for index in 0..BOXES {
+        let at = egui::pos2(left + index as f32 * (BOX + BOX_GAP), middle - BOX / 2.0);
+        let square = Rect::from_min_size(at, vec2(BOX, BOX));
+        if index < green {
+            painter.rect_filled(square, 1.0, added_colour);
+        } else if index < green + red {
+            painter.rect_filled(square, 1.0, removed_colour);
+        } else {
+            painter.rect_stroke(
+                square,
+                1.0,
+                Stroke::new(1.0, color(palette.border_strong)),
+                StrokeKind::Inside,
+            );
+        }
+    }
+    let font = egui::FontId::monospace(12.0);
+    let mut start = left - SHAPE.space[1];
+    for (text, colour) in [
+        (format!("−{removed}"), removed_colour),
+        (format!("+{added}"), added_colour),
+    ] {
+        let galley = painter.layout_no_wrap(text, font.clone(), colour);
+        start -= galley.size().x;
+        painter.galley(
+            egui::pos2(start, middle - galley.size().y / 2.0),
+            galley,
+            colour,
+        );
+        start -= SHAPE.space[0];
+    }
+    start + SHAPE.space[0]
+}
+
+/// The lines added and removed with their bar, as a widget of its own of
+/// `width`, such as the gallery shows; the file lists paint them at the end
+/// of their rows.
+pub fn changed_lines(ui: &mut Ui, added: u64, removed: u64, width: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, SHAPE.target), Sense::hover());
+    paint_changed_lines(ui, rect.right(), rect.center().y, added, removed);
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bar_fills_its_boxes_in_proportion_and_one_for_each_kind() {
+        assert_eq!(bar_boxes(12, 3), (4, 1));
+        assert_eq!(bar_boxes(1, 1), (1, 1));
+        assert_eq!(bar_boxes(3, 0), (3, 0));
+        assert_eq!(bar_boxes(0, 2), (0, 2));
+        assert_eq!(bar_boxes(1, 100), (1, 4));
+        assert_eq!(bar_boxes(100, 1), (4, 1));
+        assert_eq!(bar_boxes(0, 0), (0, 0));
+    }
+}

@@ -118,7 +118,8 @@ fn gallery(ui: &mut egui::Ui, state: &mut Gallery) {
                     .show(ui);
                 Button::new("Focused").show(ui);
             });
-            ui.horizontal(|ui| {
+            // Every icon, in as many rows as the gallery needs.
+            ui.horizontal_wrapped(|ui| {
                 for (name, icon) in icons::ALL {
                     components::icon_button(ui, icon, name, None);
                 }
@@ -263,6 +264,13 @@ fn gallery(ui: &mut egui::Ui, state: &mut Gallery) {
                             true,
                         );
                         badge(ui, palette, icons::TAG, "v0.1.0", palette.badge_tag, false);
+                    });
+                    // The changed lines of a file: many, one replaced, and
+                    // removed alone.
+                    ui.horizontal(|ui| {
+                        components::changed_lines(ui, 12, 3, 110.0);
+                        components::changed_lines(ui, 1, 1, 110.0);
+                        components::changed_lines(ui, 0, 4, 110.0);
                     });
                 });
             });
