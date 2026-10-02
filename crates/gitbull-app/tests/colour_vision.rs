@@ -19,7 +19,7 @@ use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
 use gitbull_git::history::CommitLine;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_testkit::{FakeBackend, fake_id};
-use support::{Setup, build, path, settle_window, text_colours, window};
+use support::{Setup, build, path, settle_window, text_colours, wait_for_references, window};
 
 /// A commit with a remote branch on it that modifies a Rust file and
 /// replaces a line of it.
@@ -127,6 +127,7 @@ fn open(theme: ThemeSetting, colour_vision: ColourVision) -> Harness<'static, Ap
     wait_for(&mut harness, |h| {
         h.query_all_by_role(Role::Code).next().is_some() && highlighted(h)
     });
+    wait_for_references(&mut harness);
     harness
 }
 

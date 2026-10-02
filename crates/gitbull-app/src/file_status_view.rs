@@ -31,6 +31,8 @@ const GROUPS: [Group; 3] = [Group::Staged, Group::Unstaged, Group::Untracked];
 
 /// The texts of the list, read before the tab is borrowed.
 struct Texts {
+    /// The title of the panel, which names the list.
+    name: String,
     loading: String,
     clean: String,
     file_history: String,
@@ -56,6 +58,7 @@ impl Texts {
             app.texts.text_with(msg, Some(&args))
         };
         Texts {
+            name: text(Msg::PanelFiles),
             loading: text(Msg::FileStatusLoading),
             clean: text(Msg::FileStatusClean),
             file_history: text(Msg::FileHistory),
@@ -207,18 +210,22 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     }
 
     let before = view.status_files.selected();
-    let output = VirtualList::new(Id::new(STATUS_LIST), rows.len() as u64).show(
-        ui,
-        &mut view.status_files,
-        |ui, row, selected| match rows.get(row as usize) {
+    let list = VirtualList::new(
+        Id::new(STATUS_LIST),
+        Role::List,
+        texts.name.as_str(),
+        rows.len() as u64,
+    );
+    let output = list.show(ui, &mut view.status_files, |ui, row, selected| {
+        match rows.get(row as usize) {
             Some(StatusRow::Title(group)) => title_row(ui, texts.title(*group)),
             Some(StatusRow::Entry(group, index)) => {
                 let entry = &status.group(*group)[*index];
                 entry_row(ui, entry, selected, &texts, palette);
             }
             None => {}
-        },
-    );
+        }
+    });
     // Titles are not selected: the selection moves on to a file.
     if let Some(row) = view.status_files.selected()
         && matches!(rows.get(row as usize), Some(StatusRow::Title(_)))

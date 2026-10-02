@@ -166,6 +166,28 @@ pub fn settle_window(harness: &mut Harness<'_, App>) {
     }
 }
 
+/// Steps the window until the active tab has read its references.
+///
+/// A tab reads them beside its history, in either order, and only then
+/// shows them as badges and in the sidebar. The state is checked rather
+/// than a label: the status bar names the branch before any badge does.
+pub fn wait_for_references(harness: &mut Harness<'_, App>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !references_read(harness.state()) {
+        assert!(Instant::now() < deadline, "the references were not read");
+        harness.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    harness.run();
+}
+
+fn references_read(app: &App) -> bool {
+    app.workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| session.sidebar().is_some())
+}
+
 /// The titles of the open tabs.
 pub fn tab_titles(app: &App) -> Vec<String> {
     app.workspace()
@@ -410,6 +432,25 @@ impl Scripted {
             }
         })
     }
+}
+
+/// Presses Tab `presses` times and describes each widget it focused that
+/// does not tell assistive technology what it is and what it is called: a
+/// screen reader announces whatever Tab focuses.
+pub fn unnamed_tab_stops(harness: &mut Harness<'_, App>, presses: usize) -> Vec<String> {
+    let mut unnamed = Vec::new();
+    for press in 1..=presses {
+        harness.key_press(eframe::egui::Key::Tab);
+        harness.run();
+        let focused = harness.get_by(|node| node.is_focused_in_tree());
+        let node = focused.accesskit_node();
+        let label = node.label().unwrap_or_default();
+        if node.role() == Role::Unknown || label.trim().is_empty() {
+            let id = harness.ctx.memory(|memory| memory.focused());
+            unnamed.push(format!("Tab {press}: {:?} {label:?} {id:?}", node.role()));
+        }
+    }
+    unnamed
 }
 
 /// Every rectangle drawn with the focus ring of either appearance.

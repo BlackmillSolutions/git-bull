@@ -6,9 +6,10 @@
 
 use std::ops::Range;
 
+use eframe::egui::accesskit::Role;
 use eframe::egui::{
     Align, Context, Event, EventFilter, Id, InputOptions, Key, Layout, Modifiers, MouseWheelUnit,
-    Rect, Response, Sense, TouchPhase, Ui, UiBuilder, pos2, vec2,
+    Rect, Response, Sense, TouchPhase, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 
 use crate::components;
@@ -289,13 +290,19 @@ pub struct ListOutput {
 /// A list of `rows` rows that fills the space it is given.
 pub struct VirtualList {
     id: Id,
+    role: Role,
+    name: String,
     rows: u64,
 }
 
 impl VirtualList {
-    pub fn new(id: impl Into<Id>, rows: u64) -> VirtualList {
+    /// A list that takes the focus, which assistive technology announces as
+    /// `role` called `name`.
+    pub fn new(id: impl Into<Id>, role: Role, name: impl Into<String>, rows: u64) -> VirtualList {
         VirtualList {
             id: id.into(),
+            role,
+            name: name.into(),
             rows,
         }
     }
@@ -311,6 +318,10 @@ impl VirtualList {
         let rect = ui.available_rect_before_wrap();
         ui.allocate_rect(rect, Sense::hover());
         let response = ui.interact(rect, self.id, Sense::click());
+        // `widget_info` gives the node its name; the role is set after it.
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &self.name));
+        ui.ctx()
+            .accesskit_node_builder(response.id, |node| node.set_role(self.role));
         let view = f64::from(rect.height());
         let rows = self.rows;
         let before = state.selected();

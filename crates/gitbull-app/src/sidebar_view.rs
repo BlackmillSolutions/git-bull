@@ -61,6 +61,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         show_only: app.texts.text(Msg::SidebarShowOnlyBranch),
     };
     let hint = app.texts.text(Msg::SidebarFilter);
+    let name = app.texts.text(Msg::Sidebar);
     let shown_view = app
         .workspace()
         .and_then(|workspace| workspace.active())
@@ -79,7 +80,10 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     } = view;
 
     let width = ui.available_width();
-    components::text_field(ui, &mut sidebar.filter, &hint, width);
+    let filter = components::text_field(ui, &mut sidebar.filter, &hint, width);
+    // The field has no label of its own: its hint names it.
+    ui.ctx()
+        .accesskit_node_builder(filter.id, |node| node.set_label(hint.as_str()));
     ui.add_space(4.0);
 
     // Laying out thousands of references each frame would cost more than
@@ -93,7 +97,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     }
 
     let rows: &[SidebarRow] = sidebar_rows;
-    let output = VirtualList::new(Id::new(AREA_SIDEBAR), rows.len() as u64).show(
+    let output = VirtualList::new(Id::new(AREA_SIDEBAR), Role::Tree, name, rows.len() as u64).show(
         ui,
         sidebar_list,
         |ui, index, selected| {

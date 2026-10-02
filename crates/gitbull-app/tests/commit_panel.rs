@@ -17,7 +17,7 @@ use gitbull_git::refs::{RefKind, Reference};
 use gitbull_testkit::{FakeBackend, fake_id};
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
-use support::{Setup, build, path, settle_window, window};
+use support::{Setup, build, path, settle_window, wait_for_references, window};
 
 fn seconds(text: &str) -> i64 {
     text.parse::<Timestamp>().unwrap().as_second()
@@ -140,6 +140,7 @@ fn open_with(backend: FakeBackend, layout: Layout) -> Harness<'static, App> {
     let mut harness = window(test.app);
     settle_window(&mut harness);
     wait_until(&mut harness, |h| commit_row(h, "Fix the parser").is_some());
+    wait_for_references(&mut harness);
     harness
 }
 
@@ -185,11 +186,13 @@ fn select(harness: &mut Harness<'_, App>, summary: &str) {
 }
 
 /// The texts of the widgets inside `area`: labels carry theirs as a
-/// value, other widgets as a label.
+/// value, other widgets as a label. An empty panel is a pane that only
+/// repeats its title for assistive technology, which shows no text.
 fn texts_in(harness: &Harness<'_, App>, area: eframe::egui::Rect) -> Vec<String> {
     harness
         .query_all_by(|node| {
-            node.role() != Role::TextRun && (node.label().is_some() || node.value().is_some())
+            !matches!(node.role(), Role::TextRun | Role::Pane)
+                && (node.label().is_some() || node.value().is_some())
         })
         .filter(|node| area.contains_rect(node.rect()))
         .filter_map(|node| {
@@ -201,8 +204,8 @@ fn texts_in(harness: &Harness<'_, App>, area: eframe::egui::Rect) -> Vec<String>
 
 /// The texts in the commit panel: below its title and left of the diff.
 fn panel_texts(harness: &Harness<'_, App>) -> Vec<String> {
-    let title = harness.get_by_label("COMMIT").rect();
-    let diff = harness.get_by_label("DIFF").rect();
+    let title = harness.get_by_role_and_label(Role::Label, "COMMIT").rect();
+    let diff = harness.get_by_role_and_label(Role::Label, "DIFF").rect();
     let area = eframe::egui::Rect::from_min_max(
         eframe::egui::pos2(title.left() - 12.0, title.top()),
         eframe::egui::pos2(diff.left() - 4.0, f32::INFINITY),
@@ -212,7 +215,7 @@ fn panel_texts(harness: &Harness<'_, App>) -> Vec<String> {
 
 /// The texts in the diff panel: below its title and above the status bar.
 fn diff_texts(harness: &Harness<'_, App>) -> Vec<String> {
-    let diff = harness.get_by_label("DIFF").rect();
+    let diff = harness.get_by_role_and_label(Role::Label, "DIFF").rect();
     let status_bar = harness
         .query_all_by_value("Git 2.55.0")
         .next()

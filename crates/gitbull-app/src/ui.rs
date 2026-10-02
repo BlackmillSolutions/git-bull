@@ -35,7 +35,7 @@ use crate::i18n::Msg;
 use crate::icons;
 use crate::native::TitleBar;
 use crate::paths::System;
-use crate::search_view;
+use crate::search_view::{self, SEARCH_RESULTS};
 use crate::sidebar_view::{self, SidebarAction};
 use crate::style;
 use crate::theme::{self, Appearance, Palette, Rgb, SHAPE};
@@ -48,7 +48,9 @@ use std::time::Duration;
 use crate::commit_list::SHORT_HASH;
 
 /// The areas of the History view, in the order Tab moves through them.
-/// Each is one focusable widget, found by these ids.
+/// Each is one focusable widget, found by these ids, which its view draws
+/// in every frame: the focus on an id that nothing drew would name a node
+/// that assistive technology does not know.
 pub const AREA_SIDEBAR: &str = "area-sidebar";
 pub const COMMIT_LIST: &str = "commit-list";
 pub const AREA_COMMIT_PANEL: &str = "area-commit-panel";
@@ -56,6 +58,8 @@ pub const AREA_DIFF: &str = "area-diff";
 const AREAS: [&str; 4] = [AREA_SIDEBAR, COMMIT_LIST, AREA_COMMIT_PANEL, AREA_DIFF];
 /// The areas of the File status view.
 const STATUS_AREAS: [&str; 3] = [AREA_SIDEBAR, STATUS_LIST, AREA_DIFF];
+/// The areas of the Search view.
+const SEARCH_AREAS: [&str; 2] = [AREA_SIDEBAR, SEARCH_RESULTS];
 /// The areas of the file history.
 const FILE_HISTORY_AREAS: [&str; 3] = [AREA_SIDEBAR, FILE_HISTORY_LIST, AREA_DIFF];
 /// The areas of blame, whose content scrolls without a focus.
@@ -1331,9 +1335,16 @@ fn search_bar(app: &App, ui: &mut Ui, search: &Search, focus: bool, actions: &mu
             }
         });
     focus_ring(ui, &combo.response);
+    // Neither control has a label of its own to name it: the mode shows
+    // its value, the field its hint.
+    let mode_name = app.texts.text(Msg::SearchMode);
+    ui.ctx()
+        .accesskit_node_builder(combo.response.id, |node| node.set_label(mode_name));
     let mut text = search.text().to_owned();
     let hint = app.texts.text(Msg::SearchHint);
     let field = ui.add(components::text_edit(&mut text, &hint, 260.0).id(Id::new(SEARCH_FIELD)));
+    ui.ctx()
+        .accesskit_node_builder(field.id, |node| node.set_label(hint.as_str()));
     if focus {
         field.request_focus();
     }
@@ -1695,22 +1706,27 @@ fn history(app: &mut App, ui: &mut Ui) {
                     .size_range(200.0..=f32::INFINITY)
                     .show(ui, |ui| {
                         fill(ui);
-                        section_title(ui, files_title);
+                        section_title(ui, files_title.clone());
                         if !file_status_view::show(app, ui, palette) {
-                            focus_area(ui, STATUS_LIST);
+                            focus_area(ui, STATUS_LIST, &files_title);
                         }
                     });
                 commit_panel_width = files.response.rect.width();
                 CentralPanel::default().show(ui, |ui| {
-                    section_title(ui, diff_title);
+                    section_title(ui, diff_title.clone());
                     if !diff_view::show(app, ui, palette, Pane::FileStatus) {
-                        focus_area(ui, AREA_DIFF);
+                        focus_area(ui, AREA_DIFF, &diff_title);
                     }
                 });
             });
         }
         (None, View::Search) => {
-            CentralPanel::default().show(ui, |ui| search_view::show(app, ui, palette));
+            let title = app.texts.text(Msg::ViewSearch);
+            CentralPanel::default().show(ui, |ui| {
+                if !search_view::show(app, ui, palette) {
+                    focus_area(ui, SEARCH_RESULTS, &title);
+                }
+            });
         }
     }
     if overlay.is_none() && shown == View::History {
@@ -1729,16 +1745,18 @@ fn history(app: &mut App, ui: &mut Ui) {
                         .size_range(200.0..=f32::INFINITY)
                         .show(ui, |ui| {
                             fill(ui);
-                            section_title(ui, app.texts.text(Msg::PanelCommit));
+                            let title = app.texts.text(Msg::PanelCommit);
+                            section_title(ui, title.clone());
                             if !commit_panel::show(app, ui, palette) {
-                                focus_area(ui, AREA_COMMIT_PANEL);
+                                focus_area(ui, AREA_COMMIT_PANEL, &title);
                             }
                         });
                     commit_panel_width = commit.response.rect.width();
                     CentralPanel::default().show(ui, |ui| {
-                        section_title(ui, app.texts.text(Msg::PanelDiff));
+                        let title = app.texts.text(Msg::PanelDiff);
+                        section_title(ui, title.clone());
                         if !diff_view::show(app, ui, palette, Pane::Commit) {
-                            focus_area(ui, AREA_DIFF);
+                            focus_area(ui, AREA_DIFF, &title);
                         }
                     });
                 });
@@ -1750,7 +1768,8 @@ fn history(app: &mut App, ui: &mut Ui) {
         (Some(Overlay::FileHistory), _) => &FILE_HISTORY_AREAS,
         (Some(Overlay::Blame), _) => &BLAME_AREAS,
         (None, View::FileStatus) => &STATUS_AREAS,
-        (None, _) => &AREAS,
+        (None, View::Search) => &SEARCH_AREAS,
+        (None, View::History) => &AREAS,
     };
     move_between_areas(ui, areas);
     apply_sidebar(app, sidebar_actions);
@@ -1788,9 +1807,11 @@ fn apply_sidebar(app: &mut App, actions: Vec<SidebarAction>) {
 /// Makes the rest of the panel a focusable area until its real content
 /// arrives; clicking it focuses it. It covers only the space left, so that
 /// it does not take the clicks meant for what the panel shows above it.
-pub(crate) fn focus_area(ui: &mut Ui, id: &str) {
+/// Assistive technology knows it as a pane called `name`.
+pub(crate) fn focus_area(ui: &mut Ui, id: &str, name: &str) {
     let rect = ui.available_rect_before_wrap();
     let response = ui.interact(rect, Id::new(id), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Panel, true, name));
     if response.clicked() {
         response.request_focus();
     }

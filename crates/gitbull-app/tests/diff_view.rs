@@ -20,7 +20,7 @@ use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, LiveRepo, Probe, fake_id};
 use support::{
     BURST, Setup, build, commit_list_scroll, find_row, long_history, path, settle_window,
-    turn_wheel, wait_for_row, window, window_at_60_fps,
+    turn_wheel, unnamed_tab_stops, wait_for_row, window, window_at_60_fps,
 };
 
 fn root() -> std::path::PathBuf {
@@ -367,7 +367,7 @@ fn choose(test: &mut Test, entry: &str) {
 
 /// The texts in the diff panel: right of its title, above the status bar.
 fn diff_texts(harness: &Harness<'_, App>) -> Vec<String> {
-    let title = harness.get_by_label("DIFF").rect();
+    let title = harness.get_by_role_and_label(Role::Label, "DIFF").rect();
     let status_bar = harness
         .query_all_by_value("Git 2.55.0")
         .next()
@@ -419,6 +419,15 @@ fn selecting_a_commit_shows_the_diff_of_its_first_file() {
     let test = open();
     assert_eq!(diff_rows(&test.harness)[0], HEADER);
     assert!(diff_texts(&test.harness).contains(&"src/parser.rs".to_owned()));
+}
+
+/// Twice round the areas from the commit list, which has the focus: the
+/// files of the commit, the diff, the sidebar and the list again.
+#[test]
+fn every_area_round_a_shown_diff_has_a_role_and_a_name() {
+    let mut test = open();
+    let unnamed = unnamed_tab_stops(&mut test.harness, 8);
+    assert!(unnamed.is_empty(), "{unnamed:#?}");
 }
 
 #[test]

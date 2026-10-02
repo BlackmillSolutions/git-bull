@@ -21,7 +21,7 @@ use gitbull_git::history::CommitLine;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, Gate, Probe, commit_line, fake_id};
-use support::{Setup, build, path, settle_window, window};
+use support::{Setup, build, path, settle_window, unnamed_tab_stops, window};
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -250,6 +250,16 @@ fn each_entry_shows_its_description_and_the_path_the_file_had() {
     assert!(shown[0].ends_with(&short("c")));
     assert!(shown[1].starts_with("Rename a to b, src/b.rs, "));
     assert!(shown[2].starts_with("Add a, src/a.rs, "), "{shown:?}");
+}
+
+/// Once round the window: past the stops before the areas, and then round
+/// the sidebar, the entries and the diff.
+#[test]
+fn every_widget_tab_reaches_in_the_file_history_has_a_role_and_a_name() {
+    let mut harness = open_with(backend());
+    open_history_of_c(&mut harness);
+    let unnamed = unnamed_tab_stops(&mut harness, 40);
+    assert!(unnamed.is_empty(), "{unnamed:#?}");
 }
 
 #[test]
