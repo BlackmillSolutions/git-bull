@@ -49,9 +49,18 @@ pub const BRANCH: &str = phosphor::GIT_BRANCH;
 pub const REMOTE_BRANCH: &str = phosphor::CLOUD;
 pub const TAG: &str = phosphor::TAG;
 pub const HEAD: &str = phosphor::TARGET;
+/// Shows spaces, tabs and line endings: the pilcrow.
+pub const INVISIBLES: &str = phosphor::PARAGRAPH;
+pub const PREVIOUS_HUNK: &str = phosphor::ARROW_UP;
+pub const NEXT_HUNK: &str = phosphor::ARROW_DOWN;
+/// Reveals the hidden lines that follow the hunk above.
+pub const REVEAL_DOWN: &str = phosphor::ARROW_LINE_DOWN;
+/// Reveals the hidden lines that lead into the hunk below.
+pub const REVEAL_UP: &str = phosphor::ARROW_LINE_UP;
+pub const REVEAL_ALL: &str = phosphor::ARROWS_OUT_LINE_VERTICAL;
 
 /// Every icon with its name.
-pub const ALL: [(&str, &str); 17] = [
+pub const ALL: [(&str, &str); 23] = [
     ("folder", FOLDER),
     ("refresh", REFRESH),
     ("sun", SUN),
@@ -69,4 +78,10 @@ pub const ALL: [(&str, &str); 17] = [
     ("remote branch", REMOTE_BRANCH),
     ("tag", TAG),
     ("head", HEAD),
+    ("invisibles", INVISIBLES),
+    ("previous hunk", PREVIOUS_HUNK),
+    ("next hunk", NEXT_HUNK),
+    ("reveal down", REVEAL_DOWN),
+    ("reveal up", REVEAL_UP),
+    ("reveal all", REVEAL_ALL),
 ];

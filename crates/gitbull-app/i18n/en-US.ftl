@@ -171,6 +171,20 @@ diff-missing-content = The content of this file is not available locally. The re
 diff-line-added = Added
 diff-line-removed = Removed
 diff-line-context = Unchanged
+diff-hidden-lines = { $count ->
+    [one] 1 hidden line
+   *[other] { $count } hidden lines
+}
+diff-show-after-previous = Show { $count } lines after the previous hunk
+diff-show-before-next = Show { $count } lines before the next hunk
+diff-show-all = { $count ->
+    [one] Show the hidden line
+   *[other] Show all { $count } lines
+}
+diff-too-large = The file is too large to show the lines between its hunks.
+diff-show-invisibles = Show invisible characters
+diff-previous-hunk = Previous hunk
+diff-next-hunk = Next hunk
 copy-lines = Copy lines
 copy-hunk = Copy hunk
 

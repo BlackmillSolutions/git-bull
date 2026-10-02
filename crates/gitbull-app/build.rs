@@ -4,7 +4,10 @@
 use std::path::Path;
 
 fn main() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("i18n");
+    // Read when the script runs, not when it is compiled: Cargo may reuse a
+    // script compiled for another checkout of the same sources.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("Cargo sets the manifest folder");
+    let dir = Path::new(&manifest).join("i18n");
     println!("cargo:rerun-if-changed={}", dir.display());
 
     let mut languages: Vec<(String, String)> = std::fs::read_dir(&dir)

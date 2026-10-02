@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gitbull_core::diff_document::RowKey;
+
+use crate::components::RowsShown;
+use crate::diff_view::GapLabels;
 use gitbull_core::git_setup::GitCheck;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
@@ -140,6 +144,9 @@ pub(crate) struct TabView {
     /// A view opened from the context menu of a file, shown instead of the
     /// view of the sidebar until the user goes back.
     pub(crate) overlay: Option<Overlay>,
+    /// The move to another hunk F7 or Shift+F7 asked for in this frame,
+    /// which the diff drawn takes.
+    pub(crate) hunk_move: Option<HunkMove>,
     /// The commits of the file history.
     pub(crate) file_commits: ListState,
     /// The diff of the commit chosen in the file history.
@@ -191,13 +198,29 @@ pub(crate) enum FileAction {
     Blame(String, RepoPath),
 }
 
+/// A move to the next or the previous hunk of the diff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HunkMove {
+    Next,
+    Previous,
+}
+
 /// What a diff panel keeps for the diff it shows.
 #[derive(Default)]
 pub(crate) struct DiffView {
-    /// The rows selected, from where the selection began to where it ends.
-    pub(crate) selection: Option<(usize, usize)>,
+    /// The lines selected, from where the selection began to where it
+    /// ends, by keys that stay with their lines when lines are revealed.
+    pub(crate) selection: Option<(RowKey, RowKey)>,
     /// The diff the selection belongs to.
     pub(crate) key: Option<DiffKey>,
+    /// What its rows showed in the last frame: where the hunk buttons and
+    /// F7 can move from.
+    pub(crate) shown: RowsShown,
+    /// The names of the rows of hidden lines and their offers, made when
+    /// the gaps change rather than in every frame.
+    pub(crate) gap_labels: Vec<GapLabels>,
+    /// The diff and the build of its rows `gap_labels` were made for.
+    pub(crate) labels_for: Option<(DiffKey, u64)>,
 }
 
 /// Which diff a diff panel shows. The last field counts how often a diff
@@ -344,6 +367,14 @@ impl App {
     pub fn set_system_title_bar(&mut self, system: bool) {
         if self.settings.system_title_bar != system {
             self.settings.system_title_bar = system;
+            self.dirty = true;
+        }
+    }
+
+    /// Sets whether the diff shows spaces, tabs and line endings.
+    pub fn set_show_invisibles(&mut self, show: bool) {
+        if self.settings.show_invisibles != show {
+            self.settings.show_invisibles = show;
             self.dirty = true;
         }
     }

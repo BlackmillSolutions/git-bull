@@ -20,6 +20,8 @@ use eframe::egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, TouchPh
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_core::details::DiffState;
+use gitbull_core::diff_document::{DiffDocument, Part};
 use gitbull_core::git_setup::check_git;
 use gitbull_core::opening::open;
 use gitbull_core::session::{BranchFilter, LoadState, Session};
@@ -697,6 +699,421 @@ fn searching() {
         summary("`commit 7`", frequent.frames),
     ];
     assert!(rare.matches >= 1 && frequent.matches > 100_000);
+    for slowest in slowest {
+        assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
+    }
+}
+
+/// Lines of the source file of [`diff_repository`], under 512 KiB.
+const SOURCE_LINES: usize = 10_000;
+/// Every this many lines one word of the source file changes.
+const CHANGE_EVERY: usize = 25;
+/// Lines of the large file of [`diff_repository`], over 512 KiB, which the
+/// commit changes wholly.
+const LARGE_LINES: usize = 100_000;
+
+/// A repository with two commits, generated into `target/bench-diff` once
+/// with `git fast-import`: the second changes one word in every 25th line
+/// of `src/totals.rs`, a Rust file of 10,000 lines, and every line of
+/// `data/large.txt`, a file of 100,000 lines.
+fn diff_repository() -> PathBuf {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/bench-diff");
+    if path.join(".git").exists() {
+        return path;
+    }
+    std::fs::create_dir_all(&path).unwrap();
+    let git = |args: &[&str], input: Option<&[u8]>| {
+        use std::io::Write;
+        let mut child = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        if let Some(input) = input {
+            child.stdin.take().unwrap().write_all(input).unwrap();
+        }
+        assert!(child.wait().unwrap().success(), "git {args:?}");
+    };
+    git(&["init", "--quiet", "--initial-branch", "main"], None);
+    let source = |changed: bool| -> String {
+        let mut text = String::from("fn totals() {\n");
+        for n in 1..=SOURCE_LINES {
+            let call = if changed && n % CHANGE_EVERY == 0 {
+                "measure"
+            } else {
+                "compute"
+            };
+            text.push_str(&format!("    let value_{n:05} = {call}({n}, \"total\");\n"));
+        }
+        text.push_str("}\n");
+        text
+    };
+    let large = |changed: bool| -> String {
+        let row = if changed { "ROW" } else { "row" };
+        (1..=LARGE_LINES)
+            .map(|n| format!("{row} {n:06}\n"))
+            .collect()
+    };
+    let mut stream = Vec::new();
+    let mut blob = |mark: u32, data: &str| {
+        stream.extend_from_slice(format!("blob\nmark :{mark}\ndata {}\n", data.len()).as_bytes());
+        stream.extend_from_slice(data.as_bytes());
+        stream.push(b'\n');
+    };
+    blob(1, &source(false));
+    blob(2, &large(false));
+    blob(4, &source(true));
+    blob(5, &large(true));
+    let commit = |mark: u32, from: Option<u32>, message: &str, files: [(u32, &str); 2]| {
+        let mut text = format!(
+            "commit refs/heads/main\nmark :{mark}\ncommitter Ada Lovelace <ada@example.com> 1767268800 +0000\ndata {}\n{message}",
+            message.len()
+        );
+        if let Some(from) = from {
+            text.push_str(&format!("from :{from}\n"));
+        }
+        for (blob, path) in files {
+            text.push_str(&format!("M 100644 :{blob} {path}\n"));
+        }
+        text.push('\n');
+        text
+    };
+    let first = commit(
+        3,
+        None,
+        "Add the totals\n",
+        [(1, "src/totals.rs"), (2, "data/large.txt")],
+    );
+    let second = commit(
+        6,
+        Some(3),
+        "Change the totals\n",
+        [(4, "src/totals.rs"), (5, "data/large.txt")],
+    );
+    stream.extend_from_slice(first.as_bytes());
+    stream.extend_from_slice(second.as_bytes());
+    git(&["fast-import", "--quiet"], Some(&stream));
+    git(&["reset", "--quiet", "--hard"], None);
+    path
+}
+
+/// The diff document of the commit details, if one is shown.
+fn shown_document<T>(harness: &Harness<'_, App>, read: impl Fn(&DiffDocument) -> T) -> Option<T> {
+    let session = harness.state().workspace()?.active()?.session()?;
+    match session.details().diff() {
+        DiffState::Loaded(document) => Some(read(document)),
+        _ => None,
+    }
+}
+
+fn coloured(harness: &Harness<'_, App>) -> bool {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| session.details().highlighting().is_some())
+}
+
+/// Clicks the centre of `rect`.
+fn click_at(harness: &mut Harness<'_, App>, rect: eframe::egui::Rect) {
+    let at = rect.center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+}
+
+/// Selects the file of the commit details whose entry ends with `path`
+/// and waits for its diff; returns the time to it.
+fn choose_file(harness: &mut Harness<'_, App>, path: &str) -> Duration {
+    let entry = harness
+        .query_all_by_role(Role::ListItem)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.ends_with(path))
+        })
+        .expect("the file is listed")
+        .rect();
+    let started = Instant::now();
+    click_at(harness, entry);
+    while shown_document(harness, |d| {
+        d.diff().new_path.as_ref().map(ToString::to_string)
+    })
+    .flatten()
+    .as_deref()
+        != Some(path)
+    {
+        harness.step();
+    }
+    started.elapsed()
+}
+
+/// Frame times while the mouse wheel turns by `delta` points in every
+/// frame, over the diff.
+fn wheel_over_diff(harness: &mut Harness<'_, App>, frames: usize, delta: f32) -> Vec<Duration> {
+    let over = harness
+        .query_all_by_role(Role::Code)
+        .next()
+        .expect("a row of the diff")
+        .rect()
+        .center();
+    harness.hover_at(over);
+    (0..frames)
+        .map(|_| {
+            harness.event(Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: vec2(0.0, delta),
+                phase: TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+            let started = Instant::now();
+            harness.step();
+            started.elapsed()
+        })
+        .collect()
+}
+
+/// Frame times while F7, with `modifiers`, is pressed in every frame.
+fn press_f7(harness: &mut Harness<'_, App>, frames: usize, modifiers: Modifiers) -> Vec<Duration> {
+    (0..frames)
+        .map(|_| {
+            for pressed in [true, false] {
+                harness.event(Event::Key {
+                    key: Key::F7,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                });
+            }
+            let started = Instant::now();
+            harness.step();
+            started.elapsed()
+        })
+        .collect()
+}
+
+/// The labels of the rows of the diff in view.
+fn diff_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::Code)
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+/// Frame times while the scrollbar of the diff is dragged from the top to
+/// the bottom in `frames` steps.
+fn drag_diff_scrollbar(harness: &mut Harness<'_, App>, frames: usize) -> Vec<Duration> {
+    // The rows end where the scrollbar begins; the first row is at the top.
+    let row = harness
+        .query_all_by_role(Role::Code)
+        .map(|node| node.rect())
+        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("the diff shows rows");
+    let thumb = eframe::egui::pos2(row.right() + 5.0, row.top() + 5.0);
+    let bottom = harness.ctx.content_rect().bottom();
+    let top = diff_rows(harness);
+    harness.hover_at(thumb);
+    harness.event(Event::PointerButton {
+        pos: thumb,
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    harness.step();
+    let mut times = Vec::with_capacity(frames);
+    for frame in 1..=frames {
+        let y = thumb.y + (bottom - thumb.y) * frame as f32 / frames as f32;
+        harness.hover_at(eframe::egui::pos2(thumb.x, y));
+        let started = Instant::now();
+        harness.step();
+        times.push(started.elapsed());
+    }
+    harness.event(Event::PointerButton {
+        pos: eframe::egui::pos2(thumb.x, bottom),
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    harness.step();
+    let dragged = diff_rows(harness);
+    assert_ne!(dragged, top, "the drag moved the diff");
+    times
+}
+
+#[test]
+#[ignore]
+fn diff() {
+    let repo = diff_repository();
+    eprintln!("repository: {}, {}", repo.display(), git_version());
+    let hooks = hooks();
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![repo],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        checker: Some(Box::new(move |configured| {
+            App::git_parts(check_git(configured, hooks.clone(), None))
+        })),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    while !loaded(&harness) {
+        harness.step();
+    }
+    for _ in 0..20 {
+        harness.step();
+    }
+    // The commit that changes both files is at the top.
+    let commit = harness
+        .query_all_by_role(Role::Row)
+        .next()
+        .expect("the commit")
+        .rect();
+    click_at(&mut harness, commit);
+    while harness.query_all_by_role(Role::ListItem).count() < 2 {
+        harness.step();
+    }
+
+    // The source file: about 400 hunks with hidden lines between them.
+    let shown = choose_file(&mut harness, "src/totals.rs");
+    let started = Instant::now();
+    let marks = loop {
+        if shown_document(&harness, DiffDocument::has_marks) == Some(true) {
+            break started.elapsed();
+        }
+        harness.step();
+    };
+    let text = loop {
+        if shown_document(&harness, DiffDocument::has_text) == Some(true) {
+            break started.elapsed();
+        }
+        harness.step();
+    };
+    let colours = loop {
+        if coloured(&harness) {
+            break started.elapsed();
+        }
+        harness.step();
+    };
+    let hunks = shown_document(&harness, |d| d.hunks().len()).unwrap();
+    let gaps = shown_document(&harness, |d| d.gaps().len()).unwrap();
+    for _ in 0..5 {
+        harness.step();
+    }
+    let wheel = wheel_over_diff(&mut harness, 400, -240.0);
+    // Back to the top, then from hunk to hunk and back.
+    wheel_over_diff(&mut harness, 400, 2400.0);
+    let next = press_f7(&mut harness, hunks + 5, Modifiers::NONE);
+    let at_end = diff_rows(&harness);
+    let previous = press_f7(&mut harness, hunks + 5, Modifiers::SHIFT);
+    assert_ne!(diff_rows(&harness), at_end, "Shift+F7 moved the diff");
+    // Each gap revealed in a frame of its own, as a click would.
+    let mut revealed = Vec::with_capacity(gaps);
+    for gap in 0..gaps {
+        let started = Instant::now();
+        let session = harness
+            .state_mut()
+            .workspace_mut()
+            .and_then(|workspace| workspace.active_mut())
+            .and_then(|tab| tab.session_mut())
+            .unwrap();
+        session.expand_diff(gap, Part::All);
+        session.expand_diff(gap, Part::Top);
+        harness.step();
+        revealed.push(started.elapsed());
+    }
+    // Invisible characters toggled every tenth frame while the wheel turns.
+    let mut toggled = Vec::new();
+    for frame in 0..400 {
+        if frame % 10 == 0 {
+            let show = !harness.state().settings().show_invisibles;
+            harness.state_mut().set_show_invisibles(show);
+        }
+        toggled.extend(wheel_over_diff(&mut harness, 1, -240.0));
+    }
+
+    // The large file: its whole diff of 200,000 lines.
+    choose_file(&mut harness, "data/large.txt");
+    while harness.query_by_label("Load full diff").is_none() {
+        harness.step();
+    }
+    let started = Instant::now();
+    harness.get_by_label("Load full diff").click();
+    let whole = loop {
+        if shown_document(&harness, |d| !d.diff().truncated) == Some(true) {
+            break started.elapsed();
+        }
+        harness.step();
+    };
+    let whole_marks = loop {
+        if shown_document(&harness, DiffDocument::has_marks) == Some(true) {
+            break started.elapsed();
+        }
+        harness.step();
+    };
+    let lines = shown_document(&harness, |d| d.rows().len()).unwrap();
+    for _ in 0..5 {
+        harness.step();
+    }
+    let large_wheel = wheel_over_diff(&mut harness, 400, -240.0);
+    wheel_over_diff(&mut harness, 100, 1_000_000.0);
+    let dragged = drag_diff_scrollbar(&mut harness, 200);
+
+    eprintln!();
+    eprintln!("| Diff of {SOURCE_LINES} lines with {hunks} hunks | Result |");
+    eprintln!("|---|---|");
+    eprintln!(
+        "| Diff shown after | {:.0} ms |",
+        shown.as_secs_f64() * 1000.0
+    );
+    eprintln!(
+        "| Changed words after | {:.0} ms |",
+        marks.as_secs_f64() * 1000.0
+    );
+    eprintln!(
+        "| Text to reveal after | {:.0} ms |",
+        text.as_secs_f64() * 1000.0
+    );
+    eprintln!(
+        "| Syntax colours after | {:.0} ms |",
+        colours.as_secs_f64() * 1000.0
+    );
+    eprintln!();
+    eprintln!("| Whole diff of {LARGE_LINES} changed lines | Result |");
+    eprintln!("|---|---|");
+    eprintln!("| Rows | {lines} |");
+    eprintln!(
+        "| Whole diff shown after | {:.0} ms |",
+        whole.as_secs_f64() * 1000.0
+    );
+    eprintln!(
+        "| Changed words after | {:.0} ms |",
+        whole_marks.as_secs_f64() * 1000.0
+    );
+    eprintln!();
+    eprintln!("| Diff | Frames | Median | 99th percentile | Slowest |");
+    eprintln!("|---|---|---|---|---|");
+    let slowest = [
+        summary("Mouse wheel through 400 hunks", wheel),
+        summary("F7 through every hunk", next),
+        summary("Shift+F7 back", previous),
+        summary("Revealing every gap", revealed),
+        summary("Toggling invisible characters while scrolling", toggled),
+        summary("Mouse wheel through 200,000 lines", large_wheel),
+        summary("Scrollbar from top to bottom, 200,000 lines", dragged),
+    ];
     for slowest in slowest {
         assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
     }

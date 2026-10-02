@@ -31,6 +31,7 @@ use crate::badges::{self, Badge};
 use crate::blame::Blame;
 use crate::content_cache::ContentCache;
 use crate::details::Details;
+use crate::diff_document::Part;
 use crate::file_history::FileHistory;
 use crate::file_status::FileStatus;
 use crate::graph::{Checkpoint, Graph, GraphBuilder};
@@ -838,6 +839,12 @@ impl Session {
         self.details.load_whole_diff();
     }
 
+    /// Reveals `part` of the gap `gap` of the diff of the commit details.
+    /// Returns whether anything was revealed.
+    pub fn expand_diff(&mut self, gap: usize, part: Part) -> bool {
+        self.details.expand_diff(gap, part)
+    }
+
     /// The commit whose details are shown, its changed files and the diff
     /// of the file chosen.
     pub fn details(&self) -> &Details {
@@ -881,6 +888,13 @@ impl Session {
         if let Some(history) = &mut self.file_history {
             history.load_whole_diff();
         }
+    }
+
+    /// Reveals `part` of the gap `gap` of the diff of the file history.
+    pub fn expand_file_history_diff(&mut self, gap: usize, part: Part) -> bool {
+        self.file_history
+            .as_mut()
+            .is_some_and(|history| history.expand_diff(gap, part))
     }
 
     /// Opens the blame of the file at `path` as of `revision`; the one open
@@ -977,6 +991,13 @@ impl Session {
         if let Some(status) = &mut self.file_status {
             status.load_whole_diff();
         }
+    }
+
+    /// Reveals `part` of the gap `gap` of the diff of the file status.
+    pub fn expand_status_diff(&mut self, gap: usize, part: Part) -> bool {
+        self.file_status
+            .as_mut()
+            .is_some_and(|status| status.expand_diff(gap, part))
     }
 
     /// The row of the history shown above which the row "Uncommitted

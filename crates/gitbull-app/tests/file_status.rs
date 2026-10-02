@@ -83,6 +83,7 @@ fn diff(path: &str, lines: &[(LineKind, &str)]) -> FileDiff {
                 text: (*text).to_owned(),
                 no_newline: false,
                 cut: false,
+                crlf: false,
             }
         })
         .collect();

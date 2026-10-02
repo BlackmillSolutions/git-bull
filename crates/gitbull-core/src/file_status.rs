@@ -8,6 +8,7 @@ use gitbull_git::Backend;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, WorkingStatus};
 
+use crate::diff_document::Part;
 use crate::diff_pane::{DiffPane, DiffSource, DiffState, Highlighting};
 use crate::highlight::HighlightTheme;
 use crate::pending::Pending;
@@ -83,6 +84,11 @@ impl FileStatus {
     /// Loads all of a diff that stopped at the limit.
     pub(crate) fn load_whole_diff(&mut self) {
         self.pane.load_whole();
+    }
+
+    /// Reveals `part` of the gap `gap` of the diff shown.
+    pub(crate) fn expand_diff(&mut self, gap: usize, part: Part) -> bool {
+        self.pane.expand(gap, part)
     }
 
     /// Highlights with the colours of `theme` from now on.
@@ -239,6 +245,7 @@ mod tests {
                     text: added.to_owned(),
                     no_newline: false,
                     cut: false,
+                    crlf: false,
                 }],
             }]),
             truncated: false,
@@ -279,10 +286,7 @@ mod tests {
 
     fn added_text(status: &FileStatus) -> String {
         match status.diff() {
-            DiffState::Loaded(FileDiff {
-                content: Content::Text(hunks),
-                ..
-            }) => hunks[0].lines[0].text.clone(),
+            DiffState::Loaded(document) => document.hunks()[0].lines[0].text.clone(),
             other => panic!("no text: {other:?}"),
         }
     }

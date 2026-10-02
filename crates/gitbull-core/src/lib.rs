@@ -8,6 +8,7 @@ pub mod badges;
 pub mod blame;
 pub mod content_cache;
 pub mod details;
+pub mod diff_document;
 pub mod diff_pane;
 pub mod file_history;
 pub mod file_status;

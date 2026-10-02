@@ -10,6 +10,7 @@ use gitbull_git::Backend;
 use gitbull_git::changes::FileChange;
 use gitbull_git::object_id::ObjectId;
 
+use crate::diff_document::Part;
 use crate::diff_pane::{DiffPane, DiffSource};
 pub use crate::diff_pane::{DiffState, Highlighting};
 use crate::highlight::HighlightTheme;
@@ -213,6 +214,11 @@ impl Details {
         self.pane.load_whole();
     }
 
+    /// Reveals `part` of the gap `gap` of the diff shown.
+    pub(crate) fn expand_diff(&mut self, gap: usize, part: Part) -> bool {
+        self.pane.expand(gap, part)
+    }
+
     fn clear_file(&mut self) {
         self.file = None;
         self.pane.show(None);
@@ -368,7 +374,7 @@ mod tests {
 
     fn shown_path(details: &Details) -> String {
         match details.diff() {
-            DiffState::Loaded(diff) => diff.new_path.as_ref().unwrap().to_string(),
+            DiffState::Loaded(document) => document.diff().new_path.as_ref().unwrap().to_string(),
             other => panic!("not loaded: {other:?}"),
         }
     }
@@ -531,6 +537,7 @@ mod tests {
             text: text.to_owned(),
             no_newline: false,
             cut: false,
+            crlf: false,
         };
         FileDiff {
             old_path: Some("src/lib.rs".into()),
@@ -581,10 +588,7 @@ mod tests {
 
     fn lines_of(details: &Details) -> Vec<DiffLine> {
         match details.diff() {
-            DiffState::Loaded(FileDiff {
-                content: Content::Text(hunks),
-                ..
-            }) => hunks[0].lines.clone(),
+            DiffState::Loaded(document) => document.hunks()[0].lines.clone(),
             other => panic!("no text: {other:?}"),
         }
     }
@@ -657,6 +661,7 @@ mod tests {
             text: "x".to_owned(),
             no_newline: false,
             cut: false,
+            crlf: false,
         };
         let red = |line: &DiffLine| highlighting.spans(line).map(|spans| spans[0].color[0]);
         assert_eq!(red(&line(LineKind::Removed, Some(2), None)), Some(2));

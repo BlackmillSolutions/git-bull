@@ -164,6 +164,46 @@ pub fn icon_button(
     tooltip(response, name, shortcut)
 }
 
+/// An [`icon_button`] that switches `value` on and off. While on it is
+/// drawn as selected, in the accent on its soft wash, and it reports
+/// itself to assistive technology as a button that is pressed or not.
+pub fn toggle_icon_button(ui: &mut Ui, icon: &str, name: &str, value: &mut bool) -> Response {
+    let palette = active_palette(ui.ctx());
+    let side = SHAPE.control_height;
+    let (rect, mut response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), *value, name));
+    let state = State::of(&response);
+    let colours = if *value && state == State::Idle {
+        (color(palette.accent_soft), color(palette.accent))
+    } else {
+        (
+            state.fill(palette, Color32::TRANSPARENT),
+            color(palette.text),
+        )
+    };
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
+    tooltip(response, name, None)
+}
+
+/// An [`icon_button`] that fills `rect`, which is at least
+/// [`SHAPE`]`.target` on each side, as in a row of a list.
+pub fn icon_button_in(ui: &mut Ui, rect: Rect, icon: &str, name: &str) -> Response {
+    let palette = active_palette(ui.ctx());
+    let response = ui.interact(rect, ui.id().with(("icon-button", name)), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
+    let colours = (
+        State::of(&response).fill(palette, Color32::TRANSPARENT),
+        color(palette.text),
+    );
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
+    tooltip(response, name, None)
+}
+
 /// Draws an icon button of `response` in `rect` with corners of `radius`:
 /// its surface and `icon` in `colours`, and its focus ring with the same
 /// corners.
@@ -639,11 +679,52 @@ pub fn area_focus_ring(ui: &Ui, rect: egui::Rect, focused: bool) {
     }
 }
 
+/// Where the rows of a [`rows_area_in`] lie, from the top of the first. The
+/// rows must allocate exactly the heights it gives them. Finding a row must
+/// not grow with the number of rows, so that a frame costs the same for
+/// any number of them.
+pub trait RowLayout {
+    /// The number of rows.
+    fn total(&self) -> usize;
+
+    /// The top of `row`; the top of `total()` is the height of all rows.
+    fn top(&self, row: usize) -> f32;
+
+    /// The row that holds the height `y`, or the last one below it.
+    fn row_at(&self, y: f32) -> usize;
+}
+
+/// Rows that are all as high as each other.
+pub struct EvenRows {
+    pub height: f32,
+    pub total: usize,
+}
+
+impl RowLayout for EvenRows {
+    fn total(&self) -> usize {
+        self.total
+    }
+
+    fn top(&self, row: usize) -> f32 {
+        row as f32 * self.height
+    }
+
+    fn row_at(&self, y: f32) -> usize {
+        ((y / self.height).floor().max(0.0) as usize).min(self.total.saturating_sub(1))
+    }
+}
+
+/// What a [`rows_area_in`] showed in this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowsShown {
+    /// The row at the top of the view.
+    pub first_visible: usize,
+    /// The view can scroll further down.
+    pub can_scroll_down: bool,
+}
+
 /// A scroll area in both directions over `total` rows, each exactly
 /// `row_height` points high, which draws the rows in view with `add_rows`.
-/// `ScrollArea::show_rows` plans each row as high as `row_height` plus the
-/// spacing of the `Ui` it is given; the rows have no spacing, so neither
-/// has that.
 pub fn rows_area(
     ui: &mut Ui,
     id_salt: impl AsIdSalt,
@@ -651,13 +732,65 @@ pub fn rows_area(
     total: usize,
     add_rows: impl FnOnce(&mut Ui, Range<usize>),
 ) {
+    let layout = EvenRows {
+        height: row_height,
+        total,
+    };
+    rows_area_in(ui, id_salt, &layout, None, add_rows);
+}
+
+/// A scroll area in both directions over the rows of `layout`, which draws
+/// the rows in view with `add_rows`; with `scroll_to`, it first scrolls so
+/// that row begins at the top, as far as it can. The rows have no spacing.
+pub fn rows_area_in(
+    ui: &mut Ui,
+    id_salt: impl AsIdSalt,
+    layout: &impl RowLayout,
+    scroll_to: Option<usize>,
+    add_rows: impl FnOnce(&mut Ui, Range<usize>),
+) -> RowsShown {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        ScrollArea::both()
+        let mut area = ScrollArea::both()
             .id_salt(id_salt)
-            .auto_shrink([false, false])
-            .show_rows(ui, row_height, total, add_rows);
-    });
+            .auto_shrink([false, false]);
+        if let Some(row) = scroll_to {
+            area = area.vertical_scroll_offset(layout.top(row));
+        }
+        let total = layout.total();
+        let output = area.show_viewport(ui, |ui, viewport| {
+            ui.set_height(layout.top(total));
+            if total == 0 {
+                return;
+            }
+            let first = layout.row_at(viewport.min.y);
+            // One row more, as egui's own rows: the last may be cut.
+            let last = (layout.row_at(viewport.max.y) + 2).min(total);
+            let top = ui.max_rect().top();
+            let rect = Rect::from_x_y_ranges(
+                ui.max_rect().x_range(),
+                top + layout.top(first)..=top + layout.top(last),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                // The same automatic ids for a row wherever the view is.
+                ui.skip_ahead_auto_ids(first);
+                add_rows(ui, first..last);
+            });
+        });
+        let offset = output.state.offset.y;
+        // Half a point for the rounding of offsets.
+        let first_visible = if total == 0 {
+            0
+        } else {
+            layout.row_at(offset + 0.5)
+        };
+        let bottom = offset + output.inner_rect.height();
+        RowsShown {
+            first_visible,
+            can_scroll_down: bottom < output.content_size.y - 0.5,
+        }
+    })
+    .inner
 }
 
 fn radius() -> CornerRadius {

@@ -137,6 +137,9 @@ pub struct Settings {
     /// own; it takes effect at the next start.
     #[serde(deserialize_with = "or_default")]
     pub system_title_bar: bool,
+    /// Whether the diff shows spaces, tabs and line endings.
+    #[serde(deserialize_with = "or_default")]
+    pub show_invisibles: bool,
     /// A language tag such as `en-US`.
     pub language: String,
     /// The Git executable chosen by the user, if any.
@@ -169,6 +172,7 @@ impl Default for Settings {
             colour_vision: ColourVision::Standard,
             interface_size: InterfaceSize::Percent100,
             system_title_bar: false,
+            show_invisibles: false,
             language: "en-US".to_owned(),
             git_path: None,
             recent: Vec::new(),
@@ -322,6 +326,7 @@ mod tests {
             colour_vision: ColourVision::Standard,
             interface_size: InterfaceSize::Percent100,
             system_title_bar: false,
+            show_invisibles: false,
             language: "de-DE".to_owned(),
             git_path: Some(PathBuf::from("/opt/git/bin/git")),
             recent: vec![
@@ -550,6 +555,41 @@ mod tests {
     }
 
     #[test]
+    fn a_file_without_the_setting_for_invisible_characters_hides_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(
+            &file,
+            "theme = \"dark\"\n\
+             system_title_bar = true\n\
+             tabs = [\"/work/git-bull\"]\n",
+        );
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert!(!loaded.settings.show_invisibles);
+        assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
+        assert!(loaded.settings.system_title_bar);
+        assert_eq!(loaded.settings.tabs, [PathBuf::from("/work/git-bull")]);
+    }
+
+    #[test]
+    fn the_setting_for_invisible_characters_survives_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            show_invisibles: true,
+            ..example()
+        };
+        file.save(&settings).unwrap();
+
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.contains("show_invisibles = true"), "{text}");
+        assert_eq!(file.load().settings, settings);
+    }
+
+    #[test]
     fn a_layout_without_the_commit_details_and_the_path_column_keeps_the_rest() {
         let dir = tempfile::tempdir().unwrap();
         let file = file_in(&dir);
@@ -617,6 +657,7 @@ mod tests {
             "interface_size = \"large\"",
             "system_title_bar = \"yes\"",
             "system_title_bar = 1",
+            "show_invisibles = \"yes\"",
         ] {
             let text = format!("{unknown}\nlanguage = \"de-DE\"\nactive_tab = 2\n");
             write(&file, &text);

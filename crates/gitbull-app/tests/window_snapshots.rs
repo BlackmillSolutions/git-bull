@@ -107,6 +107,7 @@ fn commit_with_everything() -> FakeBackend {
         text: text.to_owned(),
         no_newline: false,
         cut: false,
+        crlf: false,
     };
     // Both versions of the file, which highlighting reads whole.
     let filler: String = (1..40).map(|n| format!("// line {n}\n")).collect();
