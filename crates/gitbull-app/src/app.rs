@@ -379,6 +379,14 @@ impl App {
         }
     }
 
+    /// Sets whether file lists show a tree of folders.
+    pub fn set_file_tree(&mut self, tree: bool) {
+        if self.settings.file_tree != tree {
+            self.settings.file_tree = tree;
+            self.dirty = true;
+        }
+    }
+
     pub fn set_interface_size(&mut self, size: InterfaceSize) {
         if self.settings.interface_size != size {
             self.settings.interface_size = size;

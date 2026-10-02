@@ -104,7 +104,7 @@ view. It holds:
 
 Sorting 50,000 paths takes longer than a frame, so `FileOrder` is built
 on the worker that read the files: `Details` builds it with the files of
-a commit (`ChangedFiles::Loaded` carries it beside the files), and
+a commit and keeps it beside them (`Details::file_order`), and
 `FileStatus` with each status it reads. The views only share it.
 
 `FileTree` holds the rows of one list, built from a `FileOrder`, the mode
@@ -137,10 +137,11 @@ builds, so that tests can see that drawing does not build.
 
 Its interface: `rows()`, `set_mode`, `set_filter`, `toggle(folder)`,
 `row_of_file(group, index)`, `row_of_folder(group, path)`, `first_file()`,
-`left(row)` and `right(row)`, which collapse, expand or name the row to
-move to, `path(row)` for copying a file's or a folder's path, and
-`collapsed()` with `FileTree::with_collapsed` to carry the collapsed
-folders into the tree of a list read again.
+`left(row)` and `right(row)`, which collapse, expand or select the row to
+move to, `path(row)` for copying a file's or a folder's path, the
+selection (`select_row`, `select_file`, `select_first`, `selected_row`),
+and `renewed(order)`, which carries the mode, the filter, the collapsed
+folders and a selected folder into the tree of a list read again.
 
 The views keep one `FileTree` per file list in their `TabView`, with the
 selection as the group and index of its file, or the group and path of

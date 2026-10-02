@@ -10,6 +10,7 @@ use gitbull_git::status::{Group, WorkingStatus};
 
 use crate::diff_document::Part;
 use crate::diff_pane::{DiffPane, DiffSource, DiffState, Highlighting};
+use crate::file_tree::FileOrder;
 use crate::highlight::HighlightTheme;
 use crate::pending::Pending;
 use crate::workspace::{Failure, Notify};
@@ -22,13 +23,19 @@ pub enum StatusState {
     Failed(Failure),
 }
 
+/// The groups, in the order the file list shows them and its
+/// [`FileOrder`] holds them.
+pub const GROUPS: [Group; 3] = [Group::Staged, Group::Unstaged, Group::Untracked];
+
 /// The uncommitted changes and the diff of the file chosen.
 pub struct FileStatus {
     backend: Arc<dyn Backend>,
     root: PathBuf,
     notify: Notify,
     state: StatusState,
-    work: Pending<WorkingStatus>,
+    work: Pending<(WorkingStatus, Arc<FileOrder>)>,
+    /// The prepared order of the files of the status shown.
+    order: Option<Arc<FileOrder>>,
     /// The file chosen, by its path, so that it stays chosen when the
     /// status is read again.
     chosen: Option<(Group, RepoPath)>,
@@ -46,6 +53,7 @@ impl FileStatus {
             notify,
             state: StatusState::Loading,
             work: Pending::none(),
+            order: None,
             chosen: None,
             pane,
             version: 0,
@@ -56,8 +64,19 @@ impl FileStatus {
     /// status shown stays until the new one has arrived.
     pub(crate) fn refresh(&mut self) {
         let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
-        self.work
-            .start(&self.notify, move |cancel| backend.status(&root, cancel));
+        self.work.start(&self.notify, move |cancel| {
+            let status = backend.status(&root, cancel)?;
+            let order = FileOrder::new(
+                GROUPS.map(|group| {
+                    status
+                        .group(group)
+                        .iter()
+                        .map(|entry| (&entry.path, entry.old_path.as_ref()))
+                }),
+                true,
+            );
+            Ok((status, Arc::new(order)))
+        });
     }
 
     /// Chooses the file at `index` of `group`, and loads its diff; `None`
@@ -101,8 +120,14 @@ impl FileStatus {
         let mut changed = false;
         if let Some(status) = self.work.take() {
             self.state = match status {
-                Ok(status) => StatusState::Loaded(status),
-                Err(failure) => StatusState::Failed(failure),
+                Ok((status, order)) => {
+                    self.order = Some(order);
+                    StatusState::Loaded(status)
+                }
+                Err(failure) => {
+                    self.order = None;
+                    StatusState::Failed(failure)
+                }
             };
             self.version += 1;
             self.keep_chosen();
@@ -154,6 +179,11 @@ impl FileStatus {
     }
 
     /// Whether the status is known and has uncommitted changes.
+    /// The prepared order of the files of the status shown.
+    pub fn file_order(&self) -> Option<&Arc<FileOrder>> {
+        self.order.as_ref()
+    }
+
     pub fn has_changes(&self) -> bool {
         matches!(&self.state, StatusState::Loaded(status) if !status.is_clean())
     }
@@ -301,6 +331,25 @@ mod tests {
         assert_eq!(unstaged_paths(&status), ["a.txt"]);
         assert!(status.has_changes());
         assert_eq!(probe.calls(&root()), ["status"]);
+    }
+
+    #[test]
+    fn each_status_arrives_with_the_order_of_its_groups() {
+        let working = WorkingStatus {
+            staged: vec![modified("s.rs")],
+            unstaged: vec![modified("src/a.rs")],
+            untracked: vec![entry(StatusKind::Untracked, "n.txt")],
+        };
+        let (mut status, _) = file_status(FakeBackend::default().with_status(root(), working));
+        assert!(status.file_order().is_none());
+        status.refresh();
+        wait_until(&mut status, loaded);
+        let order = status.file_order().expect("the order of the files");
+        assert_eq!(order.groups(), GROUPS.len());
+        for (group, path) in ["s.rs", "src/a.rs", "n.txt"].into_iter().enumerate() {
+            assert_eq!(order.file_path(group, 0), &RepoPath::new(path));
+        }
+        assert_eq!(GROUPS, [Group::Staged, Group::Unstaged, Group::Untracked]);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use gitbull_git::backend::{
 };
 use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
-use gitbull_git::changes::FileChange;
+use gitbull_git::changes::{FileChange, FileLines};
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
@@ -66,6 +66,10 @@ pub struct FakeBackend {
     contents: HashMap<ObjectId, CommitContent>,
     changes: HashMap<ObjectId, Vec<FileChange>>,
     failing_changes: Vec<ObjectId>,
+    line_counts: HashMap<ObjectId, Vec<FileLines>>,
+    failing_line_counts: Vec<ObjectId>,
+    /// Holds every count of lines.
+    line_count_gate: Option<Gate>,
     diffs: HashMap<(ObjectId, String), FileDiff>,
     blobs: HashMap<ObjectId, Vec<u8>>,
     /// Holds every read of a blob.
@@ -307,6 +311,25 @@ impl FakeBackend {
     /// The files `commit` changed; a commit without an entry changed none.
     pub fn with_changes(mut self, commit: ObjectId, changes: Vec<FileChange>) -> FakeBackend {
         self.changes.insert(commit, changes);
+        self
+    }
+
+    /// The lines `commit` changed in its files; a commit without an entry
+    /// changed none.
+    pub fn with_line_counts(mut self, commit: ObjectId, counts: Vec<FileLines>) -> FakeBackend {
+        self.line_counts.insert(commit, counts);
+        self
+    }
+
+    /// Counting the lines of `commit` fails.
+    pub fn with_failing_line_counts(mut self, commit: ObjectId) -> FakeBackend {
+        self.failing_line_counts.push(commit);
+        self
+    }
+
+    /// Counting lines takes until the test opens `gate`.
+    pub fn with_line_count_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.line_count_gate = Some(gate.clone());
         self
     }
 
@@ -775,6 +798,31 @@ impl Backend for FakeBackend {
             });
         }
         Ok(self.changes.get(commit).cloned().unwrap_or_default())
+    }
+
+    fn line_counts(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        _parent: Option<&ObjectId>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<FileLines>, Error> {
+        self.probe.record("line-counts", repo);
+        if let Some(gate) = &self.line_count_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
+        if self.failing_line_counts.contains(commit) {
+            return Err(Error::CommandFailed {
+                command: "git diff-tree --numstat".to_owned(),
+                code: Some(128),
+                stderr: format!("fatal: bad object {commit}"),
+            });
+        }
+        Ok(self.line_counts.get(commit).cloned().unwrap_or_default())
     }
 
     fn file_diff(

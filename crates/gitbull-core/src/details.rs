@@ -2,17 +2,20 @@
 //! the file chosen among them. Each loads in the background when it is
 //! selected.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gitbull_git::Backend;
-use gitbull_git::changes::FileChange;
+use gitbull_git::changes::{FileChange, FileLines, LineCount};
 use gitbull_git::object_id::ObjectId;
+use gitbull_git::path::RepoPath;
 
 use crate::diff_document::Part;
 use crate::diff_pane::{DiffPane, DiffSource};
 pub use crate::diff_pane::{DiffState, Highlighting};
+use crate::file_tree::FileOrder;
 use crate::highlight::HighlightTheme;
 use crate::pending::Pending;
 use crate::workspace::{Failure, Notify};
@@ -49,8 +52,12 @@ pub struct Details {
     /// The index of the first untracked file among `files`.
     untracked_from: Option<usize>,
     files: ChangedFiles,
-    /// The files, and where the untracked ones of a stash begin.
-    files_work: Pending<(Vec<FileChange>, Option<usize>)>,
+    /// The files, where the untracked ones of a stash begin, and the order
+    /// of their list.
+    files_work: Pending<(Vec<FileChange>, Option<usize>, Arc<FileOrder>)>,
+    order: Option<Arc<FileOrder>>,
+    counts: Option<LineCounts>,
+    counts_work: Pending<LineCounts>,
     /// The index of the chosen file among `files`.
     file: Option<usize>,
     pane: DiffPane,
@@ -73,6 +80,9 @@ impl Details {
             untracked_from: None,
             files: ChangedFiles::Loading,
             files_work: Pending::none(),
+            order: None,
+            counts: None,
+            counts_work: Pending::none(),
             file: None,
             pane,
             last_selected: None,
@@ -133,6 +143,9 @@ impl Details {
         self.untracked_from = None;
         self.files = ChangedFiles::Loading;
         self.files_work.stop();
+        self.order = None;
+        self.counts = None;
+        self.counts_work.stop();
         self.clear_file();
         let rapid = self
             .last_selected
@@ -170,14 +183,49 @@ impl Details {
         let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
         self.files_work.start(&self.notify, move |cancel| {
             let mut files = backend.changed_files(&root, &commit, parent.as_ref(), cancel)?;
-            let Some(untracked) = untracked else {
-                return Ok((files, None));
+            let from = match untracked {
+                // The commit of the untracked files has no parent: all of
+                // its files are added.
+                Some(untracked) => {
+                    let from = files.len();
+                    files.extend(backend.changed_files(&root, &untracked, None, cancel)?);
+                    Some(from)
+                }
+                None => None,
             };
-            // The commit of the untracked files has no parent: all of its
-            // files are added.
-            let from = files.len();
-            files.extend(backend.changed_files(&root, &untracked, None, cancel)?);
-            Ok((files, Some(from)))
+            let order = FileOrder::new(
+                [files
+                    .iter()
+                    .map(|file| (&file.path, file.old_path.as_ref()))],
+                false,
+            );
+            Ok((files, from, Arc::new(order)))
+        });
+    }
+
+    /// Counts the lines of `files`, the files of the commit shown, in the
+    /// background: the files of the commit against its parent, and for a
+    /// stash its untracked files against nothing.
+    fn count_lines(&mut self, files: Vec<(RepoPath, Option<RepoPath>)>) {
+        let Some(commit) = self.commit else {
+            return;
+        };
+        let (parent, untracked, from) = (self.parent, self.untracked, self.untracked_from);
+        let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
+        self.counts_work.start(&self.notify, move |cancel| {
+            let split = from.unwrap_or(files.len());
+            let mut counts = LineCounts::default();
+            counts.add(
+                &files[..split],
+                &backend.line_counts(&root, &commit, parent.as_ref(), cancel)?,
+            );
+            if let Some(untracked) = untracked {
+                counts.add(
+                    &files[split..],
+                    &backend.line_counts(&root, &untracked, None, cancel)?,
+                );
+            }
+            Ok(counts)
         });
     }
 
@@ -236,12 +284,23 @@ impl Details {
         }
         if let Some(files) = self.files_work.take() {
             self.files = match files {
-                Ok((files, untracked_from)) => {
+                Ok((files, untracked_from, order)) => {
                     self.untracked_from = untracked_from;
+                    self.order = Some(order);
+                    let paths = files
+                        .iter()
+                        .map(|file| (file.path.clone(), file.old_path.clone()))
+                        .collect();
+                    self.count_lines(paths);
                     ChangedFiles::Loaded(files)
                 }
                 Err(failure) => ChangedFiles::Failed(failure),
             };
+            changed = true;
+        }
+        if let Some(counts) = self.counts_work.take() {
+            // Without numbers the list still serves; a failure shows none.
+            self.counts = counts.ok();
             changed = true;
         }
         changed |= self.pane.poll();
@@ -297,6 +356,50 @@ impl Details {
     pub fn diff_version(&self) -> u64 {
         self.pane.version()
     }
+
+    /// The prepared order of the files, once they have loaded.
+    pub fn file_order(&self) -> Option<&Arc<FileOrder>> {
+        self.order.as_ref()
+    }
+
+    /// The lines the commit changed, once they are counted; never when
+    /// counting failed.
+    pub fn line_counts(&self) -> Option<&LineCounts> {
+        self.counts.as_ref()
+    }
+
+    /// Whether the lines of the commit shown are being counted.
+    pub fn is_counting(&self) -> bool {
+        self.counts_work.is_running()
+    }
+}
+
+/// The lines a commit changed in each of its files, aligned with them, and
+/// in all of them together.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineCounts {
+    /// By the index of the file; `None` for a file Git did not count.
+    pub files: Vec<Option<LineCount>>,
+    pub added: u64,
+    pub removed: u64,
+}
+
+impl LineCounts {
+    /// Adds the counts of `files`, found in `counted` by their paths.
+    fn add(&mut self, files: &[(RepoPath, Option<RepoPath>)], counted: &[FileLines]) {
+        let by_paths: HashMap<(&RepoPath, Option<&RepoPath>), LineCount> = counted
+            .iter()
+            .map(|lines| ((&lines.path, lines.old_path.as_ref()), lines.count))
+            .collect();
+        for (path, old_path) in files {
+            let count = by_paths.get(&(path, old_path.as_ref())).copied();
+            if let Some(LineCount::Lines { added, removed }) = count {
+                self.added += added;
+                self.removed += removed;
+            }
+            self.files.push(count);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -305,7 +408,7 @@ mod tests {
     use crate::highlight::{HIGHLIGHT_LIMIT, Span};
     use gitbull_git::changes::ChangeKind;
     use gitbull_git::diff::{Content, DiffLine, FileDiff, LINE_LIMIT, LineKind};
-    use gitbull_testkit::{FakeBackend, Probe, fake_id};
+    use gitbull_testkit::{FakeBackend, Gate, Probe, fake_id};
     use std::time::{Duration, Instant};
 
     fn root() -> PathBuf {
@@ -747,6 +850,186 @@ mod tests {
         let compared: Vec<_> = probe.compared().into_iter().map(|(id, _)| id).collect();
         assert!(!compared.contains(&fake_id("b")), "{compared:?}");
         assert!(compared.contains(&fake_id("c")));
+    }
+
+    fn counted(path: &str, old_path: Option<&str>, count: LineCount) -> FileLines {
+        FileLines {
+            path: path.into(),
+            old_path: old_path.map(RepoPath::from),
+            count,
+        }
+    }
+
+    fn lines(added: u64, removed: u64) -> Option<LineCount> {
+        Some(LineCount::Lines { added, removed })
+    }
+
+    fn counts_known(details: &Details) -> bool {
+        !details.is_counting() && files_loaded(details)
+    }
+
+    #[test]
+    fn the_files_arrive_with_their_order() {
+        let (mut details, _) = details(two_files());
+        details.select(Some(fake_id("b")), None);
+        assert!(details.file_order().is_none());
+        wait_until(&mut details, files_loaded);
+        let order = details.file_order().expect("the order of the files");
+        assert_eq!(order.groups(), 1);
+        assert_eq!(order.file_path(0, 1), &RepoPath::from("two.txt"));
+    }
+
+    #[test]
+    fn line_counts_arrive_after_the_files_aligned_with_them() {
+        let gate = Gate::new();
+        let fake = two_files()
+            .with_line_counts(
+                fake_id("b"),
+                vec![
+                    counted("two.txt", None, LineCount::Binary),
+                    counted(
+                        "one.txt",
+                        None,
+                        LineCount::Lines {
+                            added: 3,
+                            removed: 1,
+                        },
+                    ),
+                ],
+            )
+            .with_line_count_gate(&gate);
+        let (mut details, _) = details(fake);
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, files_loaded);
+        assert!(details.is_counting());
+        assert_eq!(details.line_counts(), None);
+
+        gate.open();
+        wait_until(&mut details, counts_known);
+        let counts = details.line_counts().expect("the counts");
+        assert_eq!(counts.files, [lines(3, 1), Some(LineCount::Binary)]);
+        assert_eq!((counts.added, counts.removed), (3, 1));
+    }
+
+    #[test]
+    fn line_counts_find_a_renamed_file_by_both_paths() {
+        let fake = FakeBackend::default()
+            .with_changes(
+                fake_id("b"),
+                vec![
+                    FileChange {
+                        kind: ChangeKind::Renamed,
+                        path: "new.rs".into(),
+                        old_path: Some("old.rs".into()),
+                    },
+                    added("old.rs"),
+                ],
+            )
+            .with_line_counts(
+                fake_id("b"),
+                vec![
+                    counted(
+                        "old.rs",
+                        None,
+                        LineCount::Lines {
+                            added: 4,
+                            removed: 0,
+                        },
+                    ),
+                    counted(
+                        "new.rs",
+                        Some("old.rs"),
+                        LineCount::Lines {
+                            added: 1,
+                            removed: 2,
+                        },
+                    ),
+                ],
+            );
+        let (mut details, _) = details(fake);
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, counts_known);
+        let counts = details.line_counts().expect("the counts");
+        assert_eq!(counts.files, [lines(1, 2), lines(4, 0)]);
+        assert_eq!((counts.added, counts.removed), (5, 2));
+    }
+
+    #[test]
+    fn line_counts_of_a_stash_include_its_untracked_files() {
+        let fake = FakeBackend::default()
+            .with_changes(
+                fake_id("stash"),
+                vec![FileChange {
+                    kind: ChangeKind::Modified,
+                    path: "a.txt".into(),
+                    old_path: None,
+                }],
+            )
+            .with_changes(fake_id("untracked"), vec![added("new.txt")])
+            .with_line_counts(
+                fake_id("stash"),
+                vec![counted(
+                    "a.txt",
+                    None,
+                    LineCount::Lines {
+                        added: 2,
+                        removed: 1,
+                    },
+                )],
+            )
+            .with_line_counts(
+                fake_id("untracked"),
+                vec![counted(
+                    "new.txt",
+                    None,
+                    LineCount::Lines {
+                        added: 5,
+                        removed: 0,
+                    },
+                )],
+            );
+        let (mut details, _) = details(fake);
+        details.select_stash(
+            fake_id("stash"),
+            Some(fake_id("base")),
+            Some(fake_id("untracked")),
+        );
+        wait_until(&mut details, counts_known);
+        let counts = details.line_counts().expect("the counts");
+        assert_eq!(counts.files, [lines(2, 1), lines(5, 0)]);
+        assert_eq!((counts.added, counts.removed), (7, 1));
+    }
+
+    #[test]
+    fn a_failed_count_gives_no_numbers() {
+        let fake = two_files().with_failing_line_counts(fake_id("b"));
+        let (mut details, _) = details(fake);
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, counts_known);
+        assert_eq!(details.line_counts(), None);
+        assert!(matches!(details.files(), ChangedFiles::Loaded(_)));
+    }
+
+    #[test]
+    fn another_commit_drops_the_line_counts() {
+        let fake = two_files().with_line_counts(
+            fake_id("b"),
+            vec![counted(
+                "one.txt",
+                None,
+                LineCount::Lines {
+                    added: 1,
+                    removed: 0,
+                },
+            )],
+        );
+        let (mut details, _) = details(fake);
+        details.select(Some(fake_id("b")), None);
+        wait_until(&mut details, counts_known);
+        assert!(details.line_counts().is_some());
+        details.select(Some(fake_id("c")), None);
+        assert_eq!(details.line_counts(), None);
+        assert!(details.file_order().is_none());
     }
 
     #[test]
