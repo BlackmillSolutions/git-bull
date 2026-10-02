@@ -21,7 +21,7 @@ use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 use support::{
     BURST, Setup, build, commit_list_scroll, find_row, long_history, path, settle_window,
-    turn_wheel, wait_for_row, window, window_at_60_fps,
+    turn_wheel, wait_for_references, wait_for_row, window, window_at_60_fps,
 };
 
 fn seconds(text: &str) -> i64 {
@@ -141,6 +141,7 @@ fn open(backend: FakeBackend) -> Harness<'static, App> {
     let mut harness = window(test.app);
     settle_window(&mut harness);
     wait_for_label(&mut harness, "Fix the parser");
+    wait_for_references(&mut harness);
     harness
 }
 

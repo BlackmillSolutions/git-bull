@@ -17,7 +17,7 @@ use gitbull_git::refs::{RefKind, Reference};
 use gitbull_testkit::{FakeBackend, fake_id};
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
-use support::{Setup, build, path, settle_window, window};
+use support::{Setup, build, path, settle_window, wait_for_references, window};
 
 fn seconds(text: &str) -> i64 {
     text.parse::<Timestamp>().unwrap().as_second()
@@ -140,6 +140,7 @@ fn open_with(backend: FakeBackend, layout: Layout) -> Harness<'static, App> {
     let mut harness = window(test.app);
     settle_window(&mut harness);
     wait_until(&mut harness, |h| commit_row(h, "Fix the parser").is_some());
+    wait_for_references(&mut harness);
     harness
 }
 

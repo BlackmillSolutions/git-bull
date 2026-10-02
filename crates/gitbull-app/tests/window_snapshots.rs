@@ -18,7 +18,7 @@ use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
 use gitbull_git::history::CommitLine;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_testkit::{FakeBackend, fake_id};
-use support::{Setup, TestApp, build, path, settle_window};
+use support::{Setup, TestApp, build, path, settle_window, wait_for_references};
 
 /// The main window of `test` at 1280 by 800, rendered with a graphics
 /// adapter.
@@ -256,6 +256,7 @@ fn history_view_on(
     wait_for(&mut harness, |h| {
         h.query_all_by_role(Role::Code).next().is_some() && highlighted(h)
     });
+    wait_for_references(&mut harness);
     harness
 }
 

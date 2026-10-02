@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-02
+# Only tests change; no behaviour of git-bull does.
+skip_specs: true
