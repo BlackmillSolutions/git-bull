@@ -1218,3 +1218,45 @@ fn the_context_menu_of_a_folder_of_the_file_status_copies_its_path() {
     harness.step();
     assert_eq!(copied(&harness), Some("notes".to_owned()));
 }
+
+/// The rows of the sidebar that are selected.
+fn selected_items(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::TreeItem)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+#[test]
+fn the_uncommitted_row_selects_file_status_in_the_sidebar() {
+    let mut harness = open_with(backend().with_status(root(), mixed()));
+    wait_until(&mut harness, |h| has_row(h, "Uncommitted changes"));
+    assert_eq!(selected_items(&harness), ["History"]);
+    let at = row(&harness, "Uncommitted changes").unwrap().center();
+    click_at(&mut harness, at, PointerButton::Primary);
+    assert_eq!(listed(&mut harness)[0], "Staged files (2)");
+    // Also for assistive technology: File status is the one selected row.
+    assert_eq!(selected_items(&harness), ["File status"]);
+}
+
+#[test]
+fn the_button_of_the_commit_panel_selects_file_status_in_place_of_a_branch() {
+    let mut harness = open_with(backend().with_status(root(), mixed()));
+    let side = harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| node.accesskit_node().label().as_deref() == Some("side"))
+        .unwrap()
+        .rect()
+        .center();
+    click_at(&mut harness, side, PointerButton::Primary);
+    assert_eq!(selected_items(&harness), ["side"]);
+
+    move_onto_the_uncommitted_row(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Button, "Open File status")
+        .click();
+    harness.step();
+    assert_eq!(listed(&mut harness)[0], "Staged files (2)");
+    assert_eq!(selected_items(&harness), ["File status"]);
+}

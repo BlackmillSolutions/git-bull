@@ -603,3 +603,88 @@ fn ctrl_f_focuses_the_search_field() {
     press(&mut harness, Key::F, Modifiers::COMMAND);
     assert!(field(&harness).is_focused());
 }
+
+/// The rows of the sidebar that are selected.
+fn selected_items(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::TreeItem)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+#[test]
+fn a_match_chosen_in_the_search_view_selects_history_in_the_sidebar() {
+    let backend = backend().with_matches(SearchKind::Message, "work", ids(&["x", "c"]));
+    let mut harness = open(backend);
+    type_text(&mut harness, "work");
+    wait_until(&mut harness, |h| text_shown(h, "2 matches"));
+    let search = sidebar_item(&harness, "Search");
+    click_at(&mut harness, search);
+    wait_until(&mut harness, |h| {
+        h.query_all_by_role(Role::ListItem).count() == 2
+    });
+    assert_eq!(selected_items(&harness), ["Search"]);
+
+    let first = harness
+        .query_all_by_role(Role::ListItem)
+        .next()
+        .unwrap()
+        .rect()
+        .center();
+    click_at(&mut harness, first);
+    wait_until(&mut harness, |h| {
+        selected(h)
+            .first()
+            .is_some_and(|row| row.starts_with("Side work"))
+    });
+    assert_eq!(selected_items(&harness), ["History"]);
+}
+
+#[test]
+fn next_keeps_a_branch_selected_in_the_sidebar() {
+    let backend = backend().with_matches(SearchKind::Message, "work", ids(&["x", "c"]));
+    let mut harness = open(backend);
+    let main = sidebar_item(&harness, "main");
+    click_at(&mut harness, main);
+    wait_until(&mut harness, |h| {
+        selected(h)
+            .first()
+            .is_some_and(|row| row.starts_with("Head work"))
+    });
+    type_text(&mut harness, "work");
+    wait_until(&mut harness, |h| text_shown(h, "2 matches"));
+
+    harness.get_by_label("Next").click();
+    wait_until(&mut harness, |h| {
+        selected(h)
+            .first()
+            .is_some_and(|row| row.starts_with("Side work"))
+    });
+    assert_eq!(selected_items(&harness), ["main"]);
+}
+
+#[test]
+fn a_view_selected_with_the_arrow_keys_gives_way_when_next_shows_history() {
+    let backend = backend().with_matches(SearchKind::Message, "work", ids(&["x", "c"]));
+    let mut harness = open(backend);
+    let history = sidebar_item(&harness, "History");
+    click_at(&mut harness, history);
+    press(&mut harness, Key::ArrowDown, Modifiers::NONE);
+    press(&mut harness, Key::ArrowDown, Modifiers::NONE);
+    assert_eq!(selected_items(&harness), ["Search"]);
+    assert!(has_row(&harness, "Base"), "the History view stays");
+
+    type_text(&mut harness, "work");
+    wait_until(&mut harness, |h| text_shown(h, "2 matches"));
+    harness.get_by_label("Next").click();
+    wait_until(&mut harness, |h| {
+        selected(h)
+            .first()
+            .is_some_and(|row| row.starts_with("Side work"))
+    });
+    for _ in 0..3 {
+        harness.step();
+    }
+    assert_eq!(selected_items(&harness), ["History"]);
+}

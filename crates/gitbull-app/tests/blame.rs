@@ -497,3 +497,25 @@ fn scrolling_blame_moves_every_line_by_as_much() {
     harness.step();
     assert_eq!(line_top(&harness, 20), before - 100.0);
 }
+
+#[test]
+fn a_commit_chosen_in_the_blame_from_file_status_selects_history() {
+    let mut harness = open_with(with_changed_file(backend()));
+    open_blame_from_file_status(&mut harness);
+    assert!(sidebar_item_selected(&harness, "File status"));
+    wait_until(&mut harness, |h| margin(h).len() == 3);
+    let entry = harness
+        .query_all_by_role(Role::Link)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(&short("b")))
+        })
+        .unwrap()
+        .rect()
+        .center();
+    click_at(&mut harness, entry, PointerButton::Primary);
+    wait_until(&mut harness, |h| commit_selected(h, "Rename a to b"));
+    assert!(sidebar_item_selected(&harness, "History"));
+    assert!(!sidebar_item_selected(&harness, "File status"));
+}
