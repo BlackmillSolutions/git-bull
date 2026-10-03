@@ -33,7 +33,7 @@
 
 ## 6. Snapshots and manual check
 
-- [ ] 6.1 Update the window snapshots, which now show the home tab in the title bar, and add one of the home tab with pinned and recent repositories and worktrees in a light and a dark palette; send the user screenshots while the view takes shape; verify that `tests/window_snapshots.rs` passes with the new images and that the user approves them
+- [x] 6.1 Update the window snapshots, which now show the home tab in the title bar, and add one of the home tab with pinned and recent repositories and worktrees in a light and a dark palette; send the user screenshots while the view takes shape; verify that `tests/window_snapshots.rs` passes with the new images and that the user approves them
 - [ ] 6.2 The user checks on Windows with a release build: the home tab with real repositories and their worktrees, switching with Ctrl+O, Open folder, pinning, unpinning and removing, Show in file manager, the status read again after returning to the window, the list unchanged in shape after a restart, the home tab restored after a restart, and that a long list stays fluid; verify that the result and the date are recorded in this task
 
 ## 7. Final check
