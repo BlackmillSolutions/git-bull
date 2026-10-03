@@ -50,6 +50,9 @@ pub enum GitStatus {
 /// How often changed settings are written at most.
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long after a reading ended the home tab reads again by itself.
+const HOME_READ_AGAIN: Duration = Duration::from_secs(20);
+
 /// Asks the user for a path, usually through the system's file dialogs.
 pub trait Picker {
     /// A folder to open, or `None` when the user cancelled.
@@ -140,6 +143,11 @@ pub(crate) struct Home {
     /// The home tab was shown when the logic last ran, so that it reads
     /// the repositories again when it becomes shown.
     shown: bool,
+    /// When the last reading ended, in seconds since 1970, for the timer.
+    read_at: Option<i64>,
+    /// The window has the focus, as it reported it last; one that reports
+    /// nothing counts as focused.
+    pub(crate) focused: bool,
 }
 
 impl Home {
@@ -154,6 +162,8 @@ impl Home {
             menu: None,
             focus_filter: false,
             shown: false,
+            read_at: None,
+            focused: true,
         }
     }
 
@@ -686,8 +696,16 @@ impl App {
         // The main states depend on the time: they are decided again when
         // a round ends.
         if ended {
-            self.home.list.set_now(self.desktop.now());
+            let now = self.desktop.now();
+            self.home.read_at = Some(now);
+            self.home.list.set_now(now);
             self.home.list.settle();
+        }
+        // While the home tab is shown and the window has the focus, it reads
+        // again 20 seconds after the last reading ended (design of
+        // `worktree-cockpit`, decision 1).
+        if self.home_due_in() == Some(Duration::ZERO) {
+            self.read_home(Request::Again);
         }
         if known_changed {
             self.known_changed();
@@ -695,6 +713,21 @@ impl App {
         if self.dirty && self.last_saved.elapsed() >= SAVE_INTERVAL {
             self.save();
         }
+    }
+
+    /// How long until the home tab reads again by itself, or `None` while it
+    /// does not: it is not shown, the window has no focus, or a reading
+    /// runs. The window schedules another pass for then.
+    pub fn home_due_in(&self) -> Option<Duration> {
+        if !self.home_shown() || !self.home.focused || self.home.is_reading() {
+            return None;
+        }
+        let since = self.desktop.now() - self.home.read_at?;
+        Some(Duration::from_secs(
+            HOME_READ_AGAIN
+                .as_secs()
+                .saturating_sub(since.max(0) as u64),
+        ))
     }
 
     /// How long until pending changes are written, or `None` when nothing is

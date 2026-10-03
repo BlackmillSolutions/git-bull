@@ -174,6 +174,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     actions.extend(dropped_folders(ui));
     actions.extend(returned_to_window(ui));
+    if let Some(focused) = window_focus(ui) {
+        app.home.focused = focused;
+    }
     // The window behind the settings dialog takes no keys, as it takes no
     // clicks.
     if app.dialog.is_none() {
@@ -571,6 +574,18 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
         ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
     }
     actions
+}
+
+/// Whether the window has the focus, as this pass tells it: by an event,
+/// else as the window reports it; `None` when it tells nothing.
+fn window_focus(ui: &Ui) -> Option<bool> {
+    ui.ctx().input(|input| {
+        let event = input.events.iter().rev().find_map(|event| match event {
+            egui::Event::WindowFocused(focused) => Some(*focused),
+            _ => None,
+        });
+        event.or(input.viewport().focused)
+    })
 }
 
 /// Returning to the window may follow work in a terminal, so it refreshes.

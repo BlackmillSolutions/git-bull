@@ -62,7 +62,8 @@ pub const NOW: i64 = 1_800_000_000;
 /// asked to show and can fail to show them.
 #[derive(Clone)]
 pub struct FixedDesktop {
-    pub now: i64,
+    /// The time, which tests may move on.
+    pub now: Arc<std::sync::atomic::AtomicI64>,
     pub revealed: Arc<Mutex<Vec<PathBuf>>>,
     pub fails: bool,
 }
@@ -70,7 +71,7 @@ pub struct FixedDesktop {
 impl Default for FixedDesktop {
     fn default() -> FixedDesktop {
         FixedDesktop {
-            now: NOW,
+            now: Arc::new(std::sync::atomic::AtomicI64::new(NOW)),
             revealed: Arc::default(),
             fails: false,
         }
@@ -79,7 +80,7 @@ impl Default for FixedDesktop {
 
 impl Desktop for FixedDesktop {
     fn now(&self) -> i64 {
-        self.now
+        self.now.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn reveal(&self, folder: &Path) -> std::io::Result<()> {
@@ -145,6 +146,23 @@ pub fn build(setup: Setup) -> TestApp {
         time_zone: setup.time_zone.unwrap_or(jiff::tz::TimeZone::UTC),
     });
     TestApp { dir, app }
+}
+
+/// Like [`build`], with the fake backend shared with the test, which can
+/// change what it answers while the application runs.
+pub fn build_shared(mut setup: Setup) -> (TestApp, Arc<FakeBackend>) {
+    let backend = Arc::new(std::mem::take(&mut setup.backend));
+    let shared = Arc::clone(&backend);
+    setup.checker = Some(Box::new(move |_| {
+        let backend: Arc<dyn gitbull_git::Backend> = Arc::clone(&shared) as _;
+        (
+            GitStatus::Ready {
+                version: GIT_VERSION,
+            },
+            Some(backend),
+        )
+    }));
+    (build(setup), backend)
 }
 
 /// An application with `settings` and the given repositories.

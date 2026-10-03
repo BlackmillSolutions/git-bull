@@ -89,7 +89,7 @@ pub struct FakeBackend {
     status_gates: Vec<(PathBuf, Gate)>,
     /// The worktrees of a repository, the main one first.
     worktrees: Mutex<Vec<Vec<Worktree>>>,
-    summaries: Vec<(PathBuf, Summary)>,
+    summaries: Mutex<Vec<(PathBuf, Summary)>>,
     /// Holds every summary.
     summary_gate: Option<Gate>,
     working_diffs: HashMap<(Group, String), FileDiff>,
@@ -341,9 +341,18 @@ impl FakeBackend {
 
     /// The summary of the working copy at `worktree`. Without it, a working
     /// copy is summarised from its HEAD and its status.
-    pub fn with_summary(mut self, worktree: impl Into<PathBuf>, summary: Summary) -> FakeBackend {
-        self.summaries.push((worktree.into(), summary));
+    pub fn with_summary(self, worktree: impl Into<PathBuf>, summary: Summary) -> FakeBackend {
+        self.set_summary(worktree, summary);
         self
+    }
+
+    /// Changes the summary of the working copy at `worktree` while the
+    /// backend is in use, as when a file changes.
+    pub fn set_summary(&self, worktree: impl Into<PathBuf>, summary: Summary) {
+        let worktree = worktree.into();
+        let mut known = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|(path, _)| *path != worktree);
+        known.push((worktree, summary));
     }
 
     /// Every summary waits until the test opens `gate`.
@@ -1274,7 +1283,12 @@ impl Backend for FakeBackend {
             return Err(Error::Cancelled);
         }
         self.gone(worktree)?;
-        if let Some((_, summary)) = self.summaries.iter().find(|(path, _)| path == worktree) {
+        let known = self
+            .summaries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some((_, summary)) = known.iter().find(|(path, _)| path == worktree) {
             return Ok(summary.clone());
         }
         let known = self

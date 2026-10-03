@@ -1036,3 +1036,267 @@ fn a_folder_that_is_no_repository_leaves_the_home_tab_shown() {
     assert_eq!(tab_titles(harness.state()), ["git-bull", "web-shop"]);
     assert!(harness.state().home_shown());
 }
+
+// Reading again by itself (design of `worktree-cockpit`, decision 1).
+
+use gitbull_git::compare::{BaseComparison, Counts};
+use gitbull_git::facts::{Branch, RepositoryFacts, Upstream};
+use gitbull_git::merged::{MergedBy, Prediction, Unpredicted};
+use std::sync::atomic::{AtomicI64, Ordering};
+use support::{build_shared, worktree};
+
+/// Moves the time of the desktop on by `seconds`.
+fn later(clock: &AtomicI64, seconds: i64) {
+    clock.fetch_add(seconds, Ordering::SeqCst);
+}
+
+/// Steps until the home tab has finished reading.
+fn read_through(harness: &mut Harness<'_, App>) {
+    harness.step();
+    step_until(harness, |harness| !harness.state().home_reading());
+}
+
+#[test]
+fn the_home_tab_reads_again_every_20_seconds_while_it_has_the_focus() {
+    let setup = one_repository(
+        "git-bull",
+        summary(Head::Branch("main".to_owned()), 3, 0, 600),
+    );
+    let clock = Arc::clone(&setup.desktop.now);
+    let (test, backend) = build_shared(setup);
+    let mut harness = window(test.app);
+    wait_for_home(&mut harness);
+    let probe = backend.probe();
+    assert_eq!(summaries(&probe), 1);
+
+    backend.set_summary(
+        path(&["work", "git-bull"]),
+        summary(Head::Branch("main".to_owned()), 4, 0, 600),
+    );
+    later(&clock, 19);
+    harness.step();
+    harness.step();
+    assert_eq!(summaries(&probe), 1);
+    later(&clock, 1);
+    step_until(&mut harness, |harness| {
+        row_label(harness, "git-bull").contains("4 changed")
+    });
+    assert_eq!(summaries(&probe), 2);
+}
+
+#[test]
+fn the_home_tab_reads_nothing_by_itself_without_the_focus() {
+    let setup = one_repository(
+        "git-bull",
+        summary(Head::Branch("main".to_owned()), 3, 0, 600),
+    );
+    let clock = Arc::clone(&setup.desktop.now);
+    let probe = setup.backend.probe();
+    let mut harness = window(build(setup).app);
+    wait_for_home(&mut harness);
+
+    harness.event(Event::WindowFocused(false));
+    harness.step();
+    later(&clock, 60);
+    for _ in 0..5 {
+        harness.step();
+    }
+    assert!(!harness.state().home_reading());
+    assert_eq!(summaries(&probe), 1);
+}
+
+/// `work/app` with `count` agent worktrees started from `dev`, each a
+/// commit ahead, and `dev` tracking `origin/dev` at `fetched`.
+fn agents(count: usize) -> (Setup, Vec<gitbull_git::worktrees::Worktree>) {
+    let root = path(&["work", "app"]);
+    let mut listed = vec![worktree(root.clone(), Some("main"))];
+    for n in 0..count {
+        listed.push(worktree(
+            path(&["work", "wt", &format!("agent-{n}")]),
+            Some(&format!("claude/{n}")),
+        ));
+    }
+    let mut backend = FakeBackend::default()
+        .with_repository(&root)
+        .with_facts(&root, agent_facts(&listed, "d"))
+        .with_worktrees(listed.clone());
+    for n in 0..count {
+        let tip = format!("refs/heads/claude/{n}");
+        backend = backend
+            .with_detected_base(&root, &tip, "refs/heads/dev")
+            .with_comparison(&root, &tip, ahead_of_dev(1));
+    }
+    let setup = Setup {
+        settings: Settings {
+            recent: vec![root],
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    };
+    (setup, listed)
+}
+
+fn agent_facts(listed: &[gitbull_git::worktrees::Worktree], fetched: &str) -> RepositoryFacts {
+    let mut branches = vec![
+        Branch {
+            name: "refs/heads/dev".to_owned(),
+            commit: "d".to_owned(),
+            upstream: Some(Upstream {
+                tracking: "refs/remotes/origin/dev".to_owned(),
+                remote: "origin".to_owned(),
+                merge: "refs/heads/dev".to_owned(),
+            }),
+        },
+        Branch {
+            name: "refs/heads/main".to_owned(),
+            commit: "m".to_owned(),
+            upstream: None,
+        },
+        Branch {
+            name: "refs/remotes/origin/dev".to_owned(),
+            commit: fetched.to_owned(),
+            upstream: None,
+        },
+    ];
+    for worktree in &listed[1..] {
+        branches.push(Branch {
+            name: format!("refs/heads/{}", worktree.branch.as_ref().unwrap()),
+            commit: worktree.head.clone().unwrap(),
+            upstream: None,
+        });
+    }
+    RepositoryFacts {
+        overrides: Vec::new(),
+        merge_driver: false,
+        worktree_config: false,
+        remotes: Vec::new(),
+        common_dir: path(&["work", "app", ".git"]),
+        branches,
+        origin_head: None,
+    }
+}
+
+fn ahead_of_dev(ahead: u64) -> BaseComparison {
+    BaseComparison {
+        counted: "refs/heads/dev".to_owned(),
+        counts: Counts { ahead, behind: 0 },
+        lines: None,
+        merged: None,
+        prediction: Prediction::NoConflict,
+    }
+}
+
+#[test]
+fn a_commit_in_one_of_ten_worktrees_compares_only_that_one_again() {
+    let (setup, mut listed) = agents(10);
+    let clock = Arc::clone(&setup.desktop.now);
+    let (test, backend) = build_shared(setup);
+    let probe = backend.probe();
+    let mut harness = window(test.app);
+    wait_for_home(&mut harness);
+    read_through(&mut harness);
+    let before = probe.base_comparisons().len();
+    assert_eq!(before, 10);
+
+    listed[4].head = Some("moved".to_owned());
+    backend.set_facts(path(&["work", "app"]), agent_facts(&listed, "d"));
+    backend.set_worktrees(listed);
+    later(&clock, 20);
+    harness.step();
+    read_through(&mut harness);
+
+    let again: Vec<String> = probe.base_comparisons()[before..]
+        .iter()
+        .map(|request| request.tip.clone())
+        .collect();
+    assert_eq!(again, ["refs/heads/claude/3"]);
+}
+
+#[test]
+fn a_branch_merged_on_the_server_is_done_after_the_fetch() {
+    let (setup, listed) = agents(1);
+    let clock = Arc::clone(&setup.desktop.now);
+    let (test, backend) = build_shared(setup);
+    let mut harness = window(test.app);
+    wait_for_home(&mut harness);
+    read_through(&mut harness);
+    assert!(harness.query_by_label("Done (1)").is_none());
+
+    // The user fetched in a terminal: `origin/dev` moved, and neither
+    // `dev` nor the worktree's HEAD.
+    let root = path(&["work", "app"]);
+    backend.set_facts(&root, agent_facts(&listed, "fetched"));
+    backend.set_comparison(
+        &root,
+        "refs/heads/claude/0",
+        BaseComparison {
+            counted: "refs/remotes/origin/dev".to_owned(),
+            counts: Counts {
+                ahead: 0,
+                behind: 1,
+            },
+            lines: None,
+            merged: Some(("refs/remotes/origin/dev".to_owned(), MergedBy::Ancestor)),
+            prediction: Prediction::Unknown(Unpredicted::NotAsked),
+        },
+    );
+    later(&clock, 20);
+    harness.step();
+    step_until(&mut harness, |harness| {
+        harness.query_by_label_contains("Done (1)").is_some()
+    });
+}
+
+#[test]
+fn gaining_the_focus_lets_a_slow_reading_finish_and_reads_once_more() {
+    let gate = Gate::new();
+    let mut setup = home_with_a_tab();
+    setup.backend = setup.backend.with_summary_gate(&gate);
+    let probe = setup.backend.probe();
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    step_until(&mut harness, |_| summaries(&probe) == 1);
+    let rounds = || listings(&probe);
+    let before = rounds();
+
+    for _ in 0..2 {
+        harness.event(Event::WindowFocused(false));
+        harness.step();
+        harness.event(Event::WindowFocused(true));
+        harness.step();
+    }
+    assert!(!gate.was_cancelled());
+    assert_eq!(rounds(), before);
+    gate.open();
+    step_until(&mut harness, |harness| {
+        !harness.state().home_reading() && rounds() == before + 1
+    });
+}
+
+/// How often the worktrees of `git-bull` were listed: once by each round
+/// of the home tab, and once when its tab opened.
+fn listings(probe: &Probe) -> usize {
+    probe
+        .calls(&path(&["work", "git-bull"]))
+        .iter()
+        .filter(|call| *call == "worktrees")
+        .count()
+}
+
+#[test]
+fn refresh_stops_a_slow_reading_and_starts_a_new_one() {
+    let gate = Gate::new();
+    let mut setup = home_with_a_tab();
+    setup.backend = setup.backend.with_summary_gate(&gate);
+    let probe = setup.backend.probe();
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    step_until(&mut harness, |_| summaries(&probe) == 1);
+    let before = listings(&probe);
+
+    harness.key_press(Key::F5);
+    harness.step();
+    assert!(gate.was_cancelled());
+    step_until(&mut harness, |_| listings(&probe) == before + 1);
+}
