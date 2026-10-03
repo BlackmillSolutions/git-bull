@@ -81,6 +81,10 @@ text conversion and merge drivers, which git-bull never uses.
 - **WHEN** a repository's configuration defines a merge driver, its attributes assign it to a file that a worktree's branch and its base both changed, and the home tab predicts whether merging the branch would conflict
 - **THEN** the driver is not executed
 
+#### Scenario: Squash merge recognised
+- **WHEN** a repository's configuration names an external diff tool and a text conversion filter for a file type, a worktree's branch changed such a file, and the home tab checks whether the branch was merged by a squash merge
+- **THEN** neither is executed
+
 #### Scenario: Diff copied as AI context
 - **WHEN** a repository's configuration names an external diff tool and a text conversion filter, and the user copies a worktree as AI context with its diff
 - **THEN** neither is executed, and the diff is git-bull's own
