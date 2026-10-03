@@ -183,11 +183,16 @@ impl RepositoryList {
     }
 
     /// Collapses or expands the worktrees of the repository at `index`. A
-    /// worktree selected in it gives the selection to the repository.
+    /// worktree selected in it gives the selection to the repository. While
+    /// the filter has text, every repository shows the worktrees that match,
+    /// and nothing changes.
     pub fn toggle(&mut self, index: usize) {
         let Some(repository) = self.repositories.get(index) else {
             return;
         };
+        if !self.lower_filter.is_empty() {
+            return;
+        }
         let path = repository.path.clone();
         if !self.collapsed.remove(&path) {
             if self
@@ -994,6 +999,19 @@ mod tests {
         list.toggle(0);
         assert_eq!(shown(&list), ["# Recent", "app+"]);
         list.toggle(0);
+        assert_eq!(shown(&list), ["# Recent", "app", "  one"]);
+    }
+
+    #[test]
+    fn nothing_collapses_while_the_filter_has_text() {
+        let mut list = RepositoryList::new(&[], &[p("/work/app")], &[]);
+        list.set_found(p("/work/app"), repository("/work/app", &["/work/wt/one"]));
+        list.set_filter("one");
+        list.select_row(2);
+        list.toggle(0);
+        assert_eq!(shown(&list), ["# Recent", "app~", "  one"]);
+        assert_eq!(selected(&list).as_deref(), Some("one"));
+        list.set_filter("");
         assert_eq!(shown(&list), ["# Recent", "app", "  one"]);
     }
 

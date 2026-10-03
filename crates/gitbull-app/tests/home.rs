@@ -611,6 +611,23 @@ fn left_moves_from_a_worktree_to_its_repository_and_then_collapses_it() {
 }
 
 #[test]
+fn a_click_on_the_triangle_collapses_nothing_while_the_filter_has_text() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    type_text(&mut harness, "fix-rel");
+    let row = home_row(&harness, "git-bull").expect("row");
+    let triangle = Pos2::new(row.left() + 6.0, row.center().y);
+    click_with(&mut harness, triangle, PointerButton::Primary);
+    assert_eq!(rows(&harness).0, ["git-bull", "git-bull-fix-reload"]);
+
+    // Emptied, the filter shows the worktrees as before.
+    ctrl_o(&mut harness);
+    harness.key_press(Key::Escape);
+    harness.run();
+    assert!(rows(&harness).0.contains(&"git-bull-fix-reload".to_owned()));
+}
+
+#[test]
 fn escape_empties_the_filter_and_then_shows_the_tab_shown_before() {
     let mut harness = tab_shown();
     ctrl_o(&mut harness);

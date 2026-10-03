@@ -42,8 +42,9 @@ pub struct DiffLine {
     pub no_newline: bool,
     /// The text was cut after [`LINE_CHARS`] characters.
     pub cut: bool,
-    /// The line ended in a carriage return and a line feed; the carriage
-    /// return is not part of `text`.
+    /// The line ended in a carriage return and a line feed, or with
+    /// `no_newline` in a carriage return alone; the carriage return is not
+    /// part of `text`.
     pub crlf: bool,
 }
 

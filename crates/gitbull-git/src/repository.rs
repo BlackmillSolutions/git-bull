@@ -106,7 +106,7 @@ fn boolean(line: Option<&[u8]>) -> Option<bool> {
     }
 }
 
-fn trim_newline(bytes: &[u8]) -> &[u8] {
+pub(crate) fn trim_newline(bytes: &[u8]) -> &[u8] {
     bytes.strip_suffix(b"\n").unwrap_or(bytes)
 }
 

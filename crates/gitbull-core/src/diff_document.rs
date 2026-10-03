@@ -51,12 +51,16 @@ pub enum LineEnd {
     Crlf,
     /// The last line of a version without a line break.
     None,
+    /// The last line of a version without a line feed, ending in a carriage
+    /// return, which is not part of its text.
+    Cr,
 }
 
 impl LineEnd {
     fn of(line: &DiffLine) -> LineEnd {
         match (line.no_newline, line.crlf) {
-            (true, _) => LineEnd::None,
+            (true, true) => LineEnd::Cr,
+            (true, false) => LineEnd::None,
             (false, true) => LineEnd::Crlf,
             (false, false) => LineEnd::Lf,
         }
@@ -197,6 +201,7 @@ impl NewText {
                     (start + at - 1, start + at + 1, LineEnd::Crlf)
                 }
                 Some(at) => (start + at, start + at + 1, LineEnd::Lf),
+                None if bytes.ends_with(b"\r") => (bytes.len() - 1, bytes.len(), LineEnd::Cr),
                 None => (bytes.len(), bytes.len(), LineEnd::None),
             };
             let (end, cut) = cut_at_chars(&content, start..end);
@@ -1187,6 +1192,19 @@ mod tests {
     }
 
     #[test]
+    fn a_revealed_last_line_keeps_its_carriage_return_out_of_its_text() {
+        let hunks = vec![replacing(13)];
+        let mut lines: Vec<String> = (1..=20).map(|n| format!("line {n}\n")).collect();
+        lines.push("last\r".to_owned());
+        let text = Arc::new(NewText::new(Arc::from(lines.concat()), &[]));
+        let mut document = DiffDocument::new(modified(hunks));
+        document.set_text(text);
+        document.expand(1, Part::All);
+        assert_eq!(document.text(Row::Revealed(21)), Some("last"));
+        assert_eq!(document.line_end(Row::Revealed(21)), Some(LineEnd::Cr));
+    }
+
+    #[test]
     fn line_endings_git_converts_end_in_lf() {
         // The hunk shows line 10 with LF, the file on disk has CRLF, as with
         // `core.autocrlf`.
@@ -1321,6 +1339,20 @@ mod tests {
         assert!(old.words.is_empty() && new.words.is_empty());
         // Equal text and equal endings: nothing to mark.
         assert_eq!(pair("same", "same"), None);
+    }
+
+    #[test]
+    fn a_carriage_return_at_the_end_of_a_file_is_a_line_end_of_its_own() {
+        // `-same\r` and `+same`, both without a line break at the end.
+        let mut hunk = hunk(1, 1, &["-same", "+same"]);
+        hunk.lines[0].crlf = true;
+        for line in &mut hunk.lines {
+            line.no_newline = true;
+        }
+        assert_eq!(LineEnd::of(&hunk.lines[0]), LineEnd::Cr);
+        assert_eq!(LineEnd::of(&hunk.lines[1]), LineEnd::None);
+        let (old, new) = compare(&hunk.lines[0], &hunk.lines[1]).expect("marked");
+        assert!(old.ending && new.ending);
     }
 
     #[test]
