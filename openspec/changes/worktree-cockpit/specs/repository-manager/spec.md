@@ -88,10 +88,12 @@ the commit time of HEAD and the last modification of a file or folder with
 uncommitted changes. The status SHALL be read in the background, by at most
 four Git processes at a time, and only while the home tab is shown: when it
 becomes shown, when the window gains focus while it is shown, on Refresh,
-and every 20 seconds while it is shown and the window has the focus. The
-comparison with the base SHALL be read again only for a worktree whose HEAD
-or whose base moved since it was last read, when the home tab becomes
-shown, and on Refresh. A row SHALL show that its status is being read until
+and every 20 seconds while it is shown and the window has the focus; a
+reading still running when 20 seconds have passed SHALL finish, and the
+next one SHALL start after it. The comparison with the base SHALL be read
+again for a worktree whose HEAD, whose base or the remote-tracking branch
+of whose base moved since it was last read, and for every worktree when the
+home tab becomes shown and on Refresh. A row SHALL show that its status is being read until
 it has one; afterwards the values last read SHALL stay until new ones
 arrive, also while the home tab is not shown. Leaving the home tab SHALL
 stop the reading that has not finished, the Git processes already running
@@ -139,6 +141,14 @@ letter.
 - **WHEN** the home tab reads again every 20 seconds and a commit is made in one of ten worktrees
 - **THEN** only that worktree is compared with its base again
 
+#### Scenario: Merged on the server while the user looks
+- **WHEN** the home tab is shown, a worktree's branch was merged into `dev` on the server, and the user fetches in a terminal, which moves `origin/dev` but neither `dev` nor the worktree's HEAD
+- **THEN** within 20 seconds the worktree is done
+
+#### Scenario: Slow reading
+- **WHEN** the home tab is shown and reading a repository on a network share takes 30 seconds
+- **THEN** that reading finishes and its row shows its status, and the next reading starts after it
+
 #### Scenario: Nothing read while hidden
 - **WHEN** the window gains focus while a repository tab is shown
 - **THEN** the home tab reads no status
@@ -163,7 +173,8 @@ path; Copy as AI context, for a worktree and for a repository with a
 working copy; Open remote, where its remote has a web address; Mark as seen;
 Pin or Unpin, for a repository; and Remove from list, for a
 repository, which removes every path of it from the pinned and the recently
-opened repositories but leaves its folder as it is. Ctrl+C on a row SHALL
+opened repositories and forgets the base set for it, but leaves its folder
+as it is. Ctrl+C on a row SHALL
 copy its path. A row whose folder was not found SHALL offer only Copy path
 and, for a repository, Remove from list, and a row that Git refuses to read
 SHALL not offer Open; Enter and a double click SHALL do nothing on either.
@@ -183,8 +194,8 @@ repository brings along.
 - **THEN** it is listed under "Pinned", and it stays there after git-bull starts again and after 20 other repositories were opened
 
 #### Scenario: Remove from the list
-- **WHEN** the user chooses Remove from list for a repository
-- **THEN** it is no longer listed, and its folder is unchanged
+- **WHEN** the user chooses Remove from list for a repository whose base the user had set to `dev`
+- **THEN** it is no longer listed, and its folder is unchanged; opened again later, its base is detected
 
 #### Scenario: Remove a repository known through its worktrees
 - **WHEN** the recently opened repositories hold a repository and, from an earlier version, two of its worktrees, and the user chooses Remove from list for the repository
@@ -210,6 +221,63 @@ repository brings along.
 - **WHEN** a worktree shows two new commits and the user chooses Mark as seen in its context menu
 - **THEN** it shows no new commits any more
 
+### Requirement: Filter and keyboard
+A filter field at the top of the home tab SHALL narrow the list to the
+repositories and worktrees whose name, branch or last two folders of their
+path contain its text, regardless of case; the folders further up, such as
+the user's home folder, SHALL not count. A repository SHALL stay listed with
+those of its worktrees that match; when no row matches, the home tab SHALL
+say so. While the filter has text, the first repository or worktree that
+matches SHALL be selected, the worktrees that match SHALL be listed also
+below a collapsed repository, and nothing SHALL collapse or expand the
+worktrees of a repository. In the field, Enter SHALL open the row selected,
+Down SHALL move the focus to the list and leave its selection, and Escape
+SHALL empty the field, and in an empty field show the repository tab shown
+before. The list SHALL be operated like the other lists: Up, Down, Page Up,
+Page Down, Home and End move the selection, Left and Right collapse and
+expand the worktrees of a repository or move from a worktree to its
+repository, Enter and a double click open the row selected, and Tab and
+Shift+Tab move between the filter, the list and the detail panel, in this
+order and back, the panel left out while it is hidden. The list SHALL tell
+assistive technology each row, its level and whether the worktrees of a
+repository are expanded; the field SHALL be named for it.
+
+#### Scenario: Switching with the keyboard
+- **WHEN** a repository tab is shown and the user presses Ctrl+O, types `bil` and presses Enter
+- **THEN** the first repository or worktree that matches `bil` is shown in a tab
+
+#### Scenario: Filter by branch
+- **WHEN** a worktree is on the branch `claude/fix-reload` and the user types `fix-rel` into the filter
+- **THEN** the list shows that worktree below its repository, and the worktree is selected
+
+#### Scenario: Filter ignores the start of the path
+- **WHEN** every repository lies in `C:\Users\ali\Projects` and the user types `ali`
+- **THEN** only the rows whose name, branch or last two folders contain `ali` are listed
+
+#### Scenario: No match
+- **WHEN** the user types a text that no row matches
+- **THEN** the home tab says that no repository matches, and Enter opens nothing
+
+#### Scenario: Down keeps the selection
+- **WHEN** the filter has text, the first match is selected and the user presses Down in the field
+- **THEN** the list has the focus and the first match stays selected
+
+#### Scenario: Collapsing with the keyboard
+- **WHEN** the list has the focus, a worktree is selected and the user presses Left twice
+- **THEN** its repository is selected after the first press and its worktrees are collapsed after the second
+
+#### Scenario: Nothing collapses while filtering
+- **WHEN** the filter has text and the user clicks the triangle of a repository listed with a matching worktree
+- **THEN** the worktree stays listed, and once the filter is emptied the repository is expanded as before
+
+#### Scenario: Tab through filter, list and panel
+- **WHEN** the filter has the focus and the panel is shown, and the user presses Tab three times
+- **THEN** the focus moves to the list, then to the panel, then back to the filter, and Shift+Tab goes the other way
+
+#### Scenario: Tab with the panel hidden
+- **WHEN** the window is narrow, the panel is hidden, and the list has the focus
+- **THEN** Tab moves the focus to the filter
+
 ### Requirement: Performance of the home tab
 The home tab SHALL stay fluid with many repositories: in a release build,
 each frame SHALL take less than 16.7 ms while it lists 40 repositories with
@@ -230,17 +298,26 @@ the new rows within the frame of the change.
 ## ADDED Requirements
 
 ### Requirement: Base branch
-Each worktree and each branch SHALL be compared with a base branch. Unless
-the user set a base for its repository, git-bull SHALL detect the base of
-each branch: with Git 2.47 or newer, the local or remote-tracking branch it
-most likely started from; with an older Git, or when none is found, the
-default branch of the remote `origin`; else `main`; else `master`. A branch
-SHALL never be its own base. The user SHALL be able to set the base of a
-repository in the detail panel, choosing among its local branches, and to
-return to detecting it; the choice SHALL be kept across restarts. Wherever
-the base is shown, it SHALL say whether it was detected or set. A worktree
-or branch for which no base is found SHALL show no comparison and say that
-it has no base.
+Each worktree and each branch SHALL be compared with a base branch. When
+the user set a base for its repository, that base SHALL apply to every
+other branch of it. Otherwise git-bull SHALL detect the base of each
+branch: with Git 2.47 or newer, the local or remote-tracking branch it most
+likely started from, among the branches that no linked worktree other than
+its own has checked out and their remote-tracking branches; when that
+branch leaves it at the same commit as the default branch of the remote
+`origin`, `main`, `master`, `develop` or `dev`, that branch is the base
+instead; with an older Git, or when none is found, the default branch of
+the remote `origin`; else `main`; else `master`. A branch SHALL never be
+its own base. A base branch of a repository, that is the base the user
+set, the default branch of the remote `origin`, and every branch that is
+the base of another listed worktree or branch, SHALL be compared with its
+upstream instead, and SHALL show no comparison when it has none. The user
+SHALL be able to set the base of a repository in the detail panel, choosing
+among its local branches, and to return to detecting it; the choice SHALL
+be kept across restarts. Wherever the base is shown, it SHALL say whether
+it was detected or set, or that a base branch is compared with its
+upstream. A worktree or branch for which no base is found SHALL show no
+comparison and say that it has no base.
 
 #### Scenario: Base detected from where the branch started
 - **WHEN** Git is 2.47 or newer, a repository has the branches `main` and `dev`, and a worktree's branch was created from `dev`
@@ -250,13 +327,25 @@ it has no base.
 - **WHEN** Git is 2.47 or newer, one worktree's branch was created from `dev` and another's from `main`
 - **THEN** each is compared with the branch it was created from
 
+#### Scenario: Parallel agents
+- **WHEN** Git is 2.47 or newer and the worktrees `claude/a` and `claude/b` were both created from the same commit of `dev` and each has commits
+- **THEN** both are compared with `dev`, not with each other
+
+#### Scenario: Left-over branch of the same start
+- **WHEN** Git is 2.47 or newer, a branch without a worktree and a worktree's branch both started from the same commit of `dev`
+- **THEN** the worktree is compared with `dev`
+
+#### Scenario: Base branch compared with its upstream
+- **WHEN** the main worktree is on `dev`, the worktrees of two agents are compared with `dev`, and `dev` has two commits that `origin/dev` does not have
+- **THEN** the main worktree shows 2 ahead of `origin/dev`, says that it is compared with its upstream, and is never Ready
+
 #### Scenario: Older Git
 - **WHEN** Git is 2.40 and the default branch of the remote `origin` is `main`
 - **THEN** every worktree is compared with `main`, shown as detected
 
 #### Scenario: Base set by the user
 - **WHEN** the user sets `dev` as the base of a repository in the detail panel
-- **THEN** every worktree and branch of it is compared with `dev`, shown as set, also after git-bull starts again
+- **THEN** every other worktree and branch of it is compared with `dev`, shown as set, and `dev` with its upstream, also after git-bull starts again
 
 #### Scenario: Back to detection
 - **WHEN** the user set the base of a repository and then chooses to detect it again
@@ -274,9 +363,11 @@ local base branch and its remote-tracking branch exist, the counts SHALL be
 taken against the one that contains the other, and against the local one
 when neither does. A branch SHALL count as merged when the local base
 branch or its remote-tracking branch contains it: as an ancestor, with every
-one of its commits applied under another hash as after a rebase, or, with
-Git 2.38 or newer, when merging it would add nothing as after a squash
-merge. Recognising merged branches SHALL need no setting.
+one of its commits applied under another hash as after a rebase, with all
+of its changes applied in one commit as after a squash merge, also when the
+base changed the same lines again later, or, with Git 2.38 or newer, when
+merging it would add nothing. Recognising merged branches SHALL need no
+setting.
 
 #### Scenario: Ahead and behind
 - **WHEN** a worktree's branch has three commits that its base `dev` does not have, and `dev` has one commit that the branch does not have
@@ -299,21 +390,28 @@ merge. Recognising merged branches SHALL need no setting.
 - **THEN** the branch counts as merged
 
 #### Scenario: Squash merge
-- **WHEN** Git is 2.38 or newer and the changes of a branch were applied to `dev` as one squashed commit
+- **WHEN** the three commits of a branch were applied to `dev` as one squashed commit
 - **THEN** the branch counts as merged
+
+#### Scenario: Squash merge changed again later
+- **WHEN** the changes of a branch were applied to `dev` as one squashed commit, and a later commit on `dev` changed the same lines again
+- **THEN** the branch counts as merged, and no conflict is predicted for it
 
 ### Requirement: Main state of a worktree
 Each worktree SHALL show one main state, the first of these that applies:
 Conflict, when an operation such as a merge or a rebase stopped with files
-in conflict in it, or, with Git 2.38 or newer, merging its branch into its
-base would conflict; Working, when a file with uncommitted changes changed,
-or a commit was made on its branch, in the last five minutes; New, when its
-branch has commits since the user last looked at it; Ready, when it has no
-uncommitted changes, its branch is ahead of its base and not merged, and
-merging it would not conflict; Paused, when it has uncommitted changes;
-Done, when its branch is merged into its base and it has no uncommitted
-changes; Idle otherwise. The main worktree of a repository SHALL never be
-done. A state SHALL appear in the row as a chip with an icon and a word;
+in conflict in it, or, with Git 2.38 or newer, merging its branch, which is
+not merged, into its base is predicted to conflict; Working, when a file
+with uncommitted changes changed, or a commit was made on its branch, in
+the last five minutes; New, when its branch has commits since the user
+last looked at it; Ready, when it has no uncommitted changes, its branch is
+ahead of its base and not merged, and merging it is not predicted to
+conflict, also when no prediction can be made; Paused, when it has
+uncommitted changes; Done, when its branch is merged into its base and it
+has no uncommitted changes; Idle otherwise. The main worktree of a
+repository SHALL never be done. A worktree on a base branch, which is
+compared with its upstream, SHALL never be Ready or Done. A state SHALL
+appear in the row as a chip with an icon and a word;
 Idle SHALL show no chip. The name of a row for assistive technology SHALL
 include its state.
 
@@ -339,6 +437,10 @@ include its state.
 
 #### Scenario: Ready
 - **WHEN** a worktree has no uncommitted changes, its branch is three commits ahead of its base and not merged, its last commit was made an hour ago, and the user has seen every commit
+- **THEN** its row shows the state Ready
+
+#### Scenario: Ready without a prediction
+- **WHEN** Git is 2.36, and a clean worktree's branch is ahead of its base, not merged, quiet for an hour and seen
 - **THEN** its row shows the state Ready
 
 #### Scenario: Done
@@ -371,20 +473,29 @@ they share.
 
 ### Requirement: New since the user looked
 git-bull SHALL remember, for each worktree and each branch listed by the
-home tab, the last commit the user saw on it: when the user leaves its row
-after selecting it, opens it in a tab, chooses Mark as seen for it, or
-chooses Mark all as seen in the home tab. The commits on its branch after
+home tab, the last commit the user saw on it: when its row has stayed
+selected for at least a second while the detail panel showed it, when the
+user opens it in a tab, chooses Mark as seen for it, or chooses Mark all as
+seen in the home tab. Passing a row with the keyboard or while typing into
+the filter SHALL not count as seeing it. The commits on its branch after
 that commit SHALL count as new. When that commit is no longer in the
 history of the branch, as after a rebase or a forced push, every commit of
-the branch ahead of its base SHALL count as new. A worktree or branch that
-the home tab finds for the first time SHALL count as seen. What was seen
-SHALL be kept across restarts in a file of its own beside the settings;
-when that file cannot be read, nothing SHALL count as new and the settings
-SHALL stay as they are.
+the branch ahead of its base SHALL count as new. When git-bull has no
+record of what was seen yet, every worktree and branch SHALL count as seen,
+and so SHALL those of a repository that the home tab lists for the first
+time. A worktree or branch that appears later in a repository already
+listed SHALL count its commits ahead of its base as new. What was seen
+SHALL be kept across restarts in a file of its own beside the settings,
+written also when git-bull closes; when that file cannot be read, nothing
+SHALL count as new and the settings SHALL stay as they are.
 
 #### Scenario: Commits after the last look
-- **WHEN** the user selected a worktree and moved on, and then two commits were made on its branch
+- **WHEN** the user selected a worktree, looked at its panel for two seconds and moved on, and then two commits were made on its branch
 - **THEN** the worktree shows 2 new commits
+
+#### Scenario: Passing a row
+- **WHEN** a worktree shows 3 new commits and the user moves the selection past it with Down within half a second, or types into the filter so that it is selected and then another row is
+- **THEN** it still shows 3 new commits
 
 #### Scenario: Seen by opening
 - **WHEN** a worktree shows two new commits and the user opens it in a tab
@@ -398,13 +509,25 @@ SHALL stay as they are.
 - **WHEN** the user saw a worktree's branch at a commit, and the branch was then rebased so that this commit is no longer in its history, and it is four commits ahead of its base
 - **THEN** the worktree shows 4 new commits
 
-#### Scenario: First sight
-- **WHEN** a new worktree with five commits appears in the home tab
-- **THEN** it shows no new commits until commits are made after it was found
+#### Scenario: First start
+- **WHEN** git-bull starts without a record of what was seen, and lists worktrees whose branches are ahead of their bases
+- **THEN** none of them shows new commits
+
+#### Scenario: New worktree of an agent
+- **WHEN** a repository is already listed, an agent creates a worktree in it and makes three commits on its new branch while a repository tab is shown, and the user then shows the home tab
+- **THEN** the new worktree shows 3 new commits
+
+#### Scenario: Repository listed for the first time
+- **WHEN** the user opens a repository for the first time whose branches without a worktree are ahead of its base
+- **THEN** none of them shows new commits
 
 #### Scenario: Survives a restart
 - **WHEN** a worktree shows two new commits, git-bull is closed and started again
 - **THEN** the worktree still shows 2 new commits
+
+#### Scenario: Closed right after looking
+- **WHEN** the user looks at a worktree with new commits for two seconds and closes git-bull at once
+- **THEN** after the next start the worktree shows no new commits
 
 #### Scenario: State file that cannot be read
 - **WHEN** the file of what was seen is damaged and git-bull starts
@@ -413,7 +536,8 @@ SHALL stay as they are.
 ### Requirement: Detail panel
 Right of the list, the home tab SHALL show a panel for the row selected.
 For a worktree it SHALL show its branch, or the short hash of a detached
-HEAD, with its base and whether the base was detected or set; its commits
+HEAD, with its base and whether the base was detected or set, or with its
+upstream for a base branch; its commits
 ahead of and behind the base; the lines added and removed against the base
 and in how many files; its new commits with their short hash, subject and
 age, at most 50, saying how many more there are; the files changed against
@@ -451,9 +575,9 @@ button, and the numbers in the rows SHALL be shortened.
 
 ### Requirement: Branches without a worktree
 The panel of a repository SHALL list its local branches that no worktree
-has checked out, except its base, each with its commits ahead of and behind
-its base and its main state among New, Ready, Done and Idle, as for a
-worktree without uncommitted changes. Branches that are done SHALL be
+has checked out, except its base branches, each with its commits ahead of
+and behind its base and its main state among New, Ready, Done and Idle, as
+for a worktree without uncommitted changes. Branches that are done SHALL be
 folded into a row "Done" that names their number. Opening such a branch
 SHALL open its repository's tab with the branch selected in the history.
 
@@ -470,7 +594,8 @@ The detail panel and the context menu of a worktree, and of a repository
 with a working copy, SHALL offer Copy as AI context, with the choices
 Summary and With diff; the button SHALL copy the summary. The summary SHALL
 put on the clipboard, as Markdown: the repository, the folder of the
-worktree, its branch, its base with whether it was detected or set, its
+worktree, its branch, its base with whether it was detected or set, or its
+upstream for a base branch, its
 commits ahead and behind, its commits ahead of the base with their short
 hash and subject, oldest first, at most 100 and saying how many more there
 are, the files changed against the base with their lines added and removed,
@@ -506,7 +631,9 @@ port, the home tab SHALL offer Open remote, which opens `https://host/path`
 in the browser without a user name, password or token and without a
 trailing `.git`. The remote SHALL be the remote of the branch's upstream,
 else `origin`. For a worktree whose branch has an upstream on `github.com`
-or `gitlab.com`, Open remote SHALL open the page of that branch. Before it
+or `gitlab.com`, Open remote SHALL open the page of the upstream's branch,
+by the name it has on the remote, with each part of that name
+percent-encoded as a path of the address requires. Before it
 is opened, the address SHALL be shown in the tooltip of the action. A remote
 with another scheme, with a port or with a local path SHALL offer no Open
 remote.
@@ -522,6 +649,14 @@ remote.
 #### Scenario: Branch of a worktree
 - **WHEN** a worktree's branch `claude/fix-reload` has the upstream `origin/claude/fix-reload` and `origin` is on `github.com`
 - **THEN** Open remote opens the page of the branch `claude/fix-reload` on GitHub
+
+#### Scenario: Upstream with another name
+- **WHEN** a worktree's local branch `fix` has the upstream `origin/claude/fix-reload` on `github.com`
+- **THEN** Open remote opens the page of `claude/fix-reload`, not of `fix`
+
+#### Scenario: Branch name that needs encoding
+- **WHEN** a worktree's branch `feat#12` has an upstream of the same name on `github.com`
+- **THEN** Open remote opens the page of `feat#12`, with `#` encoded in the address
 
 #### Scenario: No web address
 - **WHEN** the only remote of a repository is a local path

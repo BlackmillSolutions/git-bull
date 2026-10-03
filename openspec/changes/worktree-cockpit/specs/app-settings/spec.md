@@ -64,3 +64,40 @@ saved settings; the other settings SHALL still be saved.
 #### Scenario: Settings file without bases
 - **WHEN** git-bull starts with a settings file that names no base for any repository
 - **THEN** every base is detected, and every other setting from the file is kept
+
+#### Scenario: Base set through another path of the repository
+- **WHEN** the recently opened repositories name a repository by a path written as Git writes it, the user pinned it under its path as the file system writes it, and set its base in the home tab
+- **THEN** the base applies to the repository whichever of its paths lists it, and is kept once in the settings
+
+### Requirement: Recently opened repositories
+git-bull SHALL remember the 20 most recently opened repositories, most
+recent first. Opening a worktree SHALL count as opening its repository, so
+that the worktrees of one repository take one place. Pinned repositories
+SHALL be kept apart from this limit, in the order the user pinned them.
+Removing a repository from the list of the home tab SHALL remove every path
+of it from the recently opened and from the pinned repositories, and SHALL
+forget the base the user set for it.
+
+#### Scenario: List is capped
+- **WHEN** 20 repositories are in the list and the user opens another one
+- **THEN** the new repository is first in the list and the oldest entry is removed
+
+#### Scenario: Reopening moves an entry to the top
+- **WHEN** the user opens a repository that is already in the list
+- **THEN** that entry moves to the first position and appears only once
+
+#### Scenario: Worktrees take the place of their repository
+- **WHEN** the user opens three worktrees of the same repository one after the other
+- **THEN** the repository is first in the list and takes one place in it
+
+#### Scenario: Pinned repository outlasts the limit
+- **WHEN** a repository is pinned and the user opens 20 other repositories
+- **THEN** it is still pinned and listed in the home tab
+
+#### Scenario: Removed repository
+- **WHEN** the user removes a pinned repository from the list of the home tab
+- **THEN** it is neither pinned nor among the recently opened repositories
+
+#### Scenario: Removed repository forgets its base
+- **WHEN** the user set the base of a repository to `dev` and removes it from the list of the home tab
+- **THEN** the settings no longer name a base for it

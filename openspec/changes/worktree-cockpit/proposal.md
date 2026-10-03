@@ -15,10 +15,11 @@ the second change of the repository manager of milestone M2, explored on
 
 - Every worktree is compared with its base branch, which git-bull detects
   for each branch (the branch it most likely started from, with Git 2.47
-  or newer; otherwise the default branch of the remote, `main` or
-  `master`) and which the user can set for a repository. Each worktree
-  shows its commits ahead of and behind the base and the lines it added
-  and removed against it.
+  or newer, never another agent's worktree; otherwise the default branch
+  of the remote, `main` or `master`) and which the user can set for a
+  repository. Each worktree shows its commits ahead of and behind the base
+  and the lines it added and removed against it. A base branch itself,
+  such as `dev` in the main worktree, is compared with its upstream.
 - Each worktree row shows one main state, chosen by priority: Conflict,
   Working, New, Ready, Paused, Idle or Done, as a chip with an icon and a
   word. A worktree whose branch is contained in the base, locally or in its
@@ -28,8 +29,9 @@ the second change of the repository manager of milestone M2, explored on
 - A worktree that changes files another worktree of the same repository
   also changes shows a mark for that overlap.
 - What is new since the user last looked: the commits that arrived on a
-  worktree's branch since the user last left its row or opened it, with
-  "Mark all as seen"; a rewritten branch counts as new. This is kept in a
+  worktree's branch since the user last looked at it in the panel for a
+  second or opened it, with "Mark all as seen"; a rewritten branch, and a
+  worktree an agent created meanwhile, count as new. This is kept in a
   state file of its own.
 - A detail panel right of the list shows the worktree selected: its branch
   and base, the numbers against the base, the new commits, the files
@@ -74,15 +76,18 @@ None.
 - `repository-manager`: "List of repositories" folds done worktrees and
   worktrees whose folder is gone into a section "Done" and adds the mark of
   a repository with new branches; "Status of repositories and worktrees"
-  reads again every 20 seconds while the home tab is shown and keeps the
-  drive letter of a mapped drive; "Actions of a row" adds Copy as AI context,
-  Open remote and Mark as seen; "Performance of the home tab" covers the
-  comparison with the base and the panel. New requirements: "Base branch",
+  reads again every 20 seconds while the home tab is shown, without
+  interrupting a reading still running, and keeps the drive letter of a
+  mapped drive; "Actions of a row" adds Copy as AI context, Open remote and
+  Mark as seen, and Remove from list forgets the base; "Filter and
+  keyboard" lets Tab reach the panel; "Performance of the home tab" covers
+  the comparison with the base and the panel. New requirements: "Base branch",
   "Comparison with the base", "Main state of a worktree", "Overlapping
   worktrees", "New since the user looked", "Detail panel", "Branches without
   a worktree", "Copy as AI context" and "Open remote".
 - `app-settings`: "Persisted settings" adds the base branch the user set
-  for a repository.
+  for a repository; "Recently opened repositories" forgets it when the
+  repository is removed from the list.
 - `git-integration`: "Read-only operation" adds that predicting conflicts
   and recognising merged branches leave the repository unchanged;
   "Untrusted repositories" adds that no merge driver of a repository runs.
