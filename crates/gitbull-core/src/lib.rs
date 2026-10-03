@@ -21,6 +21,7 @@ pub mod highlight;
 pub mod links;
 pub mod opening;
 pub mod overlaps;
+pub mod overview;
 mod pending;
 pub mod repositories;
 pub mod search;

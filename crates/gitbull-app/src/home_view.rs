@@ -239,6 +239,15 @@ fn draw(
                 let cells = Cells::new(&state, texts, translations, now);
                 working_copy_row(ui, &folder_name(path), 1, None, &cells, selected, palette);
             }
+            Row::Done {
+                expanded, count, ..
+            } => {
+                let mut args = FluentArgs::new();
+                args.set("count", count);
+                let name = translations.text_with(Msg::HomeDone, Some(&args));
+                let cells = Cells::new(&State::Done, texts, translations, now);
+                working_copy_row(ui, &name, 1, Some(expanded), &cells, selected, palette);
+            }
         },
     );
 
@@ -252,6 +261,12 @@ fn draw(
             Some(row) => list.select_row(row),
             None => home.rows.select(list.selected_row().map(|row| row as u64)),
         }
+    }
+    // A click on a row "Done" folds or shows the done worktrees.
+    if let Some(row) = output.clicked.or(output.activated)
+        && let Some(Row::Done { repository, .. }) = list.rows().get(row as usize).copied()
+    {
+        list.toggle_done(repository);
     }
     // A click on the triangle collapses or expands the worktrees.
     if let Some(row) = output.clicked
@@ -319,7 +334,7 @@ pub(crate) struct RowMenu {
 
 fn menu_of(list: &RepositoryList, row: &Row) -> Option<RowMenu> {
     match *row {
-        Row::Title(_) => None,
+        Row::Title(_) | Row::Done { .. } => None,
         Row::Repository { index, .. } => {
             let repository = &list.repositories()[index];
             let mut paths = repository.paths.clone();
@@ -393,7 +408,7 @@ fn readable(repository: &Repository, list: &RepositoryList) -> bool {
 /// The folder of the row at `row`, if it can be opened.
 fn openable(list: &RepositoryList, row: usize) -> Option<PathBuf> {
     match *list.rows().get(row)? {
-        Row::Title(_) => None,
+        Row::Title(_) | Row::Done { .. } => None,
         Row::Repository { index, .. } => {
             let repository = &list.repositories()[index];
             readable(repository, list).then(|| repository.path.clone())
@@ -450,6 +465,8 @@ enum State<'a> {
     Failed(&'a str),
     Bare,
     Status(&'a Status),
+    /// The row that folds the done worktrees.
+    Done,
 }
 
 fn repository_state<'a>(repository: &'a Repository, list: &'a RepositoryList) -> State<'a> {
@@ -505,6 +522,7 @@ impl Cells {
                 note: Some((texts.bare.clone(), Tone::Muted)),
                 ..empty
             },
+            State::Done => empty,
             State::Status(Status::Reading) => Cells {
                 note: Some((texts.reading.clone(), Tone::Muted)),
                 ..empty

@@ -16,6 +16,7 @@ use gitbull_git::Error;
 use std::path::PathBuf;
 
 use gitbull_core::git_setup::GitCheck;
+use gitbull_core::overview::Request;
 use gitbull_git::head::Head;
 use gitbull_git::locate::LocateError;
 use gitbull_git::version::GitVersion;
@@ -123,6 +124,9 @@ enum Action {
     ShowAllBranches(String),
     /// Look for changes made outside git-bull in the tab shown.
     Refresh,
+    /// The window gained the focus: the tab shown looks for changes, and
+    /// the home tab reads again after a reading still running.
+    Returned,
     /// Search the tab shown in this mode for this text.
     Search(SearchMode, String),
     NextMatch,
@@ -273,7 +277,14 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::ShowAllBranches(reference) => app.show_all_branches(&reference),
             Action::Refresh => {
                 if app.home_shown() {
-                    app.read_home();
+                    app.read_home(Request::Refresh);
+                } else if let Some(workspace) = app.workspace_mut() {
+                    workspace.refresh_active();
+                }
+            }
+            Action::Returned => {
+                if app.home_shown() {
+                    app.read_home(Request::Again);
                 } else if let Some(workspace) = app.workspace_mut() {
                     workspace.refresh_active();
                 }
@@ -571,7 +582,7 @@ fn returned_to_window(ui: &Ui) -> Option<Action> {
                 .iter()
                 .any(|event| matches!(event, egui::Event::WindowFocused(true)))
         })
-        .then_some(Action::Refresh)
+        .then_some(Action::Returned)
 }
 
 /// Folders dropped onto the window this frame. A dropped file opens the

@@ -67,6 +67,7 @@ messages! {
     HomeConflicts => "home-conflicts",
     HomeNotFound => "home-not-found",
     HomeBare => "home-bare",
+    HomeDone => "home-done",
     HomeActiveNow => "home-active-now",
     HomeActiveMinutes => "home-active-minutes",
     HomeActiveHours => "home-active-hours",

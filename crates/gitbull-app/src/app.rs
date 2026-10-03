@@ -11,7 +11,8 @@ use gitbull_core::diff_document::RowKey;
 use crate::components::RowsShown;
 use crate::diff_view::GapLabels;
 use gitbull_core::git_setup::GitCheck;
-use gitbull_core::repositories::{Overview, RepositoryList};
+use gitbull_core::overview::{Overview, Request};
+use gitbull_core::repositories::RepositoryList;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
 use gitbull_core::settings::{
@@ -143,8 +144,10 @@ pub(crate) struct Home {
 
 impl Home {
     fn new(settings: &Settings) -> Home {
+        let mut list = RepositoryList::new(&settings.pinned, &settings.recent, &settings.worktrees);
+        list.set_bases(&settings.bases);
         Home {
-            list: RepositoryList::new(&settings.pinned, &settings.recent, &settings.worktrees),
+            list,
             overview: None,
             filter: String::new(),
             rows: ListState::default(),
@@ -585,17 +588,16 @@ impl App {
         self.home.is_reading()
     }
 
-    /// Reads the repositories of the home tab again.
-    pub(crate) fn read_home(&mut self) {
-        let paths: Vec<PathBuf> = self
-            .home
-            .list
-            .repositories()
-            .iter()
-            .flat_map(|repository| repository.paths.iter().cloned())
-            .collect();
+    /// Asks for a reading of the repositories of the home tab (design of
+    /// `worktree-cockpit`, decision 1): showing the home tab and Refresh take
+    /// the order of the worktrees again.
+    pub(crate) fn read_home(&mut self, request: Request) {
+        self.home.list.set_now(self.desktop.now());
+        if request != Request::Again {
+            self.home.list.freeze_order();
+        }
         if let Some(overview) = &mut self.home.overview {
-            overview.start(paths);
+            overview.request(&self.home.list, request);
         }
     }
 
@@ -628,6 +630,7 @@ impl App {
     /// The repositories of the settings changed: the list follows, and the
     /// settings are saved.
     fn known_changed(&mut self) {
+        self.home.list.set_bases(&self.settings.bases);
         self.home.list.set_known(
             &self.settings.pinned,
             &self.settings.recent,
@@ -664,7 +667,7 @@ impl App {
         // stops when another tab is shown (design, decision 4).
         let shown = self.home_shown();
         if shown && !self.home.shown {
-            self.read_home();
+            self.read_home(Request::Shown);
         } else if !shown
             && self.home.shown
             && let Some(overview) = &mut self.home.overview
@@ -672,10 +675,19 @@ impl App {
             overview.cancel();
         }
         self.home.shown = shown;
+        let mut ended = false;
         if let Some(overview) = &mut self.home.overview {
-            for change in overview.poll(&mut self.home.list) {
+            let polled = overview.poll(&mut self.home.list);
+            for change in polled.changes {
                 known_changed |= change.apply(&mut self.settings);
             }
+            ended = polled.ended;
+        }
+        // The main states depend on the time: they are decided again when
+        // a round ends.
+        if ended {
+            self.home.list.set_now(self.desktop.now());
+            self.home.list.settle();
         }
         if known_changed {
             self.known_changed();

@@ -45,6 +45,7 @@ home-changed = { $count ->
 home-conflicts = Conflicts
 home-not-found = Not found
 home-bare = Bare repository
+home-done = Done ({ $count })
 home-active-now = Just now
 home-active-minutes = { $count } min
 home-active-hours = { $count } h
