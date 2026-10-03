@@ -4,10 +4,11 @@
 mod support;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Key, Modifiers};
+use eframe::egui::{Event, Key, Modifiers, OutputCommand, PointerButton, Pos2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
@@ -672,4 +673,298 @@ fn tab_and_shift_tab_move_between_the_filter_and_the_list() {
     harness.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
     harness.run();
     assert!(focused(&harness, gitbull_app::home_view::HOME_FILTER));
+}
+
+/// The entries a context menu of the home tab can have.
+const ENTRIES: [&str; 6] = [
+    "Open",
+    "Show in file manager",
+    "Copy path",
+    "Pin",
+    "Unpin",
+    "Remove from list",
+];
+
+/// Clicks with `button` at `at`.
+fn click_with(harness: &mut Harness<'_, App>, at: Pos2, button: PointerButton) {
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
+/// Opens the context menu of the row named `name`.
+fn open_menu(harness: &mut Harness<'_, App>, name: &str) {
+    let at = home_row(harness, name)
+        .unwrap_or_else(|| panic!("no row {name}"))
+        .center();
+    click_with(harness, at, PointerButton::Secondary);
+}
+
+/// The entries of the context menu open now, without the toolbar's Open,
+/// which lies above every row.
+fn entries(harness: &Harness<'_, App>) -> Vec<String> {
+    let toolbar = harness
+        .query_all_by_role_and_label(Role::Button, "Open")
+        .map(|node| node.rect().top())
+        .fold(f32::INFINITY, f32::min);
+    harness
+        .query_all_by_role(Role::Button)
+        .filter(|node| {
+            let label = node.accesskit_node().label().unwrap_or_default();
+            ENTRIES.contains(&label.as_str()) && !(label == "Open" && node.rect().top() == toolbar)
+        })
+        .map(|node| node.accesskit_node().label().unwrap_or_default())
+        .collect()
+}
+
+/// Chooses `entry` in the context menu of the row named `name`.
+fn choose(harness: &mut Harness<'_, App>, name: &str, entry: &str) {
+    open_menu(harness, name);
+    harness
+        .query_all_by_role_and_label(Role::Button, entry)
+        .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .unwrap_or_else(|| panic!("no entry {entry}"))
+        .click();
+    // Open shows a tab that opens.
+    settle_window(harness);
+}
+
+fn copied(harness: &Harness<'_, App>) -> Option<String> {
+    harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+}
+
+#[test]
+fn the_context_menu_of_a_repository_offers_every_action() {
+    let mut harness = home(home_setup());
+    open_menu(&mut harness, "web-shop");
+    assert_eq!(
+        entries(&harness),
+        [
+            "Open",
+            "Show in file manager",
+            "Copy path",
+            "Pin",
+            "Remove from list"
+        ]
+    );
+}
+
+#[test]
+fn the_context_menu_of_a_worktree_offers_no_pin_and_no_remove() {
+    let mut harness = home(home_setup());
+    open_menu(&mut harness, "git-bull-fix-reload");
+    assert_eq!(
+        entries(&harness),
+        ["Open", "Show in file manager", "Copy path"]
+    );
+}
+
+#[test]
+fn open_in_the_context_menu_opens_a_worktree_in_a_tab() {
+    let mut setup = home_setup();
+    setup.backend = setup
+        .backend
+        .with_repository(path(&["work", "git-bull-fix-reload"]));
+    let mut harness = home(setup);
+    choose(&mut harness, "git-bull-fix-reload", "Open");
+    settle_window(&mut harness);
+
+    assert_eq!(tab_titles(harness.state()), ["git-bull-fix-reload"]);
+    assert_eq!(
+        active_title(harness.state()).as_deref(),
+        Some("git-bull-fix-reload")
+    );
+}
+
+#[test]
+fn opening_a_repository_that_is_open_shows_its_tab() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    support::open_from_home(&mut harness, "git-bull");
+
+    assert_eq!(tab_titles(harness.state()), ["git-bull"]);
+    assert!(!harness.state().home_shown());
+}
+
+#[test]
+fn a_pinned_repository_is_listed_under_pinned_also_after_a_restart() {
+    let mut harness = home(home_setup());
+    choose(&mut harness, "web-shop", "Pin");
+
+    let web_shop = path(&["work", "web-shop"]);
+    assert!(harness.state().settings().pinned.contains(&web_shop));
+    let names = rows(&harness).0;
+    assert_eq!(names[..2], ["billing-api", "web-shop"]);
+    assert_eq!(names.iter().filter(|name| *name == "web-shop").count(), 1);
+
+    // After a restart and 20 other repositories opened.
+    let mut settings = harness.state().settings().clone();
+    for index in 0..20 {
+        settings.remember(path(&["work", &format!("other-{index:02}")]));
+    }
+    assert!(!settings.recent.contains(&web_shop));
+    let mut setup = home_setup();
+    setup.settings = settings;
+    let harness = home(setup);
+    assert_eq!(rows(&harness).0[..2], ["billing-api", "web-shop"]);
+}
+
+#[test]
+fn unpin_moves_a_repository_back_among_the_recent_ones() {
+    let mut harness = home(home_setup());
+    choose(&mut harness, "billing-api", "Unpin");
+
+    assert!(harness.state().settings().pinned.is_empty());
+    assert!(harness.query_by_label("Pinned").is_none());
+    assert!(rows(&harness).0.contains(&"billing-api".to_owned()));
+}
+
+#[test]
+fn remove_from_list_forgets_a_repository() {
+    let mut harness = home(home_setup());
+    choose(&mut harness, "web-shop", "Remove from list");
+
+    assert!(!rows(&harness).0.contains(&"web-shop".to_owned()));
+    assert!(
+        !harness
+            .state()
+            .settings()
+            .recent
+            .contains(&path(&["work", "web-shop"]))
+    );
+}
+
+#[test]
+fn removing_a_repository_known_through_its_worktrees_forgets_them_too() {
+    let mut setup = home_setup();
+    // An earlier version remembered worktrees among the recent ones.
+    setup.settings.pinned = Vec::new();
+    setup.settings.recent = vec![
+        path(&["work", "git-bull-fix-reload"]),
+        path(&["work", "git-bull"]),
+        path(&["work", "git-bull-home-tab"]),
+    ];
+    let mut harness = home(setup);
+    assert_eq!(rows(&harness).0[0], "git-bull");
+
+    choose(&mut harness, "git-bull", "Remove from list");
+    assert!(rows(&harness).0.is_empty(), "{:?}", rows(&harness).0);
+
+    harness.key_press(Key::F5);
+    wait_for_home(&mut harness);
+    assert!(rows(&harness).0.is_empty(), "{:?}", rows(&harness).0);
+    assert!(harness.state().settings().recent.is_empty());
+}
+
+#[test]
+fn show_in_file_manager_shows_the_folder_of_a_worktree() {
+    let setup = home_setup();
+    let revealed = Arc::clone(&setup.desktop.revealed);
+    let mut harness = home(setup);
+    choose(&mut harness, "git-bull-fix-reload", "Show in file manager");
+
+    assert_eq!(
+        *revealed.lock().unwrap(),
+        [path(&["work", "git-bull-fix-reload"])]
+    );
+}
+
+#[test]
+fn a_file_manager_that_cannot_start_shows_a_notice() {
+    let mut setup = home_setup();
+    setup.desktop.fails = true;
+    let mut harness = home(setup);
+    choose(&mut harness, "git-bull", "Show in file manager");
+
+    harness.get_by_label_contains("The file manager could not be started");
+}
+
+#[test]
+fn the_row_of_a_folder_gone_offers_only_copy_path_and_remove_and_opens_nothing() {
+    let mut harness = home(home_setup());
+    open_menu(&mut harness, "notes");
+    assert_eq!(entries(&harness), ["Copy path", "Remove from list"]);
+    harness.key_press(Key::Escape);
+    harness.run();
+
+    harness.key_press(Key::Enter);
+    settle_window(&mut harness);
+    assert!(tab_titles(harness.state()).is_empty());
+}
+
+#[test]
+fn the_row_of_a_repository_git_refuses_offers_no_open() {
+    let root = path(&["work", "shared"]);
+    let mut harness = home(Setup {
+        settings: Settings {
+            recent: vec![root.clone()],
+            ..Settings::default()
+        },
+        backend: FakeBackend::default()
+            .with_repository(&root)
+            .with_refused(&root),
+        ..Setup::default()
+    });
+    open_menu(&mut harness, "shared");
+    assert_eq!(
+        entries(&harness),
+        [
+            "Show in file manager",
+            "Copy path",
+            "Pin",
+            "Remove from list"
+        ]
+    );
+}
+
+#[test]
+fn ctrl_c_copies_the_path_of_the_row_selected() {
+    let mut harness = home(home_setup());
+    let at = home_row(&harness, "web-shop").expect("row").center();
+    click_with(&mut harness, at, PointerButton::Primary);
+    // In one frame, which the copy goes out with.
+    for pressed in [true, false] {
+        harness.input_mut().events.push(Event::Key {
+            key: Key::C,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        });
+    }
+    harness.step();
+
+    assert_eq!(
+        copied(&harness),
+        Some(path(&["work", "web-shop"]).display().to_string())
+    );
+}
+
+#[test]
+fn copy_path_in_the_context_menu_copies_the_path_of_the_row() {
+    let mut harness = home(home_setup());
+    open_menu(&mut harness, "notes");
+    harness
+        .get_by_role_and_label(Role::Button, "Copy path")
+        .click();
+    harness.step();
+    assert_eq!(
+        copied(&harness),
+        Some(path(&["work", "notes"]).display().to_string())
+    );
 }
