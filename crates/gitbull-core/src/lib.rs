@@ -4,6 +4,7 @@
 //! Depends on `gitbull-git` only through its backend trait and never on the
 //! UI framework.
 
+pub mod ai_context;
 pub mod badges;
 pub mod base;
 pub mod blame;
@@ -24,6 +25,7 @@ pub mod overlaps;
 pub mod overview;
 pub mod panel;
 mod pending;
+pub mod remote_web;
 pub mod repositories;
 pub mod search;
 pub mod seen;
