@@ -42,21 +42,67 @@ fn three_tabs() -> Setup {
 }
 
 #[test]
-fn command_o_shows_the_repository_chooser() {
+fn command_o_shows_the_home_tab_with_the_focus_in_its_filter() {
     let mut harness = window(build(three_tabs()).app);
     settle_window(&mut harness);
     harness.key_press_modifiers(Modifiers::COMMAND, Key::O);
     harness.run();
-    harness.get_by_label("Choose folder…");
+    assert!(harness.state().home_shown());
+    assert!(
+        harness
+            .get_by_label("Filter repositories and worktrees")
+            .is_focused()
+    );
+    assert_eq!(
+        tab_titles(harness.state()),
+        ["git-bull", "linux", "chromium"]
+    );
 }
 
 #[test]
-fn command_t_shows_the_repository_chooser_for_a_new_tab() {
+fn command_t_shows_the_home_tab_for_a_new_tab() {
     let mut harness = window(build(three_tabs()).app);
     settle_window(&mut harness);
     harness.key_press_modifiers(Modifiers::COMMAND, Key::T);
     harness.run();
-    harness.get_by_label("Choose folder…");
+    assert!(harness.state().home_shown());
+    assert!(
+        harness
+            .get_by_label("Filter repositories and worktrees")
+            .is_focused()
+    );
+}
+
+#[test]
+fn command_w_leaves_the_home_tab_and_closes_no_tab() {
+    let mut harness = window(build(three_tabs()).app);
+    settle_window(&mut harness);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::O);
+    harness.run();
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::W);
+    harness.run();
+    assert!(harness.state().home_shown());
+    assert_eq!(
+        tab_titles(harness.state()),
+        ["git-bull", "linux", "chromium"]
+    );
+}
+
+#[test]
+fn control_tab_after_the_last_tab_shows_the_home_tab_and_then_the_first() {
+    let mut harness = window(build(three_tabs()).app);
+    settle_window(&mut harness);
+    harness.key_press_modifiers(Modifiers::CTRL, Key::Tab);
+    harness.run();
+    assert_eq!(active_title(harness.state()).as_deref(), Some("chromium"));
+
+    harness.key_press_modifiers(Modifiers::CTRL, Key::Tab);
+    harness.run();
+    assert!(harness.state().home_shown());
+
+    harness.key_press_modifiers(Modifiers::CTRL, Key::Tab);
+    settle_window(&mut harness);
+    assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
 }
 
 #[test]

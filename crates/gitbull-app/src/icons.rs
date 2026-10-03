@@ -66,9 +66,11 @@ pub const COPY: &str = phosphor::COPY_SIMPLE;
 pub const HASH: &str = phosphor::HASH;
 /// Copies the message of a commit.
 pub const MESSAGE: &str = phosphor::TEXT_ALIGN_LEFT;
+/// The home tab, which lists the repositories.
+pub const HOME: &str = phosphor::HOUSE_SIMPLE;
 
 /// Every icon with its name.
-pub const ALL: [(&str, &str); 27] = [
+pub const ALL: [(&str, &str); 28] = [
     ("folder", FOLDER),
     ("refresh", REFRESH),
     ("sun", SUN),
@@ -96,4 +98,5 @@ pub const ALL: [(&str, &str); 27] = [
     ("copy", COPY),
     ("hash", HASH),
     ("message", MESSAGE),
+    ("home", HOME),
 ];

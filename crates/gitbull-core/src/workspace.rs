@@ -137,18 +137,21 @@ impl Tab {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
     /// A repository opened by the user is ready; it belongs in the list of
-    /// recent repositories.
+    /// recent repositories. A worktree is reported as its repository.
     Opened(PathBuf),
     /// The folder the user opened is not inside a repository; no tab stays.
     NotARepository(PathBuf),
 }
 
-/// The tabs and which one is active.
+/// The tabs and which one is active. With none active, the home tab of
+/// the window is shown, and no repository tab is.
 pub struct Workspace {
     backend: Arc<dyn Backend>,
     notify: Notify,
     tabs: Vec<Tab>,
     active: Option<TabId>,
+    /// The tab shown before the home tab, to return to.
+    before_home: Option<TabId>,
     /// The tab shown in the last frame.
     last_shown: Option<TabId>,
     events: Vec<Event>,
@@ -162,6 +165,7 @@ impl Workspace {
             notify,
             tabs: Vec::new(),
             active: None,
+            before_home: None,
             last_shown: None,
             events: Vec::new(),
             next_id: 0,
@@ -175,16 +179,14 @@ impl Workspace {
         id
     }
 
-    /// Reopens the tabs of the last run, activating `active`.
+    /// Reopens the tabs of the last run, activating `active`, or showing
+    /// the home tab for `None`.
     pub fn restore(&mut self, paths: &[PathBuf], active: Option<usize>) {
         let ids: Vec<TabId> = paths
             .iter()
             .map(|path| self.add(path.clone(), Origin::Restored))
             .collect();
-        self.active = active
-            .and_then(|index| ids.get(index).copied())
-            .or(ids.first().copied())
-            .or(self.active);
+        self.active = active.and_then(|index| ids.get(index).copied());
     }
 
     /// Applies finished background work. Returns whether anything changed.
@@ -223,25 +225,48 @@ impl Workspace {
         }
     }
 
-    /// Activates the tab right of the active one, wrapping around.
+    /// Shows the home tab, and no repository tab.
+    pub fn show_home(&mut self) {
+        if self.active.is_some() {
+            self.before_home = self.active;
+        }
+        self.active = None;
+    }
+
+    /// Whether the home tab is shown.
+    pub fn home_shown(&self) -> bool {
+        self.active.is_none()
+    }
+
+    /// The tab shown before the home tab, if it is still open.
+    pub fn shown_before(&self) -> Option<TabId> {
+        self.before_home
+            .filter(|id| self.tabs.iter().any(|tab| tab.id == *id))
+    }
+
+    /// Activates the tab right of the active one; after the last comes the
+    /// home tab, and after it the first tab.
     pub fn activate_next(&mut self) {
         self.activate_by(1);
     }
 
-    /// Activates the tab left of the active one, wrapping around.
+    /// Activates the tab left of the active one, the other way round.
     pub fn activate_previous(&mut self) {
-        self.activate_by(self.tabs.len().saturating_sub(1));
+        self.activate_by(self.tabs.len());
     }
 
+    /// Moves `step` places through the home tab, at place 0, and the tabs
+    /// after it, wrapping around.
     fn activate_by(&mut self, step: usize) {
-        let count = self.tabs.len();
-        let Some(position) = self
+        let places = self.tabs.len() + 1;
+        let place = self
             .active
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
-        else {
-            return;
-        };
-        self.active = Some(self.tabs[(position + step) % count].id);
+            .map_or(0, |position| position + 1);
+        match (place + step) % places {
+            0 => self.show_home(),
+            next => self.active = Some(self.tabs[next - 1].id),
+        }
     }
 
     /// Moves the tab to `index` among the tabs, or to the end past it. The
@@ -432,7 +457,7 @@ impl Workspace {
         match result {
             Ok(opened) => {
                 if origin == Origin::User {
-                    self.events.push(Event::Opened(opened.root.clone()));
+                    self.events.push(Event::Opened(opened.repository.clone()));
                 }
                 let existing = self.tabs.iter().find(|tab| {
                     tab.id != id
@@ -452,11 +477,12 @@ impl Workspace {
             }
             Err(Failure::Git(Error::NotARepository(path))) if origin == Origin::User => {
                 let removed = self.tabs.remove(index);
+                // Back to the tab shown before; opened from the home tab,
+                // the home tab stays.
                 if self.active == Some(id) {
                     self.active = removed
                         .previous
-                        .filter(|previous| self.tabs.iter().any(|tab| tab.id == *previous))
-                        .or_else(|| self.tabs.last().map(|tab| tab.id));
+                        .filter(|previous| self.tabs.iter().any(|tab| tab.id == *previous));
                 }
                 self.events.push(Event::NotARepository(path));
                 false
@@ -754,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn next_and_previous_tab_wrap_around() {
+    fn next_and_previous_tab_pass_through_the_home_tab() {
         let backend = two_repositories().with_repository(path(&["work", "chromium"]));
         let mut workspace = workspace(backend);
         workspace.open(path(&["work", "git-bull"]));
@@ -763,11 +789,93 @@ mod tests {
         settle(&mut workspace);
 
         workspace.activate_next();
+        assert!(workspace.home_shown());
+        workspace.activate_next();
         assert_eq!(active_title(&workspace).as_deref(), Some("git-bull"));
+        workspace.activate_previous();
+        assert!(workspace.home_shown());
         workspace.activate_previous();
         assert_eq!(active_title(&workspace).as_deref(), Some("chromium"));
         workspace.activate_previous();
         assert_eq!(active_title(&workspace).as_deref(), Some("linux"));
+    }
+
+    #[test]
+    fn tabs_restored_without_an_active_one_show_the_home_tab() {
+        let mut workspace = workspace(two_repositories());
+        workspace.restore(
+            &[path(&["work", "git-bull"]), path(&["work", "linux"])],
+            None,
+        );
+        settle(&mut workspace);
+        assert_eq!(titles(&workspace), ["git-bull", "linux"]);
+        assert!(workspace.home_shown());
+        assert_eq!(workspace.session_to_save().1, None);
+    }
+
+    #[test]
+    fn closing_the_last_tab_shows_the_home_tab() {
+        let mut workspace = workspace(two_repositories());
+        let id = workspace.open(path(&["work", "git-bull"]));
+        settle(&mut workspace);
+        workspace.close(id);
+        assert!(workspace.home_shown());
+    }
+
+    #[test]
+    fn the_home_tab_remembers_the_tab_shown_before_while_it_is_open() {
+        let (mut workspace, [_, second, third]) = three_tabs();
+        workspace.show_home();
+        assert!(workspace.home_shown());
+        assert_eq!(workspace.shown_before(), Some(third));
+        workspace.activate(second);
+        workspace.show_home();
+        assert_eq!(workspace.shown_before(), Some(second));
+        workspace.close(second);
+        assert_eq!(workspace.shown_before(), None);
+    }
+
+    #[test]
+    fn a_folder_that_is_no_repository_opened_from_the_home_tab_keeps_it() {
+        let mut workspace = workspace(two_repositories());
+        workspace.open(path(&["work", "git-bull"]));
+        workspace.open(path(&["work", "linux"]));
+        settle(&mut workspace);
+        workspace.show_home();
+
+        workspace.open(path(&["work", "notes"]));
+        settle(&mut workspace);
+
+        assert_eq!(titles(&workspace), ["git-bull", "linux"]);
+        assert!(workspace.home_shown());
+    }
+
+    #[test]
+    fn no_tab_works_or_refreshes_while_the_home_tab_is_shown() {
+        let backend = two_repositories();
+        let probe = backend.probe();
+        let mut workspace = workspace(backend);
+        workspace.restore(&[path(&["work", "git-bull"])], Some(0));
+        settle(&mut workspace);
+        wait_for(&mut workspace, |w| loaded(w, "git-bull"));
+        wait_for(&mut workspace, |_| {
+            reference_reads(&probe, &["work", "git-bull"]) == 1
+        });
+
+        workspace.show_home();
+        workspace.refresh_active();
+        for _ in 0..5 {
+            workspace.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(reference_reads(&probe, &["work", "git-bull"]), 1);
+
+        // Shown again, it refreshes.
+        let id = workspace.tabs()[0].id();
+        workspace.activate(id);
+        wait_for(&mut workspace, |_| {
+            reference_reads(&probe, &["work", "git-bull"]) == 2
+        });
     }
 
     /// git-bull, linux and chromium open in that order; chromium is active.
@@ -857,6 +965,28 @@ mod tests {
             workspace.take_events(),
             [Event::NotARepository(path(&["work", "notes"]))]
         );
+    }
+
+    #[test]
+    fn an_opened_worktree_is_reported_as_its_repository() {
+        let listed = |path: PathBuf| gitbull_git::worktrees::Worktree {
+            path,
+            head: None,
+            branch: Some("main".to_owned()),
+            bare: false,
+            detached: false,
+            prunable: false,
+        };
+        let (main, linked) = (path(&["work", "app"]), path(&["work", "app-fix"]));
+        let backend = FakeBackend::default()
+            .with_repository(main.clone())
+            .with_repository(linked.clone())
+            .with_worktrees(vec![listed(main.clone()), listed(linked.clone())]);
+        let mut workspace = workspace(backend);
+        workspace.open(linked.clone());
+        settle(&mut workspace);
+        assert_eq!(workspace.take_events(), [Event::Opened(main)]);
+        assert_eq!(workspace.session_to_save().0, [linked]);
     }
 
     #[test]
