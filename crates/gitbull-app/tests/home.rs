@@ -968,3 +968,54 @@ fn copy_path_in_the_context_menu_copies_the_path_of_the_row() {
         Some(path(&["work", "notes"]).display().to_string())
     );
 }
+
+/// `git-bull` and `web-shop` open in tabs.
+fn two_tabs(active_tab: Option<usize>) -> Setup {
+    let mut setup = home_setup();
+    setup.settings.tabs = vec![path(&["work", "git-bull"]), path(&["work", "web-shop"])];
+    setup.settings.active_tab = active_tab;
+    setup
+}
+
+#[test]
+fn the_home_tab_shown_at_closing_is_shown_again_with_the_tabs() {
+    let mut harness = window(build(two_tabs(Some(1))).app);
+    settle_window(&mut harness);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::O);
+    harness.run();
+    let settings = harness.state().settings().clone();
+    assert_eq!(settings.active_tab, None);
+
+    let mut setup = home_setup();
+    setup.settings = settings;
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    assert_eq!(tab_titles(harness.state()), ["git-bull", "web-shop"]);
+    assert!(harness.state().home_shown());
+}
+
+#[test]
+fn a_tab_shown_at_closing_is_shown_again() {
+    let mut harness = window(build(two_tabs(Some(1))).app);
+    settle_window(&mut harness);
+    assert_eq!(active_title(harness.state()).as_deref(), Some("web-shop"));
+    assert!(!harness.state().home_shown());
+}
+
+#[test]
+fn a_folder_that_is_no_repository_leaves_the_home_tab_shown() {
+    let mut setup = two_tabs(None);
+    setup.picker = Some(path(&["work", "scratch"]));
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    assert!(harness.state().home_shown());
+
+    harness
+        .get_by_role_and_label(Role::Button, "Open folder…")
+        .click();
+    settle_window(&mut harness);
+
+    harness.get_by_label_contains("scratch is not inside a Git repository");
+    assert_eq!(tab_titles(harness.state()), ["git-bull", "web-shop"]);
+    assert!(harness.state().home_shown());
+}
