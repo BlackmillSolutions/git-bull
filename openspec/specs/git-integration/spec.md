@@ -71,13 +71,17 @@ directory.
 - **WHEN** git-bull is computing the file status and the user runs `git commit` in a terminal at the same time
 - **THEN** the commit succeeds without an error about a locked repository
 
+#### Scenario: Status read by the home tab
+- **WHEN** the modification time of tracked files changed but not their content in a repository and in a worktree listed in the home tab, and the home tab reads their status
+- **THEN** the index files of both are byte for byte unchanged
+
 ### Requirement: Untrusted repositories
 git-bull MUST NOT execute commands that a repository brings along. This
-covers commands named in the repository's own configuration, including files
-it includes and the configuration of its worktrees and submodules, as well as
-hooks. Configuration that the user set in the system or global scope SHALL be
-honoured, except for external diff tools and text conversion, which git-bull
-never uses.
+covers commands named in the repository's own configuration, including
+files it includes and the configuration of its worktrees and submodules, as
+well as hooks. Configuration that the user set in the system or global
+scope SHALL be honoured, except for external diff tools and text
+conversion, which git-bull never uses.
 
 #### Scenario: Monitor hook is configured
 - **WHEN** a repository's configuration names a file-system monitor hook and the user opens the repository and views the file status
@@ -115,6 +119,10 @@ never uses.
 #### Scenario: Submodule configuration
 - **WHEN** a submodule's configuration defines a filter or a diff driver and the user views the file status and diffs of the repository that contains it
 - **THEN** nothing named in the submodule's configuration is executed
+
+#### Scenario: Monitor hook in a listed repository
+- **WHEN** the configuration of a repository or of one of its worktrees listed in the home tab names a file-system monitor hook, and the home tab reads their status
+- **THEN** the hook is not executed
 
 ### Requirement: No network access
 git-bull MUST NOT contact a remote in this milestone. In a partial clone,
