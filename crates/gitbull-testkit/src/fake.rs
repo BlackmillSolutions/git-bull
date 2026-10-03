@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+use gitbull_git::ai_diff::{AiDiff, AiDiffRequest};
 use gitbull_git::backend::{
     BlameEntries, CommitStream, ContentSource, FileCommitStream, MatchStream,
 };
@@ -122,6 +123,8 @@ pub struct FakeBackend {
     commit_lists: HashMap<(String, String), Vec<CommitEntry>>,
     /// The uncommitted files of a worktree.
     uncommitted: Vec<(PathBuf, Uncommitted)>,
+    /// The diffs of a worktree for the AI context.
+    ai_diffs: Vec<(PathBuf, AiDiff)>,
     probe: Probe,
 }
 
@@ -226,6 +229,12 @@ impl FakeBackend {
         files: Uncommitted,
     ) -> FakeBackend {
         self.uncommitted.push((worktree.into(), files));
+        self
+    }
+
+    /// The diffs of the worktree at `worktree` for the AI context.
+    pub fn with_ai_diff(mut self, worktree: impl Into<PathBuf>, diff: AiDiff) -> FakeBackend {
+        self.ai_diffs.push((worktree.into(), diff));
         self
     }
 
@@ -1203,6 +1212,19 @@ impl Backend for FakeBackend {
             .iter()
             .find(|(path, _)| path == worktree)
             .map(|(_, files)| files.clone())
+            .unwrap_or_default())
+    }
+
+    fn ai_diff(&self, request: &AiDiffRequest<'_>, cancel: &CancelToken) -> Result<AiDiff, Error> {
+        self.probe.record("ai-diff", request.worktree);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        Ok(self
+            .ai_diffs
+            .iter()
+            .find(|(path, _)| path == request.worktree)
+            .map(|(_, diff)| diff.clone())
             .unwrap_or_default())
     }
 

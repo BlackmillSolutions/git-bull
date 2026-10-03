@@ -3,6 +3,7 @@
 //! Runs the installed Git executable, parses its output and returns typed
 //! data. Every invocation applies the rules of ADR 0006.
 
+pub mod ai_diff;
 pub mod backend;
 pub mod bases;
 pub mod batch_check;

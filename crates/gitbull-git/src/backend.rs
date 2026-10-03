@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::ai_diff::{self, AiDiff, AiDiffRequest};
 use crate::bases;
 use crate::blame::{self, BlameEntry, BlameStream};
 use crate::blob;
@@ -230,6 +231,10 @@ pub trait Backend: Send + Sync {
         overrides: Option<&[ConfigOverride]>,
         cancel: &CancelToken,
     ) -> Result<Uncommitted, Error>;
+
+    /// The diffs of a worktree for "Copy as AI context", cut after 2,000
+    /// lines (design of `worktree-cockpit`, decision 12).
+    fn ai_diff(&self, request: &AiDiffRequest<'_>, cancel: &CancelToken) -> Result<AiDiff, Error>;
 
     /// The working copy at `worktree` in short, for the home tab, with the
     /// `overrides` of the facts of its repository, or, without them, with
@@ -522,6 +527,10 @@ impl Backend for CliBackend {
         cancel: &CancelToken,
     ) -> Result<Uncommitted, Error> {
         uncommitted::uncommitted(&self.git, worktree, overrides, cancel)
+    }
+
+    fn ai_diff(&self, request: &AiDiffRequest<'_>, cancel: &CancelToken) -> Result<AiDiff, Error> {
+        ai_diff::ai_diff(&self.git, request, cancel)
     }
 
     fn summary(
