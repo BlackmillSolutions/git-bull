@@ -1,12 +1,109 @@
-//! Fallback fonts for scripts the fonts bundled with egui lack.
+//! The bundled fonts, and fallback fonts for scripts they lack.
+//!
+//! Inter is the proportional font, registered once per weight because egui
+//! chooses fonts by family, and JetBrains Mono the monospace font (design,
+//! decision 3). Every family of text gets the whole chain behind its font:
+//! egui's monochrome emoji fonts, then the system fonts for Chinese,
+//! Japanese and Korean. The icons of Phosphor have a family of their own
+//! (see [`crate::icons`]).
 //!
 //! egui keeps every registered font completely in memory, so git-bull loads
 //! at most one system font per script group, and only one that really
 //! contains the script's characters.
 
-use eframe::egui::{self, FontData, FontFamily};
-use eframe::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontTweak};
+use eframe::epaint::text::{FontInsert, FontPriority, InsertFontFamily, VariationCoords};
 use skrifa::MetadataProvider;
+
+/// The family of text in the medium weight, 500.
+pub const MEDIUM: &str = "medium";
+/// The family of text in the semibold weight, 600.
+pub const SEMIBOLD: &str = "semibold";
+
+static INTER: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
+static JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
+
+/// Whether the bundled fonts are loaded, which at start-up happens before
+/// the first frame. Until then egui knows only its own fonts. Valid from
+/// the first pass of `ctx` on, when egui has fonts.
+///
+/// egui's fonts are asked only until they know the bundled families, which
+/// locks them; from then on a record in the context's data answers, as
+/// nothing takes the bundled fonts away. The record comes from egui's
+/// fonts, not from the call that gives them: egui takes fonts given to
+/// `set_fonts` only at the start of the next pass.
+pub fn loaded(ctx: &egui::Context) -> bool {
+    let record = egui::Id::new(LOADED);
+    if ctx.data(|data| data.get_temp::<bool>(record)) == Some(true) {
+        return true;
+    }
+    let semibold = FontFamily::Name(SEMIBOLD.into());
+    let known = ctx.fonts(|fonts| fonts.definitions().families.contains_key(&semibold));
+    if known {
+        ctx.data_mut(|data| data.insert_temp(record, true));
+    }
+    known
+}
+
+/// The record that the bundled fonts are loaded.
+const LOADED: &str = "bundled-fonts-loaded";
+
+/// egui's emoji fonts, in their order.
+const EMOJI: [&str; 2] = ["NotoEmoji-Regular", "emoji-icon-font"];
+
+/// Every family of text, which the fallbacks join.
+fn families() -> [FontFamily; 4] {
+    [
+        FontFamily::Proportional,
+        FontFamily::Name(MEDIUM.into()),
+        FontFamily::Name(SEMIBOLD.into()),
+        FontFamily::Monospace,
+    ]
+}
+
+/// The bundled fonts with the chain of each family, without the system
+/// fallbacks, which [`install`] adds once they are found.
+pub fn definitions() -> FontDefinitions {
+    let mut definitions = FontDefinitions::default();
+    // Ubuntu Light and Hack are replaced; egui's emoji fonts stay.
+    definitions.font_data.remove("Ubuntu-Light");
+    definitions.font_data.remove("Hack");
+    let inter = |weight: f32| {
+        FontData::from_static(INTER).tweak(FontTweak {
+            coords: VariationCoords::new([(b"wght", weight)]),
+            ..FontTweak::default()
+        })
+    };
+    for (name, data) in [
+        ("Inter", inter(400.0)),
+        ("Inter Medium", inter(500.0)),
+        ("Inter Semibold", inter(600.0)),
+        ("JetBrains Mono", FontData::from_static(JETBRAINS_MONO)),
+        (
+            "Phosphor",
+            FontData::from_static(egui_phosphor::Variant::Regular.font_bytes()),
+        ),
+    ] {
+        definitions.font_data.insert(name.to_owned(), data.into());
+    }
+    let [proportional, medium, semibold, monospace] = families();
+    for (family, first) in [
+        (proportional, &["Inter"][..]),
+        (medium, &["Inter Medium"]),
+        (semibold, &["Inter Semibold"]),
+        (monospace, &["JetBrains Mono", "Inter"]),
+    ] {
+        let chain = first.iter().chain(&EMOJI).map(|name| name.to_string());
+        definitions.families.insert(family, chain.collect());
+    }
+    // Icons have a family of their own: in a chain with Inter, either font
+    // hides glyphs of the other.
+    definitions.families.insert(
+        FontFamily::Name(crate::icons::FAMILY.into()),
+        vec!["Phosphor".to_owned()],
+    );
+    definitions
+}
 
 /// Groups of scripts that one font usually covers together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,8 +203,7 @@ pub fn choose(db: &fontdb::Database) -> Vec<Fallback> {
         .collect()
 }
 
-/// Registers `fallbacks` behind egui's own fonts, for both proportional
-/// and monospace text.
+/// Registers `fallbacks` last in the chain of every family of text.
 pub fn install(ctx: &egui::Context, fallbacks: &[Fallback]) {
     for fallback in fallbacks {
         let mut data = FontData::from_owned(fallback.data.clone());
@@ -115,7 +211,7 @@ pub fn install(ctx: &egui::Context, fallbacks: &[Fallback]) {
         ctx.add_font(FontInsert::new(
             &format!("fallback: {}", fallback.family),
             data,
-            [FontFamily::Proportional, FontFamily::Monospace]
+            families()
                 .into_iter()
                 .map(|family| InsertFontFamily {
                     family,

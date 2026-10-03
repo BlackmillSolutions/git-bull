@@ -28,6 +28,10 @@ const PACKAGE: &str = "gitbull-app";
 /// The file, at the root of the repository.
 pub const FILE: &str = "THIRD-PARTY-NOTICES.md";
 
+/// The fonts git-bull bundles, each beside a licence text named after its
+/// family, such as `Inter-OFL.txt` for `InterVariable.ttf`.
+const FONTS: &str = "crates/gitbull-app/assets/fonts";
+
 /// Licence files that a crate keeps in a folder: the fonts egui bundles.
 const EXTRA_FILES: &[(&str, &[&str])] = &[(
     "epaint_default_fonts",
@@ -151,7 +155,7 @@ pub fn generate() -> Result<String, String> {
     if !missing.is_empty() {
         return Err(missing.join("\n"));
     }
-    Ok(render(&crates, &uses))
+    render(&crates, &uses)
 }
 
 /// The crates `cargo tree` reports for the release build on every target.
@@ -358,7 +362,7 @@ pub fn fence(text: &str) -> String {
     "`".repeat(longest.max(2) + 1)
 }
 
-fn render(crates: &[Crate], uses: &BTreeMap<String, BTreeSet<String>>) -> String {
+fn render(crates: &[Crate], uses: &BTreeMap<String, BTreeSet<String>>) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(
         "# Third-party notices
@@ -372,6 +376,7 @@ This file is generated with `cargo xtask notices`. Do not edit it by hand.
 ",
     );
     render_assets(&mut out);
+    render_fonts(&mut out)?;
 
     out.push_str(&format!(
         "## Rust crates\n\nThe {} crates of the release build on {}.\n\n",
@@ -400,7 +405,58 @@ This file is generated with `cargo xtask notices`. Do not edit it by hand.
             users.join(", ")
         ));
     }
-    out
+    Ok(out)
+}
+
+/// A font git-bull bundles, with its licence text.
+#[derive(Debug)]
+pub struct Font {
+    pub file: String,
+    pub licence: String,
+}
+
+/// The fonts in [`FONTS`], each with the licence text whose family its
+/// file name starts with.
+pub fn bundled_fonts() -> Result<Vec<Font>, String> {
+    let folder = root().join(FONTS);
+    let mut names: Vec<String> = std::fs::read_dir(&folder)
+        .map_err(|error| format!("{}: {error}", folder.display()))?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    let licences: Vec<&String> = names.iter().filter(|name| name.ends_with(".txt")).collect();
+    names
+        .iter()
+        .filter(|name| name.ends_with(".ttf"))
+        .map(|file| {
+            let licence = licences
+                .iter()
+                .find(|licence| {
+                    let family = licence.rsplit_once('-').map_or("", |(family, _)| family);
+                    !family.is_empty() && file.starts_with(family)
+                })
+                .ok_or_else(|| format!("{file} has no licence text in {FONTS}"))?;
+            let text = std::fs::read_to_string(folder.join(licence))
+                .map_err(|error| format!("{licence}: {error}"))?;
+            Ok(Font {
+                file: file.clone(),
+                licence: text,
+            })
+        })
+        .collect()
+}
+
+fn render_fonts(out: &mut String) -> Result<(), String> {
+    out.push_str("## Fonts\n\ngit-bull bundles these fonts with their licences.\n\n");
+    for font in bundled_fonts()? {
+        let text = normalize(&font.licence);
+        let fence = fence(&text);
+        out.push_str(&format!(
+            "### {}\n\n{fence}text\n{text}\n{fence}\n\n",
+            font.file
+        ));
+    }
+    Ok(())
 }
 
 /// The syntax definitions and themes of two-face, and the acknowledgements
@@ -591,6 +647,21 @@ mod tests {
         let listing = two_face::acknowledgement::listing();
         for license in listing.for_syntaxes().iter().chain(listing.for_themes()) {
             assert!(notices.contains(&normalize(&license.text)));
+        }
+    }
+
+    #[test]
+    fn the_notices_list_every_bundled_font_with_its_licence() {
+        let notices = committed();
+        let fonts = bundled_fonts().unwrap();
+        assert!(fonts.len() >= 2, "{fonts:?}");
+        for font in fonts {
+            assert!(notices.contains(&font.file), "{} is missing", font.file);
+            assert!(
+                notices.contains(&normalize(&font.licence)),
+                "the licence of {} is missing",
+                font.file
+            );
         }
     }
 

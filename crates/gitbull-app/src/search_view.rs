@@ -10,6 +10,7 @@ use gitbull_git::object_id::ObjectId;
 
 use crate::app::App;
 use crate::commit_list::{SHORT_HASH, color, local_date};
+use crate::components;
 use crate::i18n::Msg;
 use crate::theme::Palette;
 use crate::virtual_list::VirtualList;
@@ -30,9 +31,12 @@ struct Match {
     short: String,
 }
 
-pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
+/// Draws the view. Returns whether it drew the list of matches, which
+/// takes the focus of the view.
+pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let text = |msg| app.texts.text(msg);
-    let (empty, hash_hint, none, loading) = (
+    let (name, empty, hash_hint, none, loading) = (
+        text(Msg::ViewSearch),
         text(Msg::SearchEmpty),
         text(Msg::SearchHashHint),
         text(Msg::SearchNone),
@@ -56,19 +60,19 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     };
     let zone = app.time_zone.clone();
     let Some((session, view)) = app.active_view() else {
-        return;
+        return false;
     };
     let search = session.search();
     if search.text().trim().is_empty() {
         ui.weak(empty);
-        return;
+        return false;
     }
     if search.mode() == SearchMode::Hash {
         ui.weak(hash_hint);
-        return;
+        return false;
     }
     match search.state() {
-        SearchState::Idle => return,
+        SearchState::Idle => return false,
         SearchState::Waiting | SearchState::Running => {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -77,7 +81,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         }
         SearchState::Done if search.matches().is_empty() => {
             ui.weak(none);
-            return;
+            return false;
         }
         SearchState::Done => {
             ui.weak(done);
@@ -90,8 +94,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             let mut args = FluentArgs::new();
             args.set("error", error);
             let message = app.texts.text_with(Msg::SearchFailed, Some(&args));
-            ui.colored_label(color(palette.status_deleted), message);
-            return;
+            components::error_text(ui, message);
+            return false;
         }
     }
 
@@ -121,7 +125,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         })
         .collect();
 
-    let output = VirtualList::new(Id::new(SEARCH_RESULTS), count).show(
+    let output = VirtualList::new(Id::new(SEARCH_RESULTS), Role::List, name, count).show(
         ui,
         &mut view.search_results,
         |ui, row, selected| {
@@ -137,6 +141,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     if let Some(index) = chosen {
         app.choose_match(index as usize);
     }
+    true
 }
 
 fn match_row(ui: &mut Ui, data: &Match, selected: bool, palette: &Palette) {

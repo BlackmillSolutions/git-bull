@@ -10,7 +10,7 @@ use gitbull_git::backend::{
 };
 use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
-use gitbull_git::changes::FileChange;
+use gitbull_git::changes::{FileChange, FileLines};
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
@@ -24,6 +24,8 @@ use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
 use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
+use gitbull_git::summary::Summary;
+use gitbull_git::worktrees::Worktree;
 use gitbull_git::{Backend, Error};
 
 /// An object id made from a short name, such as the commits of a test.
@@ -50,6 +52,9 @@ pub struct FakeBackend {
     failures: Vec<(PathBuf, Failure)>,
     histories: Vec<(PathBuf, History)>,
     references: Vec<(PathBuf, Vec<Reference>)>,
+    /// The answer to the first read of the references, held by a gate;
+    /// taken by that read.
+    first_references: Mutex<Vec<(PathBuf, Vec<Reference>, Gate)>>,
     counts: Vec<(PathBuf, u64)>,
     /// Histories for one set of revisions, by their arguments.
     histories_for: Vec<(PathBuf, Vec<String>, Vec<CommitLine>)>,
@@ -63,12 +68,23 @@ pub struct FakeBackend {
     contents: HashMap<ObjectId, CommitContent>,
     changes: HashMap<ObjectId, Vec<FileChange>>,
     failing_changes: Vec<ObjectId>,
+    line_counts: HashMap<ObjectId, Vec<FileLines>>,
+    failing_line_counts: Vec<ObjectId>,
+    /// Holds every count of lines.
+    line_count_gate: Option<Gate>,
     diffs: HashMap<(ObjectId, String), FileDiff>,
     blobs: HashMap<ObjectId, Vec<u8>>,
+    /// Holds every read of a blob.
+    blob_gate: Option<Gate>,
     missing: Vec<(ObjectId, String)>,
     statuses: Vec<(PathBuf, WorkingStatus)>,
     failing_statuses: Vec<PathBuf>,
     status_gates: Vec<(PathBuf, Gate)>,
+    /// The worktrees of a repository, the main one first.
+    worktrees: Vec<Vec<Worktree>>,
+    summaries: Vec<(PathBuf, Summary)>,
+    /// Holds every summary.
+    summary_gate: Option<Gate>,
     working_diffs: HashMap<(Group, String), FileDiff>,
     working_files: HashMap<String, Vec<u8>>,
     hashes: HashMap<String, HashMatch>,
@@ -173,6 +189,27 @@ impl FakeBackend {
         self
     }
 
+    /// The repository has `worktrees`, its main worktree first; asked from
+    /// any of them, the backend lists them all, as Git does. Without this, a
+    /// repository has its main worktree alone.
+    pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> FakeBackend {
+        self.worktrees.push(worktrees);
+        self
+    }
+
+    /// The summary of the working copy at `worktree`. Without it, a working
+    /// copy is summarised from its HEAD and its status.
+    pub fn with_summary(mut self, worktree: impl Into<PathBuf>, summary: Summary) -> FakeBackend {
+        self.summaries.push((worktree.into(), summary));
+        self
+    }
+
+    /// Every summary waits until the test opens `gate`.
+    pub fn with_summary_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.summary_gate = Some(gate.clone());
+        self
+    }
+
     /// The structure stream of `root` delivers `lines` at once.
     pub fn with_history(mut self, root: impl Into<PathBuf>, lines: Vec<CommitLine>) -> FakeBackend {
         self.histories.push((root.into(), History::Lines(lines)));
@@ -254,6 +291,22 @@ impl FakeBackend {
         self
     }
 
+    /// The first read of the references of `root` answers `references`, as
+    /// if it had read them at once, but only once the test opens `gate`;
+    /// later reads answer at once with the references of the moment.
+    pub fn with_first_references(
+        self,
+        root: impl Into<PathBuf>,
+        references: Vec<Reference>,
+        gate: &Gate,
+    ) -> FakeBackend {
+        self.first_references
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((root.into(), references, gate.clone()));
+        self
+    }
+
     /// The commit count of `root`; otherwise the number of lines given with
     /// [`FakeBackend::with_history`], or 0.
     pub fn with_count(mut self, root: impl Into<PathBuf>, count: u64) -> FakeBackend {
@@ -289,6 +342,25 @@ impl FakeBackend {
         self
     }
 
+    /// The lines `commit` changed in its files; a commit without an entry
+    /// changed none.
+    pub fn with_line_counts(mut self, commit: ObjectId, counts: Vec<FileLines>) -> FakeBackend {
+        self.line_counts.insert(commit, counts);
+        self
+    }
+
+    /// Counting the lines of `commit` fails.
+    pub fn with_failing_line_counts(mut self, commit: ObjectId) -> FakeBackend {
+        self.failing_line_counts.push(commit);
+        self
+    }
+
+    /// Counting lines takes until the test opens `gate`.
+    pub fn with_line_count_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.line_count_gate = Some(gate.clone());
+        self
+    }
+
     /// The diff of `path` in `commit`.
     pub fn with_diff(mut self, commit: ObjectId, path: &str, diff: FileDiff) -> FakeBackend {
         self.diffs.insert((commit, path.to_owned()), diff);
@@ -318,6 +390,12 @@ impl FakeBackend {
     /// Reading the status of `root` fails as if `git status` did.
     pub fn with_failing_status(mut self, root: impl Into<PathBuf>) -> FakeBackend {
         self.failing_statuses.push(root.into());
+        self
+    }
+
+    /// Reading a blob takes until the test opens `gate`.
+    pub fn with_blob_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.blob_gate = Some(gate.clone());
         self
     }
 
@@ -555,6 +633,20 @@ impl Backend for FakeBackend {
     fn references(&self, repo: &Path) -> Result<Vec<Reference>, Error> {
         self.probe.record("references", repo);
         self.gone(repo)?;
+        let first = {
+            let mut held = self
+                .first_references
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let at = (!held.is_empty())
+                .then(|| self.root_of(repo))
+                .and_then(|root| held.iter().position(|(known, ..)| *known == root));
+            at.map(|at| held.remove(at))
+        };
+        if let Some((_, references, gate)) = first {
+            gate.wait();
+            return Ok(references);
+        }
         if let Some(references) = self.live_of(repo).and_then(|live| live.references.clone()) {
             return Ok(references);
         }
@@ -569,6 +661,9 @@ impl Backend for FakeBackend {
 
     fn stashes(&self, repo: &Path) -> Result<Vec<Stash>, Error> {
         self.probe.record("stashes", repo);
+        if let Some(stashes) = self.live_of(repo).and_then(|live| live.stashes.clone()) {
+            return Ok(stashes);
+        }
         let root = self.root_of(repo);
         Ok(self
             .stashes
@@ -736,6 +831,31 @@ impl Backend for FakeBackend {
         Ok(self.changes.get(commit).cloned().unwrap_or_default())
     }
 
+    fn line_counts(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        _parent: Option<&ObjectId>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<FileLines>, Error> {
+        self.probe.record("line-counts", repo);
+        if let Some(gate) = &self.line_count_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
+        if self.failing_line_counts.contains(commit) {
+            return Err(Error::CommandFailed {
+                command: "git diff-tree --numstat".to_owned(),
+                code: Some(128),
+                stderr: format!("fatal: bad object {commit}"),
+            });
+        }
+        Ok(self.line_counts.get(commit).cloned().unwrap_or_default())
+    }
+
     fn file_diff(
         &self,
         repo: &Path,
@@ -776,15 +896,112 @@ impl Backend for FakeBackend {
         repo: &Path,
         blob: &ObjectId,
         limit: u64,
-        _cancel: &CancelToken,
+        cancel: &CancelToken,
     ) -> Result<Option<Vec<u8>>, Error> {
         self.probe.record("blob", repo);
+        if let Some(gate) = &self.blob_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
         let content = self.blobs.get(blob).ok_or_else(|| Error::Parse {
             command: "git cat-file --batch".to_owned(),
             message: format!("the object {blob} is missing"),
             bytes: Vec::new(),
         })?;
         Ok((content.len() as u64 <= limit).then(|| content.clone()))
+    }
+
+    fn worktrees(&self, repo: &Path, cancel: &CancelToken) -> Result<Vec<Worktree>, Error> {
+        self.probe.record("worktrees", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.gone(repo)?;
+        if let Some(listed) = self.worktrees.iter().find(|listed| {
+            listed
+                .iter()
+                .any(|worktree| repo.starts_with(&worktree.path))
+        }) {
+            return Ok(listed.clone());
+        }
+        let info = self.inspect(repo)?;
+        let path = info.work_tree.clone().unwrap_or(info.git_dir.clone());
+        if info.bare {
+            return Ok(vec![Worktree {
+                path,
+                head: None,
+                branch: None,
+                bare: true,
+                detached: false,
+                prunable: false,
+            }]);
+        }
+        let (head, branch, detached) = match self.head(&path)? {
+            Head::Branch(name) => (Some(fake_id("head").to_string()), Some(name), false),
+            Head::Detached(id) => (Some(id), None, true),
+        };
+        Ok(vec![Worktree {
+            path,
+            head,
+            branch,
+            bare: false,
+            detached,
+            prunable: false,
+        }])
+    }
+
+    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error> {
+        self.probe.record("summary", worktree);
+        let _running = self.probe.summary_started();
+        if let Some(gate) = &self.summary_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.gone(worktree)?;
+        if let Some((_, summary)) = self.summaries.iter().find(|(path, _)| path == worktree) {
+            return Ok(summary.clone());
+        }
+        let listed = self
+            .worktrees
+            .iter()
+            .flatten()
+            .find(|listed| listed.path == worktree);
+        let head = match listed {
+            Some(Worktree {
+                branch: Some(branch),
+                ..
+            }) => Head::Branch(branch.clone()),
+            Some(Worktree {
+                head: Some(id),
+                detached: true,
+                ..
+            }) => Head::Detached(id.clone()),
+            _ => self.head(worktree)?,
+        };
+        let changed = self
+            .statuses
+            .iter()
+            .find(|(root, _)| root == worktree)
+            .map_or(0, |(_, status)| {
+                status.staged.len() + status.unstaged.len() + status.untracked.len()
+            });
+        Ok(Summary {
+            head,
+            commit: Some(fake_id("head").to_string()),
+            committed: Some(1_767_268_800),
+            changed,
+            conflicts: 0,
+            paths: Vec::new(),
+        })
     }
 
     fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error> {
@@ -1119,6 +1336,7 @@ pub struct LiveRepo {
 struct LiveState {
     head: Option<Head>,
     references: Option<Vec<Reference>>,
+    stashes: Option<Vec<Stash>>,
     lines: Option<Vec<CommitLine>>,
     /// Takes the place of `lines` for the next streams.
     feed: Option<HistoryFeed>,
@@ -1140,6 +1358,10 @@ impl LiveRepo {
 
     pub fn set_references(&self, references: Vec<Reference>) {
         self.lock().references = Some(references);
+    }
+
+    pub fn set_stashes(&self, stashes: Vec<Stash>) {
+        self.lock().stashes = Some(stashes);
     }
 
     /// The history every later stream delivers at once.
@@ -1299,6 +1521,18 @@ pub struct Probe {
 struct ProbeInner {
     log: Mutex<ProbeLog>,
     open_sources: AtomicUsize,
+    /// Summaries running now, and the most that ever ran at once.
+    summaries: AtomicUsize,
+    most_summaries: AtomicUsize,
+}
+
+/// Counts a summary as running until it is dropped.
+struct Running<'a>(&'a AtomicUsize);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Default)]
@@ -1314,6 +1548,22 @@ struct ProbeLog {
 }
 
 impl Probe {
+    /// The most summaries that ever ran at the same time.
+    pub fn most_summaries_at_once(&self) -> usize {
+        self.inner.most_summaries.load(Ordering::SeqCst)
+    }
+
+    /// How many summaries run now.
+    pub fn summaries_running(&self) -> usize {
+        self.inner.summaries.load(Ordering::SeqCst)
+    }
+
+    fn summary_started(&self) -> Running<'_> {
+        let now = self.inner.summaries.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inner.most_summaries.fetch_max(now, Ordering::SeqCst);
+        Running(&self.inner.summaries)
+    }
+
     /// The operations called on `repo`, in order, such as `"history"`.
     pub fn calls(&self, repo: &Path) -> Vec<String> {
         self.lock()
@@ -1368,5 +1618,114 @@ impl Probe {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ProbeLog> {
         self.inner.log.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(parts: &[&str]) -> PathBuf {
+        parts.iter().collect()
+    }
+
+    fn worktree(path: PathBuf, branch: &str) -> Worktree {
+        Worktree {
+            path,
+            head: Some(fake_id(branch).to_string()),
+            branch: Some(branch.to_owned()),
+            bare: false,
+            detached: false,
+            prunable: false,
+        }
+    }
+
+    #[test]
+    fn a_repository_without_listed_worktrees_has_its_main_one() {
+        let root = path(&["work", "app"]);
+        let backend = FakeBackend::default()
+            .with_repository(root.clone())
+            .with_head(root.clone(), Head::Branch("dev".to_owned()));
+        let found = backend
+            .worktrees(&root.join("src"), &CancelToken::new())
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, root);
+        assert_eq!(found[0].branch.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn listed_worktrees_are_found_from_any_of_them() {
+        let main = worktree(path(&["work", "app"]), "main");
+        let linked = worktree(path(&["work", "app-fix"]), "fix");
+        let backend = FakeBackend::default()
+            .with_repository(main.path.clone())
+            .with_worktrees(vec![main.clone(), linked.clone()]);
+        let found = backend
+            .worktrees(&linked.path, &CancelToken::new())
+            .unwrap();
+        assert_eq!(found, [main, linked]);
+    }
+
+    #[test]
+    fn a_working_copy_is_summarised_from_its_head_and_status() {
+        let root = path(&["work", "app"]);
+        let entry = StatusEntry {
+            kind: gitbull_git::status::StatusKind::Untracked,
+            path: RepoPath::new("new.txt"),
+            old_path: None,
+            submodule: false,
+        };
+        let backend = FakeBackend::default()
+            .with_repository(root.clone())
+            .with_head(root.clone(), Head::Branch("dev".to_owned()))
+            .with_status(
+                root.clone(),
+                WorkingStatus {
+                    untracked: vec![entry],
+                    ..WorkingStatus::default()
+                },
+            );
+        let summary = backend.summary(&root, &CancelToken::new()).unwrap();
+        assert_eq!(summary.head, Head::Branch("dev".to_owned()));
+        assert_eq!(summary.changed, 1);
+    }
+
+    #[test]
+    fn summaries_held_by_a_gate_are_counted_while_they_run() {
+        let root = path(&["work", "app"]);
+        let gate = Gate::new();
+        let backend = Arc::new(
+            FakeBackend::default()
+                .with_repository(root.clone())
+                .with_summary_gate(&gate),
+        );
+        let probe = backend.probe();
+        let threads: Vec<_> = (0..3)
+            .map(|_| {
+                let (backend, root) = (Arc::clone(&backend), root.clone());
+                std::thread::spawn(move || backend.summary(&root, &CancelToken::new()))
+            })
+            .collect();
+        while probe.calls(&root).len() < 3 {
+            std::thread::yield_now();
+        }
+        while probe.summaries_running() < 3 {
+            std::thread::yield_now();
+        }
+        gate.open();
+        for thread in threads {
+            assert!(thread.join().unwrap().is_ok());
+        }
+        assert_eq!(probe.most_summaries_at_once(), 3);
+        assert_eq!(probe.summaries_running(), 0);
+    }
+
+    #[test]
+    fn an_unknown_folder_is_not_a_repository() {
+        assert!(matches!(
+            FakeBackend::default().worktrees(&path(&["nowhere"]), &CancelToken::new()),
+            Err(Error::NotARepository(_))
+        ));
     }
 }

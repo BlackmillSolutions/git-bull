@@ -6,17 +6,27 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use egui_kittest::Harness;
+use eframe::egui::accesskit::Role;
+use eframe::egui::{Event, Modifiers, MouseWheelUnit, Pos2, Rect, TouchPhase, Vec2, vec2};
+use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::{Harness, HarnessBuilder};
 use gitbull_app::app::{App, GitChecker, GitStatus, Parts, Picker};
+use gitbull_app::desktop::Desktop;
 use gitbull_app::theme::ThemeFollower;
 use gitbull_app::ui;
+use gitbull_app::virtual_list::ROW_HEIGHT;
 use gitbull_core::git_setup::GitCheck;
 use gitbull_core::settings::{Loaded, Settings, SettingsFile};
 use gitbull_core::workspace::TabState;
 use gitbull_git::Error;
+use gitbull_git::content::{CommitContent, Signature};
+use gitbull_git::head::Head;
+use gitbull_git::history::CommitLine;
 use gitbull_git::locate::LocateError;
+use gitbull_git::summary::Summary;
 use gitbull_git::version::GitVersion;
-use gitbull_testkit::FakeBackend;
+use gitbull_git::worktrees::Worktree;
+use gitbull_testkit::{FakeBackend, fake_id};
 use tempfile::TempDir;
 
 pub const GIT_VERSION: GitVersion = GitVersion {
@@ -42,6 +52,42 @@ impl Picker for FixedPicker {
 
     fn pick_git(&self) -> Option<PathBuf> {
         self.git.clone()
+    }
+}
+
+/// The time of the tests' desktop: 2027-01-15, 08:00 UTC.
+pub const NOW: i64 = 1_800_000_000;
+
+/// A desktop whose time stands still, which records the folders it is
+/// asked to show and can fail to show them.
+#[derive(Clone)]
+pub struct FixedDesktop {
+    pub now: i64,
+    pub revealed: Arc<Mutex<Vec<PathBuf>>>,
+    pub fails: bool,
+}
+
+impl Default for FixedDesktop {
+    fn default() -> FixedDesktop {
+        FixedDesktop {
+            now: NOW,
+            revealed: Arc::default(),
+            fails: false,
+        }
+    }
+}
+
+impl Desktop for FixedDesktop {
+    fn now(&self) -> i64 {
+        self.now
+    }
+
+    fn reveal(&self, folder: &Path) -> std::io::Result<()> {
+        if self.fails {
+            return Err(std::io::Error::other("no file manager"));
+        }
+        self.revealed.lock().unwrap().push(folder.to_owned());
+        Ok(())
     }
 }
 
@@ -76,6 +122,7 @@ pub struct Setup {
     pub checker: Option<GitChecker>,
     /// The local time zone; UTC unless given.
     pub time_zone: Option<jiff::tz::TimeZone>,
+    pub desktop: FixedDesktop,
 }
 
 pub fn build(setup: Setup) -> TestApp {
@@ -93,6 +140,7 @@ pub fn build(setup: Setup) -> TestApp {
             folder: setup.picker,
             git: setup.picked_git,
         }),
+        desktop: Box::new(setup.desktop),
         open_at_start: setup.open_at_start,
         time_zone: setup.time_zone.unwrap_or(jiff::tz::TimeZone::UTC),
     });
@@ -160,6 +208,28 @@ pub fn settle_window(harness: &mut Harness<'_, App>) {
     }
 }
 
+/// Steps the window until the active tab has read its references.
+///
+/// A tab reads them beside its history, in either order, and only then
+/// shows them as badges and in the sidebar. The state is checked rather
+/// than a label: the status bar names the branch before any badge does.
+pub fn wait_for_references(harness: &mut Harness<'_, App>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !references_read(harness.state()) {
+        assert!(Instant::now() < deadline, "the references were not read");
+        harness.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    harness.run();
+}
+
+fn references_read(app: &App) -> bool {
+    app.workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| session.sidebar().is_some())
+}
+
 /// The titles of the open tabs.
 pub fn tab_titles(app: &App) -> Vec<String> {
     app.workspace()
@@ -172,6 +242,178 @@ pub fn active_title(app: &App) -> Option<String> {
     app.workspace()
         .and_then(|workspace| workspace.active())
         .map(|tab| tab.title())
+}
+
+/// A summary of a working copy on `head` with `changed` files, of which
+/// `conflicts` in conflict, last active `ago` seconds before [`NOW`].
+pub fn summary(head: Head, changed: usize, conflicts: usize, ago: i64) -> Summary {
+    Summary {
+        head,
+        commit: Some(fake_id("head").to_string()),
+        committed: Some(NOW - ago),
+        changed,
+        conflicts,
+        paths: Vec::new(),
+    }
+}
+
+/// A worktree at `path` on `branch`, or detached at a commit.
+pub fn worktree(path: PathBuf, branch: Option<&str>) -> Worktree {
+    Worktree {
+        path,
+        head: Some(fake_id("head").to_string()),
+        branch: branch.map(str::to_owned),
+        bare: false,
+        detached: branch.is_none(),
+        prunable: false,
+    }
+}
+
+/// The repositories of a developer who works with agents in worktrees:
+/// `billing-api` pinned; `git-bull` with three further worktrees,
+/// `web-shop` with files in conflict, `notes`, whose folder is gone, and
+/// the bare `infra.git` with one worktree recently opened.
+pub fn home_setup() -> Setup {
+    let work = |name: &str| path(&["work", name]);
+    let branch = |name: &str| Head::Branch(name.to_owned());
+    let minutes = 60;
+    let hours = 60 * minutes;
+    let days = 24 * hours;
+    let backend = FakeBackend::default()
+        .with_repository(work("billing-api"))
+        .with_repository(work("git-bull"))
+        .with_repository(work("web-shop"))
+        .with_bare_repository(work("infra.git"))
+        .with_worktrees(vec![
+            worktree(work("git-bull"), Some("main")),
+            worktree(work("git-bull-fix-reload"), Some("claude/fix-reload")),
+            worktree(work("git-bull-home-tab"), Some("feature/home-tab")),
+            worktree(work("git-bull-review"), None),
+        ])
+        .with_worktrees(vec![
+            Worktree {
+                path: work("infra.git"),
+                head: None,
+                branch: None,
+                bare: true,
+                detached: false,
+                prunable: false,
+            },
+            worktree(work("infra-deploy"), Some("main")),
+        ])
+        .with_summary(work("billing-api"), summary(branch("main"), 0, 0, 3 * days))
+        .with_summary(
+            work("git-bull"),
+            summary(branch("main"), 3, 0, 10 * minutes),
+        )
+        .with_summary(
+            work("git-bull-fix-reload"),
+            summary(branch("claude/fix-reload"), 5, 0, 2 * minutes),
+        )
+        .with_summary(
+            work("git-bull-home-tab"),
+            summary(branch("feature/home-tab"), 0, 0, hours),
+        )
+        .with_summary(
+            work("git-bull-review"),
+            summary(
+                Head::Detached(fake_id("review").to_string()),
+                0,
+                0,
+                2 * days,
+            ),
+        )
+        .with_summary(
+            work("web-shop"),
+            summary(branch("develop"), 4, 2, 25 * minutes),
+        )
+        .with_summary(
+            work("infra-deploy"),
+            summary(branch("main"), 1, 0, 9 * days),
+        );
+    Setup {
+        settings: Settings {
+            pinned: vec![work("billing-api")],
+            recent: vec![
+                work("git-bull"),
+                work("web-shop"),
+                work("notes"),
+                work("infra.git"),
+                work("billing-api"),
+            ],
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    }
+}
+
+/// The row of the home tab whose label starts with `name` and a comma.
+pub fn home_row(harness: &Harness<'_, App>, name: &str) -> Option<Rect> {
+    let prefix = format!("{name},");
+    harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(&prefix))
+        })
+        .map(|node| node.rect())
+}
+
+/// Steps the window until the home tab has read its repositories.
+pub fn wait_for_home(harness: &mut Harness<'_, App>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    harness.step();
+    while harness.state().home_reading() {
+        assert!(
+            Instant::now() < deadline,
+            "the home tab did not finish reading"
+        );
+        harness.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    harness.run();
+}
+
+/// Two clicks with the primary button at `at`, each press and release in
+/// a frame of its own; a double click only in a window at 60 frames per
+/// second, as egui counts the time between the clicks.
+pub fn double_click_at(harness: &mut Harness<'_, App>, at: Pos2) {
+    harness.hover_at(at);
+    harness.step();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            harness.event(Event::PointerButton {
+                pos: at,
+                button: eframe::egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+            harness.step();
+        }
+    }
+}
+
+/// Opens the row of the home tab named `name`: a click selects it and
+/// gives the list the focus, and Enter opens it. Steps until its tab has
+/// opened.
+pub fn open_from_home(harness: &mut Harness<'_, App>, name: &str) {
+    let at = home_row(harness, name)
+        .unwrap_or_else(|| panic!("no row {name} in the home tab"))
+        .center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+    harness.key_press(eframe::egui::Key::Enter);
+    settle_window(harness);
 }
 
 /// A folder dropped onto the window.
@@ -195,16 +437,180 @@ pub fn window(app: App) -> Harness<'static, App> {
 
 /// Like [`window`], with egui behaving as on `os`.
 pub fn window_on(os: eframe::egui::os::OperatingSystem, app: App) -> Harness<'static, App> {
-    Harness::builder()
+    sized_window_on(os, (1280.0, 800.0), app)
+}
+
+/// Like [`window`], in a window of `size` logical pixels.
+pub fn sized_window(size: (f32, f32), app: App) -> Harness<'static, App> {
+    sized_window_on(
+        eframe::egui::os::OperatingSystem::from_target_os(),
+        size,
+        app,
+    )
+}
+
+fn sized_window_on(
+    os: eframe::egui::os::OperatingSystem,
+    size: (f32, f32),
+    app: App,
+) -> Harness<'static, App> {
+    build_window(Harness::builder().with_size(size).with_os(os), app)
+}
+
+/// Like [`window`], at 60 frames per second as on a common display, with
+/// room for the spring of the lists to come to rest after the wheel.
+pub fn window_at_60_fps(app: App) -> Harness<'static, App> {
+    window_at_60_fps_on(eframe::egui::os::OperatingSystem::from_target_os(), app)
+}
+
+/// Like [`window_at_60_fps`], with egui behaving as on `os`.
+pub fn window_at_60_fps_on(
+    os: eframe::egui::os::OperatingSystem,
+    app: App,
+) -> Harness<'static, App> {
+    let builder = Harness::builder()
         .with_size((1280.0, 800.0))
         .with_os(os)
-        .build_ui_state(
-            |ui, app: &mut App| {
-                app.logic();
-                ui::show(app, ui);
+        .with_step_dt(1.0 / 60.0)
+        .with_max_steps(120);
+    build_window(builder, app)
+}
+
+fn build_window(builder: HarnessBuilder<App>, app: App) -> Harness<'static, App> {
+    let harness = builder.build_ui_state(
+        |ui, app: &mut App| {
+            app.logic();
+            ui::show(app, ui);
+        },
+        app,
+    );
+    // The fonts git-bull bundles, as at start-up.
+    harness.ctx.set_fonts(gitbull_app::fonts::definitions());
+    harness
+}
+
+/// Adds `count` commits to the history of `root`: "Commit 0" on top of
+/// "Commit 1" and so on, named `n0`, `n1` and so on for [`fake_id`].
+pub fn long_history(backend: FakeBackend, root: &Path, count: usize) -> FakeBackend {
+    let name = |i: usize| fake_id(&format!("n{i}"));
+    let lines = (0..count)
+        .map(|i| CommitLine {
+            timestamp: 1_767_268_800 - i as i64,
+            id: name(i),
+            parents: if i + 1 < count {
+                vec![name(i + 1)]
+            } else {
+                Vec::new()
             },
-            app,
+        })
+        .collect();
+    let author = Signature {
+        name: "Ada Lovelace".to_owned(),
+        email: "ada@example.com".to_owned(),
+        time: 1_767_268_800,
+        offset_minutes: 0,
+    };
+    (0..count).fold(backend.with_history(root, lines), |backend, i| {
+        backend.with_content(
+            name(i),
+            CommitContent {
+                author: author.clone(),
+                committer: author.clone(),
+                message: format!("Commit {i}\n"),
+            },
         )
+    })
+}
+
+/// How far the commit list of [`long_history`] is scrolled, in points, up
+/// to a constant: the row of "Commit N" is N rows below the first. The
+/// lowest row counts, whose top no clipping moves.
+pub fn commit_list_scroll(harness: &Harness<'_, App>) -> f32 {
+    harness
+        .query_all_by_role(Role::Row)
+        .filter_map(|node| {
+            let label = node.accesskit_node().label()?;
+            let number: u16 = label
+                .strip_prefix("Commit ")?
+                .split(',')
+                .next()?
+                .parse()
+                .ok()?;
+            Some((node.rect().top(), f32::from(number) * ROW_HEIGHT))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(top, below_first)| below_first - top)
+        .expect("a row of the commit list")
+}
+
+/// Where the first row of the commit list whose label starts with `prefix`
+/// is drawn.
+pub fn find_row(harness: &Harness<'_, App>, prefix: &str) -> Option<Rect> {
+    harness
+        .query_all_by_role(Role::Row)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(prefix))
+        })
+        .map(|node| node.rect())
+}
+
+/// Steps the window until a row of the commit list starts with `prefix`.
+pub fn wait_for_row(harness: &mut Harness<'_, App>, prefix: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while find_row(harness, prefix).is_none() {
+        assert!(Instant::now() < deadline, "no row {prefix}");
+        harness.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Drags with the primary button from `at` by `by` points, in steps as a
+/// hand does, and lets go.
+pub fn drag_by(harness: &mut Harness<'_, App>, at: Pos2, by: Vec2) {
+    harness.hover_at(at);
+    harness.drag_at(at);
+    harness.run();
+    for step in 1..=4 {
+        harness.hover_at(at + by * step as f32 / 4.0);
+        harness.run();
+    }
+    harness.drop_at(at + by);
+    harness.run();
+}
+
+/// The title of a column in the row of headers that holds `Description`;
+/// the commit panel names some of its fields as the columns are named.
+pub fn column_header(harness: &Harness<'_, App>, title: &str) -> Rect {
+    let row = harness.get_by_label("Description").rect().center().y;
+    harness
+        .get_all_by_label(title)
+        .map(|node| node.rect())
+        .find(|rect| (rect.center().y - row).abs() < 2.0)
+        .unwrap_or_else(|| panic!("no header {title}"))
+}
+
+/// The edge left of the column `title` in the row of headers, where it can
+/// be dragged: its title stands 4 points right of it.
+pub fn edge_left_of(harness: &Harness<'_, App>, title: &str) -> Pos2 {
+    let header = column_header(harness, title);
+    Pos2::new(header.left() - 4.0, header.center().y)
+}
+
+/// The largest burst of the touchpad the probe recorded, in points.
+pub const BURST: f32 = 681.0;
+
+/// Turns the mouse wheel by `lines` of 40 points with `modifiers` held, in
+/// the next frame; negative values scroll towards later rows, as egui
+/// counts them. Windows reports a touchpad as such lines too.
+pub fn turn_wheel(harness: &mut Harness<'_, App>, lines: f32, modifiers: Modifiers) {
+    harness.input_mut().events.push(Event::MouseWheel {
+        unit: MouseWheelUnit::Line,
+        delta: vec2(0.0, lines),
+        phase: TouchPhase::Move,
+        modifiers,
+    });
 }
 
 /// A checker whose answer depends on the path it is asked about and can be
@@ -272,4 +678,228 @@ impl Scripted {
             }
         })
     }
+}
+
+/// Presses Tab `presses` times and describes each widget it focused that
+/// does not tell assistive technology what it is and what it is called: a
+/// screen reader announces whatever Tab focuses.
+pub fn unnamed_tab_stops(harness: &mut Harness<'_, App>, presses: usize) -> Vec<String> {
+    let mut unnamed = Vec::new();
+    for press in 1..=presses {
+        harness.key_press(eframe::egui::Key::Tab);
+        harness.run();
+        let focused = harness.get_by(|node| node.is_focused_in_tree());
+        let node = focused.accesskit_node();
+        let label = node.label().unwrap_or_default();
+        if node.role() == Role::Unknown || label.trim().is_empty() {
+            let id = harness.ctx.memory(|memory| memory.focused());
+            unnamed.push(format!("Tab {press}: {:?} {label:?} {id:?}", node.role()));
+        }
+    }
+    unnamed
+}
+
+/// Every rectangle drawn with the focus ring of either appearance.
+pub fn focus_rings(output: &eframe::egui::FullOutput) -> Vec<eframe::egui::Rect> {
+    focus_strokes(output)
+        .into_iter()
+        .map(|(rect, _)| rect)
+        .collect()
+}
+
+/// Every rectangle drawn with the focus ring of either appearance, with the
+/// width of its stroke: 2 points around a control, 1 around an area.
+pub fn focus_strokes(output: &eframe::egui::FullOutput) -> Vec<(eframe::egui::Rect, f32)> {
+    focus_ring_shapes(output)
+        .into_iter()
+        .map(|ring| (ring.rect, ring.stroke.width))
+        .collect()
+}
+
+/// Every rectangle drawn with the focus ring of either appearance, as it
+/// was drawn.
+pub fn focus_ring_shapes(
+    output: &eframe::egui::FullOutput,
+) -> Vec<eframe::egui::epaint::RectShape> {
+    use eframe::egui::epaint::{RectShape, Shape};
+    use gitbull_app::theme::{DARK, LIGHT};
+    let colours = [LIGHT.focus, DARK.focus].map(gitbull_app::ui::color);
+    fn walk(shape: &Shape, colours: &[eframe::egui::Color32], found: &mut Vec<RectShape>) {
+        match shape {
+            Shape::Rect(ring)
+                if [1.0, 2.0].contains(&ring.stroke.width)
+                    && colours.contains(&ring.stroke.color) =>
+            {
+                found.push(ring.clone());
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, colours, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &colours, &mut found);
+    }
+    found
+}
+
+/// The texts drawn inside `rect`, icons included, in the order drawn.
+pub fn texts_in(output: &eframe::egui::FullOutput, rect: eframe::egui::Rect) -> Vec<String> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, rect: eframe::egui::Rect, found: &mut Vec<String>) {
+        match shape {
+            Shape::Text(text) => {
+                let drawn = text.visual_bounding_rect();
+                if rect.expand(1.0).contains_rect(drawn) {
+                    found.push(text.galley.text().to_owned());
+                }
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, rect, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, rect, &mut found);
+    }
+    found
+}
+
+/// The texts drawn in the row of `rect`, across the whole width.
+pub fn texts_in_row(output: &eframe::egui::FullOutput, rect: eframe::egui::Rect) -> Vec<String> {
+    let row = eframe::egui::Rect::from_x_y_ranges(
+        f32::NEG_INFINITY..=f32::INFINITY,
+        (rect.top() - 8.0)..=(rect.bottom() + 8.0),
+    );
+    texts_in(output, row)
+}
+
+/// The font families `text` is drawn in, wherever it is drawn.
+pub fn text_families(
+    output: &eframe::egui::FullOutput,
+    text: &str,
+) -> Vec<eframe::egui::FontFamily> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, text: &str, found: &mut Vec<eframe::egui::FontFamily>) {
+        match shape {
+            Shape::Text(shape) if shape.galley.text() == text => {
+                if let Some(section) = shape.galley.job.sections.first() {
+                    found.push(section.format.font_id.family.clone());
+                }
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, text, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, text, &mut found);
+    }
+    found
+}
+
+/// The colours `text` is drawn in, wherever it is drawn.
+pub fn text_colours(output: &eframe::egui::FullOutput, text: &str) -> Vec<eframe::egui::Color32> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, text: &str, found: &mut Vec<eframe::egui::Color32>) {
+        match shape {
+            Shape::Text(shape) if shape.galley.text() == text => {
+                // A galley laid out with the placeholder takes the colour it
+                // is drawn with.
+                let section = shape
+                    .galley
+                    .job
+                    .sections
+                    .first()
+                    .map(|section| section.format.color)
+                    .filter(|colour| *colour != eframe::egui::Color32::PLACEHOLDER);
+                found.push(
+                    shape
+                        .override_text_color
+                        .or(section)
+                        .unwrap_or(shape.fallback_color),
+                );
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, text, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, text, &mut found);
+    }
+    found
+}
+
+/// The pieces of text drawn on a background of their own, such as the
+/// changed words of the diff, with that background.
+pub fn marked_texts(output: &eframe::egui::FullOutput) -> Vec<(String, eframe::egui::Color32)> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, found: &mut Vec<(String, eframe::egui::Color32)>) {
+        match shape {
+            Shape::Text(shape) => {
+                let job = &shape.galley.job;
+                for section in &job.sections {
+                    let background = section.format.background;
+                    if background != eframe::egui::Color32::TRANSPARENT {
+                        let range = section.byte_range.start.0..section.byte_range.end.0;
+                        found.push((job.text[range].to_owned(), background));
+                    }
+                }
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &mut found);
+    }
+    found
+}
+
+/// The colours of the filled rectangles drawn within `rect`.
+pub fn fills_in(
+    output: &eframe::egui::FullOutput,
+    rect: eframe::egui::Rect,
+) -> Vec<eframe::egui::Color32> {
+    use eframe::egui::epaint::Shape;
+    fn walk(shape: &Shape, rect: eframe::egui::Rect, found: &mut Vec<eframe::egui::Color32>) {
+        match shape {
+            Shape::Rect(shape) if rect.expand(1.0).contains_rect(shape.rect) => {
+                found.push(shape.fill);
+            }
+            Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, rect, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, rect, &mut found);
+    }
+    found
 }

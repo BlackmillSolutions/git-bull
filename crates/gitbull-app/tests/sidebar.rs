@@ -7,15 +7,21 @@ use eframe::egui::{Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_app::icons;
 use gitbull_core::session::BranchFilter;
 use gitbull_core::settings::Settings;
+use gitbull_core::sidebar_tree::SidebarKey;
+use gitbull_core::workspace::View;
+use gitbull_git::changes::ChangeKind;
 use gitbull_git::content::CommitContent;
 use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
+use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::stashes::{Stash, Submodule, SubmoduleState};
+use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, HistoryFeed, LiveRepo, commit_line, fake_id};
-use support::{Setup, build, path, settle_window, tab_titles, window};
+use support::{Setup, build, path, settle_window, tab_titles, turn_wheel, window};
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -157,6 +163,21 @@ fn item<'a>(harness: &'a Harness<'_, App>, label: &str) -> egui_kittest::Node<'a
         .get_all_by_role(Role::TreeItem)
         .find(|node| node.accesskit_node().label().as_deref() == Some(label))
         .unwrap_or_else(|| panic!("no sidebar row {label}"))
+}
+
+/// Whether the row of the sidebar with `label` is selected.
+fn item_selected(harness: &Harness<'_, App>, label: &str) -> bool {
+    item(harness, label).accesskit_node().is_selected() == Some(true)
+}
+
+/// The view the active tab shows.
+fn shown_view(harness: &Harness<'_, App>) -> View {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .map(|tab| tab.view())
+        .expect("an active tab")
 }
 
 fn has_item(harness: &Harness<'_, App>, label: &str) -> bool {
@@ -335,6 +356,32 @@ fn choosing_a_tag_selects_its_commit() {
 }
 
 #[test]
+fn a_branch_chosen_in_file_status_shows_its_commit_in_the_history() {
+    let mut harness = open(backend());
+    click(&mut harness, "File status");
+    assert_eq!(shown_view(&harness), View::FileStatus);
+
+    click(&mut harness, "main");
+    assert_eq!(shown_view(&harness), View::History);
+    wait_for(&mut harness, |h| commit_selected(h, "Fifth"));
+    assert!(item_selected(&harness, "main"));
+    assert!(!item_selected(&harness, "File status"));
+}
+
+#[test]
+fn clicking_the_selected_tag_again_goes_back_to_its_commit() {
+    let mut harness = open(backend());
+    click(&mut harness, "v1.0");
+    assert!(commit_selected(&harness, "Third"));
+    harness.get_by_label("Second").click();
+    harness.run();
+    assert!(commit_selected(&harness, "Second"));
+
+    click(&mut harness, "v1.0");
+    assert!(commit_selected(&harness, "Third"));
+}
+
+#[test]
 fn choosing_a_branch_before_its_commit_has_loaded_selects_it_when_it_arrives() {
     let feed = HistoryFeed::new();
     let backend = with_contents(
@@ -409,6 +456,47 @@ fn a_branch_outside_the_filtered_graph_offers_to_show_all_branches() {
 }
 
 #[test]
+fn a_commit_hidden_by_the_branch_filter_is_announced_in_an_information_banner() {
+    let backend = backend().with_history_for(
+        root(),
+        &["--end-of-options", "HEAD"],
+        lines().into_iter().skip(1).collect(),
+    );
+    let mut harness = open(backend);
+    harness
+        .state_mut()
+        .workspace_mut()
+        .unwrap()
+        .active_mut()
+        .unwrap()
+        .session_mut()
+        .unwrap()
+        .set_filter(BranchFilter::Current);
+    wait_for(&mut harness, |h| {
+        h.query_by_label("Side work").is_none() && h.query_by_label("Fifth").is_some()
+    });
+
+    click(&mut harness, "side");
+    wait_for(&mut harness, |h| {
+        h.query_by_label_contains("hidden by the branch filter")
+            .is_some()
+    });
+
+    let notice = harness
+        .get_by_label_contains("hidden by the branch filter")
+        .rect();
+    let toolbar = harness.get_by_role_and_label(Role::Button, "Open").rect();
+    assert!(
+        notice.top() > toolbar.bottom(),
+        "{notice:?} below {toolbar:?}"
+    );
+    let row = support::texts_in_row(harness.output(), notice);
+    assert!(row.iter().any(|text| text == icons::INFO), "{row:?}");
+    harness.get_by_role_and_label(Role::Button, "Show all branches");
+    harness.get_by_role_and_label(Role::Button, "Dismiss");
+}
+
+#[test]
 fn a_tag_that_points_to_no_commit_says_so_and_keeps_the_selection() {
     let mut harness = open(backend());
     harness.get_by_label("Second").click();
@@ -460,10 +548,24 @@ fn scrolling_ten_thousand_tags_stays_fluid() {
     many.extend(
         (0..10_000).map(|n| reference(&format!("refs/tags/v0.{n:05}"), RefKind::Tag, Some("a"))),
     );
-    let mut harness = open(backend().with_references(root(), many));
+    let live = LiveRepo::new();
+    live.set_references(many.clone());
+    let mut harness = open(backend().with_live(root(), &live));
     click(&mut harness, "v1.0");
+    let with_branch = |name: &str| {
+        let mut more = many.clone();
+        more.insert(0, reference(name, RefKind::Branch, Some("c")));
+        more
+    };
     let mut frames = Vec::new();
-    for _ in 0..60 {
+    for page in 0..60 {
+        if page == 30 {
+            // A refresh brings a new branch while a tag far down is
+            // selected: the rows are laid out again and the tag is found
+            // among all of them, in that frame only.
+            live.set_references(with_branch("refs/heads/feature/api"));
+            harness.key_press(Key::F5);
+        }
         harness.key_press(Key::PageDown);
         let started = std::time::Instant::now();
         harness.step();
@@ -488,6 +590,32 @@ fn scrolling_ten_thousand_tags_stays_fluid() {
         median < std::time::Duration::from_millis(limit),
         "half of the frames took {median:?} or longer; the slowest {slowest:?}"
     );
+
+    // A refresh while the list rests leaves the sidebar where it is.
+    wait_for(&mut harness, |h| has_reference(h, "refs/heads/feature/api"));
+    harness.run();
+    let shown: Vec<String> = harness
+        .get_all_by_role(Role::TreeItem)
+        .filter_map(|node| node.accesskit_node().label())
+        .collect();
+    live.set_references(with_branch("refs/heads/feature/zip"));
+    harness.key_press(Key::F5);
+    wait_for(&mut harness, |h| has_reference(h, "refs/heads/feature/zip"));
+    harness.run();
+    let middle = &shown[shown.len() / 2];
+    assert!(has_item(&harness, middle), "{middle} is no longer in view");
+}
+
+/// Whether the session of the active tab has read the reference `name`.
+fn has_reference(harness: &Harness<'_, App>, name: &str) -> bool {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .and_then(|session| session.sidebar())
+        .and_then(|sidebar| sidebar.as_ref().ok())
+        .is_some_and(|sidebar| sidebar.references.iter().any(|r| r.name == name))
 }
 
 const ALL: [&str; 4] = ["--branches", "--tags", "--remotes", "--end-of-options"];
@@ -644,4 +772,255 @@ fn the_menu_of_a_branch_that_a_refresh_removed_closes() {
         branch_filter(&harness).accesskit_node().value().as_deref(),
         Some("All branches")
     );
+}
+
+/// The rows of the sidebar that are selected.
+fn selected_items(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .get_all_by_role(Role::TreeItem)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+/// What the sidebar of the active tab selects.
+fn sidebar_selection(harness: &Harness<'_, App>) -> SidebarKey {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .map(|tab| tab.sidebar_selection().clone())
+        .expect("an active tab")
+}
+
+/// Types `text` into the filter of the sidebar, which a selected commit
+/// puts above the filter of its files.
+fn type_filter(harness: &mut Harness<'_, App>, text: &str) {
+    harness
+        .get_by_role_and_label(Role::TextInput, "Filter")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, "Filter")
+        .type_text(text);
+    harness.run();
+}
+
+#[test]
+fn a_new_tab_selects_history_in_the_sidebar() {
+    let harness = open(backend());
+    assert_eq!(selected_items(&harness), ["History"]);
+}
+
+#[test]
+fn a_view_reached_with_the_arrow_keys_is_only_selected_until_enter() {
+    let mut harness = open(backend());
+    click(&mut harness, "History");
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    assert_eq!(selected_items(&harness), ["File status"]);
+    assert_eq!(shown_view(&harness), View::History);
+
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert_eq!(shown_view(&harness), View::FileStatus);
+    assert_eq!(selected_items(&harness), ["File status"]);
+}
+
+#[test]
+fn the_filter_keeps_the_selected_tag_selected() {
+    let mut harness = open(backend());
+    click(&mut harness, "v1.0");
+    type_filter(&mut harness, "v1");
+    assert!(!has_item(&harness, "main"));
+    assert_eq!(selected_items(&harness), ["v1.0"]);
+}
+
+#[test]
+fn a_tag_hidden_by_the_filter_is_selected_again_when_it_is_cleared() {
+    let mut harness = open(backend());
+    click(&mut harness, "v1.0");
+    type_filter(&mut harness, "graph");
+    assert!(!has_item(&harness, "v1.0"));
+    assert!(selected_items(&harness).is_empty());
+
+    for _ in 0.."graph".len() {
+        harness.key_press(Key::Backspace);
+    }
+    harness.run();
+    assert_eq!(selected_items(&harness), ["v1.0"]);
+}
+
+#[test]
+fn a_refresh_keeps_the_selected_tag_below_a_new_branch() {
+    let live = LiveRepo::new();
+    let mut harness = open_live(&live);
+    click(&mut harness, "v1.0");
+    let mut more = references();
+    more.insert(
+        0,
+        reference("refs/heads/feature/api", RefKind::Branch, Some("c")),
+    );
+    refresh_with(&mut harness, &live, more, "api", None);
+    assert_eq!(selected_items(&harness), ["v1.0"]);
+}
+
+#[test]
+fn a_refresh_keeps_the_selected_stash_below_a_newer_one() {
+    let live = LiveRepo::new();
+    let mut harness = open_live(&live);
+    click(&mut harness, "On main: try the layout");
+    live.set_stashes(vec![
+        Stash {
+            commit: fake_id("t").to_string(),
+            parents: Vec::new(),
+            selector: "stash@{0}".into(),
+            message: "On main: newer".into(),
+        },
+        Stash {
+            commit: fake_id("s").to_string(),
+            parents: Vec::new(),
+            selector: "stash@{1}".into(),
+            message: "On main: try the layout".into(),
+        },
+    ]);
+    harness.key_press(Key::F5);
+    wait_for(&mut harness, |h| has_item(h, "On main: newer"));
+    harness.run();
+    assert_eq!(selected_items(&harness), ["On main: try the layout"]);
+}
+
+#[test]
+fn a_selected_branch_that_is_gone_leaves_no_row_selected() {
+    let live = LiveRepo::new();
+    let mut harness = open_live(&live);
+    click(&mut harness, "graph-layout");
+    let fewer = references()
+        .into_iter()
+        .filter(|reference| reference.short != "feature/graph-layout")
+        .collect();
+    refresh_with(
+        &mut harness,
+        &live,
+        fewer,
+        "diff-view",
+        Some("graph-layout"),
+    );
+    assert!(selected_items(&harness).is_empty());
+}
+
+/// The references with 300 tags more, so that the sidebar scrolls.
+fn many_references() -> Vec<Reference> {
+    let mut many = references();
+    many.extend(
+        (0..300).map(|n| reference(&format!("refs/tags/v0.{n:05}"), RefKind::Tag, Some("a"))),
+    );
+    many
+}
+
+/// Turns the wheel over the sidebar until History is out of view.
+fn scroll_sidebar_down(harness: &mut Harness<'_, App>) {
+    let at = item(harness, "History").rect().center();
+    harness.hover_at(at);
+    turn_wheel(harness, -40.0, Modifiers::NONE);
+    for _ in 0..300 {
+        harness.step();
+    }
+    assert!(!has_item(harness, "History"), "the sidebar did not scroll");
+}
+
+/// Whether the session of the active tab has read `main` at `commit`.
+fn main_read_at(harness: &Harness<'_, App>, commit: &str) -> bool {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .and_then(|session| session.sidebar())
+        .and_then(|sidebar| sidebar.as_ref().ok())
+        .is_some_and(|sidebar| {
+            sidebar.references.iter().any(|reference| {
+                reference.name == "refs/heads/main"
+                    && reference.commit == Some(fake_id(commit).to_string())
+            })
+        })
+}
+
+#[test]
+fn a_refresh_on_returning_to_the_window_keeps_the_place_of_the_sidebar() {
+    let live = LiveRepo::new();
+    live.set_references(many_references());
+    let mut harness = open(per_filter().with_live(root(), &live));
+    scroll_sidebar_down(&mut harness);
+    let shown: Vec<String> = harness
+        .get_all_by_role(Role::TreeItem)
+        .filter_map(|node| node.accesskit_node().label())
+        .collect();
+
+    // A commit in a terminal moved main.
+    let moved = many_references()
+        .into_iter()
+        .map(|reference| match reference.name.as_str() {
+            "refs/heads/main" => self::reference("refs/heads/main", RefKind::Branch, Some("x")),
+            _ => reference,
+        })
+        .collect();
+    live.set_references(moved);
+    harness.event(eframe::egui::Event::WindowFocused(true));
+    wait_for(&mut harness, |h| main_read_at(h, "x"));
+    for _ in 0..10 {
+        harness.step();
+    }
+    assert!(!has_item(&harness, "History"));
+    let middle = &shown[shown.len() / 2];
+    assert!(has_item(&harness, middle), "{middle} is no longer in view");
+    assert_eq!(sidebar_selection(&harness), SidebarKey::View(View::History));
+}
+
+/// The row "Uncommitted changes" of the commit list.
+fn uncommitted_row(harness: &Harness<'_, App>) -> Option<eframe::egui::Pos2> {
+    harness
+        .query_all_by_role(Role::Row)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with("Uncommitted changes"))
+        })
+        .map(|node| node.rect().center())
+}
+
+#[test]
+fn a_view_opened_elsewhere_does_not_scroll_the_sidebar() {
+    let live = LiveRepo::new();
+    live.set_references(many_references());
+    live.set_status(WorkingStatus {
+        unstaged: vec![StatusEntry {
+            kind: StatusKind::Changed(ChangeKind::Modified),
+            path: RepoPath::new("edit.txt"),
+            old_path: None,
+            submodule: false,
+        }],
+        ..WorkingStatus::default()
+    });
+    let mut harness = open(per_filter().with_live(root(), &live));
+    wait_for(&mut harness, |h| uncommitted_row(h).is_some());
+    scroll_sidebar_down(&mut harness);
+
+    let row = uncommitted_row(&harness).unwrap();
+    harness.hover_at(row);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: row,
+            button: eframe::egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+    assert_eq!(shown_view(&harness), View::FileStatus);
+    assert_eq!(
+        sidebar_selection(&harness),
+        SidebarKey::View(View::FileStatus)
+    );
+    assert!(!has_item(&harness, "File status"));
 }

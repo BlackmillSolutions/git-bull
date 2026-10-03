@@ -17,17 +17,48 @@ start-check-again = Check again
 start-set-path = Set path to Git…
 start-details = Details
 
-## Tab bar
+## Title bar
 
 tab-new = New tab
+tab-close = Close { $title }
 tab-opening = Opening { $folder }…
+window-minimize = Minimize
+window-maximize = Maximize
+window-restore = Restore
+window-close = Close window
 
-## Repository chooser
+## Home tab
 
-chooser-title = Open a repository
-chooser-choose-folder = Choose folder…
-chooser-recent = Recent repositories
-chooser-no-recent = No repositories opened yet.
+home-tab = Repositories
+home-filter = Filter repositories and worktrees
+home-open-folder = Open folder…
+home-pinned = Pinned
+home-recent = Recent
+home-empty = Open a folder to list its repository here.
+home-no-match = No repository matches the filter.
+home-reading = Reading…
+home-clean = Clean
+home-changed = { $count ->
+    [one] 1 changed
+   *[other] { $count } changed
+}
+home-conflicts = Conflicts
+home-not-found = Not found
+home-bare = Bare repository
+home-active-now = Just now
+home-active-minutes = { $count } min
+home-active-hours = { $count } h
+home-active-days = { $count } d
+home-active-weeks = { $count } wk
+home-open = Open
+home-show-in-file-manager = Show in file manager
+home-pin = Pin
+home-unpin = Unpin
+home-remove = Remove from list
+home-file-manager-failed = The file manager could not be started: { $error }
+
+## Notices
+
 notice-not-a-repository = { $folder } is not inside a Git repository.
 notice-dismiss = Dismiss
 notice-hidden-by-filter = The commit of { $reference } is hidden by the branch filter.
@@ -40,6 +71,8 @@ notice-not-in-history = The commit { $commit } exists but is not part of the dis
 ## Search
 
 search-hint = Search commits…
+# The name of the choice of what to search, for screen readers.
+search-mode = Search by
 search-mode-hash = Hash
 search-mode-message = Message
 search-mode-author = Author
@@ -78,6 +111,8 @@ sidebar-tags = TAGS
 sidebar-remotes = REMOTES
 sidebar-stashes = STASHES
 sidebar-submodules = SUBMODULES
+# The name of the sidebar, for screen readers.
+sidebar = Sidebar
 view-history = History
 view-file-status = File status
 view-search = Search
@@ -95,6 +130,7 @@ column-description = Description
 column-date = Date
 column-author = Author
 column-commit = Commit
+column-path = Path
 row-loading = Loading…
 history-empty = This repository has no commits yet.
 history-uncommitted = Uncommitted changes
@@ -108,6 +144,9 @@ graph-cancel = Cancel
 graph-generating = Generating the commit-graph
 graph-failed = The commit-graph could not be generated: { $error }
 copy-full-hash = Copy full hash
+copy-short-hash = Copy short hash
+copy-message = Copy message
+copied = Copied
 
 ## File status view
 
@@ -128,7 +167,16 @@ detail-parents = Parents
 detail-author = Author
 detail-committer = Committer
 detail-references = References
+detail-changes = Changes
+detail-files = { $count ->
+    [one] 1 file
+   *[other] { $count } files
+}
+lines-binary = binary
 files-none = No files changed.
+files-filter = Filter files
+files-show-tree = Show as tree
+files-no-match = No file matches the filter.
 files-failed = The changed files could not be read: { $error }
 file-history = File history
 file-blame = Blame
@@ -161,6 +209,20 @@ diff-missing-content = The content of this file is not available locally. The re
 diff-line-added = Added
 diff-line-removed = Removed
 diff-line-context = Unchanged
+diff-hidden-lines = { $count ->
+    [one] 1 hidden line
+   *[other] { $count } hidden lines
+}
+diff-show-after-previous = Show { $count } lines after the previous hunk
+diff-show-before-next = Show { $count } lines before the next hunk
+diff-show-all = { $count ->
+    [one] Show the hidden line
+   *[other] Show all { $count } lines
+}
+diff-too-large = The file is too large to show the lines between its hunks.
+diff-show-invisibles = Show invisible characters
+diff-previous-hunk = Previous hunk
+diff-next-hunk = Next hunk
 copy-lines = Copy lines
 copy-hunk = Copy hunk
 
@@ -187,6 +249,18 @@ error-close = Close
 ## Settings dialog
 
 settings-title = Settings
+settings-close = Close settings
+settings-appearance = Appearance
+settings-colour-vision = Colour vision
+settings-interface-size = Interface size
+settings-title-bar = Title bar
+settings-system-title-bar = Use the system title bar
+settings-at-next-start = Takes effect when git-bull starts next.
+settings-section-git = Git
+colour-vision-standard = Standard
+colour-vision-red-green = Red-green
+colour-vision-blue-yellow = Blue-yellow
+interface-size = { $percent } %
 settings-theme = Theme
 settings-language = Language
 settings-git = Git executable
@@ -208,4 +282,12 @@ status-commits = { $count ->
    *[other] { $count } commits
 }
 status-detached = Detached at { $commit }
+status-home = { $repositories ->
+    [one] 1 repository
+   *[other] { $repositories } repositories
+}, { $worktrees ->
+    [one] 1 worktree
+   *[other] { $worktrees } worktrees
+}
+status-home-reading = Reading their status…
 status-settings-reset = The settings file could not be read; git-bull started with default settings.

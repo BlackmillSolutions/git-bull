@@ -1,0 +1,1033 @@
+//! The controls of the design system, drawn from its tokens on top of
+//! egui's widgets (design, decision 5). Every control shows the hover and
+//! pressed states, a focus ring while it has the keyboard focus, and a
+//! click target of at least [`SHAPE`]`.target` on each side.
+
+use eframe::egui::os::OperatingSystem;
+use std::ops::Range;
+use std::sync::Arc;
+
+use eframe::egui::{
+    self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
+    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Rect, Response, RichText, ScrollArea,
+    Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
+};
+
+use crate::icons;
+use crate::style::active_palette;
+use crate::theme::{Palette, SHAPE, TYPE};
+use crate::ui::color;
+
+/// The size of an icon in a control, in points.
+const ICON_SIZE: f32 = 16.0;
+
+/// How a button looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Filled with the accent: the main action of a place.
+    Primary,
+    /// Raised with a border.
+    Secondary,
+    /// Only its content until the pointer is over it, as in the toolbar.
+    Ghost,
+}
+
+/// A button with a label and an optional icon before it.
+pub struct Button<'a> {
+    label: &'a str,
+    icon: Option<&'a str>,
+    kind: Kind,
+    shortcut: Option<KeyboardShortcut>,
+}
+
+impl<'a> Button<'a> {
+    pub fn new(label: &'a str) -> Button<'a> {
+        Button {
+            label,
+            icon: None,
+            kind: Kind::Secondary,
+            shortcut: None,
+        }
+    }
+
+    pub fn icon(mut self, icon: &'a str) -> Button<'a> {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn kind(mut self, kind: Kind) -> Button<'a> {
+        self.kind = kind;
+        self
+    }
+
+    /// The shortcut a tooltip names.
+    pub fn shortcut(mut self, shortcut: KeyboardShortcut) -> Button<'a> {
+        self.shortcut = Some(shortcut);
+        self
+    }
+
+    /// How wide the button is drawn in `ui`.
+    pub fn width(&self, ui: &Ui) -> f32 {
+        self.layout(ui).1
+    }
+
+    /// The label laid out, and the width of the button.
+    fn layout(&self, ui: &Ui) -> (Arc<Galley>, f32) {
+        let font = TextStyle::Button.resolve(ui.style());
+        let galley = ui
+            .painter()
+            .layout_no_wrap(self.label.to_owned(), font, Color32::PLACEHOLDER);
+        let [_, gap, padding, _] = SHAPE.space;
+        let icon_width = if self.icon.is_some() {
+            ICON_SIZE + gap
+        } else {
+            0.0
+        };
+        let width = (2.0 * padding + icon_width + galley.size().x).max(SHAPE.target);
+        (galley, width)
+    }
+
+    pub fn show(self, ui: &mut Ui) -> Response {
+        let palette = active_palette(ui.ctx());
+        let (galley, width) = self.layout(ui);
+        let [_, gap, padding, _] = SHAPE.space;
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(width, SHAPE.control_height), Sense::click());
+        response
+            .widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.label));
+        if ui.is_rect_visible(rect) {
+            let state = State::of(&response);
+            let (fill, border, content) = match self.kind {
+                Kind::Primary => {
+                    let fill = color(palette.accent_fill);
+                    let fill = match state {
+                        State::Idle => fill,
+                        State::Hovered => fill.lerp_to_gamma(Color32::WHITE, 0.08),
+                        State::Pressed => fill.lerp_to_gamma(Color32::BLACK, 0.12),
+                    };
+                    (fill, None, color(palette.on_accent))
+                }
+                Kind::Secondary => (
+                    state.fill(palette, color(palette.raised)),
+                    Some(color(palette.border_strong)),
+                    color(palette.text),
+                ),
+                Kind::Ghost => (
+                    state.fill(palette, Color32::TRANSPARENT),
+                    None,
+                    color(palette.text),
+                ),
+            };
+            let painter = ui.painter();
+            let stroke = border.map_or(Stroke::NONE, |border| Stroke::new(1.0, border));
+            painter.rect(rect, radius(), fill, stroke, StrokeKind::Inside);
+            let mut x = rect.left() + padding;
+            if let Some(icon) = self.icon {
+                let at = egui::pos2(x, rect.center().y);
+                painter.text(
+                    at,
+                    Align2::LEFT_CENTER,
+                    icon,
+                    icons::font(ui.ctx(), ICON_SIZE),
+                    content,
+                );
+                x += ICON_SIZE + gap;
+            }
+            let at = egui::pos2(x, rect.center().y - galley.size().y / 2.0);
+            painter.galley(at, galley, content);
+            focus_ring(ui, &response);
+        }
+        match self.shortcut {
+            Some(shortcut) => tooltip(response, self.label, Some(shortcut)),
+            None => response,
+        }
+    }
+}
+
+/// A button that shows only `icon`. Its tooltip and its accessible name
+/// are `name`; the tooltip adds `shortcut`.
+pub fn icon_button(
+    ui: &mut Ui,
+    icon: &str,
+    name: &str,
+    shortcut: Option<KeyboardShortcut>,
+) -> Response {
+    let palette = active_palette(ui.ctx());
+    let side = SHAPE.control_height;
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
+    let colours = (
+        State::of(&response).fill(palette, Color32::TRANSPARENT),
+        color(palette.text),
+    );
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
+    tooltip(response, name, shortcut)
+}
+
+/// The record of the copy button clicked last, whose tooltip confirms the
+/// copy until the pointer leaves it.
+const COPIED: &str = "copied-button";
+
+/// A small icon button named `name` that copies `text`, and is disabled
+/// while there is none. After a click its tooltip says `copied` until the
+/// pointer leaves the button.
+pub fn copy_button(
+    ui: &mut Ui,
+    icon: &str,
+    name: &str,
+    copied: &str,
+    text: Option<&str>,
+) -> Response {
+    let palette = active_palette(ui.ctx());
+    let side = SHAPE.target;
+    let enabled = text.is_some();
+    let sense = match enabled {
+        true => Sense::click(),
+        false => Sense::hover(),
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), sense);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    let record = Id::new(COPIED);
+    if response.clicked()
+        && let Some(text) = text
+    {
+        ui.ctx().copy_text(text.to_owned());
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(record, response.id));
+    }
+    let confirmed = ui.ctx().data(|data| data.get_temp::<Id>(record)) == Some(response.id);
+    if confirmed && !response.hovered() {
+        ui.ctx().data_mut(|data| data.remove::<Id>(record));
+    }
+    let ink = match enabled {
+        true => color(palette.text),
+        false => color(palette.text_muted),
+    };
+    let colours = (
+        State::of(&response).fill(palette, Color32::TRANSPARENT),
+        ink,
+    );
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
+    // egui hides a tooltip after a click until the pointer moves; the
+    // confirmation shows at once.
+    if confirmed && response.hovered() {
+        response.show_tooltip_ui(|ui| {
+            ui.label(copied);
+        });
+        return response;
+    }
+    tooltip(response, name, None)
+}
+
+/// An [`icon_button`] that switches `value` on and off. While on it is
+/// drawn as selected, in the accent on its soft wash, and it reports
+/// itself to assistive technology as a button that is pressed or not.
+pub fn toggle_icon_button(ui: &mut Ui, icon: &str, name: &str, value: &mut bool) -> Response {
+    let palette = active_palette(ui.ctx());
+    let side = SHAPE.control_height;
+    let (rect, mut response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), *value, name));
+    let state = State::of(&response);
+    let colours = if *value && state == State::Idle {
+        (color(palette.accent_soft), color(palette.accent))
+    } else {
+        (
+            state.fill(palette, Color32::TRANSPARENT),
+            color(palette.text),
+        )
+    };
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
+    tooltip(response, name, None)
+}
+
+/// An [`icon_button`] that fills `rect`, which is at least
+/// [`SHAPE`]`.target` on each side, as in a row of a list.
+pub fn icon_button_in(ui: &mut Ui, rect: Rect, icon: &str, name: &str) -> Response {
+    let palette = active_palette(ui.ctx());
+    let response = ui.interact(rect, ui.id().with(("icon-button", name)), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
+    let colours = (
+        State::of(&response).fill(palette, Color32::TRANSPARENT),
+        color(palette.text),
+    );
+    paint_icon_button(ui, &response, rect, icon, radius(), colours);
+    tooltip(response, name, None)
+}
+
+/// Draws an icon button of `response` in `rect` with corners of `radius`:
+/// its surface and `icon` in `colours`, and its focus ring with the same
+/// corners.
+fn paint_icon_button(
+    ui: &Ui,
+    response: &Response,
+    rect: Rect,
+    icon: &str,
+    radius: CornerRadius,
+    (fill, ink): (Color32, Color32),
+) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, fill);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icon,
+        icons::font(ui.ctx(), ICON_SIZE),
+        ink,
+    );
+    focus_ring_with(ui, response, radius);
+}
+
+/// The surface of Close window under the pointer, and its icon there: the
+/// red of Windows, which many Linux themes share. It only marks the button
+/// under the pointer and tells nothing by itself.
+const CLOSE_WINDOW: Color32 = Color32::from_rgb(0xC4, 0x2B, 0x1C);
+const ON_CLOSE_WINDOW: Color32 = Color32::WHITE;
+
+/// A button of the title bar that acts on the window, filling `rect`: an
+/// icon button of a larger size, named `name` and red under the pointer if
+/// it `closes` the window, which takes the keyboard focus if `focusable`
+/// (design, decision 3).
+pub fn window_button(
+    ui: &mut Ui,
+    rect: Rect,
+    icon: &str,
+    name: &str,
+    closes: bool,
+    focusable: bool,
+) -> Response {
+    let palette = active_palette(ui.ctx());
+    let sense = if focusable {
+        Sense::click()
+    } else {
+        Sense::CLICK
+    };
+    let response = ui.interact(rect, Id::new(("window-button", icon)), sense);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name));
+    let state = State::of(&response);
+    let colours = if closes && state != State::Idle {
+        (CLOSE_WINDOW, ON_CLOSE_WINDOW)
+    } else {
+        (
+            state.fill(palette, Color32::TRANSPARENT),
+            color(palette.text),
+        )
+    };
+    // Square, as the title bar is filled to its edges.
+    paint_icon_button(ui, &response, rect, icon, CornerRadius::ZERO, colours);
+    tooltip(response, name, None)
+}
+
+/// `icon` of `size` points in `colour`, beside a text that names it. It is
+/// only drawn: assistive technology would read the character of the icon,
+/// which means nothing.
+pub fn icon(ui: &mut Ui, icon: &str, size: f32, colour: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            icon,
+            icons::font(ui.ctx(), size),
+            colour,
+        );
+    }
+    response
+}
+
+/// A message that something failed, in the colour of errors.
+pub fn error_text(ui: &mut Ui, text: impl Into<String>) -> Response {
+    let palette = active_palette(ui.ctx());
+    ui.label(RichText::new(text.into()).color(color(palette.error_fg)))
+}
+
+/// A tooltip that names an action, and its shortcut as the platform writes
+/// it, such as Ctrl+W, or Cmd+W on macOS.
+pub fn tooltip(response: Response, name: &str, shortcut: Option<KeyboardShortcut>) -> Response {
+    response.on_hover_ui(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(name);
+            if let Some(shortcut) = shortcut {
+                let mac = ui.ctx().os() == OperatingSystem::Mac;
+                ui.label(RichText::new(shortcut.format(&ModifierNames::NAMES, mac)).weak());
+            }
+        });
+    })
+}
+
+/// A choice among a few values, drawn as segments of one control. Each
+/// segment is a radio button to assistive technology.
+pub fn segmented<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    value: &mut T,
+    choices: &[(T, &str)],
+) -> Response {
+    let palette = active_palette(ui.ctx());
+    let font = TextStyle::Button.resolve(ui.style());
+    let [inset, _, padding, _] = SHAPE.space;
+    let galleys: Vec<_> = choices
+        .iter()
+        .map(|(_, label)| {
+            ui.painter()
+                .layout_no_wrap((*label).to_owned(), font.clone(), Color32::PLACEHOLDER)
+        })
+        .collect();
+    let widths: Vec<f32> = galleys
+        .iter()
+        .map(|galley| (galley.size().x + 2.0 * padding).max(SHAPE.target))
+        .collect();
+    let size = vec2(
+        widths.iter().sum::<f32>() + 2.0 * inset,
+        SHAPE.control_height,
+    );
+    let (track, mut response) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect(
+        track,
+        radius(),
+        color(palette.canvas),
+        Stroke::new(1.0, color(palette.border_strong)),
+        StrokeKind::Inside,
+    );
+    let mut x = track.left() + inset;
+    for (((choice, label), galley), width) in choices.iter().zip(galleys).zip(widths) {
+        // The segment takes clicks over the whole height of the control and
+        // is drawn inset in it.
+        let target =
+            egui::Rect::from_min_size(egui::pos2(x, track.top()), vec2(width, track.height()));
+        let rect = target.shrink2(vec2(0.0, inset));
+        x += width;
+        let segment = ui.interact(target, response.id.with(label), Sense::click());
+        let selected = *value == *choice;
+        segment.widget_info(|| {
+            WidgetInfo::selected(WidgetType::RadioButton, ui.is_enabled(), selected, *label)
+        });
+        if segment.clicked() && !selected {
+            *value = *choice;
+            response.mark_changed();
+        }
+        let selected = *value == *choice;
+        let fill = if selected {
+            color(palette.selection)
+        } else {
+            State::of(&segment).fill(palette, Color32::TRANSPARENT)
+        };
+        let text = if selected {
+            palette.text
+        } else {
+            palette.text_muted
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(SHAPE.radius_small as u8), fill);
+        let at = rect.center() - galley.size() / 2.0;
+        painter.galley(at, galley, color(text));
+        focus_ring(ui, &segment);
+        response = response.union(segment);
+    }
+    response
+}
+
+/// The side of the box of a checkbox, in points.
+const CHECK_BOX: f32 = 16.0;
+
+/// A box that `value` ticks, with `label` beside it, as high as a control
+/// and taking clicks on its label too (design, decision 6). Space toggles
+/// it while it has the keyboard focus.
+pub fn checkbox(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
+    let palette = active_palette(ui.ctx());
+    let font = TextStyle::Body.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
+    let gap = SHAPE.space[1];
+    let size = vec2(
+        CHECK_BOX + gap + galley.size().x,
+        SHAPE.control_height.max(SHAPE.target),
+    );
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *value, label));
+    if ui.is_rect_visible(rect) {
+        let state = State::of(&response);
+        let check = Rect::from_center_size(
+            egui::pos2(rect.left() + CHECK_BOX / 2.0, rect.center().y),
+            vec2(CHECK_BOX, CHECK_BOX),
+        );
+        let (fill, border) = if *value {
+            (color(palette.accent_fill), color(palette.accent_fill))
+        } else {
+            (
+                state.fill(palette, color(palette.canvas)),
+                color(palette.border_strong),
+            )
+        };
+        let painter = ui.painter();
+        painter.rect(
+            check,
+            CornerRadius::same(SHAPE.radius_small as u8 / 2),
+            fill,
+            Stroke::new(1.0, border),
+            StrokeKind::Inside,
+        );
+        if *value {
+            let at = |x: f32, y: f32| {
+                egui::pos2(check.left() + x * CHECK_BOX, check.top() + y * CHECK_BOX)
+            };
+            let tick = Stroke::new(2.0, color(palette.on_accent));
+            painter.line_segment([at(0.22, 0.52), at(0.42, 0.72)], tick);
+            painter.line_segment([at(0.42, 0.72), at(0.78, 0.3)], tick);
+        }
+        painter.galley(
+            egui::pos2(check.right() + gap, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color(palette.text),
+        );
+        focus_ring(ui, &response);
+    }
+    response
+}
+
+/// A single-line text field of `width`, as high as a button, with `hint`
+/// while it is empty. Its focus ring comes from the style.
+pub fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) -> Response {
+    ui.add(text_edit(text, hint, width))
+}
+
+/// The text edit of [`text_field`], for a caller that adds to it, such as
+/// an id.
+pub fn text_edit<'t>(text: &'t mut String, hint: &str, width: f32) -> egui::TextEdit<'t> {
+    let margin = Margin::symmetric(SHAPE.space[1] as i8, 0);
+    egui::TextEdit::singleline(text)
+        .hint_text(hint)
+        .margin(margin)
+        .vertical_align(egui::Align::Center)
+        .min_size(vec2(width, SHAPE.control_height))
+        .desired_width(width - margin.sum().x)
+}
+
+/// The entries of a menu, which follow each other without a gap and share
+/// the width of the widest.
+pub fn menu<R>(ui: &mut Ui, add_entries: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        add_entries(ui)
+    })
+    .inner
+}
+
+/// An entry of a menu, with an optional icon before its label and the
+/// shortcut after it.
+pub fn menu_item(
+    ui: &mut Ui,
+    icon: Option<&str>,
+    label: &str,
+    shortcut: Option<KeyboardShortcut>,
+) -> Response {
+    let palette = active_palette(ui.ctx());
+    let font = TextStyle::Button.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), Color32::PLACEHOLDER);
+    let mac = ui.ctx().os() == OperatingSystem::Mac;
+    let keys = shortcut.map(|shortcut| {
+        ui.painter().layout_no_wrap(
+            shortcut.format(&ModifierNames::NAMES, mac),
+            font,
+            Color32::PLACEHOLDER,
+        )
+    });
+    let [_, gap, padding, _] = SHAPE.space;
+    let content = padding
+        + ICON_SIZE
+        + gap
+        + galley.size().x
+        + keys
+            .as_ref()
+            .map_or(0.0, |keys| 2.0 * padding + keys.size().x)
+        + padding;
+    // In a menu, an entry fills the width that the widest entry sets. egui
+    // measures a menu with justification off first, so that the entries
+    // report the width of their content then.
+    let width = if ui.layout().horizontal_justify() {
+        content.max(ui.available_width())
+    } else {
+        content
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(width.max(SHAPE.target), SHAPE.control_height),
+        Sense::click(),
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = State::of(&response).fill(palette, Color32::TRANSPARENT);
+        painter.rect_filled(rect, radius(), fill);
+        let middle = rect.center().y;
+        let mut x = rect.left() + padding;
+        if let Some(icon) = icon {
+            painter.text(
+                egui::pos2(x, middle),
+                Align2::LEFT_CENTER,
+                icon,
+                icons::font(ui.ctx(), ICON_SIZE),
+                color(palette.text),
+            );
+        }
+        x += ICON_SIZE + gap;
+        painter.galley(
+            egui::pos2(x, middle - galley.size().y / 2.0),
+            galley,
+            color(palette.text),
+        );
+        if let Some(keys) = keys {
+            let at = egui::pos2(
+                rect.right() - padding - keys.size().x,
+                middle - keys.size().y / 2.0,
+            );
+            painter.galley(at, keys, color(palette.text_muted));
+        }
+        focus_ring(ui, &response);
+    }
+    response
+}
+
+/// The kind of a notice, which gives a banner its colours and icon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BannerKind {
+    Information,
+    Warning,
+    Error,
+}
+
+/// What the user did with a banner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BannerAction {
+    /// The action at this index of the actions shown.
+    Action(usize),
+    Dismiss,
+}
+
+/// A notice across the width of `ui`, in the colours and with the icon of
+/// `kind`, with `actions` and a button named `dismiss` that dismisses it.
+pub fn banner(
+    ui: &mut Ui,
+    kind: BannerKind,
+    text: &str,
+    actions: &[&str],
+    dismiss: &str,
+) -> Option<BannerAction> {
+    let palette = active_palette(ui.ctx());
+    let (background, foreground, icon) = match kind {
+        BannerKind::Information => (palette.info_bg, palette.info_fg, icons::INFO),
+        BannerKind::Warning => (palette.warning_bg, palette.warning_fg, icons::WARNING),
+        BannerKind::Error => (palette.error_bg, palette.error_fg, icons::ERROR),
+    };
+    let [small, medium, _, _] = SHAPE.space;
+    let mut clicked = None;
+    Frame::new()
+        .fill(color(background))
+        .corner_radius(radius())
+        .inner_margin(Margin::symmetric(medium as i8, small as i8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                self::icon(ui, icon, 18.0, color(foreground));
+                // The buttons keep their room; the text wraps in the rest.
+                let gap = ui.spacing().item_spacing.x;
+                let buttons: f32 = actions
+                    .iter()
+                    .map(|action| Button::new(action).width(ui) + gap)
+                    .sum::<f32>()
+                    + SHAPE.control_height
+                    + gap;
+                ui.scope(|ui| {
+                    ui.set_max_width((ui.available_width() - buttons).max(0.0));
+                    let text = RichText::new(text).size(TYPE.body).color(color(foreground));
+                    ui.add(Label::new(text).wrap());
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, icons::CLOSE, dismiss, None).clicked() {
+                        clicked = Some(BannerAction::Dismiss);
+                    }
+                    for (index, action) in actions.iter().enumerate().rev() {
+                        if Button::new(action).show(ui).clicked() {
+                            clicked = Some(BannerAction::Action(index));
+                        }
+                    }
+                });
+            });
+        });
+    clicked
+}
+
+/// Where the pass that last looked at the input, and whether focus rings
+/// show, are kept.
+const FOCUS_VISIBLE: &str = "gitbull-focus-visible";
+
+/// Whether focus rings show, as `:focus-visible` in browsers: from a pass
+/// with a key pressed or an action of assistive technology on, and not from
+/// a pass with a pointer button pressed on (design, decision 5). Each pass
+/// reads its input once, at the first call; `ui::show` calls this before
+/// the keys are consumed.
+pub fn focus_visible(ctx: &Context) -> bool {
+    let id = Id::new(FOCUS_VISIBLE);
+    let pass = ctx.cumulative_pass_nr();
+    let known = ctx.data(|data| data.get_temp::<(u64, bool)>(id));
+    if let Some((seen, visible)) = known
+        && seen == pass
+    {
+        return visible;
+    }
+    let mut visible = known.is_some_and(|(_, visible)| visible);
+    ctx.input(|input| {
+        for event in &input.events {
+            match event {
+                Event::Key { pressed: true, .. } | Event::AccessKitActionRequest(_) => {
+                    visible = true;
+                }
+                Event::PointerButton { pressed: true, .. } => visible = false,
+                _ => {}
+            }
+        }
+    });
+    ctx.data_mut(|data| data.insert_temp(id, (pass, visible)));
+    visible
+}
+
+/// Draws the focus ring of a control around `response` while it has the
+/// focus and rings show: the stroke of the selection, 2 points in the focus
+/// colour.
+pub fn focus_ring(ui: &Ui, response: &Response) {
+    focus_ring_with(ui, response, radius());
+}
+
+/// Like [`focus_ring`], with corners of `radius`, as the control has.
+fn focus_ring_with(ui: &Ui, response: &Response, radius: CornerRadius) {
+    if response.has_focus() && focus_visible(ui.ctx()) {
+        ui.painter().rect_stroke(
+            response.rect,
+            radius,
+            ui.visuals().selection.stroke,
+            StrokeKind::Inside,
+        );
+    }
+}
+
+/// Draws the focus ring of an area, such as a list, inside `rect` while
+/// `focused` and rings show: 1 point in the focus colour, thinner than that
+/// of a control, as the area is large.
+pub fn area_focus_ring(ui: &Ui, rect: egui::Rect, focused: bool) {
+    if focused && focus_visible(ui.ctx()) {
+        let colour = ui.visuals().selection.stroke.color;
+        ui.painter()
+            .rect_stroke(rect, 0.0, Stroke::new(1.0, colour), StrokeKind::Inside);
+    }
+}
+
+/// Where the rows of a [`rows_area_in`] lie, from the top of the first. The
+/// rows must allocate exactly the heights it gives them. Finding a row must
+/// not grow with the number of rows, so that a frame costs the same for
+/// any number of them.
+pub trait RowLayout {
+    /// The number of rows.
+    fn total(&self) -> usize;
+
+    /// The top of `row`; the top of `total()` is the height of all rows.
+    fn top(&self, row: usize) -> f32;
+
+    /// The row that holds the height `y`, or the last one below it.
+    fn row_at(&self, y: f32) -> usize;
+}
+
+/// Rows that are all as high as each other.
+pub struct EvenRows {
+    pub height: f32,
+    pub total: usize,
+}
+
+impl RowLayout for EvenRows {
+    fn total(&self) -> usize {
+        self.total
+    }
+
+    fn top(&self, row: usize) -> f32 {
+        row as f32 * self.height
+    }
+
+    fn row_at(&self, y: f32) -> usize {
+        ((y / self.height).floor().max(0.0) as usize).min(self.total.saturating_sub(1))
+    }
+}
+
+/// What a [`rows_area_in`] showed in this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowsShown {
+    /// The row at the top of the view.
+    pub first_visible: usize,
+    /// The view can scroll further down.
+    pub can_scroll_down: bool,
+}
+
+/// A scroll area in both directions over `total` rows, each exactly
+/// `row_height` points high, which draws the rows in view with `add_rows`.
+pub fn rows_area(
+    ui: &mut Ui,
+    id_salt: impl AsIdSalt,
+    row_height: f32,
+    total: usize,
+    add_rows: impl FnOnce(&mut Ui, Range<usize>),
+) {
+    let layout = EvenRows {
+        height: row_height,
+        total,
+    };
+    rows_area_in(ui, id_salt, &layout, None, add_rows);
+}
+
+/// A scroll area in both directions over the rows of `layout`, which draws
+/// the rows in view with `add_rows`; with `scroll_to`, it first scrolls so
+/// that row begins at the top, as far as it can. The rows have no spacing.
+pub fn rows_area_in(
+    ui: &mut Ui,
+    id_salt: impl AsIdSalt,
+    layout: &impl RowLayout,
+    scroll_to: Option<usize>,
+    add_rows: impl FnOnce(&mut Ui, Range<usize>),
+) -> RowsShown {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut area = ScrollArea::both()
+            .id_salt(id_salt)
+            .auto_shrink([false, false]);
+        if let Some(row) = scroll_to {
+            area = area.vertical_scroll_offset(layout.top(row));
+        }
+        let total = layout.total();
+        let output = area.show_viewport(ui, |ui, viewport| {
+            ui.set_height(layout.top(total));
+            if total == 0 {
+                return;
+            }
+            let first = layout.row_at(viewport.min.y);
+            // One row more, as egui's own rows: the last may be cut.
+            let last = (layout.row_at(viewport.max.y) + 2).min(total);
+            let top = ui.max_rect().top();
+            let rect = Rect::from_x_y_ranges(
+                ui.max_rect().x_range(),
+                top + layout.top(first)..=top + layout.top(last),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                // The same automatic ids for a row wherever the view is.
+                ui.skip_ahead_auto_ids(first);
+                add_rows(ui, first..last);
+            });
+        });
+        let offset = output.state.offset.y;
+        // Half a point for the rounding of offsets.
+        let first_visible = if total == 0 {
+            0
+        } else {
+            layout.row_at(offset + 0.5)
+        };
+        let bottom = offset + output.inner_rect.height();
+        RowsShown {
+            first_visible,
+            can_scroll_down: bottom < output.content_size.y - 0.5,
+        }
+    })
+    .inner
+}
+
+fn radius() -> CornerRadius {
+    CornerRadius::same(SHAPE.radius as u8)
+}
+
+/// The state of a control under the pointer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum State {
+    Idle,
+    Hovered,
+    Pressed,
+}
+
+impl State {
+    fn of(response: &Response) -> State {
+        if response.is_pointer_button_down_on() {
+            State::Pressed
+        } else if response.hovered() {
+            State::Hovered
+        } else {
+            State::Idle
+        }
+    }
+
+    /// The fill of a control in this state, `idle` when the pointer is not
+    /// over it.
+    fn fill(self, palette: &Palette, idle: Color32) -> Color32 {
+        match self {
+            State::Idle => idle,
+            State::Hovered => color(palette.hover),
+            State::Pressed => color(palette.pressed),
+        }
+    }
+}
+
+/// The indentation per level of folders in a tree, such as the sidebar
+/// or a file list.
+pub(crate) const TREE_INDENT: f32 = 12.0;
+/// The room left of the first level of a tree.
+pub(crate) const TREE_LEFT: f32 = 6.0;
+
+/// A small triangle pointing right, or down when `open`.
+pub(crate) fn triangle(
+    painter: &eframe::egui::Painter,
+    center: eframe::egui::Pos2,
+    open: bool,
+    fill: Color32,
+) {
+    let points = if open {
+        vec![
+            center + vec2(-4.0, -2.0),
+            center + vec2(4.0, -2.0),
+            center + vec2(0.0, 3.0),
+        ]
+    } else {
+        vec![
+            center + vec2(-2.0, -4.0),
+            center + vec2(3.0, 0.0),
+            center + vec2(-2.0, 4.0),
+        ]
+    };
+    painter.add(Shape::convex_polygon(points, fill, Stroke::NONE));
+}
+
+/// The colours of added and removed lines, as the markers of the diff
+/// draw them.
+pub fn line_colours(palette: &Palette) -> (Color32, Color32) {
+    (
+        color(palette.diff_added_marker),
+        color(palette.diff_removed_marker),
+    )
+}
+
+/// The side of a box of the bar of changed lines, the room between two
+/// boxes, and how many boxes the bar has.
+const BOX: f32 = 8.0;
+const BOX_GAP: f32 = 2.0;
+const BOXES: usize = 5;
+
+/// How many boxes of the bar show added and how many removed lines: as
+/// many as lines changed, at most five, filled in proportion, with at least
+/// one for each kind that changed.
+pub fn bar_boxes(added: u64, removed: u64) -> (usize, usize) {
+    let changed = added + removed;
+    if changed == 0 {
+        return (0, 0);
+    }
+    let filled = changed.min(BOXES as u64) as usize;
+    let mut green = (filled as f64 * added as f64 / changed as f64).round() as usize;
+    if added > 0 {
+        green = green.max(1);
+    }
+    if removed > 0 {
+        green = green.min(filled - 1);
+    }
+    (green, filled - green)
+}
+
+/// The width of the bar of five boxes.
+const BAR_WIDTH: f32 = BOXES as f32 * BOX + (BOXES - 1) as f32 * BOX_GAP;
+
+/// The numbers of the lines removed and added, in this order, as they are
+/// drawn from the right, laid out in the colours of the markers.
+fn changed_line_numbers(ui: &Ui, added: u64, removed: u64) -> [(Arc<Galley>, Color32); 2] {
+    let (added_colour, removed_colour) = line_colours(active_palette(ui.ctx()));
+    let font = egui::FontId::monospace(12.0);
+    [
+        (format!("−{removed}"), removed_colour),
+        (format!("+{added}"), added_colour),
+    ]
+    .map(|(text, colour)| {
+        let galley = ui.painter().layout_no_wrap(text, font.clone(), colour);
+        (galley, colour)
+    })
+}
+
+/// The width [`paint_changed_lines`] takes for `added` and `removed`.
+pub fn changed_lines_width(ui: &Ui, added: u64, removed: u64) -> f32 {
+    let [(removed, _), (added, _)] = changed_line_numbers(ui, added, removed);
+    BAR_WIDTH + SHAPE.space[1] + removed.size().x + SHAPE.space[0] + added.size().x
+}
+
+/// Paints the lines added and removed as `+12 −3` in the colours of the
+/// markers, and the bar of five boxes after them, ending at `right` and
+/// centred on `middle`. Returns where the numbers begin.
+pub fn paint_changed_lines(ui: &Ui, right: f32, middle: f32, added: u64, removed: u64) -> f32 {
+    let palette = active_palette(ui.ctx());
+    let painter = ui.painter();
+    let (added_colour, removed_colour) = line_colours(palette);
+    let left = right - BAR_WIDTH;
+    let (green, red) = bar_boxes(added, removed);
+    for index in 0..BOXES {
+        let at = egui::pos2(left + index as f32 * (BOX + BOX_GAP), middle - BOX / 2.0);
+        let square = Rect::from_min_size(at, vec2(BOX, BOX));
+        if index < green {
+            painter.rect_filled(square, 1.0, added_colour);
+        } else if index < green + red {
+            painter.rect_filled(square, 1.0, removed_colour);
+        } else {
+            painter.rect_stroke(
+                square,
+                1.0,
+                Stroke::new(1.0, color(palette.border_strong)),
+                StrokeKind::Inside,
+            );
+        }
+    }
+    let mut start = left - SHAPE.space[1];
+    for (galley, colour) in changed_line_numbers(ui, added, removed) {
+        start -= galley.size().x;
+        painter.galley(
+            egui::pos2(start, middle - galley.size().y / 2.0),
+            galley,
+            colour,
+        );
+        start -= SHAPE.space[0];
+    }
+    start + SHAPE.space[0]
+}
+
+/// The lines added and removed with their bar, as a widget of its own of
+/// `width`, such as the gallery shows; the file lists paint them at the end
+/// of their rows.
+pub fn changed_lines(ui: &mut Ui, added: u64, removed: u64, width: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, SHAPE.target), Sense::hover());
+    paint_changed_lines(ui, rect.right(), rect.center().y, added, removed);
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bar_fills_its_boxes_in_proportion_and_one_for_each_kind() {
+        assert_eq!(bar_boxes(12, 3), (4, 1));
+        assert_eq!(bar_boxes(1, 1), (1, 1));
+        assert_eq!(bar_boxes(3, 0), (3, 0));
+        assert_eq!(bar_boxes(0, 2), (0, 2));
+        assert_eq!(bar_boxes(1, 100), (1, 4));
+        assert_eq!(bar_boxes(100, 1), (4, 1));
+        assert_eq!(bar_boxes(0, 0), (0, 0));
+    }
+}

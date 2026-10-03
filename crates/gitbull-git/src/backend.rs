@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::blame::{self, BlameEntry, BlameStream};
 use crate::blob;
 use crate::cancel::CancelToken;
-use crate::changes::{self, FileChange};
+use crate::changes::{self, FileChange, FileLines};
 use crate::commit_graph::{self, GraphProgress};
 use crate::content::{Content, ContentReader};
 use crate::diff::{self, FileDiff};
@@ -27,7 +27,9 @@ use crate::search::{self, HashMatch, Location, SearchKind, SearchStream};
 use crate::shallow;
 use crate::stashes::{self, Stash, Submodule};
 use crate::status::{self, Group, StatusEntry, WorkingStatus};
+use crate::summary::{self, Summary};
 use crate::working_copy;
+use crate::worktrees::{self, Worktree};
 
 /// Commits newest first by commit date, never a parent before its child.
 pub trait CommitStream: Send {
@@ -122,6 +124,16 @@ pub trait Backend: Send + Sync {
         cancel: &CancelToken,
     ) -> Result<Vec<FileChange>, Error>;
 
+    /// The lines `commit` changed in each of its files against `parent`,
+    /// compared as [`Backend::changed_files`] compares them.
+    fn line_counts(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        parent: Option<&ObjectId>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<FileLines>, Error>;
+
     /// The diff of the file `change` describes, in `commit` against
     /// `parent`, its first parent; with a `limit`, up to that many lines
     /// of hunks.
@@ -147,6 +159,14 @@ pub trait Backend: Send + Sync {
 
     /// The uncommitted changes of the working copy.
     fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error>;
+
+    /// The worktrees of the repository that contains `repo`, the main
+    /// worktree first; a folder that is gone or not inside a repository is
+    /// [`Error::NotARepository`].
+    fn worktrees(&self, repo: &Path, cancel: &CancelToken) -> Result<Vec<Worktree>, Error>;
+
+    /// The working copy at `worktree` in short, for the home tab.
+    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error>;
 
     /// The commit whose hash starts with `text`.
     fn find_hash(&self, repo: &Path, text: &str, cancel: &CancelToken) -> Result<HashMatch, Error>;
@@ -307,6 +327,16 @@ impl Backend for CliBackend {
         changes::changed_files(&self.git, repo, commit, parent, cancel)
     }
 
+    fn line_counts(
+        &self,
+        repo: &Path,
+        commit: &ObjectId,
+        parent: Option<&ObjectId>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<FileLines>, Error> {
+        changes::line_counts(&self.git, repo, commit, parent, cancel)
+    }
+
     fn file_diff(
         &self,
         repo: &Path,
@@ -331,6 +361,14 @@ impl Backend for CliBackend {
 
     fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error> {
         status::status(&self.git, repo, cancel)
+    }
+
+    fn worktrees(&self, repo: &Path, cancel: &CancelToken) -> Result<Vec<Worktree>, Error> {
+        worktrees::worktrees(&self.git, repo, cancel)
+    }
+
+    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error> {
+        summary::summary(&self.git, worktree, cancel)
     }
 
     fn find_hash(&self, repo: &Path, text: &str, cancel: &CancelToken) -> Result<HashMatch, Error> {

@@ -8,7 +8,7 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Modifiers, PointerButton, Pos2};
+use eframe::egui::{Event, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
@@ -338,8 +338,8 @@ fn a_file_the_commit_deleted_offers_no_blame() {
     assert!(!has_button(&harness, "Blame"));
 }
 
-#[test]
-fn blame_from_the_file_status_shows_the_last_commit() {
+/// `src/b.rs` changed in the working copy.
+fn with_changed_file(backend: FakeBackend) -> FakeBackend {
     let status = WorkingStatus {
         unstaged: vec![StatusEntry {
             kind: StatusKind::Changed(ChangeKind::Modified),
@@ -349,29 +349,73 @@ fn blame_from_the_file_status_shows_the_last_commit() {
         }],
         ..WorkingStatus::default()
     };
-    let backend = backend().with_status(root(), status);
-    let probe = backend.probe();
-    let mut harness = open_with(backend);
-    let at = harness
+    backend.with_status(root(), status)
+}
+
+/// The centre of the row of the sidebar with `label`.
+fn sidebar_item(harness: &Harness<'_, App>, label: &str) -> Pos2 {
+    harness
         .query_all_by_role(Role::TreeItem)
-        .find(|node| node.accesskit_node().label().as_deref() == Some("File status"))
-        .unwrap()
+        .find(|node| node.accesskit_node().label().as_deref() == Some(label))
+        .unwrap_or_else(|| panic!("no sidebar row {label}"))
         .rect()
-        .center();
-    click_at(&mut harness, at, PointerButton::Primary);
-    wait_until(&mut harness, |h| {
+        .center()
+}
+
+fn sidebar_item_selected(harness: &Harness<'_, App>, label: &str) -> bool {
+    harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| node.accesskit_node().label().as_deref() == Some(label))
+        .is_some_and(|node| node.accesskit_node().is_selected() == Some(true))
+}
+
+fn commit_selected(harness: &Harness<'_, App>, prefix: &str) -> bool {
+    harness.query_all_by_role(Role::Row).any(|node| {
+        node.accesskit_node().is_selected() == Some(true)
+            && node
+                .accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(prefix))
+    })
+}
+
+/// Opens the File status view and the blame of `src/b.rs` from it.
+fn open_blame_from_file_status(harness: &mut Harness<'_, App>) {
+    let at = sidebar_item(harness, "File status");
+    click_at(harness, at, PointerButton::Primary);
+    wait_until(harness, |h| {
         labels(h, Role::ListItem).contains(&"Modified: src/b.rs".to_owned())
     });
-    let file = item(&harness, "Modified: src/b.rs");
-    click_at(&mut harness, file, PointerButton::Secondary);
+    let file = item(harness, "Modified: src/b.rs");
+    click_at(harness, file, PointerButton::Secondary);
     harness.get_by_label("Blame").click();
     harness.step();
-    wait_until(&mut harness, |h| labels(h, Role::Code).len() == 4);
+    wait_until(harness, |h| labels(h, Role::Code).len() == 4);
+}
+
+#[test]
+fn blame_from_the_file_status_shows_the_last_commit() {
+    let backend = with_changed_file(backend());
+    let probe = backend.probe();
+    let mut harness = open_with(backend);
+    open_blame_from_file_status(&mut harness);
     assert!(probe.opened().contains(&(
         "blame".to_owned(),
         "HEAD".to_owned(),
         "src/b.rs".to_owned()
     )));
+}
+
+#[test]
+fn a_branch_chosen_in_the_sidebar_closes_the_blame_and_shows_its_commit() {
+    let mut harness = open_with(with_changed_file(backend()));
+    open_blame_from_file_status(&mut harness);
+
+    let main = sidebar_item(&harness, "main");
+    click_at(&mut harness, main, PointerButton::Primary);
+    wait_until(&mut harness, |h| commit_selected(h, "Change b"));
+    assert!(!has_button(&harness, "Back"));
+    assert!(sidebar_item_selected(&harness, "main"));
 }
 
 #[test]
@@ -398,4 +442,80 @@ fn back_leaves_blame_for_the_history() {
             .iter()
             .all(|label| !label.starts_with("1: one"))
     );
+}
+
+/// The top of line `n` of the blame of `long.rs`.
+fn line_top(harness: &Harness<'_, App>, n: u32) -> f32 {
+    harness
+        .query_all_by_role(Role::Code)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label == format!("{n}: line {n}"))
+        })
+        .unwrap_or_else(|| panic!("line {n} is not shown"))
+        .rect()
+        .top()
+}
+
+#[test]
+fn scrolling_blame_moves_every_line_by_as_much() {
+    let c = fake_id("c").to_string();
+    let content: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+    let summary = |text: &str| CommitContent {
+        message: format!("{text}\n"),
+        ..CommitContent::default()
+    };
+    let backend = FakeBackend::default()
+        .with_repository(root())
+        .with_history(root(), history())
+        .with_changes(fake_id("c"), vec![change(ChangeKind::Modified, "long.rs")])
+        .with_blame("long.rs", vec![entry("c", 1, 100, true)])
+        .with_file_content(&c, "long.rs", content.as_bytes())
+        .with_content(fake_id("c"), summary("Change b"))
+        .with_content(fake_id("a"), summary("Add a"));
+    let mut harness = open_with(backend);
+    open_blame(&mut harness, "Modified: long.rs");
+    // Until the margin has filled in, which asks for frames meanwhile.
+    wait_until(&mut harness, |h| {
+        labels(h, Role::Code).len() > 20 && margin(h).len() == 1
+    });
+    let before = line_top(&harness, 20);
+    harness.hover_at(Pos2::new(600.0, before + 9.0));
+    for (phase, delta) in [
+        (TouchPhase::Start, 0.0),
+        (TouchPhase::Move, -100.0),
+        (TouchPhase::End, 0.0),
+    ] {
+        harness.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, delta),
+            phase,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.step();
+    assert_eq!(line_top(&harness, 20), before - 100.0);
+}
+
+#[test]
+fn a_commit_chosen_in_the_blame_from_file_status_selects_history() {
+    let mut harness = open_with(with_changed_file(backend()));
+    open_blame_from_file_status(&mut harness);
+    assert!(sidebar_item_selected(&harness, "File status"));
+    wait_until(&mut harness, |h| margin(h).len() == 3);
+    let entry = harness
+        .query_all_by_role(Role::Link)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(&short("b")))
+        })
+        .unwrap()
+        .rect()
+        .center();
+    click_at(&mut harness, entry, PointerButton::Primary);
+    wait_until(&mut harness, |h| commit_selected(h, "Rename a to b"));
+    assert!(sidebar_item_selected(&harness, "History"));
+    assert!(!sidebar_item_selected(&harness, "File status"));
 }

@@ -1,11 +1,12 @@
-//! Choosing and installing fallback fonts for Chinese, Japanese and Korean.
+//! The bundled fonts, and choosing and installing fallback fonts for
+//! Chinese, Japanese and Korean.
 
 #[path = "support/font.rs"]
 mod font;
 
-use eframe::egui::{self, FontId};
+use eframe::egui::{self, FontFamily, FontId};
 use egui_kittest::Harness;
-use gitbull_app::fonts::{ScriptGroup, choose, install};
+use gitbull_app::fonts::{MEDIUM, SEMIBOLD, ScriptGroup, choose, definitions, install};
 
 const JAPANESE: &[char] = &['日', '本', '語', 'あ', 'ア', '中', '文'];
 const CHINESE_ONLY: &[char] = &['日', '本', '語', '中', '文'];
@@ -110,6 +111,199 @@ fn installed_fallback_lets_egui_draw_japanese() {
 
     assert_eq!(before, Some(false), "egui alone lacks Japanese");
     assert_eq!(after, Some(true), "the fallback supplies it");
+}
+
+fn family_names(family: FontFamily) -> Vec<String> {
+    definitions()
+        .families
+        .get(&family)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn each_family_has_the_chain_of_the_design() {
+    let emoji = ["NotoEmoji-Regular", "emoji-icon-font"];
+    let chain = |first: &[&str]| -> Vec<String> {
+        first
+            .iter()
+            .chain(&emoji)
+            .map(|name| name.to_string())
+            .collect()
+    };
+    assert_eq!(family_names(FontFamily::Proportional), chain(&["Inter"]));
+    assert_eq!(
+        family_names(FontFamily::Name(MEDIUM.into())),
+        chain(&["Inter Medium"])
+    );
+    assert_eq!(
+        family_names(FontFamily::Name(SEMIBOLD.into())),
+        chain(&["Inter Semibold"])
+    );
+    assert_eq!(
+        family_names(FontFamily::Monospace),
+        chain(&["JetBrains Mono", "Inter"])
+    );
+}
+
+/// The first font of the chain of `family` that contains `character`.
+fn first_font_with(family: &FontFamily, character: char) -> Option<String> {
+    use skrifa::MetadataProvider;
+    let definitions = definitions();
+    definitions.families[family].iter().find_map(|name| {
+        let data = &definitions.font_data[name];
+        let font = skrifa::FontRef::from_index(&data.font, data.index).ok()?;
+        font.charmap().map(character).map(|_| name.clone())
+    })
+}
+
+#[test]
+fn the_icon_family_draws_every_icon_from_phosphor() {
+    let icons = FontFamily::Name(gitbull_app::icons::FAMILY.into());
+    assert_eq!(family_names(icons.clone()), ["Phosphor"]);
+    for (name, icon) in gitbull_app::icons::ALL {
+        let character = icon.chars().next().expect("an icon");
+        assert_eq!(
+            first_font_with(&icons, character).as_deref(),
+            Some("Phosphor"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_icon_is_drawn_in_the_icon_family() {
+    let icons = FontFamily::Name(gitbull_app::icons::FAMILY.into());
+    let mut families = Vec::new();
+    let mut drawable = None;
+    let mut frame = 0;
+    let mut harness = Harness::new_ui(|ui| {
+        let ctx = ui.ctx().clone();
+        let font = gitbull_app::icons::font(&ctx, 14.0);
+        families.push(font.family.clone());
+        if frame == 0 {
+            ctx.set_fonts(definitions());
+        } else {
+            let all: String = gitbull_app::icons::ALL
+                .iter()
+                .map(|(_, icon)| *icon)
+                .collect();
+            drawable = Some(ctx.fonts_mut(|fonts| fonts.has_glyphs(&font, &all)));
+        }
+        frame += 1;
+    });
+    harness.run();
+    drop(harness);
+    assert_eq!(
+        families.first(),
+        Some(&FontFamily::Proportional),
+        "before the fonts"
+    );
+    assert_eq!(families.last(), Some(&icons), "with the fonts");
+    assert_eq!(drawable, Some(true));
+}
+
+#[test]
+fn the_fonts_are_asked_only_until_the_bundled_ones_are_known() {
+    let icons = FontFamily::Name(gitbull_app::icons::FAMILY.into());
+    let mut loaded = Vec::new();
+    let mut families = Vec::new();
+    let mut frame = 0;
+    let mut harness = Harness::new_ui(|ui| {
+        let ctx = ui.ctx().clone();
+        loaded.push(gitbull_app::fonts::loaded(&ctx));
+        families.push(gitbull_app::icons::font(&ctx, 14.0).family);
+        match frame {
+            0 => ctx.set_fonts(definitions()),
+            // Nothing takes the bundled fonts away; were the fonts asked
+            // again, egui's own would answer that they are gone.
+            1 => ctx.set_fonts(egui::FontDefinitions::default()),
+            _ => {}
+        }
+        frame += 1;
+    });
+    for _ in 0..3 {
+        harness.step();
+    }
+    drop(harness);
+    assert!(loaded.len() >= 3, "{loaded:?}");
+    assert!(!loaded[0], "before the fonts");
+    assert!(loaded[1..].iter().all(|known| *known), "{loaded:?}");
+    assert_eq!(families[0], FontFamily::Proportional);
+    assert!(
+        families[1..].iter().all(|family| *family == icons),
+        "{families:?}"
+    );
+}
+
+/// The width of `text` in `family` at 14 points, with the bundled fonts.
+fn width(family: FontFamily, text: &str) -> f32 {
+    let mut found = None;
+    let mut frame = 0;
+    let mut harness = Harness::new_ui(|ui| {
+        if frame == 0 {
+            ui.ctx().set_fonts(definitions());
+        } else {
+            let galley = ui.painter().layout_no_wrap(
+                text.to_owned(),
+                FontId::new(14.0, family.clone()),
+                egui::Color32::WHITE,
+            );
+            found = Some(galley.size().x);
+        }
+        frame += 1;
+    });
+    harness.run();
+    drop(harness);
+    found.expect("a second frame")
+}
+
+#[test]
+fn heavier_weights_set_wider_text() {
+    let text = "Merge branch main";
+    let regular = width(FontFamily::Proportional, text);
+    let medium = width(FontFamily::Name(MEDIUM.into()), text);
+    let semibold = width(FontFamily::Name(SEMIBOLD.into()), text);
+    assert!(regular < medium, "{regular} {medium}");
+    assert!(medium < semibold, "{medium} {semibold}");
+}
+
+#[test]
+fn monospace_text_keeps_one_width_per_character() {
+    assert_eq!(
+        width(FontFamily::Monospace, "iiii"),
+        width(FontFamily::Monospace, "MMMM")
+    );
+}
+
+#[test]
+fn installed_fallback_lets_the_semibold_weight_draw_japanese() {
+    let db = database(&[("Test Japanese", JAPANESE)]);
+    let fallbacks = choose(&db);
+    let semibold = FontId::new(14.0, FontFamily::Name(SEMIBOLD.into()));
+    let mut drawable = Vec::new();
+    let mut frame = 0;
+    let mut harness = Harness::new_ui(|ui| {
+        let ctx = ui.ctx().clone();
+        match frame {
+            0 => ctx.set_fonts(definitions()),
+            1 => {
+                drawable.push(ctx.fonts_mut(|fonts| fonts.has_glyphs(&semibold, "日本語あア")));
+                install(&ctx, &fallbacks);
+            }
+            _ => drawable.push(ctx.fonts_mut(|fonts| fonts.has_glyphs(&semibold, "日本語あア"))),
+        }
+        frame += 1;
+    });
+    harness.run();
+    drop(harness);
+
+    assert_eq!(
+        drawable.first(),
+        Some(&false),
+        "the bundled fonts lack Japanese"
+    );
+    assert_eq!(drawable.last(), Some(&true), "the fallback supplies it");
 }
 
 /// A manual check: which fallbacks does this machine offer, and how much

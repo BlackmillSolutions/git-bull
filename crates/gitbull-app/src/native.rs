@@ -2,7 +2,10 @@
 
 use std::sync::mpsc::Receiver;
 
+use eframe::egui::os::OperatingSystem;
 use eframe::egui::{self, Pos2, Vec2, ViewportBuilder};
+use eframe::egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
+use eframe::wgpu::PowerPreference;
 use gitbull_core::settings::{Settings, WindowGeometry};
 
 use crate::app::App;
@@ -11,8 +14,34 @@ use crate::fonts::{self, Fallback};
 /// The window size on the first start.
 const FIRST_SIZE: [f32; 2] = [1280.0, 800.0];
 
-/// The window as the settings remember it.
-pub fn viewport(settings: &Settings) -> ViewportBuilder {
+/// The title bar of the window (design, decision 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitleBar {
+    /// The system's, with the tabs in a row of their own below it.
+    System,
+    /// The system's on macOS, transparent, with its buttons left of the
+    /// tabs.
+    MacOverlay,
+    /// git-bull's own, with the window buttons and bands that resize the
+    /// window.
+    Drawn,
+}
+
+impl TitleBar {
+    /// The title bar on `os`, or the system's if `system_title_bar` asks for
+    /// it.
+    pub fn new(system_title_bar: bool, os: OperatingSystem) -> TitleBar {
+        match os {
+            _ if system_title_bar => TitleBar::System,
+            OperatingSystem::Mac => TitleBar::MacOverlay,
+            _ => TitleBar::Drawn,
+        }
+    }
+}
+
+/// The window as the settings remember it, on `os`, with the title bar of
+/// [`TitleBar::new`].
+pub fn viewport(settings: &Settings, os: OperatingSystem) -> ViewportBuilder {
     let (size, position) = match settings.window {
         Some(window) => ([window.width, window.height], window.position),
         None => (FIRST_SIZE, None),
@@ -26,17 +55,47 @@ pub fn viewport(settings: &Settings) -> ViewportBuilder {
     if let Some([x, y]) = position {
         viewport = viewport.with_position(Pos2::new(x, y));
     }
-    viewport
+    match TitleBar::new(settings.system_title_bar, os) {
+        TitleBar::System => viewport,
+        TitleBar::MacOverlay => viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false),
+        TitleBar::Drawn => viewport.with_decorations(false),
+    }
+}
+
+/// How eframe sets up wgpu: with the power-saving graphics adapter, unless
+/// `WGPU_POWER_PREF` chooses another (design, decision 4).
+pub fn wgpu_setup() -> WgpuSetup {
+    WgpuSetup::CreateNew(WgpuSetupCreateNew {
+        power_preference: power_preference(PowerPreference::from_env()),
+        ..WgpuSetupCreateNew::without_display_handle()
+    })
+}
+
+/// The adapter `WGPU_POWER_PREF` chose, as `from_env`, or the power-saving
+/// one. On a computer with an integrated and a dedicated adapter that is
+/// the integrated one, where the system lets an application choose; eframe
+/// on its own prefers the dedicated one.
+pub fn power_preference(from_env: Option<PowerPreference>) -> PowerPreference {
+    from_env.unwrap_or(PowerPreference::LowPower)
 }
 
 /// The geometry to remember, from what the window reports. The position is
 /// absent where the system does not reveal it, as under Wayland.
-pub fn geometry(info: &egui::ViewportInfo, content_size: Vec2) -> WindowGeometry {
-    let size = info.inner_rect.map_or(content_size, |rect| rect.size());
+///
+/// egui-winit reports the window in points of the zoom factor `zoom`, while
+/// [`viewport`] opens the window in logical pixels before any zoom applies;
+/// the geometry is therefore stored without the zoom (design, decision 7).
+pub fn geometry(info: &egui::ViewportInfo, content_size: Vec2, zoom: f32) -> WindowGeometry {
+    let size = info.inner_rect.map_or(content_size, |rect| rect.size()) * zoom;
     WindowGeometry {
         width: size.x,
         height: size.y,
-        position: info.outer_rect.map(|rect| [rect.min.x, rect.min.y]),
+        position: info
+            .outer_rect
+            .map(|rect| [rect.min.x * zoom, rect.min.y * zoom]),
     }
 }
 
@@ -45,6 +104,29 @@ pub struct NativeApp {
     pub app: App,
     /// Fallback fonts while they are still being searched for.
     pub fonts: Option<Receiver<Vec<Fallback>>>,
+    /// The zoom factor of the last frame.
+    zoom: Option<f32>,
+}
+
+impl NativeApp {
+    pub fn new(app: App, fonts: Option<Receiver<Vec<Fallback>>>) -> NativeApp {
+        NativeApp {
+            app,
+            fonts,
+            zoom: None,
+        }
+    }
+
+    /// Records the geometry of the window as `info` reports it in the
+    /// points of the zoom factor `zoom`. In the frame after the zoom factor
+    /// changed, egui already reports the new one while egui-winit measured
+    /// the window with the old one; that frame records nothing.
+    pub fn remember_window(&mut self, info: &egui::ViewportInfo, content_size: Vec2, zoom: f32) {
+        if self.zoom.is_none_or(|last| last == zoom) {
+            self.app.record_window(geometry(info, content_size, zoom));
+        }
+        self.zoom = Some(zoom);
+    }
 }
 
 /// Searches the system's fonts in the background; scanning them can take a
@@ -66,7 +148,7 @@ impl eframe::App for NativeApp {
             fonts::install(ctx, &found);
             self.fonts = None;
         }
-        self.app.record_window(geometry(&info, content.size()));
+        self.remember_window(&info, content.size(), ctx.zoom_factor());
         self.app.logic();
         if let Some(due) = self.app.save_due_in() {
             ctx.request_repaint_after(due);
@@ -88,6 +170,69 @@ mod tests {
     use eframe::egui::{Rect, pos2, vec2};
 
     #[test]
+    fn the_title_bar_follows_the_platform_unless_the_setting_asks_for_the_systems() {
+        assert_eq!(
+            TitleBar::new(false, OperatingSystem::Windows),
+            TitleBar::Drawn
+        );
+        assert_eq!(TitleBar::new(false, OperatingSystem::Nix), TitleBar::Drawn);
+        assert_eq!(
+            TitleBar::new(false, OperatingSystem::Mac),
+            TitleBar::MacOverlay
+        );
+        for os in [
+            OperatingSystem::Windows,
+            OperatingSystem::Nix,
+            OperatingSystem::Mac,
+        ] {
+            assert_eq!(TitleBar::new(true, os), TitleBar::System, "{os:?}");
+        }
+    }
+
+    #[test]
+    fn on_windows_and_linux_the_window_has_no_title_bar_of_the_system() {
+        for os in [OperatingSystem::Windows, OperatingSystem::Nix] {
+            let viewport = viewport(&Settings::default(), os);
+            assert_eq!(viewport.decorations, Some(false), "{os:?}");
+            assert_eq!(viewport.fullsize_content_view, None, "{os:?}");
+        }
+    }
+
+    #[test]
+    fn on_macos_the_title_bar_turns_transparent_and_keeps_the_buttons_of_the_system() {
+        let viewport = viewport(&Settings::default(), OperatingSystem::Mac);
+        assert_eq!(viewport.decorations, None);
+        assert_eq!(viewport.fullsize_content_view, Some(true));
+        assert_eq!(viewport.titlebar_shown, Some(false));
+        assert_eq!(viewport.title_shown, Some(false));
+    }
+
+    #[test]
+    fn with_the_setting_every_platform_keeps_the_title_bar_of_the_system() {
+        let settings = Settings {
+            system_title_bar: true,
+            ..Settings::default()
+        };
+        for os in [
+            OperatingSystem::Windows,
+            OperatingSystem::Nix,
+            OperatingSystem::Mac,
+        ] {
+            let viewport = viewport(&settings, os);
+            assert_eq!(
+                (
+                    viewport.decorations,
+                    viewport.fullsize_content_view,
+                    viewport.titlebar_shown,
+                    viewport.title_shown,
+                ),
+                (None, None, None, None),
+                "{os:?}"
+            );
+        }
+    }
+
+    #[test]
     fn remembered_size_and_position_open_the_window_there() {
         let settings = Settings {
             window: Some(WindowGeometry {
@@ -97,7 +242,7 @@ mod tests {
             }),
             ..Settings::default()
         };
-        let viewport = viewport(&settings);
+        let viewport = viewport(&settings, OperatingSystem::Windows);
         assert_eq!(viewport.inner_size, Some(vec2(1000.0, 700.0)));
         assert_eq!(viewport.position, Some(pos2(40.0, 60.0)));
     }
@@ -112,14 +257,14 @@ mod tests {
             }),
             ..Settings::default()
         };
-        let viewport = viewport(&settings);
+        let viewport = viewport(&settings, OperatingSystem::Windows);
         assert_eq!(viewport.inner_size, Some(vec2(1000.0, 700.0)));
         assert_eq!(viewport.position, None);
     }
 
     #[test]
     fn first_start_opens_a_window_of_the_default_size_anywhere() {
-        let viewport = viewport(&Settings::default());
+        let viewport = viewport(&Settings::default(), OperatingSystem::Windows);
         assert_eq!(viewport.inner_size, Some(vec2(1280.0, 800.0)));
         assert_eq!(viewport.position, None);
         assert_eq!(viewport.drag_and_drop, Some(true));
@@ -133,7 +278,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            geometry(&info, vec2(1.0, 1.0)),
+            geometry(&info, vec2(1.0, 1.0), 1.0),
             WindowGeometry {
                 width: 1100.0,
                 height: 720.0,
@@ -143,10 +288,51 @@ mod tests {
     }
 
     #[test]
+    fn geometry_reported_at_a_larger_interface_size_gives_back_the_same_window() {
+        // A window of 1200 by 750 logical pixels at 30, 60, as egui-winit
+        // reports it in the points of the zoom factor 1.5.
+        let zoom = 1.5;
+        let info = egui::ViewportInfo {
+            inner_rect: Some(Rect::from_min_size(
+                pos2(38.0, 90.0) / zoom,
+                vec2(1200.0, 750.0) / zoom,
+            )),
+            outer_rect: Some(Rect::from_min_size(
+                pos2(30.0, 60.0) / zoom,
+                vec2(1216.0, 788.0) / zoom,
+            )),
+            ..Default::default()
+        };
+        let settings = Settings {
+            window: Some(geometry(&info, vec2(1.0, 1.0), zoom)),
+            ..Settings::default()
+        };
+        let viewport = viewport(&settings, OperatingSystem::Windows);
+        assert_eq!(viewport.inner_size, Some(vec2(1200.0, 750.0)));
+        assert_eq!(viewport.position, Some(pos2(30.0, 60.0)));
+    }
+
+    #[test]
+    fn without_a_choice_git_bull_asks_for_the_power_saving_adapter() {
+        assert_eq!(power_preference(None), PowerPreference::LowPower);
+    }
+
+    #[test]
+    fn wgpu_power_pref_chooses_another_adapter() {
+        for chosen in [
+            PowerPreference::HighPerformance,
+            PowerPreference::None,
+            PowerPreference::LowPower,
+        ] {
+            assert_eq!(power_preference(Some(chosen)), chosen);
+        }
+    }
+
+    #[test]
     fn unknown_window_position_is_not_remembered() {
         let info = egui::ViewportInfo::default();
         assert_eq!(
-            geometry(&info, vec2(900.0, 600.0)),
+            geometry(&info, vec2(900.0, 600.0), 1.0),
             WindowGeometry {
                 width: 900.0,
                 height: 600.0,

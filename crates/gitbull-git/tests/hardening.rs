@@ -86,10 +86,29 @@ fn design_commands() -> Vec<Vec<String>> {
             &["HEAD~1", "HEAD"],
         ),
         diff(
+            &[
+                "diff-tree",
+                "-r",
+                "--no-commit-id",
+                "--numstat",
+                "-M",
+                "-C",
+                "-z",
+            ],
+            &["HEAD~1", "HEAD"],
+        ),
+        diff(
             &["diff-tree", "-p", "-M"],
             &["HEAD~1", "HEAD", "--", "file.txt"],
         ),
         with(flags::STATUS, &[]),
+        // What the home tab reads of every repository in its list.
+        with(&["worktree", "list", "--porcelain"], &[]),
+        with(flags::SUMMARY, &[]),
+        with(
+            &["log", "-1", "--format=%ct", "--end-of-options", "HEAD"],
+            &[],
+        ),
         diff(&["diff"], &["--", "file.txt"]),
         diff(&["diff", "--cached"], &["--", "file.txt"]),
         diff(&["diff", "HEAD"], &["--", "file.txt"]),

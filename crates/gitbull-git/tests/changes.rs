@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use gitbull_git::Git;
 use gitbull_git::cancel::CancelToken;
-use gitbull_git::changes::{ChangeKind, FileChange, changed_files};
+use gitbull_git::changes::{ChangeKind, FileChange, LineCount, changed_files, line_counts};
 use gitbull_git::locate::{Os, SystemProbe, locate_git};
 use gitbull_git::object_id::ObjectId;
 use gitbull_testkit::TestRepo;
@@ -150,4 +150,82 @@ fn a_commit_without_changes_lists_nothing() {
     let empty = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
 
     assert!(changes(&repo, &empty, Some(&first)).is_empty());
+}
+
+/// The lines `commit` changed against `parent`, as (old path, path, count).
+fn counts(repo: &TestRepo, commit: &str, parent: Option<&str>) -> Vec<(String, String, LineCount)> {
+    let parent = parent.map(id);
+    line_counts(
+        &git(),
+        repo.path(),
+        &id(commit),
+        parent.as_ref(),
+        &CancelToken::new(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|lines| {
+        (
+            lines.old_path.map(|p| p.to_string()).unwrap_or_default(),
+            lines.path.to_string(),
+            lines.count,
+        )
+    })
+    .collect()
+}
+
+#[test]
+fn line_counts_match_the_files_of_the_commit() {
+    let mut repo = TestRepo::new();
+    repo.write("a.txt", &lines(20));
+    repo.write("long.txt", &lines(40));
+    repo.write("logo.bin", "\0\u{1}binary\0");
+    let first = repo.commit("First");
+    // 12 lines added and 3 removed.
+    let edited: String = (4..=20)
+        .map(|n| format!("line {n}\n"))
+        .chain((1..=12).map(|n| format!("new {n}\n")))
+        .collect();
+    repo.write("a.txt", &edited);
+    repo.git(&["mv", "long.txt", "renamed.txt"]);
+    repo.write("renamed.txt", &(lines(40) + "one more\n"));
+    repo.write("logo.bin", "\0\u{2}changed\0");
+    let second = repo.commit("Second");
+
+    let lines_of = |added, removed| LineCount::Lines { added, removed };
+    assert_eq!(
+        counts(&repo, &second, Some(&first)),
+        [
+            (String::new(), "a.txt".to_owned(), lines_of(12, 3)),
+            (String::new(), "logo.bin".to_owned(), LineCount::Binary),
+            (
+                "long.txt".to_owned(),
+                "renamed.txt".to_owned(),
+                lines_of(1, 0)
+            ),
+        ]
+    );
+    let files: Vec<String> = changes(&repo, &second, Some(&first))
+        .into_iter()
+        .map(|(_, _, path)| path)
+        .collect();
+    assert_eq!(files, ["a.txt", "logo.bin", "renamed.txt"]);
+}
+
+#[test]
+fn line_counts_of_a_root_commit_count_every_line_as_added() {
+    let mut repo = TestRepo::new();
+    repo.write("a.txt", &lines(5));
+    let root = repo.commit("Root");
+    assert_eq!(
+        counts(&repo, &root, None),
+        [(
+            String::new(),
+            "a.txt".to_owned(),
+            LineCount::Lines {
+                added: 5,
+                removed: 0
+            }
+        )]
+    );
 }

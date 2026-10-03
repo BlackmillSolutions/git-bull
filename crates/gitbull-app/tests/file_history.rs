@@ -8,11 +8,11 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2};
+use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
-use gitbull_core::settings::Settings;
+use gitbull_core::settings::{Layout, Settings};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::CommitContent;
 use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
@@ -21,7 +21,10 @@ use gitbull_git::history::CommitLine;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, Gate, Probe, commit_line, fake_id};
-use support::{Setup, build, path, settle_window, window};
+use support::{
+    Setup, build, column_header, drag_by, edge_left_of, path, settle_window, unnamed_tab_stops,
+    window,
+};
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -83,6 +86,7 @@ fn diff(path: &str, added: &str) -> FileDiff {
                 text: added.to_owned(),
                 no_newline: false,
                 cut: false,
+                crlf: false,
             }],
         }]),
         truncated: false,
@@ -115,10 +119,16 @@ fn backend() -> FakeBackend {
 }
 
 fn open_with(backend: FakeBackend) -> Harness<'static, App> {
+    open_laid_out(backend, Layout::default())
+}
+
+/// Like [`open_with`], with the dividers and widths of `layout`.
+fn open_laid_out(backend: FakeBackend, layout: Layout) -> Harness<'static, App> {
     let test = build(Setup {
         settings: Settings {
             tabs: vec![root()],
             active_tab: Some(0),
+            layout,
             ..Settings::default()
         },
         backend,
@@ -250,6 +260,94 @@ fn each_entry_shows_its_description_and_the_path_the_file_had() {
     assert!(shown[0].ends_with(&short("c")));
     assert!(shown[1].starts_with("Rename a to b, src/b.rs, "));
     assert!(shown[2].starts_with("Add a, src/a.rs, "), "{shown:?}");
+}
+
+/// The titles of the columns, from the left.
+const TITLES: [&str; 5] = ["Description", "Path", "Date", "Author", "Commit"];
+
+/// The widths of Description, Path, Date and Author, from one title to the
+/// next.
+fn widths(harness: &Harness<'_, App>) -> [f32; 4] {
+    let lefts = TITLES.map(|title| column_header(harness, title).left());
+    [0, 1, 2, 3].map(|index| lefts[index + 1] - lefts[index])
+}
+
+#[test]
+fn a_row_of_headers_names_the_columns_above_the_entries() {
+    let mut harness = open_with(backend());
+    open_history_of_c(&mut harness);
+    let headers = TITLES.map(|title| column_header(&harness, title));
+    for pair in headers.windows(2) {
+        assert!(pair[0].left() < pair[1].left(), "{headers:?}");
+    }
+    let first = harness
+        .query_all_by_role(Role::ListItem)
+        .map(|node| node.rect().top())
+        .fold(f32::INFINITY, f32::min);
+    assert!(headers[0].bottom() <= first, "{headers:?} above {first}");
+}
+
+#[test]
+fn dragging_the_edge_left_of_the_path_widens_it_and_keeps_its_width() {
+    let mut harness = open_with(backend());
+    open_history_of_c(&mut harness);
+    let before = widths(&harness);
+    let edge = edge_left_of(&harness, "Path");
+    drag_by(&mut harness, edge, vec2(-60.0, 0.0));
+
+    let after = widths(&harness);
+    let grew = [0, 1, 2, 3].map(|index| after[index] - before[index]);
+    for (grew, expected) in grew.into_iter().zip([-60.0, 60.0, 0.0, 0.0]) {
+        assert!((grew - expected).abs() < 1.0, "{grew:?}");
+    }
+    let kept = harness.state().settings().layout.path_column;
+    assert!(
+        kept.is_some_and(|width| (width - 240.0).abs() < 1.0),
+        "{kept:?}"
+    );
+}
+
+#[test]
+fn date_author_and_commit_are_as_wide_as_in_the_commit_list() {
+    let mut harness = open_with(backend());
+    // The Author column of the commit list made 50 points wider.
+    let edge = edge_left_of(&harness, "Author");
+    drag_by(&mut harness, edge, vec2(-50.0, 0.0));
+    open_history_of_c(&mut harness);
+    let [.., author] = widths(&harness);
+    assert!((author - 210.0).abs() < 1.0, "{author}");
+
+    // The Date column of the file history made 30 points narrower.
+    let edge = edge_left_of(&harness, "Date");
+    drag_by(&mut harness, edge, vec2(30.0, 0.0));
+    harness.get_by_label("Back").click();
+    harness.step();
+    wait_until(&mut harness, |h| row(h, "Add a").is_some());
+    let date = column_header(&harness, "Date").left();
+    let author = column_header(&harness, "Author").left();
+    assert!((author - date - 100.0).abs() < 1.0, "{}", author - date);
+}
+
+#[test]
+fn a_saved_width_of_the_path_is_used_at_start() {
+    let layout = Layout {
+        path_column: Some(250.0),
+        ..Layout::default()
+    };
+    let mut harness = open_laid_out(backend(), layout);
+    open_history_of_c(&mut harness);
+    let [_, path, ..] = widths(&harness);
+    assert!((path - 250.0).abs() < 0.5, "{path}");
+}
+
+/// Once round the window: past the stops before the areas, and then round
+/// the sidebar, the entries and the diff.
+#[test]
+fn every_widget_tab_reaches_in_the_file_history_has_a_role_and_a_name() {
+    let mut harness = open_with(backend());
+    open_history_of_c(&mut harness);
+    let unnamed = unnamed_tab_stops(&mut harness, 40);
+    assert!(unnamed.is_empty(), "{unnamed:#?}");
 }
 
 #[test]

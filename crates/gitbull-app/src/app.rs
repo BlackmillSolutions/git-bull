@@ -6,13 +6,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gitbull_core::diff_document::RowKey;
+
+use crate::components::RowsShown;
+use crate::diff_view::GapLabels;
 use gitbull_core::git_setup::GitCheck;
+use gitbull_core::repositories::{Overview, RepositoryList};
 use gitbull_core::search::HashOutcome;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
 use gitbull_core::settings::{
-    Layout, Loaded, Settings, SettingsFile, ThemeSetting, WindowGeometry,
+    ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
+    WindowGeometry,
 };
-use gitbull_core::sidebar_tree::{SidebarRow, SidebarState};
+use gitbull_core::sidebar_tree::{SidebarKey, SidebarRow, SidebarState};
 use gitbull_core::workspace::{Event, Notify, TabId, View, Workspace};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
@@ -22,6 +28,10 @@ use gitbull_git::{Backend, CliBackend};
 use jiff::tz::TimeZone;
 
 use crate::commit_list::{SHORT_HASH, list_row};
+use crate::commit_panel::MessagePart;
+use crate::desktop::Desktop;
+use crate::file_list::FileList;
+use crate::home_view::RowMenu;
 use crate::i18n::Translations;
 use crate::theme::{Appearance, ThemeFollower};
 use crate::virtual_list::ListState;
@@ -80,6 +90,8 @@ pub enum Notice {
     HashAmbiguous(String),
     /// No reference leads to the commit with this hash.
     NotInHistory(String),
+    /// The file manager could not be started, with the error.
+    FileManagerFailed(String),
 }
 
 /// The settings dialog while it is open.
@@ -103,10 +115,49 @@ pub struct Parts {
     pub notify: Notify,
     pub theme: ThemeFollower,
     pub picker: Box<dyn Picker>,
+    /// The time, and the file manager.
+    pub desktop: Box<dyn Desktop>,
     /// A folder named on the command line, opened after the restored tabs.
     pub open_at_start: Option<PathBuf>,
     /// The local time zone, in which dates are shown.
     pub time_zone: TimeZone,
+}
+
+/// What the home tab keeps between frames (spec `repository-manager`).
+pub(crate) struct Home {
+    /// The repositories and worktrees listed, with what is known of them.
+    pub(crate) list: RepositoryList,
+    /// Reads them in the background; none without a usable Git.
+    overview: Option<Overview>,
+    /// The text of the filter field.
+    pub(crate) filter: String,
+    pub(crate) rows: ListState,
+    /// The row whose context menu was opened last.
+    pub(crate) menu: Option<RowMenu>,
+    /// The filter asks for the keyboard focus in the next frame.
+    pub(crate) focus_filter: bool,
+    /// The home tab was shown when the logic last ran, so that it reads
+    /// the repositories again when it becomes shown.
+    shown: bool,
+}
+
+impl Home {
+    fn new(settings: &Settings) -> Home {
+        Home {
+            list: RepositoryList::new(&settings.pinned, &settings.recent, &settings.worktrees),
+            overview: None,
+            filter: String::new(),
+            rows: ListState::default(),
+            menu: None,
+            focus_filter: false,
+            shown: false,
+        }
+    }
+
+    /// Whether the repositories are being read.
+    pub(crate) fn is_reading(&self) -> bool {
+        self.overview.as_ref().is_some_and(Overview::is_reading)
+    }
 }
 
 /// What the UI keeps for one tab while it is open, such as the scroll
@@ -119,6 +170,9 @@ pub(crate) struct TabView {
     /// The rows laid out for `sidebar_key`, kept until it changes.
     pub(crate) sidebar_rows: Vec<SidebarRow>,
     pub(crate) sidebar_key: Option<(u64, SidebarState)>,
+    /// The entry `sidebar_list` shows selected: the tab's selection placed
+    /// last, or the entry the list selected and reported.
+    pub(crate) sidebar_placed: Option<SidebarKey>,
     /// The reference the last navigation went to.
     pub(crate) target: Option<String>,
     /// The selected commit, to select it again in a reloaded history.
@@ -130,27 +184,35 @@ pub(crate) struct TabView {
     /// The dialog that asks before writing the commit-graph is open.
     pub(crate) confirm_graph: bool,
     /// The files of the commit shown in the commit panel.
-    pub(crate) files: ListState,
-    /// The commit whose files `files` lists, to select the first file of
-    /// the next one.
+    pub(crate) commit_files: FileList,
+    /// The commit whose files `commit_files` lists, to select the first
+    /// file of the next one.
     pub(crate) files_for: Option<ObjectId>,
+    /// The parts of the message of the commit shown where it has links,
+    /// found once the message has arrived; none for a message without.
+    pub(crate) message_parts: Option<Vec<MessagePart>>,
+    /// The commit whose message `message_parts` splits.
+    pub(crate) message_for: Option<ObjectId>,
     /// The matches of the Search view.
     pub(crate) search_results: ListState,
     /// A view opened from the context menu of a file, shown instead of the
     /// view of the sidebar until the user goes back.
     pub(crate) overlay: Option<Overlay>,
+    /// The move to another hunk F7 or Shift+F7 asked for in this frame,
+    /// which the diff drawn takes.
+    pub(crate) hunk_move: Option<HunkMove>,
     /// The commits of the file history.
     pub(crate) file_commits: ListState,
     /// The diff of the commit chosen in the file history.
     pub(crate) history_diff: DiffView,
     /// The files of the File status view.
-    pub(crate) status_files: ListState,
+    pub(crate) status_files: FileList,
     /// The version of the status `status_files` shows, to select the file
     /// chosen again where a new status puts it.
     pub(crate) status_version: Option<u64>,
     /// The entry of the File status view whose context menu was opened
     /// last, with the path the last commit has of it.
-    pub(crate) status_menu: Option<(StatusEntry, Option<RepoPath>)>,
+    pub(crate) status_menu: Option<StatusMenu>,
     /// The full name of the branch or remote branch whose context menu was
     /// opened last in the sidebar.
     pub(crate) sidebar_menu: Option<String>,
@@ -174,6 +236,14 @@ impl TabView {
     }
 }
 
+/// What the context menu of the File status view was opened for.
+pub(crate) enum StatusMenu {
+    /// An entry, with the path the last commit has of it.
+    File(StatusEntry, Option<RepoPath>),
+    /// A folder of the tree, by its path.
+    Folder(RepoPath),
+}
+
 /// A view opened from the context menu of a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Overlay {
@@ -190,13 +260,29 @@ pub(crate) enum FileAction {
     Blame(String, RepoPath),
 }
 
+/// A move to the next or the previous hunk of the diff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HunkMove {
+    Next,
+    Previous,
+}
+
 /// What a diff panel keeps for the diff it shows.
 #[derive(Default)]
 pub(crate) struct DiffView {
-    /// The rows selected, from where the selection began to where it ends.
-    pub(crate) selection: Option<(usize, usize)>,
+    /// The lines selected, from where the selection began to where it
+    /// ends, by keys that stay with their lines when lines are revealed.
+    pub(crate) selection: Option<(RowKey, RowKey)>,
     /// The diff the selection belongs to.
     pub(crate) key: Option<DiffKey>,
+    /// What its rows showed in the last frame: where the hunk buttons and
+    /// F7 can move from.
+    pub(crate) shown: RowsShown,
+    /// The names of the rows of hidden lines and their offers, made when
+    /// the gaps change rather than in every frame.
+    pub(crate) gap_labels: Vec<GapLabels>,
+    /// The diff and the build of its rows `gap_labels` were made for.
+    pub(crate) labels_for: Option<(DiffKey, u64)>,
 }
 
 /// Which diff a diff panel shows. The last field counts how often a diff
@@ -216,6 +302,10 @@ pub(crate) enum DiffKey {
 pub struct App {
     settings_file: SettingsFile,
     pub(crate) settings: Settings,
+    /// Whether the window was built with the system's title bar: the
+    /// setting as it was at start-up, since a change takes effect at the
+    /// next start (design, decision 1).
+    system_title_bar: bool,
     /// The settings file was unreadable at start-up; reported once.
     pub(crate) settings_reset: bool,
     pub(crate) texts: Translations,
@@ -225,8 +315,8 @@ pub struct App {
     checker: GitChecker,
     notify: Notify,
     picker: Box<dyn Picker>,
-    /// The repository chooser replaces the main area.
-    pub(crate) choosing: bool,
+    pub(crate) desktop: Box<dyn Desktop>,
+    pub(crate) home: Home,
     pub(crate) notice: Option<Notice>,
     pub(crate) dialog: Option<SettingsDialog>,
     dirty: bool,
@@ -244,13 +334,16 @@ impl App {
             notify,
             theme,
             picker,
+            desktop,
             open_at_start,
             time_zone,
         } = parts;
         let texts = Translations::load(&loaded.settings.language);
         let (git, backend) = checker(loaded.settings.git_path.as_deref());
+        let home = Home::new(&loaded.settings);
         let mut app = App {
             settings_file,
+            system_title_bar: loaded.settings.system_title_bar,
             settings: loaded.settings,
             settings_reset: loaded.reset,
             texts,
@@ -260,7 +353,8 @@ impl App {
             checker,
             notify,
             picker,
-            choosing: false,
+            desktop,
+            home,
             notice: None,
             dialog: None,
             dirty: false,
@@ -315,13 +409,55 @@ impl App {
         self.git = git;
         match backend {
             Some(backend) => self.start_workspace(backend),
-            None => self.workspace = None,
+            None => {
+                self.workspace = None;
+                self.home.overview = None;
+            }
         }
     }
 
     pub fn set_theme(&mut self, theme: ThemeSetting) {
         if self.settings.theme != theme {
             self.settings.theme = theme;
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_colour_vision(&mut self, vision: ColourVision) {
+        if self.settings.colour_vision != vision {
+            self.settings.colour_vision = vision;
+            self.dirty = true;
+        }
+    }
+
+    /// Sets whether to use the system's title bar; the window keeps the
+    /// one it was built with until the next start.
+    pub fn set_system_title_bar(&mut self, system: bool) {
+        if self.settings.system_title_bar != system {
+            self.settings.system_title_bar = system;
+            self.dirty = true;
+        }
+    }
+
+    /// Sets whether the diff shows spaces, tabs and line endings.
+    pub fn set_show_invisibles(&mut self, show: bool) {
+        if self.settings.show_invisibles != show {
+            self.settings.show_invisibles = show;
+            self.dirty = true;
+        }
+    }
+
+    /// Sets whether file lists show a tree of folders.
+    pub fn set_file_tree(&mut self, tree: bool) {
+        if self.settings.file_tree != tree {
+            self.settings.file_tree = tree;
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_interface_size(&mut self, size: InterfaceSize) {
+        if self.settings.interface_size != size {
+            self.settings.interface_size = size;
             self.dirty = true;
         }
     }
@@ -391,6 +527,12 @@ impl App {
     /// the old ones would land on other tabs.
     fn start_workspace(&mut self, backend: Arc<dyn Backend>) {
         self.views.clear();
+        // The home tab reads with the new Git as soon as it is shown.
+        self.home.overview = Some(Overview::new(
+            Arc::clone(&backend),
+            Arc::clone(&self.notify),
+        ));
+        self.home.shown = false;
         let mut workspace = Workspace::new(backend, Arc::clone(&self.notify));
         workspace.restore(&self.settings.tabs, self.settings.active_tab);
         self.workspace = Some(workspace);
@@ -411,7 +553,6 @@ impl App {
     pub fn open(&mut self, path: PathBuf) {
         if let Some(workspace) = &mut self.workspace {
             workspace.open(path);
-            self.choosing = false;
             self.notice = None;
         }
     }
@@ -423,21 +564,89 @@ impl App {
         }
     }
 
-    /// Shows the repository chooser in the main area.
-    pub fn show_chooser(&mut self) {
-        self.choosing = true;
+    /// Shows the home tab; with `focus_filter`, with the keyboard focus in
+    /// its filter.
+    pub fn show_home(&mut self, focus_filter: bool) {
+        if let Some(workspace) = &mut self.workspace {
+            workspace.show_home();
+        }
+        self.home.focus_filter |= focus_filter;
+    }
+
+    /// Whether the home tab is shown.
+    pub fn home_shown(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.home_shown())
+    }
+
+    /// Whether the home tab is reading its repositories.
+    pub fn home_reading(&self) -> bool {
+        self.home.is_reading()
+    }
+
+    /// Reads the repositories of the home tab again.
+    pub(crate) fn read_home(&mut self) {
+        let paths: Vec<PathBuf> = self
+            .home
+            .list
+            .repositories()
+            .iter()
+            .flat_map(|repository| repository.paths.iter().cloned())
+            .collect();
+        if let Some(overview) = &mut self.home.overview {
+            overview.start(paths);
+        }
+    }
+
+    /// Shows `folder` in the file manager; a failure shows a notice.
+    pub(crate) fn reveal(&mut self, folder: &Path) {
+        if let Err(error) = self.desktop.reveal(folder) {
+            self.notice = Some(Notice::FileManagerFailed(error.to_string()));
+        }
+    }
+
+    /// Pins the repository at `path`.
+    pub(crate) fn pin(&mut self, path: PathBuf) {
+        self.settings.pin(path);
+        self.known_changed();
+    }
+
+    pub(crate) fn unpin(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            self.settings.unpin(path);
+        }
+        self.known_changed();
+    }
+
+    /// Removes the repository known by `paths` from the home tab.
+    pub(crate) fn forget(&mut self, paths: &[PathBuf]) {
+        self.settings.forget(paths);
+        self.known_changed();
+    }
+
+    /// The repositories of the settings changed: the list follows, and the
+    /// settings are saved.
+    fn known_changed(&mut self) {
+        self.home.list.set_known(
+            &self.settings.pinned,
+            &self.settings.recent,
+            &self.settings.worktrees,
+        );
+        self.dirty = true;
     }
 
     /// Work between frames: collects finished background work and saves
     /// changed settings.
     pub fn logic(&mut self) {
+        let mut known_changed = false;
         if let Some(workspace) = &mut self.workspace {
             workspace.poll();
             for event in workspace.take_events() {
                 match event {
-                    Event::Opened(root) => {
-                        self.settings.remember(root);
-                        self.dirty = true;
+                    Event::Opened(repository) => {
+                        self.settings.remember(repository);
+                        known_changed = true;
                     }
                     Event::NotARepository(path) => {
                         self.notice = Some(Notice::NotARepository(path));
@@ -450,6 +659,26 @@ impl App {
                 self.settings.active_tab = active;
                 self.dirty = true;
             }
+        }
+        // The home tab reads its repositories when it becomes shown, and
+        // stops when another tab is shown (design, decision 4).
+        let shown = self.home_shown();
+        if shown && !self.home.shown {
+            self.read_home();
+        } else if !shown
+            && self.home.shown
+            && let Some(overview) = &mut self.home.overview
+        {
+            overview.cancel();
+        }
+        self.home.shown = shown;
+        if let Some(overview) = &mut self.home.overview {
+            for change in overview.poll(&mut self.home.list) {
+                known_changed |= change.apply(&mut self.settings);
+            }
+        }
+        if known_changed {
+            self.known_changed();
         }
         if self.dirty && self.last_saved.elapsed() >= SAVE_INTERVAL {
             self.save();
@@ -480,6 +709,11 @@ impl App {
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Whether the window has the system's title bar, as it was built.
+    pub fn system_title_bar(&self) -> bool {
+        self.system_title_bar
     }
 
     pub fn workspace(&self) -> Option<&Workspace> {
@@ -518,16 +752,34 @@ impl App {
         self.show_navigation(outcome, short);
     }
 
-    /// Shows the stash at `index` of the sidebar in the details; no commit
+    /// Selects `key` in the sidebar of the active tab, which shows the
+    /// History view for a reference or a stash, and goes to the commit of
+    /// the reference or shows the stash.
+    pub(crate) fn select_in_sidebar(&mut self, key: SidebarKey) {
+        if let Some(workspace) = self.workspace_mut()
+            && let Some(id) = workspace.active().map(|tab| tab.id())
+        {
+            workspace.select_in_sidebar(id, key.clone());
+        }
+        match key {
+            SidebarKey::Reference(name) => self.navigate(&name),
+            SidebarKey::Stash(commit) => self.show_stash(&commit),
+            _ => {}
+        }
+    }
+
+    /// Shows the stash whose commit is `commit` in the details; no commit
     /// is selected meanwhile.
-    pub(crate) fn show_stash(&mut self, index: usize) {
+    pub(crate) fn show_stash(&mut self, commit: &str) {
+        // The details show in the History view.
+        self.close_overlay();
         let Some((session, view)) = self.active_view() else {
             return;
         };
         let stash = session
             .sidebar()
             .and_then(|sidebar| sidebar.as_ref().ok())
-            .and_then(|sidebar| sidebar.stashes.get(index))
+            .and_then(|sidebar| sidebar.stashes.iter().find(|stash| stash.commit == commit))
             .cloned();
         if let Some(stash) = stash {
             view.commits.select(None);

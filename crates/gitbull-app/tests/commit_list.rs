@@ -3,12 +3,13 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{Event, Id, Key, Modifiers, OutputCommand, PointerButton};
+use eframe::egui::{CursorIcon, Event, Id, Key, Modifiers, OutputCommand, PointerButton, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_app::icons;
 use gitbull_app::ui::{AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST};
-use gitbull_core::settings::Settings;
+use gitbull_core::settings::{Layout, Settings};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
@@ -18,7 +19,11 @@ use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, HistoryFeed, LiveRepo, fake_id};
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
-use support::{Setup, build, path, settle_window, window};
+use support::{
+    BURST, Setup, build, column_header, commit_list_scroll, drag_by, edge_left_of, find_row,
+    long_history, path, settle_window, turn_wheel, wait_for_references, wait_for_row, window,
+    window_at_60_fps,
+};
 
 fn seconds(text: &str) -> i64 {
     text.parse::<Timestamp>().unwrap().as_second()
@@ -124,10 +129,16 @@ fn backend() -> FakeBackend {
 }
 
 fn open(backend: FakeBackend) -> Harness<'static, App> {
+    open_with(backend, Layout::default())
+}
+
+/// Like [`open`], with the dividers and widths of `layout`.
+fn open_with(backend: FakeBackend, layout: Layout) -> Harness<'static, App> {
     let test = build(Setup {
         settings: Settings {
             tabs: vec![root()],
             active_tab: Some(0),
+            layout,
             ..Settings::default()
         },
         backend,
@@ -137,6 +148,7 @@ fn open(backend: FakeBackend) -> Harness<'static, App> {
     let mut harness = window(test.app);
     settle_window(&mut harness);
     wait_for_label(&mut harness, "Fix the parser");
+    wait_for_references(&mut harness);
     harness
 }
 
@@ -207,6 +219,23 @@ fn head_branch_and_remote_branch_are_badges_before_the_description() {
     badge(&harness, "v1.0", first);
 }
 
+#[test]
+fn each_kind_of_reference_shows_its_icon_in_its_badge() {
+    let harness = open(backend());
+    let top = harness.get_by_label("Fix the parser").rect();
+    let bottom = harness.get_by_label("First commit").rect();
+    for (name, icon, row) in [
+        ("HEAD", icons::HEAD, top),
+        ("main", icons::BRANCH, top),
+        ("origin/main", icons::REMOTE_BRANCH, top),
+        ("v1.0", icons::TAG, bottom),
+    ] {
+        let rect = badge(&harness, name, row);
+        let texts = support::texts_in(harness.output(), rect);
+        assert!(texts.iter().any(|text| text == icon), "{name}: {texts:?}");
+    }
+}
+
 /// Where the badge `name` is drawn, if it is.
 fn badge_node(harness: &Harness<'_, App>, name: &str) -> Option<eframe::egui::Rect> {
     harness
@@ -251,7 +280,7 @@ fn badges_that_do_not_fit_are_counted_and_the_description_stays_visible() {
         harness.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    // The count reads "+<number>"; the tab bar has a "+" button too.
+    // The count reads "+<number>".
     let rest: usize = harness
         .get_all_by_role(Role::Label)
         .filter_map(|node| node.accesskit_node().value())
@@ -329,11 +358,31 @@ fn copied(harness: &Harness<'_, App>) -> Option<String> {
         })
 }
 
+/// The entries of the context menu named "Copy full hash": the commit
+/// panel offers a small button of that name too, which is narrower.
+fn copy_full_hash_entries<'a>(
+    harness: &'a Harness<'_, App>,
+) -> impl Iterator<Item = egui_kittest::Node<'a>> {
+    harness
+        .query_all_by_label("Copy full hash")
+        .filter(|node| node.rect().width() > 40.0)
+}
+
+fn copy_full_hash_entry<'a>(harness: &'a Harness<'_, App>) -> egui_kittest::Node<'a> {
+    copy_full_hash_entries(harness)
+        .next()
+        .expect("the entry Copy full hash")
+}
+
+fn has_copy_full_hash_entry(harness: &Harness<'_, App>) -> bool {
+    copy_full_hash_entries(harness).next().is_some()
+}
+
 #[test]
 fn the_context_menu_copies_the_full_hash() {
     let mut harness = open(backend());
     click_row(&mut harness, "Rebased change", PointerButton::Secondary);
-    harness.get_by_label("Copy full hash").click();
+    copy_full_hash_entry(&harness).click();
     harness.step();
     assert_eq!(copied(&harness), Some(fake_id("b").to_string()));
 }
@@ -437,7 +486,7 @@ fn the_menu_copies_the_hash_of_its_commit_after_the_history_was_replaced() {
     harness.key_press(Key::End);
     harness.run();
     click_list_row(&mut harness, "Commit 199", PointerButton::Secondary);
-    assert!(harness.query_by_label("Copy full hash").is_some());
+    assert!(has_copy_full_hash_entry(&harness));
 
     // Another branch makes the history load again; the new one has 50 of
     // its commits so far when it takes the place of the one shown.
@@ -459,7 +508,7 @@ fn the_menu_copies_the_hash_of_its_commit_after_the_history_was_replaced() {
     assert_eq!(loaded(&harness), 50);
     harness.run();
 
-    harness.get_by_label("Copy full hash").click();
+    copy_full_hash_entry(&harness).click();
     harness.step();
     assert_eq!(copied(&harness), Some(fake_id("n199").to_string()));
 }
@@ -469,7 +518,7 @@ fn the_menu_copies_the_hash_of_its_commit_when_uncommitted_changes_appear_above_
     let live = LiveRepo::new();
     let mut harness = open_long(&live);
     click_list_row(&mut harness, "Commit 3", PointerButton::Secondary);
-    assert!(harness.query_by_label("Copy full hash").is_some());
+    assert!(has_copy_full_hash_entry(&harness));
 
     live.set_status(WorkingStatus {
         unstaged: vec![StatusEntry {
@@ -495,7 +544,7 @@ fn the_menu_copies_the_hash_of_its_commit_when_uncommitted_changes_appear_above_
     }
     harness.run();
 
-    harness.get_by_label("Copy full hash").click();
+    copy_full_hash_entry(&harness).click();
     harness.step();
     assert_eq!(copied(&harness), Some(fake_id("n3").to_string()));
 }
@@ -577,6 +626,44 @@ fn tab_moves_focus_through_the_areas() {
 }
 
 #[test]
+fn each_area_shows_the_focus_ring_when_tab_reaches_it() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    for area in [AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST] {
+        press(&mut harness, Modifiers::NONE);
+        assert_eq!(focused(&harness), Some(Id::new(area)));
+        assert!(
+            !support::focus_rings(harness.output()).is_empty(),
+            "no ring in {area}"
+        );
+    }
+}
+
+/// Scenario "No focus ring after a click".
+#[test]
+fn a_click_focuses_the_list_without_a_focus_ring() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    assert_eq!(focused(&harness), Some(Id::new(COMMIT_LIST)));
+    assert_eq!(support::focus_rings(harness.output()), []);
+}
+
+/// Scenario "Focus ring after a key": the ring of an area is thinner than
+/// that of a control.
+#[test]
+fn a_key_after_a_click_shows_a_thin_focus_ring_on_the_list() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Fix the parser", PointerButton::Primary);
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    let widths: Vec<f32> = support::focus_strokes(harness.output())
+        .into_iter()
+        .map(|(_, width)| width)
+        .collect();
+    assert_eq!(widths, [1.0]);
+}
+
+#[test]
 fn shift_tab_moves_focus_back_through_the_areas() {
     let mut harness = open(backend());
     click_row(&mut harness, "Fix the parser", PointerButton::Primary);
@@ -617,6 +704,146 @@ fn dragging_the_edge_of_the_graph_column_changes_and_keeps_its_width() {
     );
 }
 
+/// Where the settings keep the width of a column.
+type SavedWidth = fn(&Layout) -> Option<f32>;
+
+/// The columns whose edges at their left can be dragged, with where their
+/// widths are saved and their widths before any drag.
+const RESIZED: [(&str, SavedWidth, f32); 3] = [
+    ("Date", |layout| layout.date_column, 130.0),
+    ("Author", |layout| layout.author_column, 160.0),
+    ("Commit", |layout| layout.hash_column, 80.0),
+];
+
+/// The left edges of the titles of the columns right of the Graph.
+fn header_lefts(harness: &Harness<'_, App>) -> [f32; 4] {
+    ["Description", "Date", "Author", "Commit"].map(|title| column_header(harness, title).left())
+}
+
+/// The widths of Description, Date and Author, from one title to the next,
+/// and where Commit starts, which the right edge of the list fixes.
+fn header_widths(harness: &Harness<'_, App>) -> [f32; 4] {
+    let [description, date, author, commit] = header_lefts(harness);
+    [date - description, author - date, commit - author, -commit]
+}
+
+#[test]
+fn dragging_an_edge_right_of_the_description_widens_only_the_column_right_of_it() {
+    for (title, saved, width) in RESIZED {
+        let mut harness = open(backend());
+        let before = header_widths(&harness);
+        let edge = edge_left_of(&harness, title);
+        drag_by(&mut harness, edge, vec2(-40.0, 0.0));
+
+        // The column is 40 points wider, the Description 40 narrower, and
+        // every other column as wide as before.
+        let after = header_widths(&harness);
+        for (index, name) in ["Description", "Date", "Author", "Commit"]
+            .iter()
+            .enumerate()
+        {
+            let grew = after[index] - before[index];
+            let expected = match *name {
+                "Description" => -40.0,
+                name if name == title => 40.0,
+                _ => 0.0,
+            };
+            assert!(
+                (grew - expected).abs() < 1.0,
+                "dragging {title}: {name} grew by {grew}"
+            );
+        }
+        let kept = saved(&harness.state().settings().layout).expect("a saved width");
+        assert!((kept - (width + 40.0)).abs() < 1.0, "{title}: {kept}");
+    }
+}
+
+#[test]
+fn a_drag_towards_the_description_leaves_it_its_minimum_width() {
+    // A wide Graph leaves the Description less room than the Date may take.
+    let layout = Layout {
+        graph_column: Some(300.0),
+        ..Layout::default()
+    };
+    let mut harness = open_with(backend(), layout);
+    let edge = edge_left_of(&harness, "Date");
+    // Far to the left, over the sidebar.
+    drag_by(&mut harness, edge, vec2(20.0 - edge.x, 0.0));
+
+    let [description, date, ..] = header_lefts(&harness);
+    assert!(
+        (date - description - 120.0).abs() < 1.0,
+        "{}",
+        date - description
+    );
+}
+
+#[test]
+fn the_pointer_over_an_edge_of_the_header_shows_that_it_can_be_dragged() {
+    let mut harness = open(backend());
+    for title in ["Description", "Date", "Author", "Commit"] {
+        let edge = edge_left_of(&harness, title);
+        harness.hover_at(edge);
+        harness.run();
+        assert_eq!(
+            harness.output().platform_output.cursor_icon,
+            CursorIcon::ResizeHorizontal,
+            "edge left of {title}"
+        );
+    }
+    harness.hover_at(column_header(&harness, "Description").center());
+    harness.run();
+    assert_eq!(
+        harness.output().platform_output.cursor_icon,
+        CursorIcon::Default
+    );
+}
+
+#[test]
+fn widths_saved_in_the_settings_are_used_at_start() {
+    let layout = Layout {
+        graph_column: Some(100.0),
+        date_column: Some(200.0),
+        author_column: Some(100.0),
+        hash_column: Some(120.0),
+        ..Layout::default()
+    };
+    let harness = open_with(backend(), layout);
+    let graph = column_header(&harness, "Graph").left();
+    let [description, date, author, commit] = header_lefts(&harness);
+    assert!(
+        (description - graph - 100.0).abs() < 0.5,
+        "{}",
+        description - graph
+    );
+    assert!((author - date - 200.0).abs() < 0.5, "{}", author - date);
+    assert!((commit - author - 100.0).abs() < 0.5, "{}", commit - author);
+}
+
+#[test]
+fn the_headers_stand_over_the_columns_of_a_list_that_scrolls() {
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: long_history(FakeBackend::default().with_repository(root()), &root(), 200),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    wait_for_row(&mut harness, "Commit 0, ");
+
+    // The rows leave room for the scrollbar; the header does too.
+    let hash = harness.get_by_label(&fake_id("n0").short(7)).rect();
+    let header = column_header(&harness, "Commit");
+    assert!(
+        (hash.left() - header.left()).abs() < 0.5,
+        "{hash:?} {header:?}"
+    );
+}
+
 #[test]
 fn a_low_window_keeps_room_for_the_commit_list() {
     let test = build(Setup {
@@ -653,4 +880,68 @@ fn arrow_keys_move_the_selection_in_the_focused_commit_list() {
             .is_selected(),
         Some(true)
     );
+}
+
+/// The rows of the commit list that are selected.
+fn selected_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::Row)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+#[test]
+fn a_click_or_a_tap_during_a_motion_stops_the_commit_list_on_the_commit_pressed_on() {
+    for tap in [false, true] {
+        let test = build(Setup {
+            settings: Settings {
+                tabs: vec![root()],
+                active_tab: Some(0),
+                ..Settings::default()
+            },
+            backend: long_history(FakeBackend::default().with_repository(root()), &root(), 200),
+            ..Setup::default()
+        });
+        let mut harness = window_at_60_fps(test.app);
+        settle_window(&mut harness);
+        wait_for_row(&mut harness, "Commit 0, ");
+        let at = find_row(&harness, "Commit 3, ")
+            .expect("the row of Commit 3")
+            .center();
+        harness.hover_at(at);
+        harness.step();
+        turn_wheel(&mut harness, -BURST / 40.0, Modifiers::NONE);
+        for _ in 0..5 {
+            harness.step();
+        }
+        let scroll = commit_list_scroll(&harness);
+        let pressed_on = harness
+            .query_all_by_role(Role::Row)
+            .find(|node| node.rect().contains(at))
+            .and_then(|node| node.accesskit_node().label())
+            .expect("a row under the pointer");
+
+        for pressed in [true, false] {
+            let event = Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            // A tap on a touchpad presses and releases in the same frame.
+            if tap {
+                harness.input_mut().events.push(event);
+            } else {
+                harness.event(event);
+                harness.step();
+            }
+        }
+        for _ in 0..30 {
+            harness.step();
+        }
+
+        assert_eq!(commit_list_scroll(&harness), scroll, "tap: {tap}");
+        assert_eq!(selected_rows(&harness), [pressed_on], "tap: {tap}");
+    }
 }

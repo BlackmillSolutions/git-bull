@@ -76,14 +76,26 @@ benchmark prints a table in the form used below.
   and with the current branch only, the time to the whole history, and the
   memory the loaded history takes.
 - `wide_commit` generates a repository whose one commit adds 50,000 files
-  into `target/bench-wide`, selects the commit and scrolls through its file
-  list with Page Down and the mouse wheel in turn.
+  into `target/bench-wide`, selects the commit and measures every frame
+  until its files show, then the time until their lines are counted. It
+  scrolls through the file list with Page Down and the mouse wheel in
+  turn, switches it to the tree and scrolls that too, collapses and
+  expands the first folder in turn, and types a filter character by
+  character and clears it again.
 - `scrolling` opens the repository in the window without a graphics
   adapter and scrolls with Page Down and the mouse wheel in turn, while the
-  history loads and afterwards, then drags the scrollbar from the top to
-  the bottom. It measures the time egui needs per frame; drawing on the
-  graphics adapter is not included, so the frame times of the real window
-  are somewhat higher.
+  history loads and afterwards, then with the mouse wheel alone, then drags
+  the scrollbar from the top to the bottom. Page Down ends each motion of
+  the spring of the list a frame after the wheel started it; the pass with
+  the wheel alone turns it by one notch every fourth frame, so that the
+  frames in which the spring moves the list are measured too. It measures
+  the time egui needs per frame; drawing on the graphics adapter is not
+  included, so the frame times of the real window are somewhat higher.
+- `diff` generates a repository with two commits into `target/bench-diff`
+  once and measures the diff of the second: a Rust file of 10,000 lines in
+  which one word of every 25th line changed, and the whole diff of a file
+  of 100,000 lines that changed wholly. See the section on the comforts
+  of the diff below.
 - `searching` opens the repository in the window, waits until the history
   has loaded and searches by message twice, typing into the search field.
   While each search runs it scrolls with the mouse wheel and selects a
@@ -91,6 +103,13 @@ benchmark prints a table in the form used below.
   the time to the first match and to the end of the search, counted from
   its start after the 300 ms that it waits for the text to settle, and the
   time per frame meanwhile.
+- `home_tab` lists 40 repositories with five further worktrees each in
+  the home tab, from the fake backend rather than Git, so that it needs no
+  repositories on disk. It measures every frame while the worktrees are
+  found and the summaries wait at a gate, then while the summaries
+  arrive, then while the list scrolls with Page Down and the mouse wheel
+  in turn, and while a filter is typed a character a frame and cleared,
+  checking that each frame shows the rows of its filter.
 
 The benchmarks print their numbers first and then fail if a target of
 `commit-history` is missed: a frame of 16.7 ms or more, or 250 MB of memory
@@ -328,3 +347,131 @@ marked. The search itself takes seconds, as ADR 0004 accepts: Git reads the
 message of every commit. The first match comes when the walk reaches it;
 the newest commit with `commit 7` in its message is about 200,000 commits
 down.
+
+## Smooth scrolling (change `smooth-scrolling`, task 1.4)
+
+Measured on 2026-10-01 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, NVMe SSD, Git 2.55.0.windows.5, release build,
+against the generated repository of task 4.21 with its commit-graph file,
+with
+`cargo test --release -p gitbull-app --test benchmarks scrolling -- --ignored --nocapture`.
+
+The lists now follow the mouse wheel and the touchpad with a spring that
+moves them over the frames after the input. The new pass turns the mouse
+wheel alone, one notch of 40 points every fourth frame, so that the commit
+list keeps moving and draws new rows in most frames.
+
+| Scrolling | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| While loading | 11,522 | 0.1 ms | 2.5 ms | 7.3 ms | yes |
+| After loading | 400 | 0.8 ms | 1.0 ms | 3.1 ms | yes |
+| Mouse wheel alone, after loading | 400 | 0.5 ms | 0.6 ms | 1.6 ms | yes |
+| Scrollbar from top to bottom | 200 | 0.4 ms | 0.6 ms | 1.1 ms | yes |
+
+- The frames in which the spring moves the list are cheaper than those of
+  the pass before, in which Page Down selects another commit in every
+  second frame and starts loading its details.
+- The test window steps the time by 0.25 s per frame, of which the spring
+  counts at most 0.1 s, so the list moves further per frame than at 60
+  frames per second and draws more new rows in each.
+
+## The comforts of the diff (change `diff-comforts`, task 6.1)
+
+Measured on 2026-10-02 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, NVMe SSD, Git 2.55.0.windows.5, release build, with
+`cargo test --release -p gitbull-app --test benchmarks diff -- --ignored --nocapture`.
+
+The repository of the benchmark has two commits. The second changes one
+word in every 25th line of `src/totals.rs`, a Rust file of 10,000 lines
+under 512 KiB, which gives 400 hunks with hidden lines between them, and
+every line of `data/large.txt`, a file of 100,000 lines over 512 KiB.
+
+| Diff of 10,000 lines with 400 hunks | Result |
+|---|---|
+| Diff shown after choosing the file | 73 ms |
+| Changed words, after the diff | 1 ms |
+| Text to reveal, after the diff | 88 ms |
+| Syntax colours, after the diff | 2.50 s |
+
+| Whole diff of 100,000 changed lines | Result |
+|---|---|
+| Rows | 200,001 |
+| Whole diff shown after "Load full diff" | 111 ms |
+| Changed words, after "Load full diff" | 205 ms |
+
+| Diff | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Mouse wheel through 400 hunks | 400 | 1.0 ms | 1.2 ms | 1.2 ms | yes |
+| F7 through every hunk | 405 | 0.6 ms | 0.9 ms | 1.0 ms | yes |
+| Shift+F7 back | 405 | 1.2 ms | 1.4 ms | 1.5 ms | yes |
+| Revealing every gap, one in each frame | 400 | 1.0 ms | 1.0 ms | 1.3 ms | yes |
+| Toggling invisible characters while scrolling | 400 | 0.6 ms | 1.9 ms | 3.1 ms | yes |
+| Mouse wheel through 200,000 lines | 400 | 0.6 ms | 0.6 ms | 1.8 ms | yes |
+| Scrollbar from top to bottom, 200,000 lines | 200 | 0.6 ms | 0.8 ms | 0.8 ms | yes |
+
+- Every frame stays far below the target of 16.7 ms. The diff document
+  prepares its rows, the rows of its keys and headers and the width of
+  its line numbers when it changes, so a frame finds what it draws by
+  lookups and binary searches whatever the length of the diff.
+- A first run formatted the names of all rows of hidden lines in every
+  frame, 1,600 texts for 400 gaps: the median frame of the wheel took
+  1.7 ms and of F7 1.9 ms. The names are now made when the gaps change.
+- The syntax colours of the Rust file take 2.5 s in the background, as
+  before this change; the diff, its changed words and the text to reveal
+  do not wait for them.
+
+## The comforts of the commit details (change `commit-details-comforts`, task 5.1)
+
+Measured on 2026-10-02 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, NVMe SSD, Git 2.55.0.windows.5, release build, with
+`cargo test --release -p gitbull-app --test benchmarks wide_commit -- --ignored --nocapture`.
+
+The repository of the benchmark has one commit that adds 50,000 files in
+50 folders of 1,000 files each.
+
+| Commit with 50,000 files | Result |
+|---|---|
+| Files listed after selecting the commit | 0.14 s |
+| Lines of every file counted after selecting the commit | 3.70 s |
+
+| File list | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Until the files show, the frame of their arrival included | 441 | 0.2 ms | 0.5 ms | 5.0 ms | yes |
+| Flat list, Page Down and wheel in turn | 400 | 0.4 ms | 0.8 ms | 1.1 ms | yes |
+| Switching to the tree | 3 | 1.6 ms | 1.6 ms | 1.9 ms | yes |
+| Tree, Page Down and wheel in turn | 400 | 0.4 ms | 0.8 ms | 0.8 ms | yes |
+| Collapsing and expanding the first folder in turn | 200 | 0.8 ms | 1.4 ms | 1.4 ms | yes |
+| Typing `file04999` and clearing it, one character a frame | 18 | 2.2 ms | 3.3 ms | 3.4 ms | yes |
+
+- Every frame stays far below the target of 16.7 ms. The order of the
+  files, flat and as a tree, is prepared on the worker that reads them, so
+  the frame in which they arrive only takes them; the rows are built when
+  the mode, the filter or a folder changes, in two passes over the files,
+  which a change of the filter costs most of.
+- Counting the lines of a commit of 50,000 files makes Git read every
+  blob; it takes 3.7 s in the background after the list has shown and does
+  not delay it.
+
+## The home tab (change `repository-home`, task 5.1)
+
+Measured on 2026-10-03 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, release build, with
+`cargo test --release -p gitbull-app --test benchmarks home_tab -- --ignored --nocapture`.
+The repositories come from the fake backend, so Git and the disk take no
+part; the slowest of three runs is shown.
+
+| Home tab, 40 repositories with 5 worktrees each | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Worktrees found, summaries waiting | 60 | 0.3 ms | 1.1 ms | 10.3 ms | yes |
+| Summaries arriving | 5 | 5.9 ms | 6.8 ms | 8.2 ms | yes |
+| Page Down and wheel in turn | 400 | 0.2 ms | 0.9 ms | 1.9 ms | yes |
+| Typing `task-3` and clearing it, one character a frame | 7 | 0.4 ms | 1.1 ms | 1.1 ms | yes |
+
+- Every frame stays below the target of 16.7 ms. The slowest frame while
+  the worktrees are found is the first one, which lays out the window and
+  its fonts.
+- The 240 summaries arrive in a few frames, each of which applies every
+  report that came; a report of worktrees builds the rows again, one of a
+  summary only while a filter may look at the branch.
+- A change of the filter builds the rows in the frame of the change, which
+  shows them.
