@@ -25,6 +25,7 @@ pub mod history;
 pub mod invoke;
 pub mod locate;
 pub mod log;
+pub mod merged;
 pub mod object_id;
 pub mod path;
 pub mod process;

@@ -12,12 +12,14 @@ use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::{FileChange, FileLines};
 use gitbull_git::commit_graph::GraphProgress;
+use gitbull_git::compare::{BaseComparison, CompareRequest, Counts};
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
 use gitbull_git::facts::RepositoryFacts;
 use gitbull_git::file_history::FileCommit;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
+use gitbull_git::merged::{Prediction, Unpredicted};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
 use gitbull_git::refs::Reference;
@@ -107,6 +109,11 @@ pub struct FakeBackend {
     facts: Vec<(PathBuf, RepositoryFacts)>,
     /// The base Git detects for a tip, by a folder of its repository.
     detected: Vec<(PathBuf, String, String)>,
+    /// The comparison of a tip with its base, by a folder of its
+    /// repository.
+    comparisons: Mutex<Vec<(PathBuf, String, BaseComparison)>>,
+    /// Holds every comparison.
+    compare_gate: Option<Gate>,
     probe: Probe,
 }
 
@@ -153,6 +160,33 @@ impl FakeBackend {
     ) -> FakeBackend {
         self.detected
             .push((root.into(), tip.to_owned(), base.to_owned()));
+        self
+    }
+
+    /// Compares `tip` with its base as `comparison` says, in the
+    /// repository at `root`; without it, a tip is level with its base.
+    pub fn with_comparison(
+        self,
+        root: impl Into<PathBuf>,
+        tip: &str,
+        comparison: BaseComparison,
+    ) -> FakeBackend {
+        self.set_comparison(root, tip, comparison);
+        self
+    }
+
+    /// Changes the comparison of `tip` while the backend is in use, as when
+    /// a branch moves.
+    pub fn set_comparison(&self, root: impl Into<PathBuf>, tip: &str, comparison: BaseComparison) {
+        let root = root.into();
+        let mut comparisons = self.comparisons.lock().unwrap_or_else(|e| e.into_inner());
+        comparisons.retain(|(known, known_tip, _)| !(*known == root && known_tip == tip));
+        comparisons.push((root, tip.to_owned(), comparison));
+    }
+
+    /// Holds every comparison until `gate` opens.
+    pub fn with_compare_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.compare_gate = Some(gate.clone());
         self
     }
 
@@ -1030,6 +1064,44 @@ impl Backend for FakeBackend {
             .iter()
             .find(|(root, detected_tip, _)| repo.starts_with(root) && detected_tip == tip)
             .map(|(_, _, base)| base.clone()))
+    }
+
+    fn compare(
+        &self,
+        repo: &Path,
+        _facts: &RepositoryFacts,
+        request: &CompareRequest,
+        cancel: &CancelToken,
+    ) -> Result<BaseComparison, Error> {
+        self.probe.record("compare", repo);
+        if let Some(gate) = &self.compare_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let comparisons = self.comparisons.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, comparison)) = comparisons
+            .iter()
+            .find(|(root, tip, _)| repo.starts_with(root) && *tip == request.tip)
+        {
+            return Ok(comparison.clone());
+        }
+        Ok(BaseComparison {
+            counted: request
+                .local
+                .clone()
+                .or_else(|| request.remote.clone())
+                .unwrap_or_default(),
+            counts: Counts::default(),
+            lines: None,
+            merged: None,
+            prediction: Prediction::Unknown(Unpredicted::NotAsked),
+        })
     }
 
     fn summary(

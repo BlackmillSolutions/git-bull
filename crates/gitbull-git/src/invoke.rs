@@ -237,6 +237,34 @@ impl Git {
         finish(process, cancel)
     }
 
+    /// Like [`Git::run_cancellable`], with `input` on the standard input of
+    /// Git, written on a thread of its own so that neither pipe can block
+    /// the other.
+    pub fn run_with_input<I, S>(
+        &self,
+        repo: &Path,
+        overrides: &[ConfigOverride],
+        args: I,
+        input: Vec<u8>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut process = self.spawn(repo, overrides, args, true)?;
+        let mut stdin = process.take_stdin().expect("standard input is piped");
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            // Git may stop reading early, as when cancelled; the result
+            // tells why.
+            let _ = stdin.write_all(&input);
+        });
+        let result = finish(process, cancel);
+        let _ = writer.join();
+        result
+    }
+
     /// Like [`Git::run_cancellable`], for a command that writes objects,
     /// such as `merge-tree --write-tree`: Git reads every object of the
     /// repository, whose object folder is `objects`, but writes new ones

@@ -5,7 +5,7 @@
 //! `gitbull-testkit`. Each read operation joins the trait when git-bull
 //! first needs it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::bases;
 use crate::blame::{self, BlameEntry, BlameStream};
@@ -13,6 +13,7 @@ use crate::blob;
 use crate::cancel::CancelToken;
 use crate::changes::{self, FileChange, FileLines};
 use crate::commit_graph::{self, GraphProgress};
+use crate::compare::{self, BaseComparison, CompareRequest, Setting};
 use crate::content::{Content, ContentReader};
 use crate::diff::{self, FileDiff};
 use crate::error::Error;
@@ -21,6 +22,7 @@ use crate::file_history::{self, FileCommit, FileHistoryStream};
 use crate::head::{self, Head};
 use crate::history::{self, CommitLine, HistoryStream, Revisions};
 use crate::invoke::{ConfigOverride, Git};
+use crate::merged::MergeCache;
 use crate::object_id::ObjectId;
 use crate::path::RepoPath;
 use crate::refs::{self, Reference};
@@ -187,6 +189,16 @@ pub trait Backend: Send + Sync {
         cancel: &CancelToken,
     ) -> Result<Option<String>, Error>;
 
+    /// Compares a branch or a detached HEAD with its base, in `repo`, where
+    /// `facts` were read (design of `worktree-cockpit`, decisions 4 and 5).
+    fn compare(
+        &self,
+        repo: &Path,
+        facts: &RepositoryFacts,
+        request: &CompareRequest,
+        cancel: &CancelToken,
+    ) -> Result<BaseComparison, Error>;
+
     /// The working copy at `worktree` in short, for the home tab, with the
     /// `overrides` of the facts of its repository, or, without them, with
     /// those of its own configuration.
@@ -273,6 +285,10 @@ pub trait Backend: Send + Sync {
 pub struct CliBackend {
     git: Git,
     capabilities: Capabilities,
+    /// Patch ids and outcomes of `merge-tree`, kept across rounds.
+    merges: MergeCache,
+    /// Where quarantines of objects are made.
+    temp_dir: PathBuf,
 }
 
 impl CliBackend {
@@ -281,7 +297,16 @@ impl CliBackend {
         CliBackend {
             git,
             capabilities: Capabilities::of(version),
+            merges: MergeCache::default(),
+            temp_dir: std::env::temp_dir(),
         }
+    }
+
+    /// Makes quarantines of objects in `folder` instead of the system's
+    /// temporary folder.
+    pub fn with_temp_dir(mut self, folder: PathBuf) -> CliBackend {
+        self.temp_dir = folder;
+        self
     }
 }
 
@@ -420,6 +445,21 @@ impl Backend for CliBackend {
             return Ok(None);
         }
         bases::detect_base(&self.git, repo, tip, integration, cancel)
+    }
+
+    fn compare(
+        &self,
+        repo: &Path,
+        facts: &RepositoryFacts,
+        request: &CompareRequest,
+        cancel: &CancelToken,
+    ) -> Result<BaseComparison, Error> {
+        let setting = Setting {
+            merge_tree: self.capabilities.merge_tree,
+            temp_dir: &self.temp_dir,
+            cache: &self.merges,
+        };
+        compare::compare(&self.git, repo, facts, request, &setting, cancel)
     }
 
     fn summary(
