@@ -38,6 +38,41 @@ impl GitVersion {
     }
 }
 
+/// What a Git newer than [`GitVersion::MINIMUM`] can do that the home tab
+/// uses; without it, each use falls back to something older Git can do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capabilities {
+    /// `git merge-tree --write-tree`, Git 2.38.
+    pub merge_tree: bool,
+    /// `%(is-base:…)` of `for-each-ref`, Git 2.47, which also has its
+    /// `--exclude` of 2.42.
+    pub is_base: bool,
+}
+
+impl Capabilities {
+    /// Everything, as with the newest Git.
+    pub const ALL: Capabilities = Capabilities {
+        merge_tree: true,
+        is_base: true,
+    };
+
+    /// What `version` can do.
+    pub fn of(version: GitVersion) -> Capabilities {
+        let at_least = |minor| {
+            version
+                >= GitVersion {
+                    major: 2,
+                    minor,
+                    patch: 0,
+                }
+        };
+        Capabilities {
+            merge_tree: at_least(38),
+            is_base: at_least(47),
+        }
+    }
+}
+
 impl fmt::Display for GitVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
@@ -110,5 +145,27 @@ mod tests {
     #[test]
     fn newer_major_version_is_supported() {
         assert!(version(3, 0, 0).is_supported());
+    }
+
+    #[test]
+    fn the_oldest_git_has_no_newer_capability() {
+        let capabilities = Capabilities::of(version(2, 34, 1));
+        assert!(!capabilities.merge_tree);
+        assert!(!capabilities.is_base);
+    }
+
+    #[test]
+    fn merge_tree_arrives_with_2_38() {
+        assert!(!Capabilities::of(version(2, 37, 9)).merge_tree);
+        let capabilities = Capabilities::of(version(2, 38, 0));
+        assert!(capabilities.merge_tree);
+        assert!(!capabilities.is_base);
+    }
+
+    #[test]
+    fn is_base_arrives_with_2_47() {
+        assert!(!Capabilities::of(version(2, 46, 2)).is_base);
+        assert_eq!(Capabilities::of(version(2, 47, 0)), Capabilities::ALL);
+        assert_eq!(Capabilities::of(version(3, 0, 0)), Capabilities::ALL);
     }
 }

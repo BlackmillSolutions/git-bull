@@ -15,10 +15,11 @@ use crate::commit_graph::{self, GraphProgress};
 use crate::content::{Content, ContentReader};
 use crate::diff::{self, FileDiff};
 use crate::error::Error;
+use crate::facts::{self, RepositoryFacts};
 use crate::file_history::{self, FileCommit, FileHistoryStream};
 use crate::head::{self, Head};
 use crate::history::{self, CommitLine, HistoryStream, Revisions};
-use crate::invoke::Git;
+use crate::invoke::{ConfigOverride, Git};
 use crate::object_id::ObjectId;
 use crate::path::RepoPath;
 use crate::refs::{self, Reference};
@@ -28,6 +29,7 @@ use crate::shallow;
 use crate::stashes::{self, Stash, Submodule};
 use crate::status::{self, Group, StatusEntry, WorkingStatus};
 use crate::summary::{self, Summary};
+use crate::version::{Capabilities, GitVersion};
 use crate::working_copy;
 use crate::worktrees::{self, Worktree};
 
@@ -67,6 +69,9 @@ pub trait ContentSource: Send {
 
 /// Every read operation git-bull performs on a repository.
 pub trait Backend: Send + Sync {
+    /// What the Git behind it can do beyond the oldest supported Git.
+    fn capabilities(&self) -> Capabilities;
+
     /// Checks the repository that contains `path`.
     fn inspect(&self, path: &Path) -> Result<RepositoryInfo, Error>;
 
@@ -165,8 +170,19 @@ pub trait Backend: Send + Sync {
     /// [`Error::NotARepository`].
     fn worktrees(&self, repo: &Path, cancel: &CancelToken) -> Result<Vec<Worktree>, Error>;
 
-    /// The working copy at `worktree` in short, for the home tab.
-    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error>;
+    /// What the home tab reads of the repository that contains `repo` once
+    /// for all of its worktrees.
+    fn facts(&self, repo: &Path, cancel: &CancelToken) -> Result<RepositoryFacts, Error>;
+
+    /// The working copy at `worktree` in short, for the home tab, with the
+    /// `overrides` of the facts of its repository, or, without them, with
+    /// those of its own configuration.
+    fn summary(
+        &self,
+        worktree: &Path,
+        overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Summary, Error>;
 
     /// The commit whose hash starts with `text`.
     fn find_hash(&self, repo: &Path, text: &str, cancel: &CancelToken) -> Result<HashMatch, Error>;
@@ -243,15 +259,24 @@ pub trait Backend: Send + Sync {
 /// Reads repositories through the Git command line.
 pub struct CliBackend {
     git: Git,
+    capabilities: Capabilities,
 }
 
 impl CliBackend {
-    pub fn new(git: Git) -> CliBackend {
-        CliBackend { git }
+    /// Reads with `git`, whose version the start-up check found.
+    pub fn new(git: Git, version: GitVersion) -> CliBackend {
+        CliBackend {
+            git,
+            capabilities: Capabilities::of(version),
+        }
     }
 }
 
 impl Backend for CliBackend {
+    fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
     fn inspect(&self, path: &Path) -> Result<RepositoryInfo, Error> {
         repository::inspect(&self.git, path)
     }
@@ -367,8 +392,17 @@ impl Backend for CliBackend {
         worktrees::worktrees(&self.git, repo, cancel)
     }
 
-    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error> {
-        summary::summary(&self.git, worktree, cancel)
+    fn facts(&self, repo: &Path, cancel: &CancelToken) -> Result<RepositoryFacts, Error> {
+        facts::facts(&self.git, repo, cancel)
+    }
+
+    fn summary(
+        &self,
+        worktree: &Path,
+        overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Summary, Error> {
+        summary::summary(&self.git, worktree, overrides, cancel)
     }
 
     fn find_hash(&self, repo: &Path, text: &str, cancel: &CancelToken) -> Result<HashMatch, Error> {

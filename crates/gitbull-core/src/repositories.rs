@@ -13,10 +13,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitbull_git::Backend;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::head::Head;
 use gitbull_git::summary::{PATH_LIMIT, Summary};
+use gitbull_git::{Backend, ConfigOverride};
 
 use crate::settings::KnownWorktrees;
 use crate::workspace::Notify;
@@ -499,8 +499,9 @@ const WORKERS: usize = 4;
 enum Job {
     /// Find the repository and the worktrees of a path of the settings.
     Worktrees(PathBuf),
-    /// Summarise the working copy at the path.
-    Summary(PathBuf),
+    /// Summarise the working copy at the path, with the overrides of the
+    /// facts of its repository, or with those of its own configuration.
+    Summary(PathBuf, Option<Arc<[ConfigOverride]>>),
 }
 
 /// What a job found.
@@ -730,11 +731,24 @@ fn run(backend: &dyn Backend, cancel: &CancelToken, job: Job) -> (Option<Report>
                     .filter(|worktree| !worktree.prunable)
                     .map(|worktree| normalise(&worktree.path))
                     .collect();
+                // The configuration is the repository's, read once for all
+                // of its working copies, unless each worktree may have
+                // configuration of its own.
+                let facts = backend.facts(&main.path, cancel)?;
+                let overrides: Arc<[ConfigOverride]> = facts.overrides.into();
+                let shared = (!facts.worktree_config).then_some(&overrides);
                 let mut jobs = Vec::new();
                 if !main.bare {
-                    jobs.push(Job::Summary(repository.clone()));
+                    jobs.push(Job::Summary(
+                        repository.clone(),
+                        Some(Arc::clone(&overrides)),
+                    ));
                 }
-                jobs.extend(worktrees.iter().cloned().map(Job::Summary));
+                jobs.extend(
+                    worktrees
+                        .iter()
+                        .map(|worktree| Job::Summary(worktree.clone(), shared.cloned())),
+                );
                 let found = Found::Repository {
                     path: repository,
                     bare: main.bare,
@@ -767,9 +781,9 @@ fn run(backend: &dyn Backend, cancel: &CancelToken, job: Job) -> (Option<Report>
                 Vec::new(),
             )
         }
-        Job::Summary(worktree) => {
+        Job::Summary(worktree, overrides) => {
             let result = caught(&mut || {
-                let summary = backend.summary(&worktree, cancel)?;
+                let summary = backend.summary(&worktree, overrides.as_deref(), cancel)?;
                 let last_active = last_active(&worktree, &summary);
                 Ok((
                     Some(Report::Status {

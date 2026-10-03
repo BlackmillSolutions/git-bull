@@ -13,6 +13,7 @@ pub use fake::{FakeBackend, Gate, HistoryFeed, LiveRepo, Probe, commit_line, fak
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use gitbull_git::version::GitVersion;
 use tempfile::TempDir;
 
 /// The author and committer of every commit made through [`TestRepo`].
@@ -22,6 +23,15 @@ pub const AUTHOR_EMAIL: &str = "ada@example.com";
 /// 2026-01-01T12:00:00Z, the date of the first commit; each further commit
 /// is one minute later.
 const FIRST_COMMIT_EPOCH: u64 = 1_767_268_800;
+
+/// The version of the Git that the tests run, from the search path.
+pub fn git_version() -> GitVersion {
+    let output = Command::new("git")
+        .arg("--version")
+        .output()
+        .expect("Git runs");
+    GitVersion::parse(&String::from_utf8_lossy(&output.stdout)).expect("a Git version")
+}
 
 /// A Git repository in a temporary folder, deleted when dropped.
 pub struct TestRepo {

@@ -145,6 +145,13 @@ while nobody looks; the timer costs one `git status` per worktree every
 `Backend::summary` takes the facts' overrides instead of running `git
 config --list` itself, which removes one Git process per worktree (review
 of PR #30); decision 1 orders the jobs so that the overrides exist first.
+The facts are read in the main worktree. When `extensions.worktreeConfig`
+lets each worktree have configuration of its own, a filter that only a
+linked worktree defines would not be neutralised by them (found while
+implementing): the facts say so, the summary of a linked worktree then
+reads its own configuration as before, and every command that reads the
+repository as a whole, such as `merge-tree`, runs in the folder the facts
+were read in.
 
 Alternative: keeping `summary` self-contained. Rejected: the
 configuration is the repository's, not the worktree's, and the timer

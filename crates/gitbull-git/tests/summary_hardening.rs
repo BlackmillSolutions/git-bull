@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use gitbull_git::Git;
 use gitbull_git::cancel::CancelToken;
+use gitbull_git::facts::facts;
 use gitbull_git::locate::{Os, SystemProbe, locate_git};
 use gitbull_git::summary::summary;
 use gitbull_git::worktrees::worktrees;
@@ -20,12 +21,18 @@ fn git() -> Git {
     Git::new(executable, hooks)
 }
 
-/// Reads the worktrees of the repository at `repo` and the summary of each,
-/// as a round of the home tab does.
+/// Reads the worktrees of the repository at `repo`, the facts of the
+/// repository and the summary of each worktree, as a round of the home tab
+/// does: with the overrides of the facts, unless each worktree may have
+/// configuration of its own.
 fn read_as_the_home_tab(repo: &Path) {
     let (git, cancel) = (git(), CancelToken::new());
-    for worktree in worktrees(&git, repo, &cancel).expect("the worktrees are read") {
-        summary(&git, &worktree.path, &cancel).expect("the summary is read");
+    let listed = worktrees(&git, repo, &cancel).expect("the worktrees are read");
+    let facts = facts(&git, &listed[0].path, &cancel).expect("the facts are read");
+    for (index, worktree) in listed.iter().enumerate() {
+        let shared = index == 0 || !facts.worktree_config;
+        let overrides = shared.then_some(&facts.overrides[..]);
+        summary(&git, &worktree.path, overrides, &cancel).expect("the summary is read");
     }
 }
 
@@ -124,4 +131,33 @@ fn the_index_files_stay_byte_for_byte_unchanged() {
     // Plain Git refreshes the index of a touched file.
     plain_git(&linked, &["status"]);
     assert_ne!(std::fs::read(&linked_index).unwrap(), before.1);
+}
+
+#[test]
+fn a_filter_in_the_configuration_of_a_worktree_is_not_executed() {
+    let (repo, _outside, linked) = with_worktree();
+    let marker = Marker::new();
+    repo.config("extensions.worktreeConfig", "true");
+    plain_git(
+        &linked,
+        &[
+            "config",
+            "--worktree",
+            "filter.own.clean",
+            &marker.filter_command("worktree-clean"),
+        ],
+    );
+    std::fs::write(
+        linked.join(".gitattributes"),
+        "*.txt filter=own
+",
+    )
+    .unwrap();
+    touch(&linked.join("file.txt"));
+
+    read_as_the_home_tab(repo.path());
+    assert!(marker.labels().is_empty(), "fired: {:?}", marker.labels());
+
+    plain_git(&linked, &["status"]);
+    assert!(marker.labels().contains(&"worktree-clean".to_owned()));
 }

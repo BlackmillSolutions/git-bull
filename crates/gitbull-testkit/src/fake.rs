@@ -14,6 +14,7 @@ use gitbull_git::changes::{FileChange, FileLines};
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
+use gitbull_git::facts::RepositoryFacts;
 use gitbull_git::file_history::FileCommit;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
@@ -25,8 +26,9 @@ use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
 use gitbull_git::summary::Summary;
+use gitbull_git::version::Capabilities;
 use gitbull_git::worktrees::Worktree;
-use gitbull_git::{Backend, Error};
+use gitbull_git::{Backend, ConfigOverride, Error};
 
 /// An object id made from a short name, such as the commits of a test.
 pub fn fake_id(name: &str) -> ObjectId {
@@ -99,6 +101,10 @@ pub struct FakeBackend {
     /// By revision and path.
     file_contents: HashMap<(String, String), Vec<u8>>,
     inspect_delay: Option<std::time::Duration>,
+    /// What the Git it stands for can do; everything when not set.
+    capabilities: Option<Capabilities>,
+    /// The facts of a repository, by a folder inside it.
+    facts: Vec<(PathBuf, RepositoryFacts)>,
     probe: Probe,
 }
 
@@ -128,6 +134,19 @@ enum History {
 }
 
 impl FakeBackend {
+    /// The facts of the repository at `root`; without them a repository
+    /// has no remotes, no branches and no configuration to neutralise.
+    pub fn with_facts(mut self, root: impl Into<PathBuf>, facts: RepositoryFacts) -> FakeBackend {
+        self.facts.push((root.into(), facts));
+        self
+    }
+
+    /// Answers as a Git that can do only `capabilities`.
+    pub fn with_capabilities(mut self, capabilities: Capabilities) -> FakeBackend {
+        self.capabilities = Some(capabilities);
+        self
+    }
+
     /// Adds a repository with a working tree at `work_tree`.
     pub fn with_repository(mut self, work_tree: impl Into<PathBuf>) -> FakeBackend {
         let work_tree = work_tree.into();
@@ -574,6 +593,10 @@ impl FakeBackend {
 }
 
 impl Backend for FakeBackend {
+    fn capabilities(&self) -> Capabilities {
+        self.capabilities.unwrap_or(Capabilities::ALL)
+    }
+
     fn head(&self, repo: &Path) -> Result<Head, Error> {
         self.gone(repo)?;
         if let Some(head) = self.live_of(repo).and_then(|live| live.head.clone()) {
@@ -953,7 +976,32 @@ impl Backend for FakeBackend {
         }])
     }
 
-    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error> {
+    fn facts(&self, repo: &Path, cancel: &CancelToken) -> Result<RepositoryFacts, Error> {
+        self.probe.record("facts", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.gone(repo)?;
+        if let Some((_, facts)) = self.facts.iter().find(|(root, _)| repo.starts_with(root)) {
+            return Ok(facts.clone());
+        }
+        Ok(RepositoryFacts {
+            overrides: Vec::new(),
+            merge_driver: false,
+            worktree_config: false,
+            remotes: Vec::new(),
+            common_dir: repo.join(".git"),
+            branches: Vec::new(),
+            origin_head: None,
+        })
+    }
+
+    fn summary(
+        &self,
+        worktree: &Path,
+        _overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Summary, Error> {
         self.probe.record("summary", worktree);
         let _running = self.probe.summary_started();
         if let Some(gate) = &self.summary_gate {
@@ -1686,7 +1734,7 @@ mod tests {
                     ..WorkingStatus::default()
                 },
             );
-        let summary = backend.summary(&root, &CancelToken::new()).unwrap();
+        let summary = backend.summary(&root, None, &CancelToken::new()).unwrap();
         assert_eq!(summary.head, Head::Branch("dev".to_owned()));
         assert_eq!(summary.changed, 1);
     }
@@ -1704,7 +1752,7 @@ mod tests {
         let threads: Vec<_> = (0..3)
             .map(|_| {
                 let (backend, root) = (Arc::clone(&backend), root.clone());
-                std::thread::spawn(move || backend.summary(&root, &CancelToken::new()))
+                std::thread::spawn(move || backend.summary(&root, None, &CancelToken::new()))
             })
             .collect();
         while probe.calls(&root).len() < 3 {

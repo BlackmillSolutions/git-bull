@@ -14,6 +14,7 @@ pub mod config;
 pub mod content;
 pub mod diff;
 pub mod error;
+pub mod facts;
 pub mod file_history;
 pub mod filters;
 pub mod flags;

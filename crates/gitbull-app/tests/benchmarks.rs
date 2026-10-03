@@ -53,7 +53,10 @@ fn hooks() -> PathBuf {
 
 fn backend() -> Arc<dyn Backend> {
     let executable = locate_git(None, Os::current(), &SystemProbe).expect("Git is installed");
-    Arc::new(CliBackend::new(Git::new(executable, hooks())))
+    Arc::new(CliBackend::new(
+        Git::new(executable, hooks()),
+        gitbull_testkit::git_version(),
+    ))
 }
 
 fn memory() -> u64 {

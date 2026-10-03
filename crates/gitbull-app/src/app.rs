@@ -543,7 +543,7 @@ impl App {
         match check {
             GitCheck::Ready { git, version, .. } => (
                 GitStatus::Ready { version },
-                Some(Arc::new(CliBackend::new(git))),
+                Some(Arc::new(CliBackend::new(git, version))),
             ),
             problem => (GitStatus::Problem(problem), None),
         }
