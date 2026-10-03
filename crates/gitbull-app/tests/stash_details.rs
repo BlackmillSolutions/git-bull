@@ -309,10 +309,15 @@ fn a_stash_chosen_while_the_file_history_is_shown_closes_it() {
         });
     }
     harness.run();
+    // The file history loads in the background and the window draws again
+    // until it has, so the steps are counted here rather than run.
     harness.get_by_label("File history").click();
-    harness.run();
+    harness.step();
     wait_until(&mut harness, |h| {
         labels(h, Role::Button).iter().any(|label| label == "Back")
+            && h.query_all_by_value("No commit changed this file.")
+                .next()
+                .is_some()
     });
 
     let at = labelled(&harness, Role::TreeItem, "On main: try the layout").unwrap();
