@@ -88,7 +88,7 @@ pub struct FakeBackend {
     failing_statuses: Vec<PathBuf>,
     status_gates: Vec<(PathBuf, Gate)>,
     /// The worktrees of a repository, the main one first.
-    worktrees: Vec<Vec<Worktree>>,
+    worktrees: Mutex<Vec<Vec<Worktree>>>,
     summaries: Vec<(PathBuf, Summary)>,
     /// Holds every summary.
     summary_gate: Option<Gate>,
@@ -109,7 +109,7 @@ pub struct FakeBackend {
     /// What the Git it stands for can do; everything when not set.
     capabilities: Option<Capabilities>,
     /// The facts of a repository, by a folder inside it.
-    facts: Vec<(PathBuf, RepositoryFacts)>,
+    facts: Mutex<Vec<(PathBuf, RepositoryFacts)>>,
     /// The base Git detects for a tip, by a folder of its repository.
     detected: Vec<(PathBuf, String, String)>,
     /// The comparison of a tip with its base, by a folder of its
@@ -156,9 +156,18 @@ enum History {
 impl FakeBackend {
     /// The facts of the repository at `root`; without them a repository
     /// has no remotes, no branches and no configuration to neutralise.
-    pub fn with_facts(mut self, root: impl Into<PathBuf>, facts: RepositoryFacts) -> FakeBackend {
-        self.facts.push((root.into(), facts));
+    pub fn with_facts(self, root: impl Into<PathBuf>, facts: RepositoryFacts) -> FakeBackend {
+        self.set_facts(root, facts);
         self
+    }
+
+    /// Changes the facts of the repository at `root` while the backend is
+    /// in use, as when a branch moves.
+    pub fn set_facts(&self, root: impl Into<PathBuf>, facts: RepositoryFacts) {
+        let root = root.into();
+        let mut known = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|(path, _)| *path != root);
+        known.push((root, facts));
     }
 
     /// Lets Git detect `base` as the branch `tip` started from, both by
@@ -314,9 +323,20 @@ impl FakeBackend {
     /// The repository has `worktrees`, its main worktree first; asked from
     /// any of them, the backend lists them all, as Git does. Without this, a
     /// repository has its main worktree alone.
-    pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> FakeBackend {
-        self.worktrees.push(worktrees);
+    pub fn with_worktrees(self, worktrees: Vec<Worktree>) -> FakeBackend {
+        self.set_worktrees(worktrees);
         self
+    }
+
+    /// Changes the worktrees of the repository whose main worktree comes
+    /// first in `worktrees` while the backend is in use, as when a commit
+    /// moves the HEAD of one.
+    pub fn set_worktrees(&self, worktrees: Vec<Worktree>) {
+        let mut known = self.worktrees.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|listed| {
+            listed.first().map(|main| &main.path) != worktrees.first().map(|main| &main.path)
+        });
+        known.push(worktrees);
     }
 
     /// The summary of the working copy at `worktree`. Without it, a working
@@ -1046,7 +1066,12 @@ impl Backend for FakeBackend {
             return Err(Error::Cancelled);
         }
         self.gone(repo)?;
-        if let Some(listed) = self.worktrees.iter().find(|listed| {
+        let known = self
+            .worktrees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(listed) = known.iter().find(|listed| {
             listed
                 .iter()
                 .any(|worktree| repo.starts_with(&worktree.path))
@@ -1085,7 +1110,8 @@ impl Backend for FakeBackend {
             return Err(Error::Cancelled);
         }
         self.gone(repo)?;
-        if let Some((_, facts)) = self.facts.iter().find(|(root, _)| repo.starts_with(root)) {
+        let known = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, facts)) = known.iter().find(|(root, _)| repo.starts_with(root)) {
             return Ok(facts.clone());
         }
         Ok(RepositoryFacts {
@@ -1251,8 +1277,12 @@ impl Backend for FakeBackend {
         if let Some((_, summary)) = self.summaries.iter().find(|(path, _)| path == worktree) {
             return Ok(summary.clone());
         }
-        let listed = self
+        let known = self
             .worktrees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let listed = known
             .iter()
             .flatten()
             .find(|listed| listed.path == worktree);
@@ -1845,6 +1875,12 @@ impl Probe {
         let now = self.inner.summaries.fetch_add(1, Ordering::SeqCst) + 1;
         self.inner.most_summaries.fetch_max(now, Ordering::SeqCst);
         Running(&self.inner.summaries)
+    }
+
+    /// Every operation called, with the folder it was called for, in
+    /// order.
+    pub fn sequence(&self) -> Vec<(String, PathBuf)> {
+        self.lock().calls.clone()
     }
 
     /// The operations called on `repo`, in order, such as `"history"`.

@@ -1719,4 +1719,395 @@ mod tests {
         let gone = dir.path().join("gone");
         assert_eq!(normalise(&gone), gone);
     }
+
+    // The cockpit: order, the row "Done", states, overlaps and what is new.
+
+    use crate::base::{Base, Found as BaseFound};
+    use crate::comparison::{Against, Tips};
+    use gitbull_git::changes::{FileLines, LineCount};
+    use gitbull_git::compare::BranchLines;
+    use gitbull_git::facts::Branch;
+    use gitbull_git::merged::{MergedBy, Prediction, Unpredicted};
+    use gitbull_git::path::RepoPath;
+
+    const NOW: i64 = 1_800_000_000;
+    const MINUTE: i64 = 60;
+
+    /// A status read at `committed`, with `paths` uncommitted, the newest
+    /// of them changed at `changed`.
+    fn status_at(committed: i64, paths: &[&str], changed: Option<i64>) -> Status {
+        Status::Read {
+            summary: Summary {
+                head: Head::Branch("feature".to_owned()),
+                commit: Some("head".to_owned()),
+                committed: Some(committed),
+                changed: paths.len(),
+                conflicts: 0,
+                paths: paths.iter().map(|path| RepoPath::from(*path)).collect(),
+            },
+            last_active: Some(committed).max(changed),
+            changed,
+        }
+    }
+
+    fn base() -> Base {
+        Base {
+            local: Some("refs/heads/dev".to_owned()),
+            remote: None,
+            shown: "dev".to_owned(),
+            found: BaseFound::Detected,
+        }
+    }
+
+    /// A comparison with `dev` at `head`, changing `files` since the commit
+    /// `left`.
+    fn compared(
+        ahead: u64,
+        behind: u64,
+        merged: bool,
+        new: u64,
+        head: &str,
+        files: &[&str],
+    ) -> Comparison {
+        Comparison {
+            against: Some(Against {
+                base: base(),
+                counted: "refs/heads/dev".to_owned(),
+                ahead,
+                behind,
+                lines: Some(BranchLines {
+                    merge_base: "left".to_owned(),
+                    files: files
+                        .iter()
+                        .map(|path| FileLines {
+                            path: RepoPath::from(*path),
+                            old_path: None,
+                            count: LineCount::Lines {
+                                added: 1,
+                                removed: 0,
+                            },
+                        })
+                        .collect(),
+                    added: files.len() as u64,
+                    removed: 0,
+                    changed: files.len(),
+                }),
+                merged: merged.then(|| ("refs/heads/dev".to_owned(), MergedBy::Ancestor)),
+                prediction: Prediction::Unknown(Unpredicted::NotAsked),
+            }),
+            new,
+            tips: Tips {
+                head: head.to_owned(),
+                ..Tips::default()
+            },
+        }
+    }
+
+    fn done() -> Comparison {
+        compared(0, 1, true, 0, "merged", &[])
+    }
+
+    fn ready() -> Comparison {
+        compared(2, 0, false, 0, "ready", &[])
+    }
+
+    /// `/work/app` with the worktrees `/work/wt/<name>`.
+    fn cockpit(worktrees: &[&str]) -> RepositoryList {
+        let paths: Vec<String> = worktrees
+            .iter()
+            .map(|name| format!("/work/wt/{name}"))
+            .collect();
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let mut list = RepositoryList::new(&[], &[p("/work/app")], &[]);
+        list.set_found(p("/work/app"), repository("/work/app", &paths));
+        list.set_now(NOW);
+        list
+    }
+
+    fn wt(name: &str) -> PathBuf {
+        p(&format!("/work/wt/{name}"))
+    }
+
+    fn facts(branches: &[(&str, &str)]) -> Arc<RepositoryFacts> {
+        Arc::new(RepositoryFacts {
+            overrides: Vec::new(),
+            merge_driver: false,
+            worktree_config: false,
+            remotes: Vec::new(),
+            common_dir: p("/work/app/.git"),
+            branches: branches
+                .iter()
+                .map(|(name, commit)| Branch {
+                    name: format!("refs/heads/{name}"),
+                    commit: (*commit).to_owned(),
+                    upstream: None,
+                })
+                .collect(),
+            origin_head: None,
+        })
+    }
+
+    fn on_branch(path: PathBuf, branch: &str, head: &str, main: bool) -> Listed {
+        Listed {
+            path,
+            head: Some(head.to_owned()),
+            branch: Some(branch.to_owned()),
+            main,
+            gone: false,
+        }
+    }
+
+    #[test]
+    fn worktrees_are_listed_most_recently_active_first() {
+        let mut list = cockpit(&["one", "two"]);
+        list.set_status(wt("one"), status_at(NOW - 2 * 24 * 3600, &[], None));
+        list.set_status(wt("two"), status_at(NOW - 10 * MINUTE, &[], None));
+        list.freeze_order();
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  one"]);
+    }
+
+    #[test]
+    fn the_order_stays_while_the_user_looks() {
+        let mut list = cockpit(&["one", "two"]);
+        list.set_status(wt("one"), status_at(NOW - 2 * 24 * 3600, &[], None));
+        list.set_status(wt("two"), status_at(NOW - 10 * MINUTE, &[], None));
+        list.freeze_order();
+        list.set_status(wt("one"), status_at(NOW, &[], None));
+        list.settle();
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  one"]);
+        list.freeze_order();
+        assert_eq!(shown(&list), ["# Recent", "app", "  one", "  two"]);
+    }
+
+    #[test]
+    fn a_worktree_that_appears_meanwhile_comes_first() {
+        let mut list = cockpit(&["one", "two"]);
+        list.freeze_order();
+        list.set_found(
+            p("/work/app"),
+            repository(
+                "/work/app",
+                &["/work/wt/one", "/work/wt/two", "/work/wt/zzz"],
+            ),
+        );
+        assert_eq!(shown(&list), ["# Recent", "app", "  zzz", "  one", "  two"]);
+    }
+
+    #[test]
+    fn done_worktrees_fold_away() {
+        let mut list = cockpit(&["one", "two", "three"]);
+        for name in ["one", "two", "three"] {
+            list.set_status(wt(name), status_at(NOW - 60 * MINUTE, &[], None));
+        }
+        list.set_comparison(wt("one"), done());
+        list.set_comparison(wt("two"), done());
+        list.set_comparison(wt("three"), ready());
+        list.settle();
+        assert_eq!(list.state(&wt("one")), Some(MainState::Done));
+        assert_eq!(list.state(&wt("three")), Some(MainState::Ready));
+        assert_eq!(shown(&list), ["# Recent", "app", "  three", "  Done (2)+"]);
+        list.toggle_done(0);
+        assert_eq!(
+            shown(&list),
+            ["# Recent", "app", "  three", "  Done (2)", "  one", "  two"]
+        );
+    }
+
+    #[test]
+    fn a_worktree_whose_folder_is_gone_is_listed_as_done() {
+        let mut list = RepositoryList::new(&[], &[p("/work/app")], &[]);
+        list.set_found(
+            p("/work/app"),
+            Found::Repository {
+                path: p("/work/app"),
+                bare: false,
+                worktrees: vec![wt("one")],
+                gone: vec![wt("old")],
+            },
+        );
+        assert_eq!(shown(&list), ["# Recent", "app", "  one", "  Done (1)+"]);
+        list.toggle_done(0);
+        assert_eq!(
+            shown(&list),
+            ["# Recent", "app", "  one", "  Done (1)", "  old"]
+        );
+        assert_eq!(list.repositories()[0].gone, [wt("old")]);
+    }
+
+    #[test]
+    fn left_and_right_open_and_leave_the_row_done() {
+        let mut list = cockpit(&["one", "two"]);
+        list.set_status(wt("one"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_comparison(wt("one"), done());
+        list.settle();
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  Done (1)+"]);
+        list.select_row(3);
+        assert!(list.right(3));
+        assert_eq!(
+            shown(&list),
+            ["# Recent", "app", "  two", "  Done (1)", "  one"]
+        );
+        assert!(list.right(3));
+        assert_eq!(selected(&list).as_deref(), Some("one"));
+        assert!(list.left(4));
+        assert_eq!(selected(&list).as_deref(), Some("app"));
+        list.select_row(3);
+        assert!(list.left(3));
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  Done (1)+"]);
+        assert_eq!(selected(&list).as_deref(), Some("Done (1)+"));
+        assert!(list.left(3));
+        assert_eq!(selected(&list).as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn states_are_decided_again_as_time_passes() {
+        let mut list = cockpit(&["one"]);
+        list.set_status(
+            wt("one"),
+            status_at(NOW - 60 * MINUTE, &["src/ui.rs"], Some(NOW - 2 * MINUTE)),
+        );
+        list.set_comparison(wt("one"), ready());
+        list.settle();
+        assert_eq!(list.state(&wt("one")), Some(MainState::Working));
+        list.set_now(NOW + 10 * MINUTE);
+        list.settle();
+        assert_eq!(list.state(&wt("one")), Some(MainState::Paused));
+    }
+
+    #[test]
+    fn worktrees_that_change_the_same_file_overlap_but_not_with_a_done_one() {
+        let mut list = cockpit(&["fix-reload", "home-tab", "merged"]);
+        list.set_status(
+            wt("fix-reload"),
+            status_at(NOW - 60 * MINUTE, &["src/ui.rs"], Some(NOW - 60 * MINUTE)),
+        );
+        list.set_status(wt("home-tab"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_status(wt("merged"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_comparison(
+            wt("home-tab"),
+            compared(1, 0, false, 0, "h", &["src/ui.rs"]),
+        );
+        list.set_comparison(wt("merged"), compared(0, 1, true, 0, "m", &["src/ui.rs"]));
+        list.settle();
+        let overlap = list.overlaps(&wt("fix-reload"));
+        assert_eq!(overlap.len(), 1);
+        assert_eq!(overlap[0].other, wt("home-tab"));
+        assert_eq!(overlap[0].paths, [RepoPath::from("src/ui.rs")]);
+        assert_eq!(list.overlaps(&wt("home-tab"))[0].other, wt("fix-reload"));
+        assert!(list.overlaps(&wt("merged")).is_empty());
+    }
+
+    #[test]
+    fn a_new_worktree_of_an_agent_counts_its_commits_ahead_as_new() {
+        let mut list = cockpit(&[]);
+        let main = on_branch(p("/work/app"), "main", "m", true);
+        list.set_facts(p("/work/app"), facts(&[("main", "m")]), vec![main.clone()]);
+        list.set_found(p("/work/app"), repository("/work/app", &["/work/wt/agent"]));
+        let agent = on_branch(wt("agent"), "claude/new", "a3", false);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("main", "m"), ("claude/new", "a3")]),
+            vec![main, agent],
+        );
+        let key = Key::Branch {
+            repository: p("/work/app"),
+            branch: "claude/new".to_owned(),
+        };
+        assert_eq!(list.seen().commit(&key), None);
+        list.set_status(wt("agent"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_comparison(wt("agent"), compared(3, 0, false, 3, "a3", &[]));
+        list.settle();
+        assert_eq!(list.state(&wt("agent")), Some(MainState::New(3)));
+        // It starts as seen where it left its base.
+        assert_eq!(list.seen().commit(&key), Some("left"));
+    }
+
+    #[test]
+    fn marking_records_the_commit_the_home_tab_showed() {
+        let mut list = cockpit(&["agent"]);
+        let agent = on_branch(wt("agent"), "claude/fix", "old", false);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("claude/fix", "old")]),
+            vec![agent.clone()],
+        );
+        list.set_status(wt("agent"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_comparison(wt("agent"), compared(2, 0, false, 2, "shown", &[]));
+        // A commit arrived after the last reading.
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("claude/fix", "newer")]),
+            vec![on_branch(wt("agent"), "claude/fix", "newer", false)],
+        );
+        assert!(list.mark_seen(&wt("agent")));
+        let key = Key::Branch {
+            repository: p("/work/app"),
+            branch: "claude/fix".to_owned(),
+        };
+        assert_eq!(list.seen().commit(&key), Some("shown"));
+        assert_eq!(list.comparison(&wt("agent")).unwrap().new, 0);
+    }
+
+    #[test]
+    fn a_branch_left_behind_by_an_agent_marks_its_repository() {
+        let mut list = cockpit(&[]);
+        let main = on_branch(p("/work/app"), "main", "m", true);
+        list.set_facts(p("/work/app"), facts(&[("main", "m")]), vec![main.clone()]);
+        assert!(!list.repositories()[0].new_branches);
+        // An agent made a worktree, committed and removed it, keeping its
+        // branch.
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("main", "m"), ("claude/old", "o2")]),
+            vec![main],
+        );
+        list.settle();
+        assert!(list.repositories()[0].new_branches);
+        // Seeing the repository sees its branches without a worktree.
+        assert!(list.mark_seen(&p("/work/app")));
+        assert!(!list.repositories()[0].new_branches);
+    }
+
+    #[test]
+    fn a_moved_branch_without_a_worktree_marks_its_repository() {
+        let mut list = cockpit(&[]);
+        let main = on_branch(p("/work/app"), "main", "m", true);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("main", "m"), ("feature", "f1")]),
+            vec![main.clone()],
+        );
+        list.settle();
+        assert!(!list.repositories()[0].new_branches);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("main", "m"), ("feature", "f2")]),
+            vec![main],
+        );
+        list.settle();
+        assert!(list.repositories()[0].new_branches);
+    }
+
+    #[test]
+    fn mark_all_as_seen_clears_every_new_commit() {
+        let mut list = cockpit(&["a", "b"]);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("claude/a", "a1"), ("claude/b", "b1")]),
+            vec![
+                on_branch(wt("a"), "claude/a", "a1", false),
+                on_branch(wt("b"), "claude/b", "b1", false),
+            ],
+        );
+        for name in ["a", "b"] {
+            list.set_status(wt(name), status_at(NOW - 60 * MINUTE, &[], None));
+        }
+        list.set_comparison(wt("a"), compared(2, 0, false, 2, "a1", &[]));
+        list.set_comparison(wt("b"), compared(1, 0, false, 1, "b1", &[]));
+        list.settle();
+        assert!(list.mark_all_seen());
+        list.settle();
+        assert_eq!(list.state(&wt("a")), Some(MainState::Ready));
+        assert_eq!(list.state(&wt("b")), Some(MainState::Ready));
+    }
 }

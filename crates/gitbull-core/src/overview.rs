@@ -667,3 +667,273 @@ fn bases(
         ..Outcome::default()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gitbull_git::facts::{Branch, Upstream};
+    use gitbull_git::worktrees::Worktree;
+    use gitbull_testkit::{FakeBackend, Gate, Probe};
+    use std::path::Path;
+
+    fn p(path: &str) -> PathBuf {
+        PathBuf::from(path)
+    }
+
+    fn agent(n: usize) -> PathBuf {
+        p(&format!("/work/wt/agent-{n}"))
+    }
+
+    fn worktree(path: PathBuf, branch: &str, head: &str) -> Worktree {
+        Worktree {
+            path,
+            head: Some(head.to_owned()),
+            branch: Some(branch.to_owned()),
+            bare: false,
+            detached: false,
+            prunable: false,
+        }
+    }
+
+    /// `/work/app` on `main` with `count` agent worktrees on `claude/<n>`,
+    /// whose heads are `head-<n>` with `moved` added to the one at `moved`.
+    fn worktrees(count: usize, moved: Option<usize>) -> Vec<Worktree> {
+        let mut listed = vec![worktree(p("/work/app"), "main", "m")];
+        for n in 0..count {
+            let head = match moved {
+                Some(at) if at == n => format!("head-{n}-moved"),
+                _ => format!("head-{n}"),
+            };
+            listed.push(worktree(agent(n), &format!("claude/{n}"), &head));
+        }
+        listed
+    }
+
+    fn branch(name: &str, commit: &str, tracking: Option<&str>) -> Branch {
+        Branch {
+            name: name.to_owned(),
+            commit: commit.to_owned(),
+            upstream: tracking.map(|tracking| Upstream {
+                tracking: tracking.to_owned(),
+                remote: "origin".to_owned(),
+                merge: "refs/heads/dev".to_owned(),
+            }),
+        }
+    }
+
+    /// `main`, `dev` tracking `origin/dev` at `fetched`, and the agent
+    /// branches of `listed`.
+    fn facts(listed: &[Worktree], fetched: &str) -> RepositoryFacts {
+        let mut branches = vec![
+            branch("refs/heads/dev", "d", Some("refs/remotes/origin/dev")),
+            branch("refs/heads/main", "m", None),
+            branch("refs/remotes/origin/dev", fetched, None),
+        ];
+        for worktree in &listed[1..] {
+            branches.push(branch(
+                &format!("refs/heads/{}", worktree.branch.as_ref().unwrap()),
+                worktree.head.as_ref().unwrap(),
+                None,
+            ));
+        }
+        RepositoryFacts {
+            overrides: Vec::new(),
+            merge_driver: false,
+            worktree_config: false,
+            remotes: Vec::new(),
+            common_dir: p("/work/app/.git"),
+            branches,
+            origin_head: None,
+        }
+    }
+
+    /// A repository with `count` agents, each started from `dev`, but the
+    /// first from `main` when `first_from_main`.
+    fn backend(count: usize, first_from_main: bool) -> FakeBackend {
+        let listed = worktrees(count, None);
+        let mut backend = FakeBackend::default()
+            .with_repository(p("/work/app"))
+            .with_facts(p("/work/app"), facts(&listed, "d"))
+            .with_worktrees(listed);
+        for n in 0..count {
+            let base = match n {
+                0 if first_from_main => "refs/heads/main",
+                _ => "refs/heads/dev",
+            };
+            backend =
+                backend.with_detected_base(p("/work/app"), &format!("refs/heads/claude/{n}"), base);
+        }
+        backend
+    }
+
+    fn start(backend: Arc<FakeBackend>) -> (Overview, RepositoryList) {
+        let list = RepositoryList::new(&[], &[p("/work/app")], &[]);
+        let overview = Overview::new(backend, Arc::new(|| {}));
+        (overview, list)
+    }
+
+    /// Polls until the rounds asked for have ended.
+    fn settle(overview: &mut Overview, list: &mut RepositoryList) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            overview.poll(list);
+            if !overview.is_reading() {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    fn count(probe: &Probe, call: &str) -> usize {
+        probe
+            .sequence()
+            .iter()
+            .filter(|(name, _)| name == call)
+            .count()
+    }
+
+    fn compared_paths(probe: &Probe) -> Vec<String> {
+        probe
+            .base_comparisons()
+            .into_iter()
+            .map(|request| request.tip)
+            .collect()
+    }
+
+    #[test]
+    fn facts_come_before_summaries_and_comparisons_after_every_summary() {
+        let backend = Arc::new(backend(3, false));
+        let probe = backend.probe();
+        let (mut overview, mut list) = start(backend);
+        overview.request(&list, Request::Shown);
+        settle(&mut overview, &mut list);
+        let calls: Vec<String> = probe.sequence().into_iter().map(|(call, _)| call).collect();
+        let first = |name: &str| calls.iter().position(|call| call == name).unwrap();
+        let last = |name: &str| calls.iter().rposition(|call| call == name).unwrap();
+        assert!(first("facts") < first("summary"), "{calls:?}");
+        assert!(last("summary") < first("compare"), "{calls:?}");
+        assert_eq!(count(&probe, "summary"), 4);
+        // Every agent and the main worktree are compared.
+        assert_eq!(count(&probe, "compare"), 3);
+        assert!(list.comparison(&agent(2)).is_some());
+        assert!(list.comparison(Path::new("/work/app")).is_some());
+    }
+
+    #[test]
+    fn one_commit_in_one_of_ten_worktrees_compares_only_that_one() {
+        let backend = Arc::new(backend(10, false));
+        let probe = backend.probe();
+        let (mut overview, mut list) = start(Arc::clone(&backend));
+        overview.request(&list, Request::Shown);
+        settle(&mut overview, &mut list);
+        let before = probe.base_comparisons().len();
+
+        let listed = worktrees(10, Some(3));
+        backend.set_facts(p("/work/app"), facts(&listed, "d"));
+        backend.set_worktrees(listed);
+        overview.request(&list, Request::Again);
+        settle(&mut overview, &mut list);
+
+        assert_eq!(compared_paths(&probe)[before..], ["refs/heads/claude/3"]);
+        assert_eq!(
+            list.comparison(&agent(3)).unwrap().tips.head,
+            "head-3-moved"
+        );
+    }
+
+    #[test]
+    fn a_moved_origin_dev_alone_compares_the_worktrees_based_on_dev() {
+        let backend = Arc::new(backend(3, true));
+        let probe = backend.probe();
+        let (mut overview, mut list) = start(Arc::clone(&backend));
+        overview.request(&list, Request::Shown);
+        settle(&mut overview, &mut list);
+        let before = probe.base_comparisons().len();
+
+        // A fetch moved `origin/dev`, and neither `dev` nor a HEAD.
+        backend.set_facts(p("/work/app"), facts(&worktrees(3, None), "fetched"));
+        overview.request(&list, Request::Again);
+        settle(&mut overview, &mut list);
+
+        let mut again = compared_paths(&probe)[before..].to_vec();
+        again.sort();
+        assert_eq!(again, ["refs/heads/claude/1", "refs/heads/claude/2"]);
+    }
+
+    #[test]
+    fn showing_the_home_tab_compares_every_worktree_again() {
+        let backend = Arc::new(backend(2, false));
+        let probe = backend.probe();
+        let (mut overview, mut list) = start(backend);
+        overview.request(&list, Request::Shown);
+        settle(&mut overview, &mut list);
+        let before = probe.base_comparisons().len();
+        overview.request(&list, Request::Again);
+        settle(&mut overview, &mut list);
+        assert_eq!(probe.base_comparisons().len(), before);
+        overview.request(&list, Request::Shown);
+        settle(&mut overview, &mut list);
+        assert_eq!(probe.base_comparisons().len(), 2 * before);
+    }
+
+    #[test]
+    fn a_request_while_a_round_runs_starts_one_round_after_it() {
+        let gate = Gate::new();
+        let backend = Arc::new(backend(2, false).with_summary_gate(&gate));
+        let probe = backend.probe();
+        let (mut overview, mut list) = start(backend);
+        overview.request(&list, Request::Shown);
+        while count(&probe, "summary") == 0 {
+            overview.poll(&mut list);
+            std::thread::yield_now();
+        }
+        overview.request(&list, Request::Again);
+        overview.request(&list, Request::Again);
+        assert!(overview.is_reading());
+        assert!(!gate.was_cancelled());
+        gate.open();
+        settle(&mut overview, &mut list);
+        assert_eq!(count(&probe, "worktrees"), 2);
+    }
+
+    #[test]
+    fn refresh_restarts_a_round_still_running() {
+        let gate = Gate::new();
+        let backend = Arc::new(backend(2, false).with_summary_gate(&gate));
+        let probe = backend.probe();
+        let (mut overview, mut list) = start(backend);
+        overview.request(&list, Request::Shown);
+        while count(&probe, "summary") == 0 {
+            overview.poll(&mut list);
+            std::thread::yield_now();
+        }
+        overview.request(&list, Request::Refresh);
+        assert!(gate.was_cancelled());
+        assert!(overview.is_reading());
+        settle(&mut overview, &mut list);
+        assert_eq!(count(&probe, "worktrees"), 2);
+    }
+
+    #[test]
+    fn leaving_cancels_facts_bases_and_comparisons_and_forgets_a_request() {
+        let gate = Gate::new();
+        let backend = Arc::new(backend(2, false).with_compare_gate(&gate));
+        let probe = backend.probe();
+        let (mut overview, mut list) = start(backend);
+        overview.request(&list, Request::Shown);
+        while count(&probe, "compare") == 0 {
+            overview.poll(&mut list);
+            std::thread::yield_now();
+        }
+        overview.request(&list, Request::Again);
+        overview.cancel();
+        assert!(gate.was_cancelled());
+        assert!(!overview.is_reading());
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        overview.poll(&mut list);
+        assert!(!overview.is_reading());
+        assert_eq!(count(&probe, "worktrees"), 1);
+        assert!(list.comparison(&agent(0)).is_none());
+    }
+}
