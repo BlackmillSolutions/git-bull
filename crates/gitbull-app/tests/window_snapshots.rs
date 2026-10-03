@@ -307,3 +307,33 @@ fn interface_in_shades_of_grey() {
     let grey = image::DynamicImage::ImageLuma8(image::imageops::grayscale(&image)).to_rgba8();
     image_snapshot_options(&grey, "window_in_shades_of_grey", &options());
 }
+
+/// The home tab with pinned and recent repositories, worktrees below their
+/// repository, a folder gone and a bare repository, and `git-bull` open in
+/// a tab, in `theme`.
+fn home_tab(theme: ThemeSetting) -> Harness<'static, App> {
+    let mut setup = support::home_setup();
+    setup.settings.theme = theme;
+    setup.settings.tabs = vec![path(&["work", "git-bull"])];
+    setup.settings.active_tab = None;
+    let mut harness = rendered_window(build(setup));
+    settle_window(&mut harness);
+    // The first frame shows the home tab and starts its round.
+    harness.step();
+    wait_for(&mut harness, |h| !h.state().home_reading());
+    harness
+}
+
+#[test]
+fn home_tab_in_the_light_palette() {
+    let mut harness = home_tab(ThemeSetting::Light);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "home_light", &options());
+}
+
+#[test]
+fn home_tab_in_the_dark_palette() {
+    let mut harness = home_tab(ThemeSetting::Dark);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "home_dark", &options());
+}

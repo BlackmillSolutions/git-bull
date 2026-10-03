@@ -1380,9 +1380,9 @@ fn home_tab() {
     harness.run();
     let mut filtering = Vec::new();
     let text = "task-3";
-    for (typed, character) in text.chars().enumerate() {
+    for (at, character) in text.char_indices() {
         filtering.push(frame_with(&mut harness, Event::Text(character.to_string())));
-        let filter = &text[..=typed];
+        let filter = &text[..at + character.len_utf8()];
         let rows = home_rows(&harness);
         assert!(!rows.is_empty(), "{filter}");
         assert!(
