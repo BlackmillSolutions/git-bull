@@ -334,7 +334,11 @@ prediction, the commits since what was seen) beside its `Status`.
 `gitbull_core::state` decides the main state as a function of the status,
 the comparison, what was seen and the time, with no state of its own: it
 takes the first that applies, in the order of the spec, and never gives
-Ready or Done to a base branch; the five minutes are
+Ready or Done to a base branch. A branch at the very commit of its base,
+which Git finds contained in it, is Idle, not Done: it has nothing that
+was merged, as a new worktree before its first commit (found while
+implementing the scenario "Idle"); after a merge commit, or once the base
+moved on, it is Done. The five minutes are
 measured from the later of the newest modification time of a changed path
 and the commit time of HEAD, which `summary` reports separately from
 `last_active`. Because states depend on the time, the rows are built again
