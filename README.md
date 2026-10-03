@@ -7,9 +7,9 @@ below. It is built to stay fluid on repositories with more than a million
 commits.
 
 git-bull is in early development. The first milestone is a read-only viewer,
-and the second, now under way, improves its interface; the first release,
-0.1.0, follows when the second is done. Until then, the pre-releases on the
-releases page can be tried. What git-bull does is
+and the second, now under way, improves its interface. The first release,
+0.1.0, holds the viewer and the improvements done so far; it is on the
+releases page. What git-bull does is
 specified in [`openspec/specs`](openspec/specs), the changes being planned
 or built are in [`openspec/changes`](openspec/changes), the architecture
 decisions are in [`docs/adr`](docs/adr), and the plan ahead is on the
