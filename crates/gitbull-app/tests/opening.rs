@@ -1,4 +1,4 @@
-//! Opening repositories: chooser, folder dialog, dropped folder, command line.
+//! Opening repositories: home tab, folder dialog, dropped folder, command line.
 
 mod support;
 
@@ -10,7 +10,9 @@ use egui_kittest::kittest::Queryable;
 use gitbull_app::icons;
 use gitbull_core::settings::Settings;
 use gitbull_testkit::FakeBackend;
-use support::{Dropped, Setup, active_title, build, path, settle_window, tab_titles, window};
+use support::{
+    Dropped, Setup, active_title, build, open_from_home, path, settle_window, tab_titles, window,
+};
 
 /// Settings with `work/git-bull` open in the active tab.
 fn one_tab_open() -> Settings {
@@ -28,7 +30,7 @@ fn repositories() -> FakeBackend {
 }
 
 #[test]
-fn chooser_lists_recent_repositories_and_opens_one() {
+fn home_tab_lists_recent_repositories_and_opens_one() {
     let settings = Settings {
         recent: vec![path(&["work", "linux"]), path(&["work", "git-bull"])],
         ..Settings::default()
@@ -41,15 +43,10 @@ fn chooser_lists_recent_repositories_and_opens_one() {
     let mut harness = window(test.app);
     harness.run();
 
-    harness
-        .get_by_role_and_label(
-            Role::Button,
-            &path(&["work", "linux"]).display().to_string(),
-        )
-        .click();
-    settle_window(&mut harness);
+    open_from_home(&mut harness, "linux");
 
     assert_eq!(tab_titles(harness.state()), ["linux"]);
+    assert_eq!(active_title(harness.state()).as_deref(), Some("linux"));
 }
 
 #[test]
@@ -63,7 +60,7 @@ fn folder_picked_in_the_dialog_opens_in_a_tab() {
     harness.run();
 
     harness
-        .get_by_role_and_label(Role::Button, "Choose folder…")
+        .get_by_role_and_label(Role::Button, "Open folder…")
         .click();
     settle_window(&mut harness);
 
@@ -81,7 +78,7 @@ fn cancelled_folder_dialog_opens_nothing() {
     harness.run();
 
     harness
-        .get_by_role_and_label(Role::Button, "Choose folder…")
+        .get_by_role_and_label(Role::Button, "Open folder…")
         .click();
     settle_window(&mut harness);
 
@@ -149,7 +146,7 @@ fn folder_that_is_no_repository_is_named_in_a_message_and_opens_no_tab() {
     harness.run();
 
     harness
-        .get_by_role_and_label(Role::Button, "Choose folder…")
+        .get_by_role_and_label(Role::Button, "Open folder…")
         .click();
     settle_window(&mut harness);
 
@@ -167,7 +164,7 @@ fn folder_that_is_no_repository_is_named_in_a_warning_banner_below_the_toolbar()
     let mut harness = window(test.app);
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Choose folder…")
+        .get_by_role_and_label(Role::Button, "Open folder…")
         .click();
     settle_window(&mut harness);
 
@@ -194,7 +191,7 @@ fn folder_that_is_no_repository_is_named_in_a_warning_banner_below_the_toolbar()
 }
 
 #[test]
-fn new_tab_button_shows_the_chooser_while_a_repository_is_open() {
+fn new_tab_button_shows_the_home_tab_with_the_focus_in_its_filter() {
     let settings = Settings {
         recent: vec![path(&["work", "linux"])],
         ..one_tab_open()
@@ -206,12 +203,19 @@ fn new_tab_button_shows_the_chooser_while_a_repository_is_open() {
     });
     let mut harness = window(test.app);
     settle_window(&mut harness);
-    assert!(harness.query_by_label("Choose folder…").is_none());
+    assert!(harness.query_by_label("Open folder…").is_none());
 
     harness
         .get_by_role_and_label(Role::Button, "New tab")
         .click();
     harness.run();
 
-    harness.get_by_role_and_label(Role::Button, "Choose folder…");
+    harness.get_by_role_and_label(Role::Button, "Open folder…");
+    assert!(harness.state().home_shown());
+    assert!(
+        harness
+            .get_by_label("Filter repositories and worktrees")
+            .is_focused()
+    );
+    assert_eq!(tab_titles(harness.state()), ["git-bull"]);
 }

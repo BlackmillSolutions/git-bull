@@ -69,7 +69,7 @@ fn warning_banner_below_the_toolbar() {
     let mut harness = rendered_window(test);
     harness.run();
     harness
-        .get_by_role_and_label(Role::Button, "Choose folder…")
+        .get_by_role_and_label(Role::Button, "Open folder…")
         .click();
     settle_window(&mut harness);
 
