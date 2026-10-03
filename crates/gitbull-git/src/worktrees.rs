@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::cancel::CancelToken;
 use crate::error::Error;
 use crate::invoke::Git;
-use crate::repository::{classify, path_from_bytes};
+use crate::repository::{classify, path_from_bytes, trim_newline};
 
 /// One worktree of a repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +29,8 @@ pub struct Worktree {
 const ARGS: [&str; 3] = ["worktree", "list", "--porcelain"];
 
 /// Lists the worktrees of the repository that contains `repo`, the main
-/// worktree first. A folder that is gone or not inside a repository is
+/// worktree first, by the folder of its working tree also in a submodule. A
+/// folder that is gone or not inside a repository is
 /// [`Error::NotARepository`], and one that Git refuses is
 /// [`Error::DubiousOwnership`].
 pub fn worktrees(git: &Git, repo: &Path, cancel: &CancelToken) -> Result<Vec<Worktree>, Error> {
@@ -39,11 +40,31 @@ pub fn worktrees(git: &Git, repo: &Path, cancel: &CancelToken) -> Result<Vec<Wor
     let output = git
         .run_cancellable(repo, &[], ARGS, cancel)
         .map_err(|error| classify(error, repo))?;
-    parse_worktrees(&output).map_err(|message| Error::Parse {
+    let mut found = parse_worktrees(&output).map_err(|message| Error::Parse {
         command: format!("git {}", ARGS.join(" ")),
         message,
         bytes: output,
-    })
+    })?;
+    if let Some(main) = found.first_mut() {
+        main.path = main_folder(git, main, cancel)?;
+    }
+    Ok(found)
+}
+
+/// The folder of the main worktree `main`. Git names the Git folder of the
+/// repository without its last `/.git`; where that folder lies elsewhere,
+/// as `.git/modules/<name>` of a submodule, Git names the Git folder itself,
+/// and knows the working tree from `core.worktree`. A Git folder without a
+/// working tree keeps the folder Git named.
+fn main_folder(git: &Git, main: &Worktree, cancel: &CancelToken) -> Result<PathBuf, Error> {
+    if main.bare || !main.path.is_dir() || main.path.join(".git").exists() {
+        return Ok(main.path.clone());
+    }
+    match git.run_cancellable(&main.path, &[], ["rev-parse", "--show-toplevel"], cancel) {
+        Ok(output) => Ok(path_from_bytes(trim_newline(&output))),
+        Err(Error::Cancelled) => Err(Error::Cancelled),
+        Err(_) => Ok(main.path.clone()),
+    }
 }
 
 /// Reads `git worktree list --porcelain`: for each worktree a line

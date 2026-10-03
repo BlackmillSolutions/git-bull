@@ -61,6 +61,30 @@ fn the_main_worktree_comes_first_and_the_others_follow() {
 }
 
 #[test]
+fn the_main_worktree_of_a_submodule_is_its_folder_not_its_git_folder() {
+    let inner = committed();
+    let mut outer = committed();
+    outer.git(&[
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        &inner.url(),
+        "libs/inner",
+    ]);
+    outer.commit("Add submodule");
+    let submodule = outer.path().join("libs").join("inner");
+
+    // Git itself names `.git/modules/libs/inner` as the main worktree.
+    let found = worktrees(&git(), &submodule, &CancelToken::new()).unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(same(&found[0].path, &submodule), "{:?}", found[0].path);
+    assert!(!found[0].bare);
+    assert_eq!(found[0].branch.as_deref(), Some("main"));
+}
+
+#[test]
 fn a_deleted_folder_is_not_a_repository() {
     let gone = tempfile::tempdir().unwrap().path().join("gone");
     assert!(matches!(
