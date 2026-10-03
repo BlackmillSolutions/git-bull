@@ -8,11 +8,15 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use gitbull_git::ai_diff::AiDiffRequest;
+use gitbull_git::cancel::CancelToken;
+use gitbull_git::compare::CompareRequest;
 use gitbull_git::filters::neutralised_filters;
 use gitbull_git::flags;
 use gitbull_git::locate::{Os, SystemProbe, locate_git};
-use gitbull_git::{ConfigOverride, Git};
-use gitbull_testkit::{Marker, TestRepo};
+use gitbull_git::version::Capabilities;
+use gitbull_git::{Backend, CliBackend, ConfigOverride, Git};
+use gitbull_testkit::{Marker, TestRepo, git_version};
 
 fn git() -> Git {
     let executable = locate_git(None, Os::current(), &SystemProbe).expect("Git is installed");
@@ -161,6 +165,49 @@ fn run_design_commands(repo: &Path) {
         let _ = stdout.read_to_end(&mut Vec::new());
         let _ = process.wait();
     }
+    run_cockpit(repo);
+}
+
+/// Reads `repo` as the home tab does for its cockpit: the facts, the base
+/// of `side`, its full comparison with `main`, which runs every check of a
+/// merge, what came since a commit, the uncommitted files and the diffs for
+/// the AI context.
+fn run_cockpit(repo: &Path) {
+    let temp = tempfile::tempdir().unwrap();
+    let backend = CliBackend::new(git(), git_version()).with_temp_dir(temp.path().to_owned());
+    let cancel = CancelToken::new();
+    let Ok(facts) = backend.facts(repo, &cancel) else {
+        return;
+    };
+    let _ = backend.detect_base(
+        repo,
+        "refs/heads/side",
+        &["refs/heads/main".to_owned()],
+        &cancel,
+    );
+    let request = CompareRequest {
+        tip: "refs/heads/side".to_owned(),
+        local: Some("refs/heads/main".to_owned()),
+        remote: None,
+        merged: true,
+        predict: true,
+    };
+    let _ = backend.compare(repo, &facts, &request, &cancel);
+    let _ = backend.since(repo, "HEAD~1", "HEAD", &cancel);
+    let _ = backend.commit_list(repo, "HEAD~1", "HEAD", 51, &cancel);
+    let _ = backend.uncommitted(repo, Some(&facts.overrides), &cancel);
+    let diff = AiDiffRequest {
+        repo,
+        overrides: &facts.overrides,
+        branch: Some(("HEAD~1", "refs/heads/side")),
+        worktree: repo,
+        own_config: facts.worktree_config,
+    };
+    let _ = backend.ai_diff(&diff, &cancel);
+    assert!(
+        std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+        "a quarantine of objects was left behind"
+    );
 }
 
 /// Asserts that the setup fires `label`, then that the design's commands
@@ -182,14 +229,31 @@ fn assert_fires_only_without_rules(repo: &Path, marker: &Marker, label: &str) {
     );
 }
 
-/// Two commits of `file.txt`, so that diffs between commits exist.
+/// Two commits of `file.txt` on `main`, so that diffs between commits
+/// exist, and `side`, which changed the same line after the first, so that
+/// comparing `side` with `main` runs every check of a merge.
 fn repository() -> TestRepo {
     let mut repo = TestRepo::new();
     repo.write("file.txt", "first\n");
     repo.commit("First");
     repo.write("file.txt", "second\n");
     repo.commit("Second");
+    repo.git(&["switch", "--quiet", "--create", "side", "HEAD~1"]);
+    repo.write("file.txt", "side\n");
+    repo.commit("Side");
+    repo.git(&["switch", "--quiet", "main"]);
     repo
+}
+
+/// Merges `side` into `main` with plain Git, which runs what a merge runs:
+/// `merge-tree` where Git has it, else a merge that is aborted.
+fn merge_with_plain_git(repo: &TestRepo) {
+    if Capabilities::of(git_version()).merge_tree {
+        let _ = repo.try_git(&["merge-tree", "--write-tree", "main", "side"]);
+    } else {
+        let _ = repo.try_git(&["merge", "--no-commit", "--no-ff", "side"]);
+        let _ = repo.try_git(&["merge", "--abort"]);
+    }
 }
 
 fn git_dir(repo: &TestRepo) -> PathBuf {
@@ -271,6 +335,91 @@ fn process_filter_is_not_executed() {
     repo.touch("file.txt");
     let _ = repo.try_git(&["status"]);
     assert_fires_only_without_rules(repo.path(), &marker, "process");
+}
+
+#[test]
+fn merge_driver_assigned_by_the_attributes_is_not_executed() {
+    let repo = repository();
+    let marker = Marker::new();
+    repo.write_git_file("info/attributes", "* merge=evil\n");
+    repo.config(
+        "merge.evil.driver",
+        &marker.script("merge-driver", "exit 0"),
+    );
+    merge_with_plain_git(&repo);
+    assert_fires_only_without_rules(repo.path(), &marker, "merge-driver");
+}
+
+#[test]
+fn clean_filter_run_by_renormalizing_a_merge_is_not_executed() {
+    let repo = repository();
+    let marker = Marker::new();
+    repo.write_git_file("info/attributes", "* filter=evil\n");
+    repo.config("filter.evil.clean", &marker.filter_command("renormalize"));
+    repo.config("merge.renormalize", "true");
+    merge_with_plain_git(&repo);
+    assert_fires_only_without_rules(repo.path(), &marker, "renormalize");
+}
+
+#[test]
+fn text_conversion_of_a_file_a_squash_merge_changed_is_not_executed() {
+    let mut repo = repository();
+    // `main` takes the change of `side` as one squashed commit, so that
+    // recognising it reads the patches of `main`.
+    repo.git(&[
+        "merge",
+        "--quiet",
+        "--squash",
+        "--strategy-option=theirs",
+        "side",
+    ]);
+    repo.commit("Squashed side");
+    let marker = Marker::new();
+    repo.write_git_file("info/attributes", "* diff=evil\n");
+    repo.config(
+        "diff.evil.textconv",
+        &marker.script("squash-textconv", "cat \"$1\""),
+    );
+    let _ = repo.try_git(&["log", "-p", "-1"]);
+    assert_fires_only_without_rules(repo.path(), &marker, "squash-textconv");
+}
+
+/// Every file below `folder` with its content.
+fn snapshot(folder: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![folder.to_owned()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.push((path.clone(), std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn a_full_comparison_leaves_objects_references_and_index_unchanged() {
+    let repo = repository();
+    repo.write("file.txt", "uncommitted\n");
+    repo.write("untracked.txt", "untracked\n");
+    repo.touch("file.txt");
+    let git_folder = git_dir(&repo);
+    let objects = snapshot(&git_folder.join("objects"));
+    let references = repo.git(&["for-each-ref"]);
+    let packed = std::fs::read(git_folder.join("packed-refs")).ok();
+    let index = std::fs::read(git_folder.join("index")).unwrap();
+
+    run_cockpit(repo.path());
+
+    assert_eq!(snapshot(&git_folder.join("objects")), objects);
+    assert_eq!(repo.git(&["for-each-ref"]), references);
+    assert_eq!(std::fs::read(git_folder.join("packed-refs")).ok(), packed);
+    assert_eq!(std::fs::read(git_folder.join("index")).unwrap(), index);
 }
 
 #[test]

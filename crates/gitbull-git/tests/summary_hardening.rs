@@ -6,12 +6,13 @@
 
 use std::path::{Path, PathBuf};
 
-use gitbull_git::Git;
+use gitbull_git::ai_diff::AiDiffRequest;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::facts::facts;
 use gitbull_git::locate::{Os, SystemProbe, locate_git};
 use gitbull_git::summary::summary;
 use gitbull_git::worktrees::worktrees;
+use gitbull_git::{Backend, CliBackend, Git};
 use gitbull_testkit::{Marker, TestRepo};
 
 fn git() -> Git {
@@ -29,10 +30,23 @@ fn read_as_the_home_tab(repo: &Path) {
     let (git, cancel) = (git(), CancelToken::new());
     let listed = worktrees(&git, repo, &cancel).expect("the worktrees are read");
     let facts = facts(&git, &listed[0].path, &cancel).expect("the facts are read");
+    let backend = CliBackend::new(git.clone(), gitbull_testkit::git_version());
     for (index, worktree) in listed.iter().enumerate() {
         let shared = index == 0 || !facts.worktree_config;
         let overrides = shared.then_some(&facts.overrides[..]);
         summary(&git, &worktree.path, overrides, &cancel).expect("the summary is read");
+        // What the panel and Copy as AI context read of the worktree.
+        backend
+            .uncommitted(&worktree.path, overrides, &cancel)
+            .expect("the uncommitted files are read");
+        let diff = AiDiffRequest {
+            repo: &listed[0].path,
+            overrides: &facts.overrides,
+            branch: None,
+            worktree: &worktree.path,
+            own_config: !shared,
+        };
+        backend.ai_diff(&diff, &cancel).expect("the diff is read");
     }
 }
 
