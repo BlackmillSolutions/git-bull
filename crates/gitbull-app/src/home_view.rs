@@ -309,7 +309,7 @@ fn draw(
         && let Some(path) = list.selected_row().and_then(|row| list.path(row))
         && ui.input_mut(take_copy)
     {
-        ui.ctx().copy_text(path.display().to_string());
+        ui.ctx().copy_text(list.shown(path).display().to_string());
     }
 
     let menu = home.menu.as_ref();
@@ -344,17 +344,17 @@ fn menu_of(list: &RepositoryList, row: &Row) -> Option<RowMenu> {
                 }
             }
             Some(RowMenu {
-                path: repository.path.clone(),
+                path: list.shown(&repository.path),
                 repository: Some((paths, repository.section == Section::Pinned)),
                 found: repository.problem != Some(Problem::NotFound),
                 readable: readable(repository, list),
             })
         }
         Row::Worktree { repository, index } => {
-            let path = list.repositories()[repository].worktrees[index].clone();
-            let readable = !matches!(list.status(&path), Status::Failed(_));
+            let path = &list.repositories()[repository].worktrees[index];
+            let readable = !matches!(list.status(path), Status::Failed(_));
             Some(RowMenu {
-                path,
+                path: list.shown(path),
                 repository: None,
                 found: true,
                 readable,
@@ -411,11 +411,11 @@ fn openable(list: &RepositoryList, row: usize) -> Option<PathBuf> {
         Row::Title(_) | Row::Done { .. } => None,
         Row::Repository { index, .. } => {
             let repository = &list.repositories()[index];
-            readable(repository, list).then(|| repository.path.clone())
+            readable(repository, list).then(|| list.shown(&repository.path))
         }
         Row::Worktree { repository, index } => {
             let path = &list.repositories()[repository].worktrees[index];
-            (!matches!(list.status(path), Status::Failed(_))).then(|| path.clone())
+            (!matches!(list.status(path), Status::Failed(_))).then(|| list.shown(path))
         }
     }
 }

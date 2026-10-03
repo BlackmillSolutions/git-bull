@@ -19,7 +19,8 @@ use gitbull_git::{Backend, ConfigOverride};
 use crate::base::{Base, Bases, Detected, Tip};
 use crate::comparison::{self, Comparison, SeenAt, Subject, Tips};
 use crate::repositories::{
-    Found, Listed, RepositoryList, RoundInput, SettingsChange, Status, latest_change, normalise,
+    Drive, Found, Listed, RepositoryList, RoundInput, SettingsChange, Status, latest_change,
+    normalise,
 };
 use crate::seen::Key;
 use crate::workspace::Notify;
@@ -45,16 +46,23 @@ enum Job {
     /// Find the repository and the worktrees of a path of the settings.
     Worktrees(PathBuf),
     /// Read the facts of a repository, found at `main`, whose canonical
-    /// path is `repository`.
+    /// path is `repository`, on `drive` if it is on a mapped or substituted
+    /// drive.
     Facts {
         repository: PathBuf,
         main: PathBuf,
         bare: bool,
         listed: Vec<Listed>,
+        drive: Option<Drive>,
     },
-    /// Summarise the working copy at the path, with the overrides of the
-    /// facts of its repository, or with those of its own configuration.
-    Summary(PathBuf, Option<Arc<[ConfigOverride]>>),
+    /// Summarise the working copy whose canonical path is `worktree`, read
+    /// at `at`, with the overrides of the facts of its repository, or with
+    /// those of its own configuration.
+    Summary {
+        worktree: PathBuf,
+        at: PathBuf,
+        overrides: Option<Arc<[ConfigOverride]>>,
+    },
     /// Decide the bases of the worktrees of a repository.
     Bases {
         repository: PathBuf,
@@ -84,6 +92,8 @@ enum Report {
         path: PathBuf,
         normalised: PathBuf,
         found: Found,
+        /// The mapped or substituted drive it is on.
+        drive: Option<Drive>,
     },
     Facts {
         repository: PathBuf,
@@ -263,7 +273,11 @@ fn apply(report: Report, list: &mut RepositoryList, changes: &mut Vec<SettingsCh
             path,
             normalised,
             found,
+            drive,
         } => {
+            if let Some(drive) = drive {
+                list.add_drive(drive);
+            }
             if let Found::Repository {
                 path: repository,
                 worktrees,
@@ -387,6 +401,7 @@ fn run(backend: &dyn Backend, cancel: &CancelToken, input: &RoundInput, job: Job
                     path,
                     normalised,
                     found,
+                    drive: None,
                 }),
                 ..Outcome::default()
             }
@@ -396,9 +411,19 @@ fn run(backend: &dyn Backend, cancel: &CancelToken, input: &RoundInput, job: Job
             main,
             bare,
             listed,
+            drive,
         } => {
-            let result =
-                caught(&mut || facts(backend, cancel, &repository, &main, bare, listed.clone()));
+            let result = caught(&mut || {
+                facts(
+                    backend,
+                    cancel,
+                    &repository,
+                    &main,
+                    bare,
+                    listed.clone(),
+                    drive.as_ref(),
+                )
+            });
             match result {
                 Ok(Ok(done)) => done,
                 Ok(Err(Error::Cancelled)) => Outcome::default(),
@@ -408,16 +433,24 @@ fn run(backend: &dyn Backend, cancel: &CancelToken, input: &RoundInput, job: Job
                     front: listed
                         .iter()
                         .filter(|listed| !listed.gone && !(listed.main && bare))
-                        .map(|listed| Job::Summary(listed.path.clone(), None))
+                        .map(|listed| Job::Summary {
+                            worktree: listed.path.clone(),
+                            at: shown(drive.as_ref(), &listed.path),
+                            overrides: None,
+                        })
                         .collect(),
                     ..Outcome::default()
                 },
             }
         }
-        Job::Summary(worktree, overrides) => {
+        Job::Summary {
+            worktree,
+            at,
+            overrides,
+        } => {
             let result = caught(&mut || {
-                let summary = backend.summary(&worktree, overrides.as_deref(), cancel)?;
-                let changed = latest_change(&worktree, &summary);
+                let summary = backend.summary(&at, overrides.as_deref(), cancel)?;
+                let changed = latest_change(&at, &summary);
                 let last_active = summary.committed.max(changed);
                 Ok(Outcome {
                     report: Some(Report::Status {
@@ -490,6 +523,14 @@ fn run(backend: &dyn Backend, cancel: &CancelToken, input: &RoundInput, job: Job
     }
 }
 
+/// `path`, a canonical path, as Git reads it: with the letter of `drive`
+/// instead of its canonical root.
+fn shown(drive: Option<&Drive>, path: &std::path::Path) -> PathBuf {
+    drive
+        .and_then(|drive| drive.shown(path))
+        .unwrap_or_else(|| path.to_owned())
+}
+
 /// Lists the worktrees of the repository at `path`, a path of the settings,
 /// and goes on with its facts.
 fn worktrees(
@@ -499,12 +540,14 @@ fn worktrees(
 ) -> Result<Outcome, gitbull_git::Error> {
     let found_worktrees = backend.worktrees(path, cancel)?;
     let normalised = normalise(path);
+    let drive = Drive::of(path, |root| std::fs::canonicalize(root));
     let Some(main) = found_worktrees.first() else {
         return Ok(Outcome {
             report: Some(Report::Found {
                 path: path.to_owned(),
                 normalised,
                 found: Found::Failed("Git lists no worktree".to_owned()),
+                drive,
             }),
             ..Outcome::default()
         });
@@ -544,12 +587,14 @@ fn worktrees(
             path: path.to_owned(),
             normalised,
             found,
+            drive: drive.clone(),
         }),
         front: vec![Job::Facts {
+            main: shown(drive.as_ref(), &repository),
             repository,
-            main: main.path.clone(),
             bare: main.bare,
             listed,
+            drive,
         }],
         ..Outcome::default()
     })
@@ -564,6 +609,7 @@ fn facts(
     main: &std::path::Path,
     bare: bool,
     listed: Vec<Listed>,
+    drive: Option<&Drive>,
 ) -> Result<Outcome, gitbull_git::Error> {
     let facts = Arc::new(backend.facts(main, cancel)?);
     let overrides: Arc<[ConfigOverride]> = facts.overrides.clone().into();
@@ -574,7 +620,11 @@ fn facts(
         .filter(|listed| !listed.gone && !(listed.main && bare))
         .map(|listed| {
             let shared = listed.main || !facts.worktree_config;
-            Job::Summary(listed.path.clone(), shared.then(|| Arc::clone(&overrides)))
+            Job::Summary {
+                worktree: listed.path.clone(),
+                at: shown(drive, &listed.path),
+                overrides: shared.then(|| Arc::clone(&overrides)),
+            }
         })
         .collect();
     Ok(Outcome {

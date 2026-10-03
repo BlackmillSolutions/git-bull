@@ -144,11 +144,55 @@ enum Selected {
     Done(PathBuf),
 }
 
+/// A mapped or substituted drive on Windows: the root of the drive, such as
+/// `Z:\`, and the canonical form of that root, such as `\\server\share\`
+/// (design of `worktree-cockpit`, decision 15). [`normalise`] keeps the
+/// canonical form, by which folders compare equal; a path is read, shown,
+/// copied and opened with the drive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Drive {
+    pub canonical: PathBuf,
+    pub root: PathBuf,
+}
+
+impl Drive {
+    /// The drive `path` starts with, if its root canonicalises to another
+    /// path, as `canonicalize` tells; `None` for a plain drive, a network
+    /// path and on other systems.
+    pub fn of(
+        path: &Path,
+        canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
+    ) -> Option<Drive> {
+        let Some(Component::Prefix(prefix)) = path.components().next() else {
+            return None;
+        };
+        let letter = match prefix.kind() {
+            std::path::Prefix::Disk(letter) | std::path::Prefix::VerbatimDisk(letter) => letter,
+            _ => return None,
+        };
+        let root = PathBuf::from(format!("{}:\\", char::from(letter).to_ascii_uppercase()));
+        let canonical = without_verbatim_prefix(canonicalize(&root).ok()?);
+        let same = canonical
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&root.to_string_lossy());
+        (!same).then_some(Drive { canonical, root })
+    }
+
+    /// `path` with the drive instead of its canonical root, if it starts
+    /// with that.
+    pub fn shown(&self, path: &Path) -> Option<PathBuf> {
+        let rest = path.strip_prefix(&self.canonical).ok()?;
+        Some(self.root.join(rest))
+    }
+}
+
 /// What a round needs to know of the list when it starts.
 #[derive(Clone, Debug, Default)]
 pub struct RoundInput {
     /// Every worktree is compared, not only those that moved.
     pub compare_all: bool,
+    /// The drives known so far, by which Git is run with drive letters.
+    pub drives: Vec<Drive>,
     /// The base the user set, by the canonical path of the repository.
     pub bases: HashMap<PathBuf, String>,
     /// What Git detected, by the canonical path of the repository.
@@ -187,6 +231,8 @@ pub struct RepositoryList {
     /// The active worktrees of each repository in the order of their last
     /// activity, taken when the home tab becomes shown and on Refresh.
     order: HashMap<PathBuf, Vec<PathBuf>>,
+    /// The mapped and substituted drives the paths of the settings are on.
+    drives: Vec<Drive>,
     /// Repositories whose worktrees are hidden, by their path.
     collapsed: HashSet<PathBuf>,
     /// Repositories whose done worktrees are shown, by their path.
@@ -245,6 +291,23 @@ impl RepositoryList {
     /// What the user saw, to write it.
     pub fn seen_mut(&mut self) -> &mut Seen {
         &mut self.seen
+    }
+
+    /// A path of the settings is on `drive`: paths on it are shown with
+    /// its letter.
+    pub fn add_drive(&mut self, drive: Drive) {
+        if !self.drives.contains(&drive) {
+            self.drives.push(drive);
+        }
+    }
+
+    /// `path` as it is read, shown, copied and opened: with the letter of a
+    /// mapped or substituted drive instead of its canonical root.
+    pub fn shown(&self, path: &Path) -> PathBuf {
+        self.drives
+            .iter()
+            .find_map(|drive| drive.shown(path))
+            .unwrap_or_else(|| path.to_owned())
     }
 
     /// What a round found for the path `path` of the settings.
@@ -412,6 +475,7 @@ impl RepositoryList {
     pub fn round_input(&self, compare_all: bool) -> RoundInput {
         RoundInput {
             compare_all,
+            drives: self.drives.clone(),
             bases: self.bases.clone(),
             detected: self.detected.clone(),
             tips: self
@@ -2109,5 +2173,89 @@ mod tests {
         list.settle();
         assert_eq!(list.state(&wt("a")), Some(MainState::Ready));
         assert_eq!(list.state(&wt("b")), Some(MainState::Ready));
+    }
+
+    // Drive letters.
+
+    #[test]
+    fn a_path_on_a_drive_is_shown_with_its_letter() {
+        let drive = Drive {
+            canonical: p("/mnt/share"),
+            root: p("/z"),
+        };
+        assert_eq!(
+            drive.shown(Path::new("/mnt/share/repo-fix")),
+            Some(p("/z/repo-fix"))
+        );
+        assert_eq!(drive.shown(Path::new("/work/other")), None);
+    }
+
+    #[test]
+    fn a_repository_on_a_mapped_drive_is_listed_once_and_shown_with_its_letter() {
+        let mut list = RepositoryList::new(&[], &[p("/z/repo"), p("/mnt/share/repo")], &[]);
+        let found = Found::Repository {
+            path: p("/mnt/share/repo"),
+            bare: false,
+            worktrees: vec![p("/mnt/share/repo-fix")],
+            gone: Vec::new(),
+        };
+        list.set_found(p("/z/repo"), found.clone());
+        list.set_found(p("/mnt/share/repo"), found);
+        list.add_drive(Drive {
+            canonical: p("/mnt/share"),
+            root: p("/z"),
+        });
+        assert_eq!(shown(&list), ["# Recent", "repo", "  repo-fix"]);
+        assert_eq!(list.shown(&list.repositories()[0].path), p("/z/repo"));
+        assert_eq!(
+            list.shown(Path::new("/mnt/share/repo-fix")),
+            p("/z/repo-fix")
+        );
+        assert_eq!(list.shown(Path::new("/work/other")), p("/work/other"));
+    }
+
+    #[cfg(windows)]
+    fn canonical_as(answer: &'static str) -> impl Fn(&Path) -> std::io::Result<PathBuf> {
+        move |_| Ok(PathBuf::from(answer))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_mapped_network_drive_is_found_with_its_share() {
+        let drive = Drive::of(
+            Path::new(r"z:\Repo"),
+            canonical_as(r"\\?\UNC\server\share\"),
+        )
+        .unwrap();
+        assert_eq!(drive.root, p(r"Z:\"));
+        assert_eq!(drive.canonical, p(r"\\server\share\"));
+        assert_eq!(
+            drive.shown(Path::new(r"\\server\share\Repo-fix")),
+            Some(p(r"Z:\Repo-fix"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_substituted_drive_is_found_with_its_target() {
+        let drive = Drive::of(Path::new(r"X:\repo"), canonical_as(r"\\?\C:\real")).unwrap();
+        assert_eq!(drive.canonical, p(r"C:\real"));
+        assert_eq!(drive.shown(Path::new(r"C:\real\repo")), Some(p(r"X:\repo")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_plain_drive_and_a_network_path_have_no_drive_to_show() {
+        assert_eq!(
+            Drive::of(Path::new(r"C:\work"), canonical_as(r"\\?\C:\")),
+            None
+        );
+        assert_eq!(
+            Drive::of(
+                Path::new(r"\\server\share\Repo"),
+                canonical_as(r"\\?\UNC\server\share\")
+            ),
+            None
+        );
     }
 }
