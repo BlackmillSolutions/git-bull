@@ -1,4 +1,5 @@
-//! Benchmarks against a large repository (task 4.21). They run on demand:
+//! Benchmarks against a large repository (task 4.21), and of the home tab
+//! with many repositories in the fake backend. They run on demand:
 //!
 //! ```text
 //! cargo test --release -p gitbull-app --test benchmarks -- --ignored --nocapture --test-threads=1
@@ -1242,6 +1243,179 @@ fn diff() {
         summary("Toggling invisible characters while scrolling", toggled),
         summary("Mouse wheel through 200,000 lines", large_wheel),
         summary("Scrollbar from top to bottom, 200,000 lines", dragged),
+    ];
+    for slowest in slowest {
+        assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
+    }
+}
+
+/// The repositories of the benchmark of the home tab, and the further
+/// worktrees of each.
+const HOME_REPOSITORIES: usize = 40;
+const HOME_WORKTREES: usize = 5;
+
+/// The names of the rows of the home tab shown.
+fn home_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::TreeItem)
+        .filter_map(|node| {
+            let label = node.accesskit_node().label()?;
+            Some(label.split(',').next()?.to_owned())
+        })
+        .collect()
+}
+
+/// A frame with `event`, timed.
+fn frame_with(harness: &mut Harness<'_, App>, event: Event) -> Duration {
+    harness.input_mut().events.push(event);
+    let started = Instant::now();
+    harness.step();
+    started.elapsed()
+}
+
+#[test]
+#[ignore]
+fn home_tab() {
+    use gitbull_git::head::Head;
+    use gitbull_testkit::{FakeBackend, Gate};
+    use support::{path, worktree};
+    let summary_of = support::summary;
+
+    let name = |repository: usize| format!("repository-{repository:02}");
+    let gate = Gate::new();
+    let mut backend = FakeBackend::default();
+    let mut paths = Vec::new();
+    for repository in 0..HOME_REPOSITORIES {
+        let root = path(&["work", &name(repository)]);
+        let mut listed = vec![worktree(root.clone(), Some("main"))];
+        backend = backend.with_repository(&root).with_summary(
+            &root,
+            summary_of(Head::Branch("main".to_owned()), repository, 0, 600),
+        );
+        for agent in 0..HOME_WORKTREES {
+            let folder = path(&["work", &format!("{}-agent-{agent}", name(repository))]);
+            let branch = format!("agent/task-{repository:02}-{agent}");
+            listed.push(worktree(folder.clone(), Some(&branch)));
+            backend = backend.with_summary(
+                &folder,
+                summary_of(Head::Branch(branch), agent, 0, 60 * agent as i64),
+            );
+        }
+        backend = backend.with_worktrees(listed);
+        paths.push(root);
+    }
+    let backend = backend.with_summary_gate(&gate);
+    let test = build(Setup {
+        settings: Settings {
+            pinned: paths[..HOME_REPOSITORIES / 2].to_vec(),
+            recent: paths[HOME_REPOSITORIES / 2..].to_vec(),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+
+    // The worktrees are found while the summaries wait; then they arrive.
+    let mut finding = Vec::new();
+    for _ in 0..60 {
+        let started = Instant::now();
+        harness.step();
+        finding.push(started.elapsed());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    gate.open();
+    let mut arriving = Vec::new();
+    while harness.state().home_reading() {
+        let started = Instant::now();
+        harness.step();
+        arriving.push(started.elapsed());
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    let all = HOME_REPOSITORIES * (HOME_WORKTREES + 1);
+    assert_eq!(
+        harness
+            .query_all_by_role(Role::TreeItem)
+            .filter(|node| {
+                node.accesskit_node()
+                    .label()
+                    .is_some_and(|label| !label.ends_with("Reading…"))
+            })
+            .count(),
+        home_rows(&harness).len(),
+        "every row shown was read"
+    );
+    harness.get_by_label(&format!(
+        "{HOME_REPOSITORIES} repositories, {} worktrees",
+        all - HOME_REPOSITORIES
+    ));
+
+    // Page Down and the wheel in turn over the list.
+    let list = harness
+        .get_by_role_and_label(Role::Tree, "Repositories")
+        .rect();
+    harness.hover_at(list.center());
+    harness.drag_at(list.center());
+    harness.drop_at(list.center());
+    harness.run();
+    let first = home_rows(&harness);
+    let mut scrolling = Vec::new();
+    for frame in 0..400 {
+        let event = match frame % 2 {
+            0 => key(Key::PageDown),
+            _ => Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: vec2(0.0, -240.0),
+                phase: TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            },
+        };
+        scrolling.push(frame_with(&mut harness, event));
+    }
+    assert_ne!(home_rows(&harness), first, "the list scrolled");
+
+    // A filter typed a character a frame, and cleared; each frame shows the
+    // rows of its filter.
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::O);
+    harness.run();
+    let mut filtering = Vec::new();
+    let text = "task-3";
+    for (typed, character) in text.chars().enumerate() {
+        filtering.push(frame_with(&mut harness, Event::Text(character.to_string())));
+        let filter = &text[..=typed];
+        let rows = home_rows(&harness);
+        assert!(!rows.is_empty(), "{filter}");
+        assert!(
+            harness
+                .query_all_by_role(Role::TreeItem)
+                .filter_map(|node| node.accesskit_node().label())
+                .all(|label| label.contains(filter) || !label.contains("agent")),
+            "the frame of {filter} shows its rows"
+        );
+    }
+    filtering.push(frame_with(&mut harness, key(Key::Escape)));
+    // The field shows its text as it was drawn, before Escape emptied it.
+    harness.step();
+    let field = harness.get_by_label("Filter repositories and worktrees");
+    assert_eq!(
+        field.value().as_deref(),
+        Some(""),
+        "Escape cleared the filter"
+    );
+
+    eprintln!();
+    eprintln!(
+        "| Home tab, {HOME_REPOSITORIES} repositories with {HOME_WORKTREES} worktrees each | Frames | Median | 99th percentile | Slowest |"
+    );
+    eprintln!("|---|---|---|---|---|");
+    let slowest = [
+        summary("Worktrees found, summaries waiting", finding),
+        summary("Summaries arriving", arriving),
+        summary("Page Down and wheel in turn", scrolling),
+        summary(
+            "Typing `task-3` and clearing it, one character a frame",
+            filtering,
+        ),
     ];
     for slowest in slowest {
         assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");

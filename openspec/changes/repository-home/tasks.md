@@ -29,7 +29,7 @@
 
 ## 5. Performance
 
-- [ ] 5.1 Add a benchmark `home_tab` to `tests/benchmarks.rs`: 40 repositories with five worktrees each in the fake backend, their summaries arriving through a gate, the list scrolled and a filter typed character by character and cleared; verify that each frame takes less than 16.7 ms in a release build, for the scenario "Many repositories" of `repository-manager`, and that its table and the machine are recorded in `docs/benchmarks.md`
+- [x] 5.1 Add a benchmark `home_tab` to `tests/benchmarks.rs`: 40 repositories with five worktrees each in the fake backend, their summaries arriving through a gate, the list scrolled and a filter typed character by character and cleared; verify that each frame takes less than 16.7 ms in a release build, for the scenario "Many repositories" of `repository-manager`, and that its table and the machine are recorded in `docs/benchmarks.md`
 
 ## 6. Snapshots and manual check
 
