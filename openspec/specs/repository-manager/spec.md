@@ -57,7 +57,9 @@ each with the name of its folder. A worktree that was opened on its own
 SHALL be listed under its repository and not as a repository of its own,
 and its repository SHALL be listed in its place. A repository or a worktree
 SHALL be listed once, however its path is written, such as with other
-letter cases on Windows, a short name or through a symbolic link. At start,
+letter cases on Windows, a short name or through a symbolic link. A
+submodule SHALL be listed by the folder of its working tree, not by its Git
+folder in the repository that holds it. At start,
 the home tab SHALL list the worktrees found when it last read them, until
 it has read them again. The worktrees of a repository SHALL be expanded
 until the user collapses them. A repository whose folder is gone SHALL say
@@ -80,6 +82,10 @@ status of its own. A title without rows SHALL not be shown.
 #### Scenario: Same folder written differently
 - **WHEN** on Windows a worktree was opened through a path with a short name, such as `C:\Users\ALIKAR~1\work\fix`, and Git names it with its long name
 - **THEN** the worktree is listed once, below its repository
+
+#### Scenario: Submodule
+- **WHEN** the user opened a submodule whose Git folder lies in `.git/modules` of the repository that holds it
+- **THEN** the home tab lists the submodule by the folder of its working tree, and Show in file manager and Copy path use that folder
 
 #### Scenario: Worktrees known at start
 - **WHEN** git-bull starts with the home tab shown, and a repository had two worktrees when the home tab last read it
@@ -159,7 +165,9 @@ path contain its text, regardless of case; the folders further up, such as
 the user's home folder, SHALL not count. A repository SHALL stay listed with
 those of its worktrees that match; when no row matches, the home tab SHALL
 say so. While the filter has text, the first repository or worktree that
-matches SHALL be selected. In the field, Enter SHALL open the row selected,
+matches SHALL be selected, the worktrees that match SHALL be listed also
+below a collapsed repository, and nothing SHALL collapse or expand the
+worktrees of a repository. In the field, Enter SHALL open the row selected,
 Down SHALL move the focus to the list and leave its selection, and Escape
 SHALL empty the field, and in an empty field show the repository tab shown
 before. The list SHALL be operated like the other lists: Up, Down, Page Up,
@@ -193,6 +201,10 @@ repository are expanded; the field SHALL be named for it.
 #### Scenario: Collapsing with the keyboard
 - **WHEN** the list has the focus, a worktree is selected and the user presses Left twice
 - **THEN** its repository is selected after the first press and its worktrees are collapsed after the second
+
+#### Scenario: Nothing collapses while filtering
+- **WHEN** the filter has text and the user clicks the triangle of a repository listed with a matching worktree
+- **THEN** the worktree stays listed, and once the filter is emptied the repository is expanded as before
 
 ### Requirement: Actions of a row
 The context menu of a row SHALL offer Open, which shows it in a tab, opening
