@@ -1,15 +1,15 @@
-//! The tab bar: a tab per repository, its close button and the button for
-//! a new tab.
+//! The tab bar: the home tab, a tab per repository, its close button and
+//! the button for a new tab.
 
 mod support;
 
-use eframe::egui::accesskit::Role;
+use eframe::egui::accesskit::{Role, Toggled};
 use eframe::egui::os::OperatingSystem;
 use std::path::PathBuf;
 
 use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, Rect, pos2};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
 use gitbull_core::settings::{Settings, SettingsFile};
 use gitbull_testkit::FakeBackend;
@@ -440,6 +440,7 @@ fn buttons_of_the_tab_bar_have_click_targets_of_at_least_24() {
     let mut harness = window_on(OperatingSystem::Windows, build(two_tabs()).app);
     settle_window(&mut harness);
     for label in [
+        "Repositories",
         "git-bull",
         "linux",
         "Close git-bull",
@@ -454,4 +455,110 @@ fn buttons_of_the_tab_bar_have_click_targets_of_at_least_24() {
             .size();
         assert!(size.x >= 24.0 && size.y >= 24.0, "{label} is {size:?}");
     }
+}
+
+/// Where the home tab is drawn.
+fn home_tab(harness: &Harness<'_, App>) -> Rect {
+    harness
+        .get_by_role_and_label(Role::Button, "Repositories")
+        .rect()
+}
+
+#[test]
+fn the_title_bar_shows_the_home_tab_left_of_the_tabs_and_the_window_buttons() {
+    let mut harness = window_on(OperatingSystem::Windows, build(two_tabs()).app);
+    settle_window(&mut harness);
+    let home = home_tab(&harness);
+    assert!(home.right() <= tab(&harness, "git-bull").left(), "{home:?}");
+    for label in ["New tab", "Minimize", "Maximize", "Close window"] {
+        harness.get_by_role_and_label(Role::Button, label);
+    }
+    // It cannot be closed: it has no close button, also under the pointer.
+    harness.hover_at(home.center());
+    harness.run();
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Close Repositories")
+            .is_none()
+    );
+    // The tab names it to assistive technology, its tooltip to the eye.
+    assert_eq!(harness.query_all_by_label("Repositories").count(), 2);
+}
+
+#[test]
+fn a_click_on_the_home_tab_shows_it_and_marks_it_selected() {
+    let mut harness = window(build(two_tabs()).app);
+    settle_window(&mut harness);
+    let node = harness.get_by_role_and_label(Role::Button, "Repositories");
+    assert_eq!(node.accesskit_node().toggled(), Some(Toggled::False));
+    node.click();
+    harness.run();
+
+    assert!(harness.state().home_shown());
+    let node = harness.get_by_role_and_label(Role::Button, "Repositories");
+    assert_eq!(node.accesskit_node().toggled(), Some(Toggled::True));
+    assert_eq!(tab_titles(harness.state()), ["git-bull", "linux"]);
+}
+
+#[test]
+fn without_tabs_to_restore_the_home_tab_shows_the_repositories() {
+    let test = build(Setup {
+        settings: Settings {
+            recent: vec![path(&["work", "git-bull"])],
+            ..Settings::default()
+        },
+        backend: FakeBackend::default().with_repository(path(&["work", "git-bull"])),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    harness.run();
+
+    assert!(harness.state().home_shown());
+    assert!(support::home_row(&harness, "git-bull").is_some());
+}
+
+#[test]
+fn moving_the_first_tab_to_the_left_leaves_the_home_tab_first() {
+    let mut harness = window(build(two_tabs()).app);
+    settle_window(&mut harness);
+    harness.key_press_modifiers(Modifiers::CTRL | Modifiers::SHIFT, Key::PageUp);
+    harness.run();
+
+    assert_eq!(tab_titles(harness.state()), ["git-bull", "linux"]);
+    assert!(home_tab(&harness).right() <= tab(&harness, "git-bull").left());
+}
+
+#[test]
+fn a_tab_dropped_over_the_home_tab_becomes_the_first_tab() {
+    let mut harness = window(build(three_tabs()).app);
+    settle_window(&mut harness);
+    let distance = home_tab(&harness).center().x - tab(&harness, "chromium").center().x;
+
+    drag_tab_by(&mut harness, "chromium", distance, false);
+
+    assert_eq!(
+        tab_titles(harness.state()),
+        ["chromium", "git-bull", "linux"]
+    );
+    assert!(home_tab(&harness).right() <= tab(&harness, "chromium").left());
+}
+
+#[test]
+fn with_30_tabs_scrolled_to_their_end_the_home_tab_stays_at_the_left() {
+    let mut harness = many_tabs_in(30, 0, SMALLEST);
+    let before = home_tab(&harness);
+    let first = tab(&harness, &long_name(0));
+    harness.hover_at(first.center());
+    harness.step();
+    turn_wheel(&mut harness, -40.0, Modifiers::NONE);
+    harness.run_steps(30);
+    assert!(
+        tab(&harness, &long_name(0)).right() < 0.0,
+        "the row scrolled to its end"
+    );
+
+    let home = home_tab(&harness);
+    let window = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(SMALLEST.0, SMALLEST.1));
+    assert!(window.contains_rect(home), "{home:?}");
+    assert_eq!(home, before);
 }

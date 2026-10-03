@@ -201,7 +201,13 @@ fn divider_positions_are_restored_from_the_settings() {
 
 #[test]
 fn headings_are_semibold_and_section_titles_medium() {
-    let test = support::build(support::Setup::default());
+    let test = support::build(support::Setup {
+        settings: Settings {
+            recent: vec![support::path(&["work", "git-bull"])],
+            ..Settings::default()
+        },
+        ..support::Setup::default()
+    });
     let mut harness = window(test.app);
     harness.run();
     let semibold = FontFamily::Name(fonts::SEMIBOLD.into());
@@ -209,11 +215,7 @@ fn headings_are_semibold_and_section_titles_medium() {
     let families =
         |harness: &Harness<'_, App>, text| support::text_families(harness.output(), text);
 
-    assert_eq!(
-        families(&harness, "Open a repository"),
-        slice::from_ref(&semibold)
-    );
-    assert_eq!(families(&harness, "Recent repositories"), [medium]);
+    assert_eq!(families(&harness, "Recent"), [medium]);
 
     harness
         .get_by_role_and_label(Role::Button, "Settings")

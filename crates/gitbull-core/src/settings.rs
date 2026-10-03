@@ -123,6 +123,15 @@ pub struct Layout {
     pub path_column: Option<f32>,
 }
 
+/// The worktrees the home tab last found in a repository, so that it shows
+/// them before it has read them again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownWorktrees {
+    pub repository: PathBuf,
+    /// Its further worktrees, by their folders.
+    pub worktrees: Vec<PathBuf>,
+}
+
 /// Everything git-bull remembers between runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -147,24 +156,77 @@ pub struct Settings {
     pub language: String,
     /// The Git executable chosen by the user, if any.
     pub git_path: Option<PathBuf>,
-    /// Recently opened repositories, most recent first.
+    /// Recently opened repositories, most recent first, each by its main
+    /// worktree or the Git folder of a bare repository.
     pub recent: Vec<PathBuf>,
+    /// Repositories the user pinned in the home tab, in the order pinned.
+    #[serde(deserialize_with = "or_default")]
+    pub pinned: Vec<PathBuf>,
     /// Repositories open in tabs when git-bull was closed, in tab order.
     pub tabs: Vec<PathBuf>,
+    /// The tab shown when git-bull was closed; `None` is the home tab.
     pub active_tab: Option<usize>,
     pub window: Option<WindowGeometry>,
     pub layout: Layout,
+    /// The worktrees last found in the pinned and recent repositories.
+    #[serde(deserialize_with = "or_default")]
+    pub worktrees: Vec<KnownWorktrees>,
 }
 
 impl Settings {
     /// How many recently opened repositories are remembered.
     pub const RECENT_LIMIT: usize = 20;
 
-    /// Puts `root` first in the list of recently opened repositories.
-    pub fn remember(&mut self, root: PathBuf) {
-        self.recent.retain(|known| *known != root);
-        self.recent.insert(0, root);
+    /// Puts `repository` first in the list of recently opened repositories.
+    pub fn remember(&mut self, repository: PathBuf) {
+        self.recent.retain(|known| *known != repository);
+        self.recent.insert(0, repository);
         self.recent.truncate(Self::RECENT_LIMIT);
+    }
+
+    /// Pins `repository`, last among the pinned ones.
+    pub fn pin(&mut self, repository: PathBuf) {
+        if !self.pinned.contains(&repository) {
+            self.pinned.push(repository);
+        }
+    }
+
+    pub fn unpin(&mut self, repository: &Path) {
+        self.pinned.retain(|known| known != repository);
+    }
+
+    /// Forgets `paths`, a repository with every path it was known by, from
+    /// the recent and the pinned repositories and the worktrees remembered.
+    pub fn forget(&mut self, paths: &[PathBuf]) {
+        self.recent.retain(|known| !paths.contains(known));
+        self.pinned.retain(|known| !paths.contains(known));
+        self.worktrees
+            .retain(|known| !paths.contains(&known.repository));
+    }
+
+    /// Remembers that `repository` has `worktrees`, if it is pinned or
+    /// recent, and drops what is remembered of repositories that are
+    /// neither any more. Returns whether anything changed.
+    pub fn remember_worktrees(&mut self, repository: PathBuf, worktrees: Vec<PathBuf>) -> bool {
+        let before = self.worktrees.clone();
+        let (recent, pinned) = (&self.recent, &self.pinned);
+        self.worktrees.retain(|known| {
+            recent.contains(&known.repository) || pinned.contains(&known.repository)
+        });
+        if recent.contains(&repository) || pinned.contains(&repository) {
+            match self
+                .worktrees
+                .iter_mut()
+                .find(|known| known.repository == repository)
+            {
+                Some(known) => known.worktrees = worktrees,
+                None => self.worktrees.push(KnownWorktrees {
+                    repository,
+                    worktrees,
+                }),
+            }
+        }
+        self.worktrees != before
     }
 }
 
@@ -180,10 +242,12 @@ impl Default for Settings {
             language: "en-US".to_owned(),
             git_path: None,
             recent: Vec::new(),
+            pinned: Vec::new(),
             tabs: Vec::new(),
             active_tab: None,
             window: None,
             layout: Layout::default(),
+            worktrees: Vec::new(),
         }
     }
 }
@@ -269,7 +333,7 @@ impl SettingsFile {
 
 /// `settings` without the paths that are not valid UTF-8, which the file
 /// cannot hold: such a repository is neither restored nor listed as
-/// recent, and such a Git is located anew. The active tab stays the one it
+/// recent or pinned, and such a Git is located anew. The active tab stays the one it
 /// was, or becomes the first when it is left out.
 fn storable(settings: &Settings) -> Settings {
     fn valid(path: &Path) -> bool {
@@ -289,9 +353,20 @@ fn storable(settings: &Settings) -> Settings {
             Some(path) if !valid(path) => 0,
             _ => index - left_out_before(index),
         });
+    let worktrees = settings
+        .worktrees
+        .iter()
+        .filter(|known| valid(&known.repository))
+        .map(|known| KnownWorktrees {
+            repository: known.repository.clone(),
+            worktrees: kept(&known.worktrees),
+        })
+        .collect();
     Settings {
         git_path: settings.git_path.clone().filter(|path| valid(path)),
         recent: kept(&settings.recent),
+        pinned: kept(&settings.pinned),
+        worktrees,
         active_tab: active_tab.filter(|_| !tabs.is_empty()),
         tabs,
         ..settings.clone()
@@ -338,6 +413,7 @@ mod tests {
                 PathBuf::from("/work/git-bull"),
                 PathBuf::from("/work/linux"),
             ],
+            pinned: Vec::new(),
             tabs: vec![PathBuf::from("/work/git-bull")],
             active_tab: Some(0),
             window: Some(WindowGeometry {
@@ -350,6 +426,7 @@ mod tests {
                 details_height: Some(300.0),
                 ..Layout::default()
             },
+            worktrees: Vec::new(),
         }
     }
 
@@ -856,5 +933,141 @@ mod tests {
         let loaded = file.load().settings;
         assert!(loaded.tabs.is_empty());
         assert_eq!(loaded.active_tab, None);
+    }
+
+    fn known(repository: &str, worktrees: &[&str]) -> KnownWorktrees {
+        KnownWorktrees {
+            repository: PathBuf::from(repository),
+            worktrees: worktrees.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    #[test]
+    fn a_file_without_pinned_repositories_and_worktrees_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(&file, "theme = \"dark\"\nrecent = [\"/work/git-bull\"]\n");
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert!(loaded.settings.pinned.is_empty());
+        assert!(loaded.settings.worktrees.is_empty());
+        assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
+        assert_eq!(loaded.settings.recent, [PathBuf::from("/work/git-bull")]);
+    }
+
+    #[test]
+    fn pinned_repositories_and_worktrees_survive_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let mut settings = example();
+        settings.pin(PathBuf::from("/work/billing"));
+        settings.pin(PathBuf::from("/work/git-bull"));
+        assert!(settings.remember_worktrees(
+            PathBuf::from("/work/git-bull"),
+            vec![PathBuf::from("/work/git-bull/.claude/worktrees/fix")],
+        ));
+        file.save(&settings).unwrap();
+        assert_eq!(file.load().settings, settings);
+    }
+
+    #[test]
+    fn a_pinned_repository_outlasts_the_limit_of_recent_ones() {
+        let mut settings = Settings::default();
+        settings.remember(PathBuf::from("/work/pinned"));
+        settings.pin(PathBuf::from("/work/pinned"));
+        for n in 0..Settings::RECENT_LIMIT {
+            settings.remember(PathBuf::from(format!("/work/other-{n}")));
+        }
+        assert!(!settings.recent.contains(&PathBuf::from("/work/pinned")));
+        assert_eq!(settings.pinned, [PathBuf::from("/work/pinned")]);
+    }
+
+    #[test]
+    fn pinning_keeps_the_order_and_unpinning_removes() {
+        let mut settings = Settings::default();
+        for path in ["/work/b", "/work/a", "/work/b"] {
+            settings.pin(PathBuf::from(path));
+        }
+        assert_eq!(
+            settings.pinned,
+            [PathBuf::from("/work/b"), PathBuf::from("/work/a")]
+        );
+        settings.unpin(Path::new("/work/b"));
+        assert_eq!(settings.pinned, [PathBuf::from("/work/a")]);
+    }
+
+    #[test]
+    fn a_removed_repository_is_neither_pinned_nor_recent() {
+        let mut settings = Settings::default();
+        settings.remember(PathBuf::from("/work/app"));
+        settings.remember(PathBuf::from("/work/other"));
+        settings.pin(PathBuf::from("/work/app"));
+        settings.forget(&[PathBuf::from("/work/app")]);
+        assert_eq!(settings.recent, [PathBuf::from("/work/other")]);
+        assert!(settings.pinned.is_empty());
+    }
+
+    #[test]
+    fn a_repository_known_through_its_worktrees_is_forgotten_whole() {
+        let mut settings = Settings::default();
+        // An earlier version recorded worktrees among the recent ones.
+        for path in [
+            "/work/app",
+            "/work/other",
+            "/work/app-fix",
+            "/work/app-docs",
+        ] {
+            settings.remember(PathBuf::from(path));
+        }
+        settings.remember_worktrees(
+            PathBuf::from("/work/app"),
+            vec![
+                PathBuf::from("/work/app-fix"),
+                PathBuf::from("/work/app-docs"),
+            ],
+        );
+        settings.forget(&[
+            PathBuf::from("/work/app"),
+            PathBuf::from("/work/app-fix"),
+            PathBuf::from("/work/app-docs"),
+        ]);
+        assert_eq!(settings.recent, [PathBuf::from("/work/other")]);
+        assert!(settings.worktrees.is_empty());
+    }
+
+    #[test]
+    fn worktrees_are_remembered_only_for_known_repositories_and_report_a_change() {
+        let mut settings = Settings::default();
+        settings.remember(PathBuf::from("/work/app"));
+        let found = vec![PathBuf::from("/work/app-fix")];
+        assert!(settings.remember_worktrees(PathBuf::from("/work/app"), found.clone()));
+        assert!(!settings.remember_worktrees(PathBuf::from("/work/app"), found));
+        assert!(!settings.remember_worktrees(PathBuf::from("/work/unknown"), Vec::new()));
+        assert_eq!(settings.worktrees, [known("/work/app", &["/work/app-fix"])]);
+        // A repository that fell out of the recent ones loses them.
+        for n in 0..Settings::RECENT_LIMIT {
+            settings.remember(PathBuf::from(format!("/work/other-{n}")));
+        }
+        assert!(settings.remember_worktrees(PathBuf::from("/work/other-0"), Vec::new()));
+        assert_eq!(settings.worktrees, [known("/work/other-0", &[])]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_paths_and_worktrees_that_are_not_valid_utf8_are_left_out() {
+        use std::os::unix::ffi::OsStrExt;
+        let invalid = PathBuf::from(std::ffi::OsStr::from_bytes(b"/work/\xff"));
+        let mut settings = Settings::default();
+        settings.remember(PathBuf::from("/work/app"));
+        settings.pin(invalid.clone());
+        settings.remember_worktrees(
+            PathBuf::from("/work/app"),
+            vec![invalid, PathBuf::from("/work/app-fix")],
+        );
+        let stored = storable(&settings);
+        assert!(stored.pinned.is_empty());
+        assert_eq!(stored.worktrees, [known("/work/app", &["/work/app-fix"])]);
     }
 }

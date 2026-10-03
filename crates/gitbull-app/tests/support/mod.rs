@@ -11,6 +11,7 @@ use eframe::egui::{Event, Modifiers, MouseWheelUnit, Pos2, Rect, TouchPhase, Vec
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder};
 use gitbull_app::app::{App, GitChecker, GitStatus, Parts, Picker};
+use gitbull_app::desktop::Desktop;
 use gitbull_app::theme::ThemeFollower;
 use gitbull_app::ui;
 use gitbull_app::virtual_list::ROW_HEIGHT;
@@ -19,9 +20,12 @@ use gitbull_core::settings::{Loaded, Settings, SettingsFile};
 use gitbull_core::workspace::TabState;
 use gitbull_git::Error;
 use gitbull_git::content::{CommitContent, Signature};
+use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
 use gitbull_git::locate::LocateError;
+use gitbull_git::summary::Summary;
 use gitbull_git::version::GitVersion;
+use gitbull_git::worktrees::Worktree;
 use gitbull_testkit::{FakeBackend, fake_id};
 use tempfile::TempDir;
 
@@ -48,6 +52,42 @@ impl Picker for FixedPicker {
 
     fn pick_git(&self) -> Option<PathBuf> {
         self.git.clone()
+    }
+}
+
+/// The time of the tests' desktop: 2027-01-15, 08:00 UTC.
+pub const NOW: i64 = 1_800_000_000;
+
+/// A desktop whose time stands still, which records the folders it is
+/// asked to show and can fail to show them.
+#[derive(Clone)]
+pub struct FixedDesktop {
+    pub now: i64,
+    pub revealed: Arc<Mutex<Vec<PathBuf>>>,
+    pub fails: bool,
+}
+
+impl Default for FixedDesktop {
+    fn default() -> FixedDesktop {
+        FixedDesktop {
+            now: NOW,
+            revealed: Arc::default(),
+            fails: false,
+        }
+    }
+}
+
+impl Desktop for FixedDesktop {
+    fn now(&self) -> i64 {
+        self.now
+    }
+
+    fn reveal(&self, folder: &Path) -> std::io::Result<()> {
+        if self.fails {
+            return Err(std::io::Error::other("no file manager"));
+        }
+        self.revealed.lock().unwrap().push(folder.to_owned());
+        Ok(())
     }
 }
 
@@ -82,6 +122,7 @@ pub struct Setup {
     pub checker: Option<GitChecker>,
     /// The local time zone; UTC unless given.
     pub time_zone: Option<jiff::tz::TimeZone>,
+    pub desktop: FixedDesktop,
 }
 
 pub fn build(setup: Setup) -> TestApp {
@@ -99,6 +140,7 @@ pub fn build(setup: Setup) -> TestApp {
             folder: setup.picker,
             git: setup.picked_git,
         }),
+        desktop: Box::new(setup.desktop),
         open_at_start: setup.open_at_start,
         time_zone: setup.time_zone.unwrap_or(jiff::tz::TimeZone::UTC),
     });
@@ -200,6 +242,178 @@ pub fn active_title(app: &App) -> Option<String> {
     app.workspace()
         .and_then(|workspace| workspace.active())
         .map(|tab| tab.title())
+}
+
+/// A summary of a working copy on `head` with `changed` files, of which
+/// `conflicts` in conflict, last active `ago` seconds before [`NOW`].
+pub fn summary(head: Head, changed: usize, conflicts: usize, ago: i64) -> Summary {
+    Summary {
+        head,
+        commit: Some(fake_id("head").to_string()),
+        committed: Some(NOW - ago),
+        changed,
+        conflicts,
+        paths: Vec::new(),
+    }
+}
+
+/// A worktree at `path` on `branch`, or detached at a commit.
+pub fn worktree(path: PathBuf, branch: Option<&str>) -> Worktree {
+    Worktree {
+        path,
+        head: Some(fake_id("head").to_string()),
+        branch: branch.map(str::to_owned),
+        bare: false,
+        detached: branch.is_none(),
+        prunable: false,
+    }
+}
+
+/// The repositories of a developer who works with agents in worktrees:
+/// `billing-api` pinned; `git-bull` with three further worktrees,
+/// `web-shop` with files in conflict, `notes`, whose folder is gone, and
+/// the bare `infra.git` with one worktree recently opened.
+pub fn home_setup() -> Setup {
+    let work = |name: &str| path(&["work", name]);
+    let branch = |name: &str| Head::Branch(name.to_owned());
+    let minutes = 60;
+    let hours = 60 * minutes;
+    let days = 24 * hours;
+    let backend = FakeBackend::default()
+        .with_repository(work("billing-api"))
+        .with_repository(work("git-bull"))
+        .with_repository(work("web-shop"))
+        .with_bare_repository(work("infra.git"))
+        .with_worktrees(vec![
+            worktree(work("git-bull"), Some("main")),
+            worktree(work("git-bull-fix-reload"), Some("claude/fix-reload")),
+            worktree(work("git-bull-home-tab"), Some("feature/home-tab")),
+            worktree(work("git-bull-review"), None),
+        ])
+        .with_worktrees(vec![
+            Worktree {
+                path: work("infra.git"),
+                head: None,
+                branch: None,
+                bare: true,
+                detached: false,
+                prunable: false,
+            },
+            worktree(work("infra-deploy"), Some("main")),
+        ])
+        .with_summary(work("billing-api"), summary(branch("main"), 0, 0, 3 * days))
+        .with_summary(
+            work("git-bull"),
+            summary(branch("main"), 3, 0, 10 * minutes),
+        )
+        .with_summary(
+            work("git-bull-fix-reload"),
+            summary(branch("claude/fix-reload"), 5, 0, 2 * minutes),
+        )
+        .with_summary(
+            work("git-bull-home-tab"),
+            summary(branch("feature/home-tab"), 0, 0, hours),
+        )
+        .with_summary(
+            work("git-bull-review"),
+            summary(
+                Head::Detached(fake_id("review").to_string()),
+                0,
+                0,
+                2 * days,
+            ),
+        )
+        .with_summary(
+            work("web-shop"),
+            summary(branch("develop"), 4, 2, 25 * minutes),
+        )
+        .with_summary(
+            work("infra-deploy"),
+            summary(branch("main"), 1, 0, 9 * days),
+        );
+    Setup {
+        settings: Settings {
+            pinned: vec![work("billing-api")],
+            recent: vec![
+                work("git-bull"),
+                work("web-shop"),
+                work("notes"),
+                work("infra.git"),
+                work("billing-api"),
+            ],
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    }
+}
+
+/// The row of the home tab whose label starts with `name` and a comma.
+pub fn home_row(harness: &Harness<'_, App>, name: &str) -> Option<Rect> {
+    let prefix = format!("{name},");
+    harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(&prefix))
+        })
+        .map(|node| node.rect())
+}
+
+/// Steps the window until the home tab has read its repositories.
+pub fn wait_for_home(harness: &mut Harness<'_, App>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    harness.step();
+    while harness.state().home_reading() {
+        assert!(
+            Instant::now() < deadline,
+            "the home tab did not finish reading"
+        );
+        harness.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    harness.run();
+}
+
+/// Two clicks with the primary button at `at`, each press and release in
+/// a frame of its own; a double click only in a window at 60 frames per
+/// second, as egui counts the time between the clicks.
+pub fn double_click_at(harness: &mut Harness<'_, App>, at: Pos2) {
+    harness.hover_at(at);
+    harness.step();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            harness.event(Event::PointerButton {
+                pos: at,
+                button: eframe::egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+            harness.step();
+        }
+    }
+}
+
+/// Opens the row of the home tab named `name`: a click selects it and
+/// gives the list the focus, and Enter opens it. Steps until its tab has
+/// opened.
+pub fn open_from_home(harness: &mut Harness<'_, App>, name: &str) {
+    let at = home_row(harness, name)
+        .unwrap_or_else(|| panic!("no row {name} in the home tab"))
+        .center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+    harness.key_press(eframe::egui::Key::Enter);
+    settle_window(harness);
 }
 
 /// A folder dropped onto the window.

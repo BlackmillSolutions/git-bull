@@ -83,7 +83,7 @@ pub fn inspect(git: &Git, path: &Path) -> Result<RepositoryInfo, Error> {
 }
 
 /// Turns Git's refusals into their own errors.
-fn classify(error: Error, path: &Path) -> Error {
+pub(crate) fn classify(error: Error, path: &Path) -> Error {
     match error {
         Error::CommandFailed { stderr, .. } if stderr.contains("not a git repository") => {
             Error::NotARepository(path.to_owned())
@@ -111,7 +111,7 @@ fn trim_newline(bytes: &[u8]) -> &[u8] {
 }
 
 /// Paths from Git are raw bytes on Unix and UTF-8 on Windows.
-fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+pub(crate) fn path_from_bytes(bytes: &[u8]) -> PathBuf {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

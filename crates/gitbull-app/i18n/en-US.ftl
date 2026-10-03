@@ -27,12 +27,38 @@ window-maximize = Maximize
 window-restore = Restore
 window-close = Close window
 
-## Repository chooser
+## Home tab
 
-chooser-title = Open a repository
-chooser-choose-folder = Choose folder…
-chooser-recent = Recent repositories
-chooser-no-recent = No repositories opened yet.
+home-tab = Repositories
+home-filter = Filter repositories and worktrees
+home-open-folder = Open folder…
+home-pinned = Pinned
+home-recent = Recent
+home-empty = Open a folder to list its repository here.
+home-no-match = No repository matches the filter.
+home-reading = Reading…
+home-clean = Clean
+home-changed = { $count ->
+    [one] 1 changed
+   *[other] { $count } changed
+}
+home-conflicts = Conflicts
+home-not-found = Not found
+home-bare = Bare repository
+home-active-now = Just now
+home-active-minutes = { $count } min
+home-active-hours = { $count } h
+home-active-days = { $count } d
+home-active-weeks = { $count } wk
+home-open = Open
+home-show-in-file-manager = Show in file manager
+home-pin = Pin
+home-unpin = Unpin
+home-remove = Remove from list
+home-file-manager-failed = The file manager could not be started: { $error }
+
+## Notices
+
 notice-not-a-repository = { $folder } is not inside a Git repository.
 notice-dismiss = Dismiss
 notice-hidden-by-filter = The commit of { $reference } is hidden by the branch filter.
@@ -256,4 +282,12 @@ status-commits = { $count ->
    *[other] { $count } commits
 }
 status-detached = Detached at { $commit }
+status-home = { $repositories ->
+    [one] 1 repository
+   *[other] { $repositories } repositories
+}, { $worktrees ->
+    [one] 1 worktree
+   *[other] { $worktrees } worktrees
+}
+status-home-reading = Reading their status…
 status-settings-reset = The settings file could not be read; git-bull started with default settings.

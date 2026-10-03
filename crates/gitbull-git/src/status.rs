@@ -182,7 +182,7 @@ fn is_submodule(field: &[u8]) -> bool {
 
 /// The first `count` fields of `record`; the last one, a path, keeps its
 /// spaces.
-fn fields(record: &[u8], count: usize) -> Result<Vec<&[u8]>, String> {
+pub(crate) fn fields(record: &[u8], count: usize) -> Result<Vec<&[u8]>, String> {
     let fields: Vec<&[u8]> = record.splitn(count, |&b| b == b' ').collect();
     match fields.last() {
         Some(last) if fields.len() == count && !last.is_empty() => Ok(fields),

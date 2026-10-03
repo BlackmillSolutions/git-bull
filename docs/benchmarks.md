@@ -103,6 +103,13 @@ benchmark prints a table in the form used below.
   the time to the first match and to the end of the search, counted from
   its start after the 300 ms that it waits for the text to settle, and the
   time per frame meanwhile.
+- `home_tab` lists 40 repositories with five further worktrees each in
+  the home tab, from the fake backend rather than Git, so that it needs no
+  repositories on disk. It measures every frame while the worktrees are
+  found and the summaries wait at a gate, then while the summaries
+  arrive, then while the list scrolls with Page Down and the mouse wheel
+  in turn, and while a filter is typed a character a frame and cleared,
+  checking that each frame shows the rows of its filter.
 
 The benchmarks print their numbers first and then fail if a target of
 `commit-history` is missed: a frame of 16.7 ms or more, or 250 MB of memory
@@ -444,3 +451,27 @@ The repository of the benchmark has one commit that adds 50,000 files in
 - Counting the lines of a commit of 50,000 files makes Git read every
   blob; it takes 3.7 s in the background after the list has shown and does
   not delay it.
+
+## The home tab (change `repository-home`, task 5.1)
+
+Measured on 2026-10-03 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, release build, with
+`cargo test --release -p gitbull-app --test benchmarks home_tab -- --ignored --nocapture`.
+The repositories come from the fake backend, so Git and the disk take no
+part; the slowest of three runs is shown.
+
+| Home tab, 40 repositories with 5 worktrees each | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Worktrees found, summaries waiting | 60 | 0.3 ms | 1.1 ms | 10.3 ms | yes |
+| Summaries arriving | 5 | 5.9 ms | 6.8 ms | 8.2 ms | yes |
+| Page Down and wheel in turn | 400 | 0.2 ms | 0.9 ms | 1.9 ms | yes |
+| Typing `task-3` and clearing it, one character a frame | 7 | 0.4 ms | 1.1 ms | 1.1 ms | yes |
+
+- Every frame stays below the target of 16.7 ms. The slowest frame while
+  the worktrees are found is the first one, which lays out the window and
+  its fonts.
+- The 240 summaries arrive in a few frames, each of which applies every
+  report that came; a report of worktrees builds the rows again, one of a
+  summary only while a filter may look at the branch.
+- A change of the filter builds the rows in the frame of the change, which
+  shows them.

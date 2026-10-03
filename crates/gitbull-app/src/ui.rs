@@ -30,6 +30,7 @@ use crate::components::{self, BannerAction, BannerKind, Button, Kind, focus_ring
 use crate::diff_view::{self, Pane};
 use crate::file_history_view::{self, FILE_HISTORY_LIST};
 use crate::file_status_view::{self, STATUS_LIST};
+use crate::home_view;
 use crate::i18n;
 use crate::i18n::Msg;
 use crate::icons;
@@ -90,8 +91,9 @@ const COMMIT_PANEL_WIDTH: f32 = 380.0;
 enum Action {
     Activate(TabId),
     Close(TabId),
-    ShowChooser,
-    ChooseFolder,
+    /// Show the home tab; with `true`, with the keyboard focus in its
+    /// filter.
+    ShowHome(bool),
     Open(PathBuf),
     DismissNotice,
     CheckGitAgain,
@@ -222,12 +224,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         .and_then(|w| w.active())
         .map(|tab| tab.state());
     match active {
-        _ if app.choosing => {
-            CentralPanel::default().show(ui, |ui| chooser(app, ui, &mut actions));
-        }
-        None => {
-            CentralPanel::default().show(ui, |ui| chooser(app, ui, &mut actions));
-        }
+        None => home_view::show(app, ui),
         // A repository that failed after opening, for example because it
         // was deleted, shows the same error as one that failed to open.
         Some(TabState::Ready(session)) if session.failure().is_some() => {
@@ -261,7 +258,6 @@ fn apply(app: &mut App, actions: Vec<Action>) {
     for action in actions {
         match action {
             Action::Activate(id) => {
-                app.choosing = false;
                 if let Some(workspace) = app.workspace_mut() {
                     workspace.activate(id);
                 }
@@ -271,13 +267,14 @@ fn apply(app: &mut App, actions: Vec<Action>) {
                     workspace.close(id);
                 }
             }
-            Action::ShowChooser => app.show_chooser(),
-            Action::ChooseFolder => app.choose_folder(),
+            Action::ShowHome(focus_filter) => app.show_home(focus_filter),
             Action::Open(path) => app.open(path),
             Action::DismissNotice => app.notice = None,
             Action::ShowAllBranches(reference) => app.show_all_branches(&reference),
             Action::Refresh => {
-                if let Some(workspace) = app.workspace_mut() {
+                if app.home_shown() {
+                    app.read_home();
+                } else if let Some(workspace) = app.workspace_mut() {
                     workspace.refresh_active();
                 }
             }
@@ -322,13 +319,11 @@ fn apply(app: &mut App, actions: Vec<Action>) {
                 }
             }
             Action::NextTab => {
-                app.choosing = false;
                 if let Some(workspace) = app.workspace_mut() {
                     workspace.activate_next();
                 }
             }
             Action::PreviousTab => {
-                app.choosing = false;
                 if let Some(workspace) = app.workspace_mut() {
                     workspace.activate_previous();
                 }
@@ -516,7 +511,7 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
             }
         }
         if input.consume_shortcut(&OPEN) || input.consume_shortcut(&NEW_TAB) {
-            actions.push(Action::ShowChooser);
+            actions.push(Action::ShowHome(true));
         }
         if input.consume_shortcut(&CLOSE_TAB) {
             actions.push(Action::CloseActive);
@@ -600,32 +595,6 @@ fn dropped_folders(ui: &Ui) -> Vec<Action> {
     })
 }
 
-/// Recently opened repositories and the folder dialog.
-fn chooser(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
-    ui.add_space(24.0);
-    ui.vertical_centered(|ui| {
-        ui.heading(app.texts.text(Msg::ChooserTitle));
-        ui.add_space(12.0);
-        let choose = app.texts.text(Msg::ChooserChooseFolder);
-        let choose = Button::new(&choose).kind(Kind::Primary).icon(icons::FOLDER);
-        if choose.show(ui).clicked() {
-            actions.push(Action::ChooseFolder);
-        }
-        ui.add_space(24.0);
-        section_title(ui, app.texts.text(Msg::ChooserRecent));
-        if app.settings().recent.is_empty() {
-            ui.label(app.texts.text(Msg::ChooserNoRecent));
-        }
-        for path in &app.settings().recent {
-            let shown = path.display().to_string();
-            let recent = Button::new(&shown).kind(Kind::Ghost).icon(icons::FOLDER);
-            if recent.show(ui).clicked() {
-                actions.push(Action::Open(path.clone()));
-            }
-        }
-    });
-}
-
 fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>) {
     let text = match notice {
         Notice::NotARepository(path) => {
@@ -668,6 +637,11 @@ fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>
             args.set("tag", tag.clone());
             app.texts.text_with(Msg::NoticeNotACommit, Some(&args))
         }
+        Notice::FileManagerFailed(error) => {
+            let mut args = FluentArgs::new();
+            args.set("error", error.clone());
+            app.texts.text_with(Msg::HomeFileManagerFailed, Some(&args))
+        }
     };
     let show_all = app.texts.text(Msg::NoticeShowAllBranches);
     let offered: &[&str] = match notice {
@@ -695,7 +669,8 @@ fn notice_kind(notice: &Notice) -> BannerKind {
         Notice::NotARepository(_)
         | Notice::NotACommit(_)
         | Notice::HashUnknown(_)
-        | Notice::HashAmbiguous(_) => BannerKind::Warning,
+        | Notice::HashAmbiguous(_)
+        | Notice::FileManagerFailed(_) => BannerKind::Warning,
     }
 }
 
@@ -951,11 +926,15 @@ fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
     }
 }
 
-/// The tabs of `workspace` and the button for a new tab, leaving `reserve`
-/// points free right of them.
+/// The home tab, the tabs of `workspace` and the button for a new tab,
+/// leaving `reserve` points free right of them.
 fn tabs(app: &App, workspace: &Workspace, ui: &mut Ui, reserve: f32, actions: &mut Vec<Action>) {
     let palette = style::active_palette(ui.ctx());
     ui.spacing_mut().item_spacing.x = SHAPE.space[0];
+    let name = app.texts.text(Msg::HomeTab);
+    if home_tab(ui, palette, &name, workspace.home_shown()).clicked() {
+        actions.push(Action::ShowHome(false));
+    }
     let active = workspace.active().map(|tab| tab.id());
     let tabs: Vec<TabLabel> = workspace
         .tabs()
@@ -982,8 +961,61 @@ fn tabs(app: &App, workspace: &Workspace, ui: &mut Ui, reserve: f32, actions: &m
     tab_row(ui, palette, &tabs, reserve, actions);
     let new_tab = app.texts.text(Msg::TabNew);
     if components::icon_button(ui, icons::PLUS, &new_tab, Some(NEW_TAB)).clicked() {
-        actions.push(Action::ShowChooser);
+        actions.push(Action::ShowHome(true));
     }
+}
+
+/// The id of the home tab.
+pub const HOME_TAB: &str = "home-tab";
+
+/// The home tab, named `name`: an icon as wide as a button, drawn like a
+/// tab, that stays left of the tabs however many there are and is neither
+/// closed nor dragged (design, decision 9).
+fn home_tab(ui: &mut Ui, palette: &Palette, name: &str, shown: bool) -> egui::Response {
+    let [small, ..] = SHAPE.space;
+    let size = egui::vec2(SHAPE.control_height + small, SHAPE.control_height + small);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let response = ui.interact(rect, Id::new(HOME_TAB), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, shown, name)
+    });
+    let under_pointer = ui.rect_contains_pointer(rect);
+    let painter = ui.painter();
+    let fill = if shown {
+        color(palette.raised)
+    } else if under_pointer {
+        color(palette.hover)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let radius = SHAPE.radius as u8;
+    let top = egui::CornerRadius {
+        nw: radius,
+        ne: radius,
+        sw: 0,
+        se: 0,
+    };
+    painter.rect_filled(rect, top, fill);
+    if shown {
+        let line = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - 2.0),
+            rect.right_bottom(),
+        );
+        painter.rect_filled(line, 0.0, color(palette.accent));
+    }
+    let ink = match shown {
+        true => palette.text,
+        false => palette.text_muted,
+    };
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icons::HOME,
+        icons::font(ui.ctx(), 16.0),
+        color(ink),
+    );
+    focus_ring(ui, &response);
+    response.on_hover_text(name)
 }
 
 /// What a tab shows.
@@ -1328,7 +1360,7 @@ fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>
             .icon(icons::FOLDER)
             .shortcut(OPEN);
         if open.show(ui).clicked() {
-            actions.push(Action::ShowChooser);
+            actions.push(Action::ShowHome(true));
         }
         let refresh = app.texts.text(Msg::ToolbarRefresh);
         let refresh = Button::new(&refresh)
@@ -1684,6 +1716,19 @@ fn status_bar(app: &App, ui: &mut Ui) {
                 }
             });
             ui.label(commits_text(app, session));
+        } else if app.home_shown() {
+            let repositories = app.home.list.repositories();
+            let worktrees: usize = repositories
+                .iter()
+                .map(|repository| repository.worktrees.len())
+                .sum();
+            let mut args = FluentArgs::new();
+            args.set("repositories", repositories.len());
+            args.set("worktrees", worktrees);
+            ui.label(app.texts.text_with(Msg::StatusHome, Some(&args)));
+            if app.home.is_reading() {
+                ui.label(app.texts.text(Msg::StatusHomeReading));
+            }
         }
         if app.settings_reset {
             ui.label(app.texts.text(Msg::StatusSettingsReset));
@@ -1890,7 +1935,7 @@ pub(crate) fn lock_tab(ui: &Ui, id: Id) {
 
 /// Tab and Shift+Tab move the focus from one of `areas` to the next or
 /// back.
-fn move_between_areas(ui: &Ui, areas: &[&str]) {
+pub(crate) fn move_between_areas(ui: &Ui, areas: &[&str]) {
     // The filter above a file list moves on as the list does.
     let focused = ui.memory(|memory| memory.focused()).map(|id| {
         match [

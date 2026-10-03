@@ -18,6 +18,17 @@ use support::{
     settle_window, sized_window, turn_wheel, wait_for_row, window, window_at_60_fps, window_on,
 };
 
+/// The field of the Git path, the text field that is not the filter of the
+/// home tab behind the dialog.
+fn git_field<'h>(harness: &'h Harness<'_, App>) -> egui_kittest::Node<'h> {
+    harness
+        .query_all_by_role(Role::TextInput)
+        .find(|node| {
+            node.accesskit_node().label().as_deref() != Some("Filter repositories and worktrees")
+        })
+        .expect("the field of the Git path")
+}
+
 fn open_dialog(harness: &mut Harness<'_, App>) {
     harness
         .get_by_role_and_label(Role::Button, "Settings")
@@ -45,7 +56,7 @@ fn dialog_offers_theme_language_and_git_path() {
     harness.get_by_role_and_label(Role::RadioButton, "Light");
     harness.get_by_role_and_label(Role::RadioButton, "Dark");
     harness.get_by_label("Language");
-    harness.get_by_role(Role::TextInput);
+    git_field(&harness);
     harness.get_by_role_and_label(Role::Button, "Use this Git");
 }
 
@@ -94,7 +105,7 @@ fn valid_git_path_is_used_from_then_on() {
     harness.run();
     open_dialog(&mut harness);
 
-    let field = harness.get_by_role(Role::TextInput);
+    let field = git_field(&harness);
     field.focus();
     field.type_text("/opt/git/bin/git");
     harness.run();
@@ -162,7 +173,7 @@ fn browsing_puts_the_chosen_file_into_the_field() {
     harness.run();
 
     assert_eq!(
-        harness.get_by_role(Role::TextInput).value().as_deref(),
+        git_field(&harness).value().as_deref(),
         Some("/opt/git/bin/git")
     );
 }
@@ -386,8 +397,8 @@ fn shortcuts_of_the_window_do_nothing_while_the_dialog_is_open() {
         .map(|workspace| workspace.tabs().len());
     assert_eq!(tabs, Some(1), "Ctrl+W closed the tab behind the dialog");
     assert!(
-        harness.query_by_label("Open a repository").is_none(),
-        "Ctrl+O showed the chooser behind the dialog"
+        !harness.state().home_shown(),
+        "Ctrl+O showed the home tab behind the dialog"
     );
     harness.get_by_label("Appearance");
 }
@@ -426,7 +437,7 @@ fn the_dialog_fits_a_narrow_window() {
         (Role::TextInput, ""),
     ] {
         let node = match label {
-            "" => harness.get_by_role(role),
+            "" => git_field(&harness),
             label => harness.get_by_role_and_label(role, label),
         };
         let rect = node.rect();

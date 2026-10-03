@@ -19,6 +19,7 @@ pub mod highlight;
 pub mod links;
 pub mod opening;
 mod pending;
+pub mod repositories;
 pub mod search;
 pub mod session;
 pub mod settings;

@@ -63,6 +63,7 @@ fn main() -> eframe::Result {
                 notify,
                 theme,
                 picker: Box::new(SystemPicker),
+                desktop: Box::new(gitbull_app::desktop::SystemDesktop),
                 open_at_start,
                 time_zone: jiff::tz::TimeZone::system(),
             });
