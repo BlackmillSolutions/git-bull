@@ -456,3 +456,220 @@ fn leaving_the_home_tab_ends_the_summaries_that_did_not_finish() {
     wait_for_home(&mut harness);
     assert_eq!(probe.summaries_running(), 0);
 }
+
+/// The repositories of [`home_setup`], `git-bull` open in the tab shown,
+/// and their status read.
+fn tab_shown() -> Harness<'static, App> {
+    let mut setup = home_setup();
+    setup.settings.tabs = vec![path(&["work", "git-bull"])];
+    setup.settings.active_tab = Some(0);
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    harness
+}
+
+/// Shows the home tab with Ctrl+O and waits until its rows are read.
+fn ctrl_o(harness: &mut Harness<'_, App>) {
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::O);
+    harness.run();
+    wait_for_home(harness);
+}
+
+/// Types `text` into the field that has the focus.
+fn type_text(harness: &mut Harness<'_, App>, text: &str) {
+    harness.event(Event::Text(text.to_owned()));
+    harness.run();
+}
+
+/// The names of the rows of the home tab, and which is selected.
+fn rows(harness: &Harness<'_, App>) -> (Vec<String>, Option<String>) {
+    let mut names = Vec::new();
+    let mut selected = None;
+    for node in harness.query_all_by_role(Role::TreeItem) {
+        let label = node.accesskit_node().label().unwrap_or_default();
+        let name = label.split(',').next().unwrap_or_default().to_owned();
+        if node.accesskit_node().is_selected() == Some(true) {
+            selected = Some(name.clone());
+        }
+        names.push(name);
+    }
+    (names, selected)
+}
+
+fn focused(harness: &Harness<'_, App>, id: &str) -> bool {
+    harness.ctx.memory(|memory| memory.focused()) == Some(eframe::egui::Id::new(id))
+}
+
+#[test]
+fn ctrl_o_a_few_letters_and_enter_open_the_first_match() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    type_text(&mut harness, "bil");
+    harness.key_press(Key::Enter);
+    settle_window(&mut harness);
+
+    assert_eq!(tab_titles(harness.state()), ["git-bull", "billing-api"]);
+    assert_eq!(
+        active_title(harness.state()).as_deref(),
+        Some("billing-api")
+    );
+}
+
+#[test]
+fn the_filter_finds_a_worktree_by_its_branch_and_selects_it() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    type_text(&mut harness, "fix-rel");
+
+    let (names, selected) = rows(&harness);
+    assert_eq!(names, ["git-bull", "git-bull-fix-reload"]);
+    assert_eq!(selected.as_deref(), Some("git-bull-fix-reload"));
+}
+
+#[test]
+fn the_filter_lists_a_repository_with_its_matching_worktree() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    type_text(&mut harness, "infra-dep");
+    assert_eq!(rows(&harness).0, ["infra.git", "infra-deploy"]);
+}
+
+#[test]
+fn enter_opens_nothing_when_no_row_matches() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    type_text(&mut harness, "zzz");
+    harness.get_by_label("No repository matches the filter.");
+    harness.key_press(Key::Enter);
+    settle_window(&mut harness);
+
+    assert_eq!(tab_titles(harness.state()), ["git-bull"]);
+    assert!(harness.state().home_shown());
+}
+
+#[test]
+fn down_in_the_filter_gives_the_list_the_focus_and_keeps_the_match_selected() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    type_text(&mut harness, "web");
+    assert_eq!(rows(&harness).1.as_deref(), Some("web-shop"));
+
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+
+    assert!(focused(&harness, gitbull_app::home_view::HOME_LIST));
+    assert_eq!(rows(&harness).1.as_deref(), Some("web-shop"));
+}
+
+#[test]
+fn down_moves_past_a_title_and_up_comes_back() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    assert_eq!(rows(&harness).1.as_deref(), Some("billing-api"));
+
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    assert_eq!(rows(&harness).1.as_deref(), Some("git-bull"));
+
+    harness.key_press(Key::ArrowUp);
+    harness.run();
+    assert_eq!(rows(&harness).1.as_deref(), Some("billing-api"));
+
+    harness.key_press(Key::End);
+    harness.run();
+    assert_eq!(rows(&harness).1.as_deref(), Some("infra-deploy"));
+}
+
+#[test]
+fn left_moves_from_a_worktree_to_its_repository_and_then_collapses_it() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    // Into the list, on billing-api, and down to the second worktree of
+    // git-bull.
+    for _ in 0..4 {
+        harness.key_press(Key::ArrowDown);
+        harness.run();
+    }
+    assert!(focused(&harness, gitbull_app::home_view::HOME_LIST));
+    assert_eq!(rows(&harness).1.as_deref(), Some("git-bull-home-tab"));
+
+    harness.key_press(Key::ArrowLeft);
+    harness.run();
+    assert_eq!(rows(&harness).1.as_deref(), Some("git-bull"));
+    assert!(rows(&harness).0.contains(&"git-bull-home-tab".to_owned()));
+
+    harness.key_press(Key::ArrowLeft);
+    harness.run();
+    assert!(!rows(&harness).0.contains(&"git-bull-home-tab".to_owned()));
+
+    harness.key_press(Key::ArrowRight);
+    harness.run();
+    assert!(rows(&harness).0.contains(&"git-bull-home-tab".to_owned()));
+}
+
+#[test]
+fn escape_empties_the_filter_and_then_shows_the_tab_shown_before() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    type_text(&mut harness, "web");
+
+    harness.key_press(Key::Escape);
+    harness.run();
+    assert!(harness.state().home_shown());
+    assert_eq!(rows(&harness).0.len(), 9);
+
+    harness.key_press(Key::Escape);
+    settle_window(&mut harness);
+    assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
+}
+
+#[test]
+fn a_repository_opened_from_the_home_tab_gets_a_tab_after_the_last() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    support::open_from_home(&mut harness, "web-shop");
+
+    assert_eq!(tab_titles(harness.state()), ["git-bull", "web-shop"]);
+    assert_eq!(active_title(harness.state()).as_deref(), Some("web-shop"));
+    let home = harness
+        .get_by_role_and_label(Role::Button, "Repositories")
+        .rect();
+    let first = harness
+        .get_by_role_and_label(Role::Button, "git-bull")
+        .rect();
+    assert!(home.right() <= first.left());
+}
+
+#[test]
+fn a_double_click_opens_a_worktree() {
+    let mut setup = home_setup();
+    setup.backend = setup
+        .backend
+        .with_repository(path(&["work", "git-bull-fix-reload"]));
+    let mut harness = support::window_at_60_fps(build(setup).app);
+    wait_for_home(&mut harness);
+    let at = home_row(&harness, "git-bull-fix-reload")
+        .expect("the row of the worktree")
+        .center();
+    support::double_click_at(&mut harness, at);
+    settle_window(&mut harness);
+
+    assert_eq!(tab_titles(harness.state()), ["git-bull-fix-reload"]);
+}
+
+#[test]
+fn tab_and_shift_tab_move_between_the_filter_and_the_list() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    assert!(focused(&harness, gitbull_app::home_view::HOME_FILTER));
+
+    harness.key_press(Key::Tab);
+    harness.run();
+    assert!(focused(&harness, gitbull_app::home_view::HOME_LIST));
+
+    harness.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+    harness.run();
+    assert!(focused(&harness, gitbull_app::home_view::HOME_FILTER));
+}
