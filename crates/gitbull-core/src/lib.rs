@@ -5,7 +5,9 @@
 //! UI framework.
 
 pub mod badges;
+pub mod base;
 pub mod blame;
+pub mod comparison;
 pub mod content_cache;
 pub mod details;
 pub mod diff_document;

@@ -1128,6 +1128,7 @@ impl Backend for FakeBackend {
         cancel: &CancelToken,
     ) -> Result<BaseComparison, Error> {
         self.probe.record("compare", repo);
+        self.probe.lock().base_comparisons.push(request.clone());
         if let Some(gate) = &self.compare_gate {
             let stop = gate.clone();
             cancel.on_cancel(move || stop.cancel());
@@ -1820,6 +1821,8 @@ struct ProbeLog {
     calls: Vec<(String, PathBuf)>,
     requested: Vec<ObjectId>,
     compared: Vec<(ObjectId, Option<ObjectId>)>,
+    /// Every comparison with a base asked for.
+    base_comparisons: Vec<CompareRequest>,
     diffs: Vec<(ObjectId, String, Option<usize>)>,
     working_diffs: Vec<(Group, String, Option<usize>)>,
     searches: Vec<(SearchKind, String)>,
@@ -1894,6 +1897,11 @@ impl Probe {
 
     fn record(&self, call: &str, repo: &Path) {
         self.lock().calls.push((call.to_owned(), repo.to_owned()));
+    }
+
+    /// Every comparison with a base asked for, in order.
+    pub fn base_comparisons(&self) -> Vec<CompareRequest> {
+        self.lock().base_comparisons.clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ProbeLog> {
