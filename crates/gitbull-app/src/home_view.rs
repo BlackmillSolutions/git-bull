@@ -512,6 +512,7 @@ impl Cells {
             State::Status(Status::Read {
                 summary,
                 last_active,
+                ..
             }) => {
                 let changes = match summary.changed {
                     0 => (texts.clean.clone(), Tone::Muted),

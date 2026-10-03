@@ -13,6 +13,7 @@ use crate::blob;
 use crate::cancel::CancelToken;
 use crate::changes::{self, FileChange, FileLines};
 use crate::commit_graph::{self, GraphProgress};
+use crate::commits::{self, CommitEntry, Since};
 use crate::compare::{self, BaseComparison, CompareRequest, Setting};
 use crate::content::{Content, ContentReader};
 use crate::diff::{self, FileDiff};
@@ -32,6 +33,7 @@ use crate::shallow;
 use crate::stashes::{self, Stash, Submodule};
 use crate::status::{self, Group, StatusEntry, WorkingStatus};
 use crate::summary::{self, Summary};
+use crate::uncommitted::{self, Uncommitted};
 use crate::version::{Capabilities, GitVersion};
 use crate::working_copy;
 use crate::worktrees::{self, Worktree};
@@ -198,6 +200,36 @@ pub trait Backend: Send + Sync {
         request: &CompareRequest,
         cancel: &CancelToken,
     ) -> Result<BaseComparison, Error>;
+
+    /// What came on `tip` after the commit `seen` (design of
+    /// `worktree-cockpit`, decision 9).
+    fn since(
+        &self,
+        repo: &Path,
+        seen: &str,
+        tip: &str,
+        cancel: &CancelToken,
+    ) -> Result<Since, Error>;
+
+    /// The commits of `from..tip`, newest first, at most `limit` of them.
+    fn commit_list(
+        &self,
+        repo: &Path,
+        from: &str,
+        tip: &str,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<CommitEntry>, Error>;
+
+    /// The uncommitted files of the worktree at `worktree` with their
+    /// lines, untracked files included, with the `overrides` of the facts
+    /// of its repository or, without them, those of its own configuration.
+    fn uncommitted(
+        &self,
+        worktree: &Path,
+        overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Uncommitted, Error>;
 
     /// The working copy at `worktree` in short, for the home tab, with the
     /// `overrides` of the facts of its repository, or, without them, with
@@ -460,6 +492,36 @@ impl Backend for CliBackend {
             cache: &self.merges,
         };
         compare::compare(&self.git, repo, facts, request, &setting, cancel)
+    }
+
+    fn since(
+        &self,
+        repo: &Path,
+        seen: &str,
+        tip: &str,
+        cancel: &CancelToken,
+    ) -> Result<Since, Error> {
+        commits::since(&self.git, repo, seen, tip, cancel)
+    }
+
+    fn commit_list(
+        &self,
+        repo: &Path,
+        from: &str,
+        tip: &str,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<CommitEntry>, Error> {
+        commits::commit_list(&self.git, repo, from, tip, limit, cancel)
+    }
+
+    fn uncommitted(
+        &self,
+        worktree: &Path,
+        overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Uncommitted, Error> {
+        uncommitted::uncommitted(&self.git, worktree, overrides, cancel)
     }
 
     fn summary(

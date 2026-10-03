@@ -12,6 +12,7 @@ use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::{FileChange, FileLines};
 use gitbull_git::commit_graph::GraphProgress;
+use gitbull_git::commits::{CommitEntry, Since};
 use gitbull_git::compare::{BaseComparison, CompareRequest, Counts};
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
@@ -28,6 +29,7 @@ use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
 use gitbull_git::summary::Summary;
+use gitbull_git::uncommitted::Uncommitted;
 use gitbull_git::version::Capabilities;
 use gitbull_git::worktrees::Worktree;
 use gitbull_git::{Backend, ConfigOverride, Error};
@@ -114,6 +116,12 @@ pub struct FakeBackend {
     comparisons: Mutex<Vec<(PathBuf, String, BaseComparison)>>,
     /// Holds every comparison.
     compare_gate: Option<Gate>,
+    /// What came after a seen commit, by the seen commit and the tip.
+    since: Mutex<HashMap<(String, String), Since>>,
+    /// The commits of a range, newest first, by its two ends.
+    commit_lists: HashMap<(String, String), Vec<CommitEntry>>,
+    /// The uncommitted files of a worktree.
+    uncommitted: Vec<(PathBuf, Uncommitted)>,
     probe: Probe,
 }
 
@@ -182,6 +190,43 @@ impl FakeBackend {
         let mut comparisons = self.comparisons.lock().unwrap_or_else(|e| e.into_inner());
         comparisons.retain(|(known, known_tip, _)| !(*known == root && known_tip == tip));
         comparisons.push((root, tip.to_owned(), comparison));
+    }
+
+    /// Lets `since` commits have come on `tip` after `seen`; without it,
+    /// nothing came after a commit.
+    pub fn with_since(self, seen: &str, tip: &str, since: Since) -> FakeBackend {
+        self.set_since(seen, tip, since);
+        self
+    }
+
+    /// Changes what came on `tip` after `seen` while the backend is in use.
+    pub fn set_since(&self, seen: &str, tip: &str, since: Since) {
+        self.since
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((seen.to_owned(), tip.to_owned()), since);
+    }
+
+    /// The commits of `from..tip`, newest first.
+    pub fn with_commit_list(
+        mut self,
+        from: &str,
+        tip: &str,
+        commits: Vec<CommitEntry>,
+    ) -> FakeBackend {
+        self.commit_lists
+            .insert((from.to_owned(), tip.to_owned()), commits);
+        self
+    }
+
+    /// The uncommitted files of the worktree at `worktree`.
+    pub fn with_uncommitted(
+        mut self,
+        worktree: impl Into<PathBuf>,
+        files: Uncommitted,
+    ) -> FakeBackend {
+        self.uncommitted.push((worktree.into(), files));
+        self
     }
 
     /// Holds every comparison until `gate` opens.
@@ -1102,6 +1147,63 @@ impl Backend for FakeBackend {
             merged: None,
             prediction: Prediction::Unknown(Unpredicted::NotAsked),
         })
+    }
+
+    fn since(
+        &self,
+        repo: &Path,
+        seen: &str,
+        tip: &str,
+        cancel: &CancelToken,
+    ) -> Result<Since, Error> {
+        self.probe.record("since", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let since = self.since.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(since
+            .get(&(seen.to_owned(), tip.to_owned()))
+            .copied()
+            .unwrap_or(Since::Commits(0)))
+    }
+
+    fn commit_list(
+        &self,
+        repo: &Path,
+        from: &str,
+        tip: &str,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<CommitEntry>, Error> {
+        self.probe.record("commit-list", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut commits = self
+            .commit_lists
+            .get(&(from.to_owned(), tip.to_owned()))
+            .cloned()
+            .unwrap_or_default();
+        commits.truncate(limit);
+        Ok(commits)
+    }
+
+    fn uncommitted(
+        &self,
+        worktree: &Path,
+        _overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Uncommitted, Error> {
+        self.probe.record("uncommitted", worktree);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        Ok(self
+            .uncommitted
+            .iter()
+            .find(|(path, _)| path == worktree)
+            .map(|(_, files)| files.clone())
+            .unwrap_or_default())
     }
 
     fn summary(

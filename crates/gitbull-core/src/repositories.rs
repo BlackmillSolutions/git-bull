@@ -51,8 +51,12 @@ pub enum Status {
     Reading,
     Read {
         summary: Summary,
-        /// When it was last active, in seconds since 1970.
+        /// When it was last active, in seconds since 1970: the later of
+        /// the commit time of HEAD and `changed`.
         last_active: Option<i64>,
+        /// The newest modification of a changed file or folder, in
+        /// seconds since 1970, which tells a worktree at work.
+        changed: Option<i64>,
     },
     /// Git could not summarise it, with its message.
     Failed(String),
@@ -784,13 +788,15 @@ fn run(backend: &dyn Backend, cancel: &CancelToken, job: Job) -> (Option<Report>
         Job::Summary(worktree, overrides) => {
             let result = caught(&mut || {
                 let summary = backend.summary(&worktree, overrides.as_deref(), cancel)?;
-                let last_active = last_active(&worktree, &summary);
+                let changed = latest_change(&worktree, &summary);
+                let last_active = summary.committed.max(changed);
                 Ok((
                     Some(Report::Status {
                         worktree: worktree.clone(),
                         status: Status::Read {
                             summary,
                             last_active,
+                            changed,
                         },
                     }),
                     Vec::new(),
@@ -808,32 +814,36 @@ fn run(backend: &dyn Backend, cancel: &CancelToken, job: Job) -> (Option<Report>
 }
 
 /// When the working copy at `worktree` was last active, in seconds since
-/// 1970: the later of the commit time of HEAD and the last modification of
-/// a changed file or folder that still exists, of at most the first
-/// [`PATH_LIMIT`] of them.
+/// 1970: the later of the commit time of HEAD and [`latest_change`].
 pub fn last_active(worktree: &Path, summary: &Summary) -> Option<i64> {
-    last_active_with(worktree, summary, |path| {
+    summary.committed.max(latest_change(worktree, summary))
+}
+
+/// The last modification of a changed file or folder of the working copy
+/// at `worktree` that still exists, of at most the first [`PATH_LIMIT`] of
+/// them, in seconds since 1970.
+pub fn latest_change(worktree: &Path, summary: &Summary) -> Option<i64> {
+    latest_change_with(worktree, summary, |path| {
         std::fs::metadata(path)
             .and_then(|meta| meta.modified())
             .ok()
     })
 }
 
-/// [`last_active`] with `modified` telling when a file was last changed.
-fn last_active_with(
+/// [`latest_change`] with `modified` telling when a file was last changed.
+fn latest_change_with(
     worktree: &Path,
     summary: &Summary,
     mut modified: impl FnMut(&Path) -> Option<SystemTime>,
 ) -> Option<i64> {
-    let latest_change = summary
+    summary
         .paths
         .iter()
         .take(PATH_LIMIT)
         .filter_map(|path| modified(&worktree.join(path.to_os_string())))
         .max()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|since| since.as_secs() as i64);
-    summary.committed.max(latest_change)
+        .map(|since| since.as_secs() as i64)
 }
 
 /// `path` as the file system knows it, so that two spellings of one folder
@@ -897,6 +907,7 @@ mod tests {
                 paths: Vec::new(),
             },
             last_active: None,
+            changed: None,
         }
     }
 
@@ -1199,11 +1210,35 @@ mod tests {
     }
 
     #[test]
+    fn the_latest_change_stays_apart_from_a_later_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        let ten_minutes_ago = now - std::time::Duration::from_secs(600);
+        std::fs::write(dir.path().join("changed.txt"), "x").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join("changed.txt"))
+            .unwrap()
+            .set_modified(ten_minutes_ago)
+            .unwrap();
+        let summary = summary_of(Some(seconds(now)), &["changed.txt"]);
+        assert_eq!(
+            latest_change(dir.path(), &summary),
+            Some(seconds(ten_minutes_ago))
+        );
+        assert_eq!(last_active(dir.path(), &summary), Some(seconds(now)));
+        assert_eq!(
+            latest_change(dir.path(), &summary_of(Some(seconds(now)), &[])),
+            None
+        );
+    }
+
+    #[test]
     fn at_most_the_first_thousand_changed_files_are_looked_up() {
         let names: Vec<String> = (0..5_000).map(|n| format!("file{n}.txt")).collect();
         let summary = summary_of(None, &names.iter().map(String::as_str).collect::<Vec<_>>());
         let mut lookups = 0;
-        let found = last_active_with(Path::new("/work"), &summary, |_| {
+        let found = latest_change_with(Path::new("/work"), &summary, |_| {
             lookups += 1;
             None
         });
