@@ -1233,6 +1233,7 @@ mod tests {
     fn opened() -> OpenedRepository {
         OpenedRepository {
             root: root(),
+            repository: root(),
             title: "git-bull".into(),
             info: RepositoryInfo {
                 work_tree: Some(root()),

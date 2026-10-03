@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use gitbull_git::cancel::CancelToken;
 use gitbull_git::head::Head;
 use gitbull_git::repository::RepositoryInfo;
 use gitbull_git::{Backend, Error};
@@ -12,6 +13,10 @@ pub struct OpenedRepository {
     /// Identifies the repository: the root of its working tree, or its Git
     /// folder when it is bare. Two tabs never show the same root.
     pub root: PathBuf,
+    /// The repository the root belongs to: its main worktree, or the Git
+    /// folder of a bare repository. A worktree has a root of its own but
+    /// counts as its repository among the recent ones.
+    pub repository: PathBuf,
     /// The name shown on the tab.
     pub title: String,
     pub info: RepositoryInfo,
@@ -30,8 +35,15 @@ pub fn open(backend: &dyn Backend, path: &Path) -> Result<OpenedRepository, Erro
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.to_string_lossy().into_owned());
     let head = backend.head(&root)?;
+    // The first worktree Git lists is the main one.
+    let repository = backend
+        .worktrees(&root, &CancelToken::new())
+        .ok()
+        .and_then(|worktrees| worktrees.into_iter().next())
+        .map_or_else(|| root.clone(), |main| main.path);
     Ok(OpenedRepository {
         root,
+        repository,
         title,
         info,
         head,
@@ -65,6 +77,36 @@ mod tests {
         .unwrap();
         assert_eq!(opened.root, path(&["work", "git-bull"]));
         assert_eq!(opened.title, "git-bull");
+    }
+
+    fn listed(path: PathBuf) -> gitbull_git::worktrees::Worktree {
+        gitbull_git::worktrees::Worktree {
+            path,
+            head: None,
+            branch: Some("main".to_owned()),
+            bare: false,
+            detached: false,
+            prunable: false,
+        }
+    }
+
+    #[test]
+    fn a_repository_is_its_own_repository() {
+        let backend = FakeBackend::default().with_repository(path(&["work", "git-bull"]));
+        let opened = open(&backend, &path(&["work", "git-bull", "crates"])).unwrap();
+        assert_eq!(opened.repository, path(&["work", "git-bull"]));
+    }
+
+    #[test]
+    fn a_worktree_opens_at_its_root_and_knows_its_repository() {
+        let (main, linked) = (path(&["work", "app"]), path(&["work", "app-fix"]));
+        let backend = FakeBackend::default()
+            .with_repository(main.clone())
+            .with_repository(linked.clone())
+            .with_worktrees(vec![listed(main.clone()), listed(linked.clone())]);
+        let opened = open(&backend, &linked).unwrap();
+        assert_eq!(opened.root, linked);
+        assert_eq!(opened.repository, main);
     }
 
     #[test]
