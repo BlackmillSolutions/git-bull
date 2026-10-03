@@ -22,6 +22,7 @@ pub mod links;
 pub mod opening;
 pub mod overlaps;
 pub mod overview;
+pub mod panel;
 mod pending;
 pub mod repositories;
 pub mod search;

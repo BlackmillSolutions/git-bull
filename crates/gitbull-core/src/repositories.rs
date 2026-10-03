@@ -487,8 +487,20 @@ impl RepositoryList {
         }
     }
 
+    /// The base the user set for the repository whose canonical path is
+    /// `repository`.
+    pub fn base_set(&self, repository: &Path) -> Option<&str> {
+        self.bases.get(repository).map(String::as_str)
+    }
+
+    /// What Git detected in the repository whose canonical path is
+    /// `repository`.
+    pub fn detected(&self, repository: &Path) -> Option<&Detected> {
+        self.detected.get(repository)
+    }
+
     /// The key of what the user saw of the worktree at `worktree`.
-    fn key_of(&self, worktree: &Path) -> Option<Key> {
+    pub(crate) fn key_of(&self, worktree: &Path) -> Option<Key> {
         self.facts.iter().find_map(|(repository, (_, listed))| {
             let found = listed.iter().find(|listed| listed.path == worktree)?;
             Some(match &found.branch {
