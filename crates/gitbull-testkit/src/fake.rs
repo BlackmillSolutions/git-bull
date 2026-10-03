@@ -105,6 +105,8 @@ pub struct FakeBackend {
     capabilities: Option<Capabilities>,
     /// The facts of a repository, by a folder inside it.
     facts: Vec<(PathBuf, RepositoryFacts)>,
+    /// The base Git detects for a tip, by a folder of its repository.
+    detected: Vec<(PathBuf, String, String)>,
     probe: Probe,
 }
 
@@ -138,6 +140,19 @@ impl FakeBackend {
     /// has no remotes, no branches and no configuration to neutralise.
     pub fn with_facts(mut self, root: impl Into<PathBuf>, facts: RepositoryFacts) -> FakeBackend {
         self.facts.push((root.into(), facts));
+        self
+    }
+
+    /// Lets Git detect `base` as the branch `tip` started from, both by
+    /// their full names, in the repository at `root`.
+    pub fn with_detected_base(
+        mut self,
+        root: impl Into<PathBuf>,
+        tip: &str,
+        base: &str,
+    ) -> FakeBackend {
+        self.detected
+            .push((root.into(), tip.to_owned(), base.to_owned()));
         self
     }
 
@@ -994,6 +1009,27 @@ impl Backend for FakeBackend {
             branches: Vec::new(),
             origin_head: None,
         })
+    }
+
+    fn detect_base(
+        &self,
+        repo: &Path,
+        tip: &str,
+        _integration: &[String],
+        cancel: &CancelToken,
+    ) -> Result<Option<String>, Error> {
+        self.probe.record("detect-base", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if !self.capabilities().is_base {
+            return Ok(None);
+        }
+        Ok(self
+            .detected
+            .iter()
+            .find(|(root, detected_tip, _)| repo.starts_with(root) && detected_tip == tip)
+            .map(|(_, _, base)| base.clone()))
     }
 
     fn summary(

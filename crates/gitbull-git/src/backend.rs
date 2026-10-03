@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use crate::bases;
 use crate::blame::{self, BlameEntry, BlameStream};
 use crate::blob;
 use crate::cancel::CancelToken;
@@ -173,6 +174,18 @@ pub trait Backend: Send + Sync {
     /// What the home tab reads of the repository that contains `repo` once
     /// for all of its worktrees.
     fn facts(&self, repo: &Path, cancel: &CancelToken) -> Result<RepositoryFacts, Error>;
+
+    /// The branch that `tip` most likely started from, by its full name,
+    /// with Git 2.47 or newer; `None` with an older Git or when Git marks
+    /// none. The `integration` branches stay candidates, and win a tie
+    /// (design of `worktree-cockpit`, decision 3).
+    fn detect_base(
+        &self,
+        repo: &Path,
+        tip: &str,
+        integration: &[String],
+        cancel: &CancelToken,
+    ) -> Result<Option<String>, Error>;
 
     /// The working copy at `worktree` in short, for the home tab, with the
     /// `overrides` of the facts of its repository, or, without them, with
@@ -394,6 +407,19 @@ impl Backend for CliBackend {
 
     fn facts(&self, repo: &Path, cancel: &CancelToken) -> Result<RepositoryFacts, Error> {
         facts::facts(&self.git, repo, cancel)
+    }
+
+    fn detect_base(
+        &self,
+        repo: &Path,
+        tip: &str,
+        integration: &[String],
+        cancel: &CancelToken,
+    ) -> Result<Option<String>, Error> {
+        if !self.capabilities.is_base {
+            return Ok(None);
+        }
+        bases::detect_base(&self.git, repo, tip, integration, cancel)
     }
 
     fn summary(
