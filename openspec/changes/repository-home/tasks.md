@@ -38,4 +38,4 @@
 
 ## 7. Final check
 
-- [ ] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate repository-home --strict`; verify all succeed and CI is green on Linux, Windows and macOS
+- [x] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace`, `cargo deny check` and `openspec validate repository-home --strict`; verify all succeed and CI is green on Linux, Windows and macOS
