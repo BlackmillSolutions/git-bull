@@ -1278,6 +1278,40 @@ fn a_change_of_line_endings_is_shown_and_marked() {
 }
 
 #[test]
+fn a_carriage_return_at_the_end_of_a_file_is_shown_and_marked() {
+    let same = Change {
+        at: 20,
+        old: "let total = 1;",
+        new: "let total = 1;",
+    };
+    let mut diff = totals_diff(40, &[same]);
+    if let Content::Text(hunks) = &mut diff.content {
+        // As the last lines of their versions, both without a line feed:
+        // the removed one ends in a carriage return.
+        hunks[0].lines[3].crlf = true;
+        hunks[0].lines[3].no_newline = true;
+        hunks[0].lines[4].no_newline = true;
+    }
+    let fake = totals_backend(40, &[]).with_diff(fake_id("w"), TOTALS, diff);
+    let mut harness = open_totals(fake);
+    toggle_invisibles(&mut harness);
+    wait_until(&mut harness, |h| !marked_texts(h.output()).is_empty());
+    harness.run();
+    let texts = drawn(&harness);
+    assert!(texts.contains(&"let·total·=·1;␍".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"let·total·=·1;".to_owned()), "{texts:?}");
+    let notes = texts
+        .iter()
+        .filter(|text| *text == "No newline at end of file")
+        .count();
+    assert_eq!(notes, 2, "{texts:?}");
+    assert_eq!(
+        marked_texts(harness.output()),
+        [("␍".to_owned(), color(LIGHT.diff_removed_word))]
+    );
+}
+
+#[test]
 fn revealed_lines_end_as_git_compares_them() {
     // The file has CRLF where the diff, as Git compares it, has LF.
     let crlf: Vec<u8> = String::from_utf8(version(40, &[TOTAL], true))

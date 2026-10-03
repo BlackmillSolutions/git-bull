@@ -977,7 +977,7 @@ fn line_row(
     if line.cut {
         endings.push(texts.cut.as_str());
     }
-    if line.end == LineEnd::None {
+    if matches!(line.end, LineEnd::None | LineEnd::Cr) {
         endings.push(texts.no_newline.as_str());
     }
     let ending = ui.painter().layout_no_wrap(
@@ -1228,6 +1228,7 @@ impl Visible {
         let ending = match end {
             LineEnd::Lf => "↵",
             LineEnd::Crlf => "␍↵",
+            LineEnd::Cr => "␍",
             LineEnd::None => "",
         };
         if !ending.is_empty() {
