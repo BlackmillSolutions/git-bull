@@ -1545,6 +1545,11 @@ impl Probe {
         self.inner.most_summaries.load(Ordering::SeqCst)
     }
 
+    /// How many summaries run now.
+    pub fn summaries_running(&self) -> usize {
+        self.inner.summaries.load(Ordering::SeqCst)
+    }
+
     fn summary_started(&self) -> Running<'_> {
         let now = self.inner.summaries.fetch_add(1, Ordering::SeqCst) + 1;
         self.inner.most_summaries.fetch_max(now, Ordering::SeqCst);
@@ -1697,11 +1702,15 @@ mod tests {
         while probe.calls(&root).len() < 3 {
             std::thread::yield_now();
         }
+        while probe.summaries_running() < 3 {
+            std::thread::yield_now();
+        }
         gate.open();
         for thread in threads {
             assert!(thread.join().unwrap().is_ok());
         }
         assert_eq!(probe.most_summaries_at_once(), 3);
+        assert_eq!(probe.summaries_running(), 0);
     }
 
     #[test]

@@ -3,13 +3,17 @@
 
 mod support;
 
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
 use eframe::egui::accesskit::Role;
+use eframe::egui::{Event, Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
 use gitbull_core::settings::Settings;
 use gitbull_git::head::Head;
-use gitbull_testkit::{FakeBackend, Gate, fake_id};
+use gitbull_testkit::{FakeBackend, Gate, Probe, fake_id};
 use support::{
     Setup, active_title, build, home_row, home_setup, path, settle_window, summary, tab_titles,
     wait_for_home, window,
@@ -278,4 +282,177 @@ fn the_status_bar_counts_the_repositories_and_worktrees_and_tells_of_reading() {
     wait_for_home(&mut harness);
     assert!(harness.query_by_label("Reading their status…").is_none());
     harness.get_by_label("5 repositories, 4 worktrees");
+}
+
+/// `git-bull` open in a tab and recently opened, its working copy with
+/// three changed files, and the home tab shown.
+fn home_with_a_tab() -> Setup {
+    let mut setup = one_repository(
+        "git-bull",
+        summary(Head::Branch("main".to_owned()), 3, 0, 600),
+    );
+    setup.settings.tabs = vec![path(&["work", "git-bull"])];
+    setup.settings.active_tab = None;
+    setup
+}
+
+/// How often the working copy of `git-bull` was summarised.
+fn summaries(probe: &Probe) -> usize {
+    probe
+        .calls(&path(&["work", "git-bull"]))
+        .iter()
+        .filter(|call| *call == "summary")
+        .count()
+}
+
+/// Steps the window until `done`, at most five seconds.
+fn step_until(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done(harness) {
+        assert!(Instant::now() < deadline, "timed out");
+        harness.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn switching_to_the_home_tab_reads_every_row_again_and_keeps_what_was_read() {
+    let setup = home_with_a_tab();
+    let probe = setup.backend.probe();
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    wait_for_home(&mut harness);
+    assert_eq!(summaries(&probe), 1);
+
+    harness.key_press_modifiers(Modifiers::CTRL, Key::Tab);
+    settle_window(&mut harness);
+    assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
+    assert_eq!(summaries(&probe), 1);
+
+    harness
+        .get_by_role_and_label(Role::Button, "Repositories")
+        .click();
+    // The click shows the home tab in the next frame, which starts a round.
+    harness.step();
+    harness.step();
+    assert!(harness.state().home_shown());
+    assert_eq!(
+        row_label(&harness, "git-bull"),
+        "git-bull, main, 3 changed, 10 min"
+    );
+    wait_for_home(&mut harness);
+    assert_eq!(summaries(&probe), 2);
+}
+
+#[test]
+fn returning_to_the_window_reads_the_home_tab_again_only_while_it_is_shown() {
+    let setup = home_with_a_tab();
+    let probe = setup.backend.probe();
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    wait_for_home(&mut harness);
+
+    harness.event(Event::WindowFocused(true));
+    wait_for_home(&mut harness);
+    assert_eq!(summaries(&probe), 2);
+
+    harness.key_press_modifiers(Modifiers::CTRL, Key::Tab);
+    settle_window(&mut harness);
+    harness.event(Event::WindowFocused(true));
+    settle_window(&mut harness);
+    assert!(!harness.state().home_reading());
+    assert_eq!(summaries(&probe), 2);
+}
+
+#[test]
+fn nothing_is_read_for_the_home_tab_while_a_repository_tab_is_shown() {
+    let mut setup = home_with_a_tab();
+    setup.settings.active_tab = Some(0);
+    let probe = setup.backend.probe();
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    harness.event(Event::WindowFocused(true));
+    settle_window(&mut harness);
+
+    // Opening the tab looked for the repository of its folder, once.
+    let calls = probe.calls(&path(&["work", "git-bull"]));
+    let count = |name: &str| calls.iter().filter(|call| *call == name).count();
+    assert_eq!((count("worktrees"), count("summary")), (1, 0), "{calls:?}");
+}
+
+#[test]
+fn refresh_reads_the_home_tab_again() {
+    let setup = home_with_a_tab();
+    let probe = setup.backend.probe();
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    wait_for_home(&mut harness);
+
+    harness.key_press(Key::F5);
+    wait_for_home(&mut harness);
+    assert_eq!(summaries(&probe), 2);
+}
+
+#[test]
+fn no_more_than_four_working_copies_are_summarised_at_once() {
+    let paths: Vec<PathBuf> = (0..30)
+        .map(|index| path(&["work", &format!("repository-{index:02}")]))
+        .collect();
+    let gate = Gate::new();
+    let backend = paths
+        .iter()
+        .fold(FakeBackend::default(), |backend, path| {
+            backend.with_repository(path)
+        })
+        .with_summary_gate(&gate);
+    let probe = backend.probe();
+    let mut harness = window(
+        build(Setup {
+            settings: Settings {
+                pinned: paths[..10].to_vec(),
+                recent: paths[10..].to_vec(),
+                ..Settings::default()
+            },
+            backend,
+            ..Setup::default()
+        })
+        .app,
+    );
+    step_until(&mut harness, |_| probe.summaries_running() == 4);
+    // Time for a fifth, which does not come.
+    std::thread::sleep(Duration::from_millis(50));
+    harness.step();
+    assert_eq!(probe.summaries_running(), 4);
+
+    gate.open();
+    wait_for_home(&mut harness);
+    assert_eq!(probe.most_summaries_at_once(), 4);
+    harness.get_by_label("30 repositories, 0 worktrees");
+}
+
+#[test]
+fn leaving_the_home_tab_ends_the_summaries_that_did_not_finish() {
+    let gate = Gate::new();
+    let mut setup = home_setup();
+    setup.settings.tabs = vec![path(&["work", "git-bull"])];
+    setup.settings.active_tab = None;
+    setup.backend = setup.backend.with_summary_gate(&gate);
+    let probe = setup.backend.probe();
+    let mut harness = window(build(setup).app);
+    settle_window(&mut harness);
+    step_until(&mut harness, |_| probe.summaries_running() == 4);
+
+    harness.key_press_modifiers(Modifiers::CTRL, Key::Tab);
+    settle_window(&mut harness);
+    assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
+    step_until(&mut harness, |_| probe.summaries_running() == 0);
+    assert!(gate.was_cancelled());
+    assert!(!harness.state().home_reading());
+
+    // The next round finds every place free.
+    harness
+        .get_by_role_and_label(Role::Button, "Repositories")
+        .click();
+    wait_for_home(&mut harness);
+    assert_eq!(probe.summaries_running(), 0);
 }
