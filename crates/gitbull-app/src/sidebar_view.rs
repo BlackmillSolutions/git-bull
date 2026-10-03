@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{Align2, Color32, Id, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2, vec2};
-use gitbull_core::sidebar_tree::{self, Section, SidebarRow, SidebarState};
+use gitbull_core::sidebar_tree::{self, Section, SidebarKey, SidebarRow, SidebarState};
 use gitbull_core::workspace::View;
 
 use crate::app::{App, TabView};
@@ -19,15 +19,14 @@ use crate::components::{TREE_INDENT as INDENT, TREE_LEFT as LEFT};
 
 /// What the user asked for in the sidebar that concerns more than it.
 pub(crate) enum SidebarAction {
+    /// The user selected this entry: a reference goes to its commit and a
+    /// stash shows in the details.
+    Select(SidebarKey),
     ShowView(View),
-    /// Go to the commit of the reference with this full name.
-    Navigate(String),
     /// Open the submodule at this path, relative to the repository.
     OpenSubmodule(PathBuf),
     /// Restrict the graph to the branch with this full name.
     ShowOnly(String),
-    /// Show the stash at this index in the details.
-    ShowStash(usize),
 }
 
 /// The texts rows need, read before the tab is borrowed.
@@ -58,11 +57,13 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     };
     let hint = app.texts.text(Msg::SidebarFilter);
     let name = app.texts.text(Msg::Sidebar);
-    let shown_view = app
+    let Some((shown_view, selection)) = app
         .workspace()
         .and_then(|workspace| workspace.active())
-        .map(|tab| tab.view())
-        .unwrap_or_default();
+        .map(|tab| (tab.view(), tab.sidebar_selection().clone()))
+    else {
+        return Vec::new();
+    };
     let Some((session, view)) = app.active_view() else {
         return Vec::new();
     };
@@ -71,6 +72,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         sidebar_list,
         sidebar_rows,
         sidebar_key,
+        sidebar_placed,
         sidebar_menu,
         ..
     } = view;
@@ -85,7 +87,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     // Laying out thousands of references each frame would cost more than
     // the frame; the rows are kept until what they show changes.
     let key = (session.sidebar_version(), sidebar.clone());
-    if sidebar_key.as_ref() != Some(&key) {
+    let rebuilt = sidebar_key.as_ref() != Some(&key);
+    let filtered = rebuilt
+        && sidebar_key
+            .as_ref()
+            .is_some_and(|(_, before)| before.filter != sidebar.filter);
+    if rebuilt {
         let loaded = session.sidebar().and_then(|result| result.as_ref().ok());
         *sidebar_rows =
             sidebar_tree::rows(loaded, &session.opened().head, sidebar, session.views());
@@ -93,6 +100,22 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     }
 
     let rows: &[SidebarRow] = sidebar_rows;
+    // The tab's selection is placed before the list is drawn, so that the
+    // list does not report it as the user's, and only when the rows or the
+    // selection changed: searching 10,000 rows each frame would cost more
+    // than the frame.
+    let elsewhere = sidebar_placed.as_ref() != Some(&selection);
+    if rebuilt || elsewhere {
+        // Only a change of the filter or an entry selected elsewhere scrolls
+        // to the row. A refresh leaves the sidebar where the user scrolled
+        // it, and so does a view, whose rows are at the top.
+        let reveal = filtered || (elsewhere && !matches!(selection, SidebarKey::View(_)));
+        match sidebar_tree::row_of(rows, &selection).map(|row| row as u64) {
+            Some(row) if reveal => sidebar_list.reselect(row),
+            row => sidebar_list.select(row),
+        }
+        *sidebar_placed = Some(selection);
+    }
     let output = VirtualList::new(Id::new(AREA_SIDEBAR), Role::Tree, name, rows.len() as u64).show(
         ui,
         sidebar_list,
@@ -110,16 +133,21 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
 
     let mut actions = Vec::new();
     let row_at = |index: u64| rows.get(index as usize).cloned();
+    // A click selects its row again, so that a branch clicked once more
+    // goes back to its commit; the keys and a right click select the row
+    // they moved onto, so that moving through references and stashes
+    // follows them in the commit list and the details.
+    let selected = output
+        .clicked
+        .or(sidebar_list.selected().filter(|_| output.selection_changed));
+    if let Some(row) = selected.and_then(row_at) {
+        // The list shows it already; the tab takes it at the end of the
+        // frame.
+        *sidebar_placed = Some(row.key());
+        actions.push(SidebarAction::Select(row.key()));
+    }
     if let Some(row) = output.clicked.and_then(row_at) {
         activate(&row, sidebar, &mut actions, false);
-    } else if output.selection_changed {
-        // Moving through references and stashes with the keyboard follows
-        // them in the commit list and the details.
-        match sidebar_list.selected().and_then(row_at) {
-            Some(SidebarRow::Reference { name, .. }) => actions.push(SidebarAction::Navigate(name)),
-            Some(SidebarRow::Stash { index, .. }) => actions.push(SidebarAction::ShowStash(index)),
-            _ => {}
-        }
     }
     if let Some(row) = output.activated.and_then(row_at) {
         activate(&row, sidebar, &mut actions, true);
@@ -157,8 +185,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     actions
 }
 
-/// What choosing `row` does. Opening a submodule takes Enter or a double
-/// click; a single click only selects it.
+/// What choosing `row` does besides selecting it. Opening a submodule
+/// takes Enter or a double click; a single click only selects it.
 fn activate(
     row: &SidebarRow,
     state: &mut SidebarState,
@@ -173,10 +201,6 @@ fn activate(
             toggle(&mut state.collapsed_folders, (*section, path.clone()));
         }
         SidebarRow::View(view) => actions.push(SidebarAction::ShowView(*view)),
-        SidebarRow::Reference { name, .. } if !open => {
-            actions.push(SidebarAction::Navigate(name.clone()))
-        }
-        SidebarRow::Stash { index, .. } if !open => actions.push(SidebarAction::ShowStash(*index)),
         SidebarRow::Submodule {
             path,
             initialised: true,

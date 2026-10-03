@@ -13,6 +13,7 @@ use gitbull_git::{Backend, Error};
 
 use crate::opening::{self, OpenedRepository};
 use crate::session::Session;
+use crate::sidebar_tree::SidebarKey;
 
 /// Asks the UI to draw again, because background work has finished.
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
@@ -70,6 +71,10 @@ pub struct Tab {
     origin: Origin,
     state: TabState,
     view: View,
+    /// What the sidebar of the tab selects. Only `Workspace::set_view` and
+    /// `Workspace::select_in_sidebar` change it and `view`, so that the two
+    /// agree.
+    sidebar_selection: SidebarKey,
     /// The tab that was active before this one opened.
     previous: Option<TabId>,
     result: Option<Receiver<Result<OpenedRepository, Failure>>>,
@@ -91,6 +96,12 @@ impl Tab {
 
     pub fn view(&self) -> View {
         self.view
+    }
+
+    /// The entry selected in the sidebar of the tab. It stays while the
+    /// entry is hidden or gone, until another one is selected.
+    pub fn sidebar_selection(&self) -> &SidebarKey {
+        &self.sidebar_selection
     }
 
     /// The session of a tab that has opened.
@@ -320,9 +331,30 @@ impl Workspace {
         }
     }
 
+    /// Shows `view` in the tab, and its sidebar selects it in place of the
+    /// entry it selected. Only a view shown already keeps a reference, a
+    /// stash or another entry that is not a view selected, so that the
+    /// sidebar never marks a view that is not shown.
     pub fn set_view(&mut self, id: TabId, view: View) {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            let other_view =
+                matches!(tab.sidebar_selection, SidebarKey::View(selected) if selected != view);
+            if tab.view != view || other_view {
+                tab.sidebar_selection = SidebarKey::View(view);
+            }
             tab.view = view;
+        }
+    }
+
+    /// Selects `key` in the sidebar of the tab. A reference or a stash
+    /// shows in the History view, which then is shown; a view only becomes
+    /// selected, until `set_view` shows it.
+    pub fn select_in_sidebar(&mut self, id: TabId, key: SidebarKey) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            if matches!(key, SidebarKey::Reference(_) | SidebarKey::Stash(_)) {
+                tab.view = View::History;
+            }
+            tab.sidebar_selection = key;
         }
     }
 
@@ -392,6 +424,7 @@ impl Workspace {
             origin,
             state: TabState::Opening,
             view: View::default(),
+            sidebar_selection: SidebarKey::View(View::default()),
             previous: self.active,
             result,
         });
@@ -1088,5 +1121,118 @@ mod tests {
                 Some(2)
             )
         );
+    }
+
+    /// The view of the tab and what its sidebar selects.
+    fn shown(workspace: &Workspace, id: TabId) -> (View, SidebarKey) {
+        let tab = workspace.tabs().iter().find(|tab| tab.id() == id).unwrap();
+        (tab.view(), tab.sidebar_selection().clone())
+    }
+
+    fn branch() -> SidebarKey {
+        SidebarKey::Reference("refs/heads/main".into())
+    }
+
+    fn stash() -> SidebarKey {
+        SidebarKey::Stash("2222222222222222222222222222222222222222".into())
+    }
+
+    #[test]
+    fn a_new_tab_selects_history_in_its_sidebar() {
+        let mut workspace = workspace(two_repositories());
+        let id = workspace.open(path(&["work", "git-bull"]));
+        assert_eq!(
+            shown(&workspace, id),
+            (View::History, SidebarKey::View(View::History))
+        );
+    }
+
+    #[test]
+    fn showing_another_view_selects_it_in_place_of_any_entry() {
+        use crate::sidebar_tree::Section;
+        let selected = [
+            SidebarKey::View(View::Search),
+            branch(),
+            SidebarKey::Reference("refs/tags/v1.0".into()),
+            SidebarKey::Reference("refs/remotes/origin/main".into()),
+            stash(),
+            SidebarKey::Section(Section::Tags),
+            SidebarKey::Folder {
+                section: Section::Branches,
+                path: "feature".into(),
+            },
+            SidebarKey::Submodule("libs/inner".into()),
+        ];
+        let mut workspace = workspace(two_repositories());
+        let id = workspace.open(path(&["work", "git-bull"]));
+        for key in selected {
+            workspace.set_view(id, View::History);
+            workspace.select_in_sidebar(id, key.clone());
+            workspace.set_view(id, View::FileStatus);
+            assert_eq!(
+                shown(&workspace, id),
+                (View::FileStatus, SidebarKey::View(View::FileStatus)),
+                "{key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn showing_the_view_shown_keeps_a_branch_but_not_another_view() {
+        let mut workspace = workspace(two_repositories());
+        let id = workspace.open(path(&["work", "git-bull"]));
+        workspace.select_in_sidebar(id, branch());
+        workspace.set_view(id, View::History);
+        assert_eq!(shown(&workspace, id), (View::History, branch()));
+
+        // The arrow keys selected File status without showing it.
+        workspace.select_in_sidebar(id, SidebarKey::View(View::FileStatus));
+        workspace.set_view(id, View::History);
+        assert_eq!(
+            shown(&workspace, id),
+            (View::History, SidebarKey::View(View::History))
+        );
+    }
+
+    #[test]
+    fn a_reference_or_a_stash_selected_in_another_view_shows_history() {
+        let mut workspace = workspace(two_repositories());
+        let id = workspace.open(path(&["work", "git-bull"]));
+        workspace.set_view(id, View::FileStatus);
+        workspace.select_in_sidebar(id, branch());
+        assert_eq!(shown(&workspace, id), (View::History, branch()));
+
+        workspace.set_view(id, View::Search);
+        workspace.select_in_sidebar(id, stash());
+        assert_eq!(shown(&workspace, id), (View::History, stash()));
+    }
+
+    #[test]
+    fn selecting_a_view_only_selects_it() {
+        let mut workspace = workspace(two_repositories());
+        let id = workspace.open(path(&["work", "git-bull"]));
+        workspace.select_in_sidebar(id, SidebarKey::View(View::Search));
+        assert_eq!(
+            shown(&workspace, id),
+            (View::History, SidebarKey::View(View::Search))
+        );
+    }
+
+    #[test]
+    fn a_reference_selected_before_or_after_showing_history_stays_selected() {
+        let mut workspace = workspace(two_repositories());
+        let before = workspace.open(path(&["work", "git-bull"]));
+        let after = workspace.open(path(&["work", "linux"]));
+
+        workspace.set_view(before, View::FileStatus);
+        workspace.select_in_sidebar(before, branch());
+        workspace.set_view(before, View::History);
+
+        workspace.set_view(after, View::FileStatus);
+        workspace.set_view(after, View::History);
+        workspace.select_in_sidebar(after, branch());
+
+        assert_eq!(shown(&workspace, before), (View::History, branch()));
+        assert_eq!(shown(&workspace, after), shown(&workspace, before));
     }
 }
