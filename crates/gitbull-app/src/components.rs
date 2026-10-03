@@ -15,7 +15,7 @@ use eframe::egui::{
 
 use crate::icons;
 use crate::style::active_palette;
-use crate::theme::{Palette, SHAPE, TYPE};
+use crate::theme::{Chip, Palette, SHAPE, TYPE};
 use crate::ui::color;
 
 /// The size of an icon in a control, in points.
@@ -1014,6 +1014,50 @@ pub fn changed_lines(ui: &mut Ui, added: u64, removed: u64, width: f32) -> Respo
     let (rect, response) = ui.allocate_exact_size(vec2(width, SHAPE.target), Sense::hover());
     paint_changed_lines(ui, rect.right(), rect.center().y, added, removed);
     response
+}
+
+/// The height of a chip, such as the main state of a worktree.
+pub const CHIP_HEIGHT: f32 = 18.0;
+const CHIP_PADDING: f32 = 6.0;
+const CHIP_ICON: f32 = 12.0;
+const CHIP_ICON_GAP: f32 = 4.0;
+
+/// The size of a chip that shows `word` after its icon.
+pub fn chip_size(ui: &Ui, word: &str) -> egui::Vec2 {
+    let font = TextStyle::Small.resolve(ui.style());
+    let text = ui
+        .painter()
+        .layout_no_wrap(word.to_owned(), font, Color32::PLACEHOLDER)
+        .size()
+        .x;
+    vec2(
+        CHIP_PADDING + CHIP_ICON + CHIP_ICON_GAP + text + CHIP_PADDING,
+        CHIP_HEIGHT,
+    )
+}
+
+/// Paints a chip into `rect`: `icon` and `word` in its ink on its fill,
+/// which is opaque, so that it reads the same on every row.
+pub fn paint_chip(ui: &Ui, rect: Rect, icon: &str, word: &str, chip: Chip) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, SHAPE.radius_small, color(chip.fill));
+    let ink = color(chip.ink);
+    let middle = rect.center().y;
+    let left = rect.left() + CHIP_PADDING;
+    painter.text(
+        egui::pos2(left, middle),
+        Align2::LEFT_CENTER,
+        icon,
+        icons::font(ui.ctx(), CHIP_ICON),
+        ink,
+    );
+    painter.text(
+        egui::pos2(left + CHIP_ICON + CHIP_ICON_GAP, middle),
+        Align2::LEFT_CENTER,
+        word,
+        TextStyle::Small.resolve(ui.style()),
+        ink,
+    );
 }
 
 #[cfg(test)]

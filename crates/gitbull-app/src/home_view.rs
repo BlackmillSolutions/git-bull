@@ -13,6 +13,7 @@ use eframe::egui::{
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::repositories::{Problem, Repository, RepositoryList, Row, Section, Status};
+use gitbull_core::state::MainState;
 use gitbull_git::head::Head;
 
 use crate::app::App;
@@ -21,7 +22,7 @@ use crate::components::{self, Button, Kind, TREE_INDENT, TREE_LEFT};
 use crate::i18n::{Msg, Translations};
 use crate::icons;
 use crate::style;
-use crate::theme::{Palette, SHAPE};
+use crate::theme::{Chip, Palette, SHAPE};
 use crate::ui::{move_between_areas, section_text};
 use crate::virtual_list::{ListKey, ListState, VirtualList};
 
@@ -34,6 +35,15 @@ pub const HOME_LIST: &str = "home-list";
 /// last activity, at the right of a row.
 const CHANGES_WIDTH: f32 = 104.0;
 const ACTIVE_WIDTH: f32 = 64.0;
+/// The width of the columns of the commits ahead and behind, and of the
+/// lines against the base.
+const COUNTS_WIDTH: f32 = 72.0;
+const LINES_WIDTH: f32 = 96.0;
+/// The room of a mark beside the chip, such as an overlap.
+const MARK: f32 = 14.0;
+/// Below this width the home tab leaves out the changed files and writes
+/// numbers short.
+const NARROW: f32 = 900.0;
 /// The room of the triangle left of a repository's name.
 const TRIANGLE: f32 = 14.0;
 
@@ -213,6 +223,7 @@ fn draw(
 
     let before = home.rows.selected();
     let rows = list.rows().to_vec();
+    let narrow = ui.available_width() < NARROW;
     let output = VirtualList::new(list_id, Role::Tree, &texts.name, rows.len() as u64).show(
         ui,
         &mut home.rows,
@@ -230,14 +241,30 @@ fn draw(
                 let repository = &list.repositories()[index];
                 let expanded = (!repository.worktrees.is_empty()).then_some(expanded);
                 let state = repository_state(repository, list);
-                let cells = Cells::new(&state, texts, translations, now);
-                working_copy_row(ui, &repository.name, 0, expanded, &cells, selected, palette);
+                let mut cockpit = Cockpit::of(list, &repository.path);
+                cockpit.new_branches = repository.new_branches;
+                let cells = Cells::new(&state, &cockpit, texts, translations, palette, now);
+                working_copy_row(
+                    ui,
+                    &repository.name,
+                    0,
+                    expanded,
+                    &cells,
+                    selected,
+                    narrow,
+                    palette,
+                );
             }
             Row::Worktree { repository, index } => {
-                let path = &list.repositories()[repository].worktrees[index];
-                let state = State::Status(list.status(path));
-                let cells = Cells::new(&state, texts, translations, now);
-                working_copy_row(ui, &folder_name(path), 1, None, &cells, selected, palette);
+                let owner = &list.repositories()[repository];
+                let path = &owner.worktrees[index];
+                let (state, cockpit) = match owner.gone.contains(path) {
+                    true => (State::Gone, Cockpit::default()),
+                    false => (State::Status(list.status(path)), Cockpit::of(list, path)),
+                };
+                let cells = Cells::new(&state, &cockpit, texts, translations, palette, now);
+                let name = folder_name(path);
+                working_copy_row(ui, &name, 1, None, &cells, selected, narrow, palette);
             }
             Row::Done {
                 expanded, count, ..
@@ -245,8 +272,24 @@ fn draw(
                 let mut args = FluentArgs::new();
                 args.set("count", count);
                 let name = translations.text_with(Msg::HomeDone, Some(&args));
-                let cells = Cells::new(&State::Done, texts, translations, now);
-                working_copy_row(ui, &name, 1, Some(expanded), &cells, selected, palette);
+                let cells = Cells::new(
+                    &State::Done,
+                    &Cockpit::default(),
+                    texts,
+                    translations,
+                    palette,
+                    now,
+                );
+                working_copy_row(
+                    ui,
+                    &name,
+                    1,
+                    Some(expanded),
+                    &cells,
+                    selected,
+                    narrow,
+                    palette,
+                );
             }
         },
     );
@@ -467,6 +510,8 @@ enum State<'a> {
     Status(&'a Status),
     /// The row that folds the done worktrees.
     Done,
+    /// A worktree whose folder is gone.
+    Gone,
 }
 
 fn repository_state<'a>(repository: &'a Repository, list: &'a RepositoryList) -> State<'a> {
@@ -478,6 +523,79 @@ fn repository_state<'a>(repository: &'a Repository, list: &'a RepositoryList) ->
     }
 }
 
+/// What the cockpit adds to a row: the main state, the marks and the
+/// comparison with the base.
+#[derive(Default)]
+struct Cockpit {
+    state: Option<MainState>,
+    overlap: bool,
+    new_branches: bool,
+    /// Ahead and behind the base.
+    counts: Option<(u64, u64)>,
+    /// Lines added and removed against the base.
+    lines: Option<(u64, u64)>,
+}
+
+impl Cockpit {
+    /// What the list knows of the working copy at `path`.
+    fn of(list: &RepositoryList, path: &Path) -> Cockpit {
+        let against = list
+            .comparison(path)
+            .and_then(|comparison| comparison.against.as_ref());
+        Cockpit {
+            state: list.state(path),
+            overlap: !list.overlaps(path).is_empty(),
+            new_branches: false,
+            counts: against.map(|against| (against.ahead, against.behind)),
+            lines: against
+                .and_then(|against| against.lines.as_ref())
+                .filter(|lines| lines.changed > 0)
+                .map(|lines| (lines.added, lines.removed)),
+        }
+    }
+}
+
+/// The chip of a main state: its icon, its word and its colours; Done and
+/// Idle have none.
+fn chip_of(state: MainState, translations: &Translations, palette: &Palette) -> Option<Chip3> {
+    let (icon, word, chip) = match state {
+        MainState::Conflict => (
+            icons::CONFLICT,
+            translations.text(Msg::HomeStateConflict),
+            palette.state_conflict,
+        ),
+        MainState::Working => (
+            icons::WORKING,
+            translations.text(Msg::HomeStateWorking),
+            palette.state_working,
+        ),
+        MainState::New(count) => {
+            let mut args = FluentArgs::new();
+            args.set("count", count);
+            (
+                icons::NEW,
+                translations.text_with(Msg::HomeStateNew, Some(&args)),
+                palette.state_new,
+            )
+        }
+        MainState::Ready => (
+            icons::READY,
+            translations.text(Msg::HomeStateReady),
+            palette.state_ready,
+        ),
+        MainState::Paused => (
+            icons::PAUSED,
+            translations.text(Msg::HomeStatePaused),
+            palette.state_paused,
+        ),
+        MainState::Done | MainState::Idle => return None,
+    };
+    Some((icon, word, chip))
+}
+
+/// A chip: its icon, its word and its colours.
+type Chip3 = (&'static str, String, Chip);
+
 /// The texts of the cells of a row, and how they are coloured.
 struct Cells {
     /// The branch, or the short hash of a detached HEAD, with its icon.
@@ -487,6 +605,16 @@ struct Cells {
     changes: Option<(String, Tone)>,
     conflicts: Option<String>,
     active: Option<String>,
+    chip: Option<Chip3>,
+    /// The word of the mark of an overlap, for assistive technology.
+    overlap: Option<String>,
+    /// The word of the mark of new branches.
+    new_branches: Option<String>,
+    counts: Option<(u64, u64)>,
+    lines: Option<(u64, u64)>,
+    /// The counts and the lines as assistive technology reads them.
+    counts_said: Option<String>,
+    lines_said: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -497,13 +625,42 @@ enum Tone {
 }
 
 impl Cells {
-    fn new(state: &State, texts: &Texts, translations: &Translations, now: i64) -> Cells {
+    fn new(
+        state: &State,
+        cockpit: &Cockpit,
+        texts: &Texts,
+        translations: &Translations,
+        palette: &Palette,
+        now: i64,
+    ) -> Cells {
+        let said = |msg: Msg, pairs: [(&'static str, u64); 2]| {
+            let mut args = FluentArgs::new();
+            for (name, value) in pairs {
+                args.set(name, value);
+            }
+            translations.text_with(msg, Some(&args))
+        };
         let empty = Cells {
             head: None,
             note: None,
             changes: None,
             conflicts: None,
             active: None,
+            chip: cockpit
+                .state
+                .and_then(|state| chip_of(state, translations, palette)),
+            overlap: cockpit.overlap.then(|| translations.text(Msg::HomeOverlap)),
+            new_branches: cockpit
+                .new_branches
+                .then(|| translations.text(Msg::HomeNewBranches)),
+            counts: cockpit.counts,
+            lines: cockpit.lines,
+            counts_said: cockpit.counts.map(|(ahead, behind)| {
+                said(Msg::HomeAheadBehind, [("ahead", ahead), ("behind", behind)])
+            }),
+            lines_said: cockpit.lines.map(|(added, removed)| {
+                said(Msg::HomeLines, [("added", added), ("removed", removed)])
+            }),
         };
         match state {
             State::NotFound => Cells {
@@ -520,6 +677,10 @@ impl Cells {
             },
             State::Bare => Cells {
                 note: Some((texts.bare.clone(), Tone::Muted)),
+                ..empty
+            },
+            State::Gone => Cells {
+                note: Some((translations.text(Msg::HomeFolderGone), Tone::Muted)),
                 ..empty
             },
             State::Done => empty,
@@ -563,9 +724,14 @@ impl Cells {
     fn describe(&self, name: &str) -> String {
         [
             Some(name),
+            self.chip.as_ref().map(|(_, word, _)| word.as_str()),
+            self.overlap.as_deref(),
+            self.new_branches.as_deref(),
             self.head.as_ref().map(|(head, _)| head.as_str()),
             self.note.as_ref().map(|(text, _)| text.as_str()),
             self.conflicts.as_deref(),
+            self.counts_said.as_deref(),
+            self.lines_said.as_deref(),
             self.changes.as_ref().map(|(text, _)| text.as_str()),
             self.active.as_deref(),
         ]
@@ -573,6 +739,23 @@ impl Cells {
         .flatten()
         .collect::<Vec<_>>()
         .join(", ")
+    }
+}
+
+/// `count` as a row shows it: in full, or in a narrow area short, such as
+/// `1.2k`.
+fn short_number(count: u64, narrow: bool) -> String {
+    if !narrow || count < 1_000 {
+        return count.to_string();
+    }
+    let (value, unit) = match count {
+        count if count < 1_000_000 => (count as f64 / 1_000.0, "k"),
+        count => (count as f64 / 1_000_000.0, "M"),
+    };
+    if value < 10.0 {
+        format!("{:.1}{unit}", (value * 10.0).floor() / 10.0)
+    } else {
+        format!("{}{unit}", value.floor())
     }
 }
 
@@ -626,7 +809,9 @@ fn title_row(ui: &mut Ui, title: &str) {
 
 /// A repository at `depth` 0 or a worktree at 1: its triangle when it has
 /// worktrees, expanded or not, its name and its cells, and its node for
-/// assistive technology.
+/// assistive technology. In a `narrow` area the column of the changed
+/// files is left out and numbers are short.
+#[allow(clippy::too_many_arguments)]
 fn working_copy_row(
     ui: &mut Ui,
     name: &str,
@@ -634,6 +819,7 @@ fn working_copy_row(
     expanded: Option<bool>,
     cells: &Cells,
     selected: bool,
+    narrow: bool,
     palette: &Palette,
 ) {
     let rect = ui.max_rect();
@@ -660,24 +846,51 @@ fn working_copy_row(
             muted,
         );
     }
+    let gap = SHAPE.space[2];
     let right = rect.right() - SHAPE.space[1];
-    let active = Rect::from_min_max(
-        pos2(right - ACTIVE_WIDTH, rect.top()),
-        pos2(right, rect.bottom()),
-    );
-    let changes = Rect::from_min_max(
-        pos2(active.left() - SHAPE.space[1] - CHANGES_WIDTH, rect.top()),
-        pos2(active.left() - SHAPE.space[1], rect.bottom()),
-    );
+    let column = |right: f32, width: f32| {
+        Rect::from_min_max(pos2(right - width, rect.top()), pos2(right, rect.bottom()))
+    };
+    let active = column(right, ACTIVE_WIDTH);
+    let mut next = active.left() - SHAPE.space[1];
+    let changes = (!narrow).then(|| {
+        let at = column(next, CHANGES_WIDTH);
+        next = at.left() - SHAPE.space[1];
+        at
+    });
+    let lines = column(next, LINES_WIDTH);
+    let counts = column(lines.left() - SHAPE.space[1], COUNTS_WIDTH);
     let name_left = left + TRIANGLE;
     let head_left = (rect.left() + rect.width() * 0.4).max(name_left + 80.0);
-    let gap = SHAPE.space[2];
+
+    // The chip and the marks stand at the end of the name's column.
+    let mut name_right = head_left - gap;
+    if let Some((icon, word, chip)) = &cells.chip {
+        let size = components::chip_size(ui, word);
+        let at = Rect::from_center_size(pos2(name_right - size.x / 2.0, rect.center().y), size);
+        if at.left() > name_left + 40.0 {
+            components::paint_chip(ui, at, icon, word, *chip);
+            name_right = at.left() - SHAPE.space[0];
+        }
+    }
+    for (shown, icon) in [
+        (cells.overlap.is_some(), icons::OVERLAP),
+        (cells.new_branches.is_some(), icons::NEW),
+    ] {
+        if shown && name_right - MARK > name_left + 40.0 {
+            ui.painter().text(
+                pos2(name_right - MARK / 2.0, rect.center().y),
+                eframe::egui::Align2::CENTER_CENTER,
+                icon,
+                icons::font(ui.ctx(), 13.0),
+                color(palette.accent),
+            );
+            name_right -= MARK + SHAPE.space[0];
+        }
+    }
     paint_text(
         ui,
-        Rect::from_min_max(
-            pos2(name_left, rect.top()),
-            pos2(head_left - gap, rect.bottom()),
-        ),
+        Rect::from_min_max(pos2(name_left, rect.top()), pos2(name_right, rect.bottom())),
         name,
         color(palette.text),
         Align::Min,
@@ -687,8 +900,8 @@ fn working_copy_row(
         Tone::Muted => muted,
         Tone::Error => color(palette.error_fg),
     };
-    // Between the branch and the changes, the note or the conflicts.
-    let mut head_right = changes.left() - gap;
+    // Between the branch and the counts, the note or the conflicts.
+    let mut head_right = counts.left() - gap;
     if let Some(conflicts) = &cells.conflicts {
         let width = text_width(ui, conflicts);
         let at = Rect::from_min_max(
@@ -726,7 +939,30 @@ fn working_copy_row(
         let at = Rect::from_min_max(pos2(head_left, rect.top()), pos2(right, rect.bottom()));
         paint_text(ui, at, note, tone(*note_tone), Align::Min);
     }
-    if let Some((text, text_tone)) = &cells.changes {
+    // Only what is not zero: `↑3`, `↓1` or both.
+    if let Some((ahead, behind)) = cells.counts {
+        let parts: Vec<String> = [("↑", ahead), ("↓", behind)]
+            .into_iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(arrow, count)| format!("{arrow}{}", short_number(count, narrow)))
+            .collect();
+        paint_text(ui, counts, &parts.join(" "), muted, Align::Max);
+    }
+    if let Some((added, removed)) = cells.lines {
+        let (plus, minus) = components::line_colours(palette);
+        let mut right_edge = lines.right();
+        for (sign, count, colour) in [("−", removed, minus), ("+", added, plus)] {
+            if count == 0 {
+                continue;
+            }
+            let text = format!("{sign}{}", short_number(count, narrow));
+            let width = text_width(ui, &text);
+            let at = Rect::from_min_max(lines.min, pos2(right_edge, lines.bottom()));
+            paint_text(ui, at, &text, colour, Align::Max);
+            right_edge -= width + SHAPE.space[0];
+        }
+    }
+    if let (Some(changes), Some((text, text_tone))) = (changes, &cells.changes) {
         paint_text(ui, changes, text, tone(*text_tone), Align::Max);
     }
     if let Some(text) = &cells.active {

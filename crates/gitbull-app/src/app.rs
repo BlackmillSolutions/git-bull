@@ -14,6 +14,7 @@ use gitbull_core::git_setup::GitCheck;
 use gitbull_core::overview::{Overview, Request};
 use gitbull_core::repositories::RepositoryList;
 use gitbull_core::search::HashOutcome;
+use gitbull_core::seen::SeenFile;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
 use gitbull_core::settings::{
     ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
@@ -49,6 +50,9 @@ pub enum GitStatus {
 
 /// How often changed settings are written at most.
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// At most this often what was seen is written.
+const SEEN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long after a reading ended the home tab reads again by itself.
 const HOME_READ_AGAIN: Duration = Duration::from_secs(20);
@@ -314,6 +318,9 @@ pub(crate) enum DiffKey {
 /// Everything the window shows.
 pub struct App {
     settings_file: SettingsFile,
+    /// The file of what was seen in the home tab, beside the settings.
+    seen_file: SeenFile,
+    last_seen_saved: Instant,
     pub(crate) settings: Settings,
     /// Whether the window was built with the system's title bar: the
     /// setting as it was at start-up, since a change takes effect at the
@@ -353,8 +360,14 @@ impl App {
         } = parts;
         let texts = Translations::load(&loaded.settings.language);
         let (git, backend) = checker(loaded.settings.git_path.as_deref());
-        let home = Home::new(&loaded.settings);
+        let mut home = Home::new(&loaded.settings);
+        // What was seen has a file of its own beside the settings; one that
+        // cannot be read leaves the settings as they are.
+        let seen_file = SeenFile::beside(settings_file.path());
+        home.list.set_seen(seen_file.load());
         let mut app = App {
+            seen_file,
+            last_seen_saved: Instant::now(),
             settings_file,
             system_title_bar: loaded.settings.system_title_bar,
             settings: loaded.settings,
@@ -713,6 +726,18 @@ impl App {
         if self.dirty && self.last_saved.elapsed() >= SAVE_INTERVAL {
             self.save();
         }
+        // What was seen changes with every look; it is written at most once
+        // a second.
+        if self.home.list.seen().is_dirty() && self.last_seen_saved.elapsed() >= SEEN_INTERVAL {
+            self.save_seen();
+        }
+    }
+
+    /// Writes what was seen now.
+    fn save_seen(&mut self) {
+        // A failed write is retried with the next change.
+        let _ = self.seen_file.save(self.home.list.seen_mut());
+        self.last_seen_saved = Instant::now();
     }
 
     /// How long until the home tab reads again by itself, or `None` while it
@@ -738,13 +763,17 @@ impl App {
             .then(|| SAVE_INTERVAL.saturating_sub(self.last_saved.elapsed()))
     }
 
-    /// Writes the settings now, for example when the window closes.
+    /// Writes the settings and what was seen now, for example when the
+    /// window closes.
     pub fn save(&mut self) {
         // A failed save is retried with the next change; git-bull keeps
         // working either way.
         let _ = self.settings_file.save(&self.settings);
         self.dirty = false;
         self.last_saved = Instant::now();
+        if self.home.list.seen().is_dirty() {
+            self.save_seen();
+        }
     }
 
     /// The appearance to draw with, given what the window reports.

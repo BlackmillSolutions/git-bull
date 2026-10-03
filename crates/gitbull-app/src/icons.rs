@@ -68,9 +68,24 @@ pub const HASH: &str = phosphor::HASH;
 pub const MESSAGE: &str = phosphor::TEXT_ALIGN_LEFT;
 /// The home tab, which lists the repositories.
 pub const HOME: &str = phosphor::HOUSE_SIMPLE;
+/// The main states of worktrees: in conflict, at work, with new commits,
+/// ready for review, and paused.
+pub const CONFLICT: &str = phosphor::WARNING;
+pub const WORKING: &str = phosphor::ACTIVITY;
+pub const NEW: &str = phosphor::SPARKLE;
+pub const READY: &str = phosphor::CHECK_CIRCLE;
+pub const PAUSED: &str = phosphor::PAUSE;
+/// A worktree changes files that another one changes too.
+pub const OVERLAP: &str = phosphor::INTERSECT;
+/// Opens the web page of a remote.
+pub const OPEN_REMOTE: &str = phosphor::ARROW_SQUARE_OUT;
+/// Shows and hides the detail panel.
+pub const PANEL: &str = phosphor::SIDEBAR_SIMPLE;
+/// Marks everything as seen.
+pub const SEEN: &str = phosphor::CHECKS;
 
 /// Every icon with its name.
-pub const ALL: [(&str, &str); 28] = [
+pub const ALL: [(&str, &str); 37] = [
     ("folder", FOLDER),
     ("refresh", REFRESH),
     ("sun", SUN),
@@ -99,4 +114,13 @@ pub const ALL: [(&str, &str); 28] = [
     ("hash", HASH),
     ("message", MESSAGE),
     ("home", HOME),
+    ("conflict", CONFLICT),
+    ("working", WORKING),
+    ("new", NEW),
+    ("ready", READY),
+    ("paused", PAUSED),
+    ("overlap", OVERLAP),
+    ("open remote", OPEN_REMOTE),
+    ("panel", PANEL),
+    ("seen", SEEN),
 ];

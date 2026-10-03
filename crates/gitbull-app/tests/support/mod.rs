@@ -16,13 +16,20 @@ use gitbull_app::theme::ThemeFollower;
 use gitbull_app::ui;
 use gitbull_app::virtual_list::ROW_HEIGHT;
 use gitbull_core::git_setup::GitCheck;
+use gitbull_core::seen::{Key, Seen, SeenFile};
 use gitbull_core::settings::{Loaded, Settings, SettingsFile};
 use gitbull_core::workspace::TabState;
 use gitbull_git::Error;
+use gitbull_git::changes::{FileLines, LineCount};
+use gitbull_git::commits::Since;
+use gitbull_git::compare::{BaseComparison, BranchLines, Counts};
 use gitbull_git::content::{CommitContent, Signature};
+use gitbull_git::facts::{Branch, Remote, RepositoryFacts, Upstream};
 use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
 use gitbull_git::locate::LocateError;
+use gitbull_git::merged::{MergedBy, Prediction};
+use gitbull_git::path::RepoPath;
 use gitbull_git::summary::Summary;
 use gitbull_git::version::GitVersion;
 use gitbull_git::worktrees::Worktree;
@@ -124,10 +131,17 @@ pub struct Setup {
     /// The local time zone; UTC unless given.
     pub time_zone: Option<jiff::tz::TimeZone>,
     pub desktop: FixedDesktop,
+    /// What was seen, written beside the settings before the start.
+    pub seen: Option<Seen>,
 }
 
 pub fn build(setup: Setup) -> TestApp {
     let dir = tempfile::tempdir().unwrap();
+    if let Some(mut seen) = setup.seen {
+        SeenFile::beside(&dir.path().join("settings.toml"))
+            .save(&mut seen)
+            .unwrap();
+    }
     let app = App::new(Parts {
         settings_file: SettingsFile::new(dir.path().join("settings.toml")),
         loaded: Loaded {
@@ -920,4 +934,246 @@ pub fn fills_in(
         walk(&clipped.shape, rect, &mut found);
     }
     found
+}
+
+/// The head every worktree of the fake backend points to.
+pub fn head_commit() -> String {
+    fake_id("head").to_string()
+}
+
+/// A comparison with `dev` of `ahead` and `behind` commits, changing
+/// `files` with `added` and `removed` lines in all.
+pub fn compared_with_dev(
+    ahead: u64,
+    behind: u64,
+    files: &[&str],
+    added: u64,
+    removed: u64,
+) -> BaseComparison {
+    let count = files.len().max(1) as u64;
+    BaseComparison {
+        counted: "refs/heads/dev".to_owned(),
+        counts: Counts { ahead, behind },
+        lines: Some(BranchLines {
+            merge_base: "left".to_owned(),
+            files: files
+                .iter()
+                .map(|path| FileLines {
+                    path: RepoPath::from(*path),
+                    old_path: None,
+                    count: LineCount::Lines {
+                        added: added / count,
+                        removed: removed / count,
+                    },
+                })
+                .collect(),
+            added,
+            removed,
+            changed: files.len(),
+        }),
+        merged: None,
+        prediction: Prediction::NoConflict,
+    }
+}
+
+/// The repositories of a developer whose coding agents work in
+/// worktrees, in every main state: `git-bull` on `dev`, two commits ahead
+/// of `origin/dev`, with the worktrees `fix-reload` at work, `home-tab`
+/// with two new commits, `review` ready, `paused`, `merged` done and
+/// `conflict` predicted to conflict, the first two changing `src/ui.rs`
+/// both, and the branch `claude/old` an agent left behind; `web-shop`
+/// stopped in a merge with files in conflict; `billing-api` pinned and
+/// quiet.
+pub fn cockpit_setup() -> Setup {
+    let work = |name: &str| path(&["work", name]);
+    let wt = |name: &str| path(&["work", "wt", name]);
+    let branch = |name: &str| Head::Branch(name.to_owned());
+    let minutes = 60;
+    let hours = 60 * minutes;
+    let days = 24 * hours;
+    let root = work("git-bull");
+    let head = head_commit();
+    let agents = [
+        ("fix-reload", Some("claude/fix-reload")),
+        ("home-tab", Some("claude/home-tab")),
+        ("review", None),
+        ("paused", Some("claude/paused")),
+        ("merged", Some("claude/merged")),
+        ("conflict", Some("claude/conflict")),
+    ];
+    let mut listed = vec![worktree(root.clone(), Some("dev"))];
+    listed.extend(
+        agents
+            .iter()
+            .map(|(name, branch)| worktree(wt(name), *branch)),
+    );
+    let local = |name: &str, upstream: Option<&str>| Branch {
+        name: format!("refs/heads/{name}"),
+        commit: head.clone(),
+        upstream: upstream.map(|tracking| Upstream {
+            tracking: format!("refs/remotes/origin/{tracking}"),
+            remote: "origin".to_owned(),
+            merge: format!("refs/heads/{tracking}"),
+        }),
+    };
+    let mut branches = vec![
+        local("dev", Some("dev")),
+        local("main", None),
+        Branch {
+            name: "refs/remotes/origin/dev".to_owned(),
+            commit: "pushed".to_owned(),
+            upstream: None,
+        },
+        Branch {
+            name: "refs/heads/claude/old".to_owned(),
+            commit: "old-tip".to_owned(),
+            upstream: None,
+        },
+    ];
+    for (_, name) in agents {
+        if let Some(name) = name {
+            branches.push(local(name, Some(name)));
+        }
+    }
+    let facts = RepositoryFacts {
+        overrides: Vec::new(),
+        merge_driver: false,
+        worktree_config: false,
+        remotes: vec![Remote {
+            name: "origin".to_owned(),
+            url: "git@github.com:blackmill/git-bull.git".to_owned(),
+        }],
+        common_dir: root.join(".git"),
+        branches,
+        origin_head: None,
+    };
+    let mut backend = FakeBackend::default()
+        .with_repository(&root)
+        .with_repository(work("web-shop"))
+        .with_repository(work("billing-api"))
+        .with_worktrees(listed)
+        .with_facts(&root, facts)
+        .with_summary(&root, summary(branch("dev"), 0, 0, 3 * hours))
+        .with_summary(
+            wt("fix-reload"),
+            summary(branch("claude/fix-reload"), 5, 0, 2 * minutes),
+        )
+        .with_summary(
+            wt("home-tab"),
+            summary(branch("claude/home-tab"), 0, 0, 40 * minutes),
+        )
+        .with_summary(
+            wt("review"),
+            summary(Head::Detached(head.clone()), 0, 0, 2 * days),
+        )
+        .with_summary(
+            wt("paused"),
+            summary(branch("claude/paused"), 1, 0, 30 * minutes),
+        )
+        .with_summary(wt("merged"), summary(branch("claude/merged"), 0, 0, days))
+        .with_summary(
+            wt("conflict"),
+            summary(branch("claude/conflict"), 0, 0, 3 * hours),
+        )
+        .with_summary(
+            work("web-shop"),
+            summary(branch("develop"), 4, 2, 25 * minutes),
+        )
+        .with_summary(work("billing-api"), summary(branch("main"), 0, 0, 3 * days))
+        .with_since("seen-home", &head, Since::Commits(2))
+        .with_comparison(
+            &root,
+            "refs/heads/dev",
+            BaseComparison {
+                counted: "refs/remotes/origin/dev".to_owned(),
+                ..compared_with_dev(2, 0, &["src/app.rs"], 14, 3)
+            },
+        )
+        .with_comparison(
+            &root,
+            "refs/heads/claude/fix-reload",
+            compared_with_dev(
+                3,
+                0,
+                &[
+                    "src/ui.rs",
+                    "src/app.rs",
+                    "src/home.rs",
+                    "README.md",
+                    "Cargo.toml",
+                ],
+                120,
+                40,
+            ),
+        )
+        .with_comparison(
+            &root,
+            "refs/heads/claude/home-tab",
+            compared_with_dev(5, 1, &["src/ui.rs", "src/home_view.rs"], 1_240, 312),
+        )
+        .with_comparison(
+            &root,
+            &head,
+            compared_with_dev(1, 0, &["docs/notes.md"], 8, 2),
+        )
+        .with_comparison(
+            &root,
+            "refs/heads/claude/paused",
+            compared_with_dev(1, 0, &["src/settings.rs"], 20, 0),
+        )
+        .with_comparison(
+            &root,
+            "refs/heads/claude/merged",
+            BaseComparison {
+                merged: Some(("refs/heads/dev".to_owned(), MergedBy::Squash)),
+                ..compared_with_dev(0, 3, &[], 0, 0)
+            },
+        )
+        .with_comparison(
+            &root,
+            "refs/heads/claude/conflict",
+            BaseComparison {
+                prediction: Prediction::Conflict,
+                ..compared_with_dev(2, 4, &["src/theme.rs"], 30, 12)
+            },
+        );
+    for (name, branch) in agents {
+        let tip = match branch {
+            Some(branch) => format!("refs/heads/{branch}"),
+            None => head.clone(),
+        };
+        let _ = name;
+        backend = backend.with_detected_base(&root, &tip, "refs/heads/dev");
+    }
+    // What was seen: every branch and the detached worktree at their
+    // commit, `claude/home-tab` two commits back, and `claude/old` never.
+    let mut seen = Seen::default();
+    let key = |branch: &str| Key::Branch {
+        repository: root.clone(),
+        branch: branch.to_owned(),
+    };
+    let mut current: Vec<(Key, String)> = ["dev", "main"]
+        .into_iter()
+        .chain(agents.iter().filter_map(|(_, branch)| *branch))
+        .map(|branch| (key(branch), head.clone()))
+        .collect();
+    current.push((
+        Key::Detached {
+            repository: root.clone(),
+            worktree: wt("review"),
+        },
+        head.clone(),
+    ));
+    seen.found(&root, &current);
+    seen.mark(key("claude/home-tab"), "seen-home");
+    Setup {
+        settings: Settings {
+            pinned: vec![work("billing-api")],
+            recent: vec![root, work("web-shop"), work("billing-api")],
+            ..Settings::default()
+        },
+        backend,
+        seen: Some(seen),
+        ..Setup::default()
+    }
 }

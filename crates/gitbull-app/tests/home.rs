@@ -81,7 +81,7 @@ fn a_repository_shows_its_branch_and_its_changed_files() {
     ));
     assert_eq!(
         row_label(&harness, "git-bull"),
-        "git-bull, main, 3 changed, 10 min"
+        "git-bull, Paused, main, 3 changed, 10 min"
     );
 }
 
@@ -124,9 +124,10 @@ fn a_detached_head_shows_the_short_hash_of_its_commit() {
         "git-bull",
         summary(Head::Detached(commit.clone()), 0, 0, 60),
     ));
+    // Committed a minute ago, it is at work.
     let label = row_label(&harness, "git-bull");
     assert!(
-        label.starts_with(&format!("git-bull, {}, ", &commit[..7])),
+        label.starts_with(&format!("git-bull, Working, {}, ", &commit[..7])),
         "{label}"
     );
 }
@@ -139,7 +140,7 @@ fn files_in_conflict_are_named() {
     ));
     assert_eq!(
         row_label(&harness, "web-shop"),
-        "web-shop, develop, Conflicts, 4 changed, 1 min"
+        "web-shop, Conflict, develop, Conflicts, 4 changed, 1 min"
     );
 }
 
@@ -165,7 +166,7 @@ fn rows_name_their_level_their_state_and_whether_they_are_expanded() {
     assert_eq!(worktree.accesskit_node().data().is_expanded(), None);
     assert_eq!(
         worktree.accesskit_node().label().as_deref(),
-        Some("git-bull-fix-reload, claude/fix-reload, 5 changed, 2 min")
+        Some("git-bull-fix-reload, Working, claude/fix-reload, 5 changed, 2 min")
     );
     // A repository without worktrees cannot be expanded.
     assert_eq!(node("web-shop").accesskit_node().data().is_expanded(), None);
@@ -213,7 +214,7 @@ fn a_row_says_that_its_status_is_being_read_until_it_has_one() {
     wait_for_home(&mut harness);
     assert_eq!(
         row_label(&harness, "git-bull"),
-        "git-bull, main, 3 changed, 10 min"
+        "git-bull, Paused, main, 3 changed, 10 min"
     );
 }
 
@@ -339,7 +340,7 @@ fn switching_to_the_home_tab_reads_every_row_again_and_keeps_what_was_read() {
     assert!(harness.state().home_shown());
     assert_eq!(
         row_label(&harness, "git-bull"),
-        "git-bull, main, 3 changed, 10 min"
+        "git-bull, Paused, main, 3 changed, 10 min"
     );
     wait_for_home(&mut harness);
     assert_eq!(summaries(&probe), 2);
@@ -1299,4 +1300,60 @@ fn refresh_stops_a_slow_reading_and_starts_a_new_one() {
     harness.step();
     assert!(gate.was_cancelled());
     step_until(&mut harness, |_| listings(&probe) == before + 1);
+}
+
+// The rows of the cockpit (spec `repository-manager`, "Main state of a
+// worktree"; spec `visual-design`, "Not by colour alone").
+
+use support::cockpit_setup;
+
+#[test]
+fn each_row_names_its_main_state_for_assistive_technology() {
+    let harness = home(cockpit_setup());
+    for (name, word) in [
+        ("fix-reload", "Working"),
+        ("paused", "Paused"),
+        ("home-tab", "New 2"),
+        ("conflict", "Conflict"),
+        ("review", "Ready"),
+        ("web-shop", "Conflict"),
+    ] {
+        let label = row_label(&harness, name);
+        assert!(
+            label.starts_with(&format!("{name}, {word}, ")),
+            "{name}: {label}"
+        );
+    }
+    // Idle shows no chip.
+    let label = row_label(&harness, "billing-api");
+    assert_eq!(label, "billing-api, main, Clean, 3 d");
+}
+
+#[test]
+fn rows_name_their_overlap_and_their_comparison_with_the_base() {
+    let harness = home(cockpit_setup());
+    let label = row_label(&harness, "home-tab");
+    assert!(label.contains(", Overlaps another worktree, "), "{label}");
+    assert!(
+        label.contains(", 5 ahead, 1 behind, 1240 added, 312 removed, "),
+        "{label}"
+    );
+}
+
+#[test]
+fn done_worktrees_fold_into_a_row_that_opens() {
+    let mut harness = home(cockpit_setup());
+    assert!(harness.query_by_label_contains("merged,").is_none());
+    harness.get_by_label("Done (1)").click();
+    harness.run();
+    let label = row_label(&harness, "merged");
+    assert!(label.starts_with("merged, claude/merged, "), "{label}");
+}
+
+#[test]
+fn a_repository_with_new_branches_shows_a_mark() {
+    let harness = home(cockpit_setup());
+    let label = row_label(&harness, "git-bull");
+    assert!(label.contains(", New branches, "), "{label}");
+    assert!(!row_label(&harness, "web-shop").contains("New branches"));
 }
