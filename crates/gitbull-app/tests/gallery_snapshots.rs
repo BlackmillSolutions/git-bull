@@ -238,6 +238,20 @@ fn gallery(ui: &mut egui::Ui, state: &mut Gallery) {
                             ui.label(RichText::new(letter).strong().color(color(kind)));
                         }
                     });
+                    // The chips of the main states of worktrees.
+                    ui.horizontal(|ui| {
+                        for (icon, word, chip) in [
+                            (icons::CONFLICT, "Conflict", palette.state_conflict),
+                            (icons::WORKING, "Working", palette.state_working),
+                            (icons::NEW, "New 2", palette.state_new),
+                            (icons::READY, "Ready", palette.state_ready),
+                            (icons::PAUSED, "Paused", palette.state_paused),
+                        ] {
+                            let size = components::chip_size(ui, word);
+                            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                            components::paint_chip(ui, rect, icon, word, chip);
+                        }
+                    });
                     ui.horizontal(|ui| {
                         for lane in palette.lanes {
                             let (rect, _) = ui
@@ -287,7 +301,7 @@ fn snapshot(name: &str, appearance: Appearance, vision: ColourVision) {
         toggles: [true, false],
     };
     let mut harness = Harness::builder()
-        .with_size((900.0, 860.0))
+        .with_size((900.0, 900.0))
         .wgpu()
         .build_ui_state(gallery, state);
     harness.ctx.set_fonts(fonts::definitions());

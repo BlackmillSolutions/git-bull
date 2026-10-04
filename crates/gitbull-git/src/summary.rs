@@ -8,7 +8,7 @@ use crate::error::Error;
 use crate::filters::neutralised_filters_cancellable;
 use crate::flags;
 use crate::head::Head;
-use crate::invoke::Git;
+use crate::invoke::{ConfigOverride, Git};
 use crate::path::RepoPath;
 use crate::status::fields;
 
@@ -39,10 +39,24 @@ pub struct Summary {
 
 /// Summarises the working copy at `worktree`: its status with the
 /// repository's filter drivers neutralised (ADR 0006), and the commit time
-/// of HEAD.
-pub fn summary(git: &Git, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error> {
-    let overrides = neutralised_filters_cancellable(git, worktree, cancel)?;
-    let output = git.run_cancellable(worktree, &overrides, flags::SUMMARY, cancel)?;
+/// of HEAD. The `overrides` that neutralise them are those of the facts of
+/// its repository; without them, as for a worktree with configuration of its
+/// own, the summary reads the configuration of `worktree` first.
+pub fn summary(
+    git: &Git,
+    worktree: &Path,
+    overrides: Option<&[ConfigOverride]>,
+    cancel: &CancelToken,
+) -> Result<Summary, Error> {
+    let own;
+    let overrides = match overrides {
+        Some(overrides) => overrides,
+        None => {
+            own = neutralised_filters_cancellable(git, worktree, cancel)?;
+            &own[..]
+        }
+    };
+    let output = git.run_cancellable(worktree, overrides, flags::SUMMARY, cancel)?;
     let mut summary = parse_summary(&output).map_err(|message| Error::Parse {
         command: format!("git {}", flags::SUMMARY.join(" ")),
         message,

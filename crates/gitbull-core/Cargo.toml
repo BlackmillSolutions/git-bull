@@ -10,7 +10,9 @@ publish.workspace = true
 
 [dependencies]
 gitbull-git.workspace = true
-hashbrown = { version = "0.17.1", default-features = false }
+# The default hasher, foldhash, is quick on the paths of the overlaps
+# (worktree-cockpit, task 5.1).
+hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
 serde = { version = "1.0.229", features = ["derive"] }
 # Comparing the words of changed lines (diff-comforts, decision 3); `std`
 # gives the deadline per pair.

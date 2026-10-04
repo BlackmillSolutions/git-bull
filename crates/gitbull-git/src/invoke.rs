@@ -131,14 +131,18 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.spawn_with(repo, &[], env, args, false, Some(watcher))
+        let env: Vec<(&str, &OsStr)> = env
+            .iter()
+            .map(|&(key, value)| (key, OsStr::new(value)))
+            .collect();
+        self.spawn_with(repo, &[], &env, args, false, Some(watcher))
     }
 
     fn spawn_with<I, S>(
         &self,
         repo: &Path,
         overrides: &[ConfigOverride],
-        env: &[(&str, &str)],
+        env: &[(&str, &OsStr)],
         args: I,
         stdin: bool,
         watcher: Option<StderrWatcher>,
@@ -229,22 +233,125 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut process = self.spawn(repo, overrides, args, false)?;
-        let canceller = process.canceller();
-        let registration = cancel.on_cancel(move || canceller.cancel());
-        let mut output = Vec::new();
-        let read = process
-            .take_stdout()
-            .expect("standard output is piped")
-            .read_to_end(&mut output);
-        let command = process.command().to_owned();
-        let result = process.wait();
-        cancel.forget(registration);
-        result?;
-        read.map_err(|source| Error::Io { command, source })?;
-        Ok(output)
+        let process = self.spawn(repo, overrides, args, false)?;
+        finish(process, cancel)
     }
 
+    /// Like [`Git::run_cancellable`], with `input` on the standard input of
+    /// Git, written on a thread of its own so that neither pipe can block
+    /// the other.
+    pub fn run_with_input<I, S>(
+        &self,
+        repo: &Path,
+        overrides: &[ConfigOverride],
+        args: I,
+        input: Vec<u8>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut process = self.spawn(repo, overrides, args, true)?;
+        let mut stdin = process.take_stdin().expect("standard input is piped");
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            // Git may stop reading early, as when cancelled; the result
+            // tells why.
+            let _ = stdin.write_all(&input);
+        });
+        let result = finish(process, cancel);
+        let _ = writer.join();
+        result
+    }
+
+    /// Like [`Git::run_cancellable`], for a command that writes objects,
+    /// such as `merge-tree --write-tree`: Git reads every object of the
+    /// repository, whose object folder is `objects`, but writes new ones
+    /// only into a new folder in `temp_dir`, which is removed when Git has
+    /// ended, also when it was cancelled. Git quarantines a push the same
+    /// way.
+    pub fn run_quarantined<I, S>(
+        &self,
+        repo: &Path,
+        overrides: &[ConfigOverride],
+        objects: &Path,
+        temp_dir: &Path,
+        args: I,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let quarantine = tempfile::Builder::new()
+            .prefix("gitbull-objects-")
+            .tempdir_in(temp_dir)
+            .map_err(|source| Error::Io {
+                command: "a quarantine of objects".to_owned(),
+                source,
+            })?;
+        let alternate = alternate_entry(objects);
+        let env = [
+            ("GIT_OBJECT_DIRECTORY", quarantine.path().as_os_str()),
+            ("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate.as_os_str()),
+        ];
+        let result = self
+            .spawn_with(repo, overrides, &env, args, false, None)
+            .and_then(|process| finish(process, cancel));
+        remove(quarantine);
+        result
+    }
+}
+
+/// Reads the standard output of `process` and waits for it; `cancel` stops
+/// it, and the result is then [`Error::Cancelled`].
+fn finish(mut process: Process, cancel: &CancelToken) -> Result<Vec<u8>, Error> {
+    let canceller = process.canceller();
+    let registration = cancel.on_cancel(move || canceller.cancel());
+    let mut output = Vec::new();
+    let read = process
+        .take_stdout()
+        .expect("standard output is piped")
+        .read_to_end(&mut output);
+    let command = process.command().to_owned();
+    let result = process.wait();
+    cancel.forget(registration);
+    result?;
+    read.map_err(|source| Error::Io { command, source })?;
+    Ok(output)
+}
+
+/// `objects` as one entry of `GIT_ALTERNATE_OBJECT_DIRECTORIES`: quoted as
+/// Git unquotes it when it holds the separator of the list or starts with a
+/// quote.
+fn alternate_entry(objects: &Path) -> OsString {
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    match objects.to_str() {
+        Some(text) if text.contains(separator) || text.starts_with('"') => {
+            let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+            OsString::from(format!("\"{escaped}\""))
+        }
+        _ => objects.as_os_str().to_owned(),
+    }
+}
+
+/// Removes a quarantine. Right after a cancel, Windows may still hold files
+/// of the stopped Git for a moment, so the removal is tried again.
+fn remove(quarantine: tempfile::TempDir) {
+    let path = quarantine.path().to_owned();
+    if quarantine.close().is_ok() {
+        return;
+    }
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        if std::fs::remove_dir_all(&path).is_ok() || !path.exists() {
+            return;
+        }
+    }
+}
+
+impl Git {
     fn record(&self, command: &str, started: Instant, outcome: Outcome) {
         if let Some(log) = &self.log {
             log.record(command, started.elapsed(), outcome);

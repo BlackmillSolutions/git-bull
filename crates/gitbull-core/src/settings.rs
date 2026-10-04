@@ -132,6 +132,17 @@ pub struct KnownWorktrees {
     pub worktrees: Vec<PathBuf>,
 }
 
+/// The base branch the user set for a repository (spec
+/// `repository-manager`, requirement "Base branch").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryBase {
+    /// The canonical path of the repository, by which the home tab tells
+    /// repositories apart, whichever of its paths lists it.
+    pub repository: PathBuf,
+    /// A local branch, by its short name such as `dev`.
+    pub branch: String,
+}
+
 /// Everything git-bull remembers between runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -171,6 +182,9 @@ pub struct Settings {
     /// The worktrees last found in the pinned and recent repositories.
     #[serde(deserialize_with = "or_default")]
     pub worktrees: Vec<KnownWorktrees>,
+    /// The base branches the user set for repositories.
+    #[serde(deserialize_with = "or_default")]
+    pub bases: Vec<RepositoryBase>,
 }
 
 impl Settings {
@@ -195,13 +209,39 @@ impl Settings {
         self.pinned.retain(|known| known != repository);
     }
 
-    /// Forgets `paths`, a repository with every path it was known by, from
-    /// the recent and the pinned repositories and the worktrees remembered.
+    /// Forgets `paths`, a repository with every path it was known by, its
+    /// canonical path among them, from the recent and the pinned
+    /// repositories, the worktrees remembered and the base set for it.
     pub fn forget(&mut self, paths: &[PathBuf]) {
         self.recent.retain(|known| !paths.contains(known));
         self.pinned.retain(|known| !paths.contains(known));
         self.worktrees
             .retain(|known| !paths.contains(&known.repository));
+        self.bases.retain(|base| !paths.contains(&base.repository));
+    }
+
+    /// The base the user set for the repository whose canonical path is
+    /// `repository`.
+    pub fn base_of(&self, repository: &Path) -> Option<&str> {
+        self.bases
+            .iter()
+            .find(|base| base.repository == repository)
+            .map(|base| base.branch.as_str())
+    }
+
+    /// Sets the base of the repository whose canonical path is
+    /// `repository` to `branch`, or lets it be detected again with `None`.
+    /// Returns whether anything changed.
+    pub fn set_base(&mut self, repository: &Path, branch: Option<String>) -> bool {
+        let before = self.bases.clone();
+        self.bases.retain(|base| base.repository != repository);
+        if let Some(branch) = branch {
+            self.bases.push(RepositoryBase {
+                repository: repository.to_owned(),
+                branch,
+            });
+        }
+        self.bases != before
     }
 
     /// Remembers that `repository` has `worktrees`, if it is pinned or
@@ -248,6 +288,7 @@ impl Default for Settings {
             window: None,
             layout: Layout::default(),
             worktrees: Vec::new(),
+            bases: Vec::new(),
         }
     }
 }
@@ -362,11 +403,18 @@ fn storable(settings: &Settings) -> Settings {
             worktrees: kept(&known.worktrees),
         })
         .collect();
+    let bases = settings
+        .bases
+        .iter()
+        .filter(|base| valid(&base.repository))
+        .cloned()
+        .collect();
     Settings {
         git_path: settings.git_path.clone().filter(|path| valid(path)),
         recent: kept(&settings.recent),
         pinned: kept(&settings.pinned),
         worktrees,
+        bases,
         active_tab: active_tab.filter(|_| !tabs.is_empty()),
         tabs,
         ..settings.clone()
@@ -427,6 +475,7 @@ mod tests {
                 ..Layout::default()
             },
             worktrees: Vec::new(),
+            bases: Vec::new(),
         }
     }
 
@@ -970,6 +1019,59 @@ mod tests {
         ));
         file.save(&settings).unwrap();
         assert_eq!(file.load().settings, settings);
+    }
+
+    #[test]
+    fn the_base_of_a_repository_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let mut settings = example();
+        assert!(settings.set_base(Path::new("/work/git-bull"), Some("dev".to_owned())));
+        file.save(&settings).unwrap();
+        let loaded = file.load().settings;
+        assert_eq!(loaded, settings);
+        assert_eq!(loaded.base_of(Path::new("/work/git-bull")), Some("dev"));
+    }
+
+    #[test]
+    fn a_file_without_bases_detects_every_base_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(
+            &file,
+            "theme = \"dark\"
+recent = [\"/work/git-bull\"]
+",
+        );
+        let loaded = file.load();
+        assert!(!loaded.reset);
+        assert!(loaded.settings.bases.is_empty());
+        assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
+    }
+
+    #[test]
+    fn a_base_is_kept_once_under_the_canonical_path() {
+        let mut settings = Settings::default();
+        let canonical = Path::new("/work/git-bull");
+        settings.set_base(canonical, Some("main".to_owned()));
+        assert!(settings.set_base(canonical, Some("dev".to_owned())));
+        assert!(!settings.set_base(canonical, Some("dev".to_owned())));
+        assert_eq!(settings.bases.len(), 1);
+        assert_eq!(settings.base_of(canonical), Some("dev"));
+        assert!(settings.set_base(canonical, None));
+        assert_eq!(settings.base_of(canonical), None);
+    }
+
+    #[test]
+    fn a_removed_repository_forgets_its_base() {
+        let mut settings = Settings::default();
+        settings.remember(PathBuf::from("/work/App"));
+        settings.set_base(Path::new("/work/app"), Some("dev".to_owned()));
+        settings.set_base(Path::new("/work/other"), Some("main".to_owned()));
+        // Every path of the repository, its canonical one among them.
+        settings.forget(&[PathBuf::from("/work/App"), PathBuf::from("/work/app")]);
+        assert_eq!(settings.base_of(Path::new("/work/app")), None);
+        assert_eq!(settings.base_of(Path::new("/work/other")), Some("main"));
     }
 
     #[test]

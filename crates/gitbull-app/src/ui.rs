@@ -16,6 +16,7 @@ use gitbull_git::Error;
 use std::path::PathBuf;
 
 use gitbull_core::git_setup::GitCheck;
+use gitbull_core::overview::Request;
 use gitbull_git::head::Head;
 use gitbull_git::locate::LocateError;
 use gitbull_git::version::GitVersion;
@@ -123,6 +124,9 @@ enum Action {
     ShowAllBranches(String),
     /// Look for changes made outside git-bull in the tab shown.
     Refresh,
+    /// The window gained the focus: the tab shown looks for changes, and
+    /// the home tab reads again after a reading still running.
+    Returned,
     /// Search the tab shown in this mode for this text.
     Search(SearchMode, String),
     NextMatch,
@@ -170,6 +174,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     actions.extend(dropped_folders(ui));
     actions.extend(returned_to_window(ui));
+    if let Some(focused) = window_focus(ui) {
+        app.home.focused = focused;
+    }
     // The window behind the settings dialog takes no keys, as it takes no
     // clicks.
     if app.dialog.is_none() {
@@ -273,7 +280,14 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::ShowAllBranches(reference) => app.show_all_branches(&reference),
             Action::Refresh => {
                 if app.home_shown() {
-                    app.read_home();
+                    app.read_home(Request::Refresh);
+                } else if let Some(workspace) = app.workspace_mut() {
+                    workspace.refresh_active();
+                }
+            }
+            Action::Returned => {
+                if app.home_shown() {
+                    app.read_home(Request::Again);
                 } else if let Some(workspace) = app.workspace_mut() {
                     workspace.refresh_active();
                 }
@@ -562,6 +576,18 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
     actions
 }
 
+/// Whether the window has the focus, as this pass tells it: by an event,
+/// else as the window reports it; `None` when it tells nothing.
+fn window_focus(ui: &Ui) -> Option<bool> {
+    ui.ctx().input(|input| {
+        let event = input.events.iter().rev().find_map(|event| match event {
+            egui::Event::WindowFocused(focused) => Some(*focused),
+            _ => None,
+        });
+        event.or(input.viewport().focused)
+    })
+}
+
 /// Returning to the window may follow work in a terminal, so it refreshes.
 fn returned_to_window(ui: &Ui) -> Option<Action> {
     ui.ctx()
@@ -571,7 +597,7 @@ fn returned_to_window(ui: &Ui) -> Option<Action> {
                 .iter()
                 .any(|event| matches!(event, egui::Event::WindowFocused(true)))
         })
-        .then_some(Action::Refresh)
+        .then_some(Action::Returned)
 }
 
 /// Folders dropped onto the window this frame. A dropped file opens the
@@ -642,6 +668,11 @@ fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>
             args.set("error", error.clone());
             app.texts.text_with(Msg::HomeFileManagerFailed, Some(&args))
         }
+        Notice::CopyFailed(error) => {
+            let mut args = FluentArgs::new();
+            args.set("error", error.clone());
+            app.texts.text_with(Msg::CockpitCopyFailed, Some(&args))
+        }
     };
     let show_all = app.texts.text(Msg::NoticeShowAllBranches);
     let offered: &[&str] = match notice {
@@ -670,7 +701,8 @@ fn notice_kind(notice: &Notice) -> BannerKind {
         | Notice::NotACommit(_)
         | Notice::HashUnknown(_)
         | Notice::HashAmbiguous(_)
-        | Notice::FileManagerFailed(_) => BannerKind::Warning,
+        | Notice::FileManagerFailed(_)
+        | Notice::CopyFailed(_) => BannerKind::Warning,
     }
 }
 

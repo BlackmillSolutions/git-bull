@@ -3,23 +3,27 @@
 //! the rows of the list, filtered and with collapsed repositories.
 //!
 //! [`RepositoryList`] knows the paths of the settings, what a round of
-//! reading found for each, and the status of every working copy; it builds
-//! the rows when one of these, the filter or a collapsed repository
-//! changes, never when they are only read.
+//! reading found for each, the status and the comparison of every working
+//! copy, and what the user saw; it builds the rows, with the main state and
+//! the overlaps of each worktree, when one of these, the filter or a
+//! collapsed repository changes, never when they are only read. Reading in
+//! rounds lives in [`crate::overview`].
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitbull_git::Backend;
-use gitbull_git::cancel::CancelToken;
+use gitbull_git::facts::RepositoryFacts;
 use gitbull_git::head::Head;
 use gitbull_git::summary::{PATH_LIMIT, Summary};
 
-use crate::settings::KnownWorktrees;
-use crate::workspace::Notify;
+use crate::base::{Bases, Detected};
+use crate::comparison::{Comparison, Tips};
+use crate::overlaps::{Changes, Overlap, overlaps};
+use crate::seen::{Key, Seen};
+use crate::settings::{KnownWorktrees, RepositoryBase};
+use crate::state::{Inputs, MainState, state};
 
 /// The sections of the list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -32,11 +36,13 @@ pub enum Section {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Found {
     /// The repository: its main worktree, or the Git folder of a bare one,
-    /// and its further worktrees, every path normalised.
+    /// its further worktrees, and those whose folder is gone, every path
+    /// normalised.
     Repository {
         path: PathBuf,
         bare: bool,
         worktrees: Vec<PathBuf>,
+        gone: Vec<PathBuf>,
     },
     /// The folder is gone or no repository any more.
     NotFound,
@@ -51,8 +57,12 @@ pub enum Status {
     Reading,
     Read {
         summary: Summary,
-        /// When it was last active, in seconds since 1970.
+        /// When it was last active, in seconds since 1970: the later of
+        /// the commit time of HEAD and `changed`.
         last_active: Option<i64>,
+        /// The newest modification of a changed file or folder, in
+        /// seconds since 1970, which tells a worktree at work.
+        changed: Option<i64>,
     },
     /// Git could not summarise it, with its message.
     Failed(String),
@@ -68,7 +78,8 @@ pub enum Problem {
 /// A repository of the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repository {
-    /// Its main worktree, or the Git folder of a bare repository.
+    /// Its main worktree, or the Git folder of a bare repository; its
+    /// canonical path, by which repositories are told apart.
     pub path: PathBuf,
     /// The name of its folder.
     pub name: String,
@@ -77,8 +88,29 @@ pub struct Repository {
     pub paths: Vec<PathBuf>,
     pub bare: bool,
     pub problem: Option<Problem>,
-    /// Its further worktrees, sorted by path.
+    /// Its further worktrees, those whose folder is gone included, sorted
+    /// by path.
     pub worktrees: Vec<PathBuf>,
+    /// Its worktrees whose folder is gone.
+    pub gone: Vec<PathBuf>,
+    /// A branch of it that no worktree has checked out has commits the
+    /// user has not seen.
+    pub new_branches: bool,
+}
+
+/// A worktree as `git worktree list` names it, in a round.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    /// Its folder, normalised.
+    pub path: PathBuf,
+    /// The commit checked out.
+    pub head: Option<String>,
+    /// The branch checked out, by its short name.
+    pub branch: Option<String>,
+    /// The main worktree of its repository.
+    pub main: bool,
+    /// Its folder is gone.
+    pub gone: bool,
 }
 
 /// One row of the list.
@@ -95,6 +127,77 @@ pub enum Row {
         repository: usize,
         index: usize,
     },
+    /// The worktrees of a repository that are done or whose folder is
+    /// gone, folded below its active ones.
+    Done {
+        repository: usize,
+        expanded: bool,
+        count: usize,
+    },
+}
+
+/// The row selected, kept across builds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Selected {
+    Folder(PathBuf),
+    /// The row "Done" of the repository at the path.
+    Done(PathBuf),
+}
+
+/// A mapped or substituted drive on Windows: the root of the drive, such as
+/// `Z:\`, and the canonical form of that root, such as `\\server\share\`
+/// (design of `worktree-cockpit`, decision 15). [`normalise`] keeps the
+/// canonical form, by which folders compare equal; a path is read, shown,
+/// copied and opened with the drive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Drive {
+    pub canonical: PathBuf,
+    pub root: PathBuf,
+}
+
+impl Drive {
+    /// The drive `path` starts with, if its root canonicalises to another
+    /// path, as `canonicalize` tells; `None` for a plain drive, a network
+    /// path and on other systems.
+    pub fn of(
+        path: &Path,
+        canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
+    ) -> Option<Drive> {
+        let Some(Component::Prefix(prefix)) = path.components().next() else {
+            return None;
+        };
+        let letter = match prefix.kind() {
+            std::path::Prefix::Disk(letter) | std::path::Prefix::VerbatimDisk(letter) => letter,
+            _ => return None,
+        };
+        let root = PathBuf::from(format!("{}:\\", char::from(letter).to_ascii_uppercase()));
+        let canonical = without_verbatim_prefix(canonicalize(&root).ok()?);
+        let same = canonical
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&root.to_string_lossy());
+        (!same).then_some(Drive { canonical, root })
+    }
+
+    /// `path` with the drive instead of its canonical root, if it starts
+    /// with that.
+    pub fn shown(&self, path: &Path) -> Option<PathBuf> {
+        let rest = path.strip_prefix(&self.canonical).ok()?;
+        Some(self.root.join(rest))
+    }
+}
+
+/// What a round needs to know of the list when it starts.
+#[derive(Clone, Debug, Default)]
+pub struct RoundInput {
+    /// Every worktree is compared, not only those that moved.
+    pub compare_all: bool,
+    /// The base the user set, by the canonical path of the repository.
+    pub bases: HashMap<PathBuf, String>,
+    /// What Git detected, by the canonical path of the repository.
+    pub detected: HashMap<PathBuf, Detected>,
+    /// What each worktree was last compared for.
+    pub tips: HashMap<PathBuf, Tips>,
+    pub seen: Seen,
 }
 
 /// The repositories of the home tab and the rows of its list.
@@ -107,14 +210,39 @@ pub struct RepositoryList {
     found: HashMap<PathBuf, Found>,
     /// By the path of the working copy.
     statuses: HashMap<PathBuf, Status>,
+    /// The facts of each repository, by its canonical path, and its
+    /// worktrees as the round listed them.
+    facts: HashMap<PathBuf, (Arc<RepositoryFacts>, Vec<Listed>)>,
+    /// What Git detected, by the canonical path of the repository.
+    detected: HashMap<PathBuf, Detected>,
+    /// The comparison of each worktree, by its folder.
+    comparisons: HashMap<PathBuf, Comparison>,
+    /// The base the user set, by the canonical path of the repository.
+    bases: HashMap<PathBuf, String>,
+    seen: Seen,
+    /// The time the main states are decided at, in seconds since 1970.
+    now: i64,
+    /// The main state of each worktree with a status, by its folder.
+    states: HashMap<PathBuf, MainState>,
+    /// The overlaps of each active worktree, by its folder.
+    overlaps: HashMap<PathBuf, Vec<Overlap>>,
+    /// The active worktrees of each repository in the order of their last
+    /// activity, taken when the home tab becomes shown and on Refresh.
+    order: HashMap<PathBuf, Vec<PathBuf>>,
+    /// The mapped and substituted drives the paths of the settings are on.
+    drives: Vec<Drive>,
     /// Repositories whose worktrees are hidden, by their path.
     collapsed: HashSet<PathBuf>,
+    /// Repositories whose done worktrees are shown, by their path.
+    done_expanded: HashSet<PathBuf>,
     lower_filter: String,
     repositories: Vec<Repository>,
     rows: Vec<Row>,
-    /// The folder of the row selected, kept across builds.
-    selected: Option<PathBuf>,
+    /// The row selected, kept across builds.
+    selected: Option<Selected>,
     selected_row: Option<usize>,
+    /// Something the rows depend on changed since they were built.
+    stale: bool,
     builds: u64,
 }
 
@@ -138,25 +266,350 @@ impl RepositoryList {
         self.build(false);
     }
 
+    /// Takes the bases the user set from the settings.
+    pub fn set_bases(&mut self, bases: &[RepositoryBase]) {
+        self.bases = bases
+            .iter()
+            .map(|base| (base.repository.clone(), base.branch.clone()))
+            .collect();
+        self.stale = true;
+    }
+
+    /// Takes what was seen, as read from its file.
+    pub fn set_seen(&mut self, seen: Seen) {
+        self.seen = seen;
+        self.stale = true;
+    }
+
+    /// What the user saw.
+    pub fn seen(&self) -> &Seen {
+        &self.seen
+    }
+
+    /// What the user saw, to write it.
+    pub fn seen_mut(&mut self) -> &mut Seen {
+        &mut self.seen
+    }
+
+    /// A path of the settings is on `drive`: paths on it are shown with
+    /// its letter.
+    pub fn add_drive(&mut self, drive: Drive) {
+        if !self.drives.contains(&drive) {
+            self.drives.push(drive);
+        }
+    }
+
+    /// `path` as it is read, shown, copied and opened: with the letter of a
+    /// mapped or substituted drive instead of its canonical root.
+    pub fn shown(&self, path: &Path) -> PathBuf {
+        self.drives
+            .iter()
+            .find_map(|drive| drive.shown(path))
+            .unwrap_or_else(|| path.to_owned())
+    }
+
     /// What a round found for the path `path` of the settings.
     pub fn set_found(&mut self, path: PathBuf, found: Found) {
+        self.found_later(path, found);
+        self.settle();
+    }
+
+    /// Like [`RepositoryList::set_found`], with the rows built by the next
+    /// [`RepositoryList::settle`], as a round applies many reports in one
+    /// frame.
+    pub(crate) fn found_later(&mut self, path: PathBuf, found: Found) {
         if self.found.get(&path) != Some(&found) {
             self.found.insert(path, found);
-            self.build(false);
+            self.stale = true;
         }
     }
 
     /// The status of the working copy at `worktree`. The rows change only
-    /// while a filter may look at its branch.
+    /// while a filter may look at its branch; the rest waits for
+    /// [`RepositoryList::settle`].
     pub fn set_status(&mut self, worktree: PathBuf, status: Status) {
         self.statuses.insert(worktree, status);
         if !self.lower_filter.is_empty() {
             self.build(false);
+        } else {
+            self.stale = true;
         }
     }
 
     pub fn status(&self, worktree: &Path) -> &Status {
         self.statuses.get(worktree).unwrap_or(&READING)
+    }
+
+    /// The facts of the repository at `repository`, by its canonical path,
+    /// with every branch and detached worktree it has: the first listing
+    /// counts each as seen.
+    pub(crate) fn set_facts(
+        &mut self,
+        repository: PathBuf,
+        facts: Arc<RepositoryFacts>,
+        listed: Vec<Listed>,
+    ) {
+        let mut current: Vec<(Key, String)> = facts
+            .branches
+            .iter()
+            .filter_map(|branch| {
+                let name = branch.name.strip_prefix("refs/heads/")?;
+                Some((
+                    Key::Branch {
+                        repository: repository.clone(),
+                        branch: name.to_owned(),
+                    },
+                    branch.commit.clone(),
+                ))
+            })
+            .collect();
+        for worktree in &listed {
+            if let (None, Some(head), false) = (&worktree.branch, &worktree.head, worktree.gone) {
+                current.push((
+                    Key::Detached {
+                        repository: repository.clone(),
+                        worktree: worktree.path.clone(),
+                    },
+                    head.clone(),
+                ));
+            }
+        }
+        self.seen.found(&repository, &current);
+        self.facts.insert(repository, (facts, listed));
+        self.stale = true;
+    }
+
+    /// The facts of the repository whose canonical path is `repository`,
+    /// and its worktrees as the last round listed them.
+    pub fn facts(&self, repository: &Path) -> Option<(&Arc<RepositoryFacts>, &[Listed])> {
+        self.facts
+            .get(repository)
+            .map(|(facts, listed)| (facts, listed.as_slice()))
+    }
+
+    /// What Git detected in the repository at `repository`.
+    pub(crate) fn set_detected(&mut self, repository: PathBuf, detected: Detected) {
+        self.detected.insert(repository, detected);
+    }
+
+    /// Keeps what the panel detected in the repository at `repository`,
+    /// with what the rounds detected there.
+    pub(crate) fn keep_detected(&mut self, repository: &Path, detected: Detected) {
+        let Some((facts, _)) = self.facts.get(repository) else {
+            return;
+        };
+        self.detected
+            .entry(repository.to_owned())
+            .or_default()
+            .absorb(facts, detected);
+    }
+
+    /// The comparison of the worktree at `worktree`. A worktree that
+    /// appeared in a repository listed before starts as seen where it left
+    /// its base, so that its commits ahead count as new. One read from what
+    /// was seen before the user marked its HEAD has no new commits, so that
+    /// a round under way during a look does not bring them back (design of
+    /// `worktree-cockpit`, decision 9).
+    pub(crate) fn set_comparison(&mut self, worktree: PathBuf, mut comparison: Comparison) {
+        if let Some(key) = self.key_of(&worktree) {
+            let seen = self.seen.commit(&key).map(str::to_owned);
+            match seen {
+                None if self.seen.knows(key.repository()) => {
+                    let left_at = comparison
+                        .against
+                        .as_ref()
+                        .and_then(|against| against.lines.as_ref())
+                        .map(|lines| lines.merge_base.clone())
+                        .unwrap_or_else(|| comparison.tips.head.clone());
+                    self.seen.mark(key, &left_at);
+                    comparison.tips.seen = Some(left_at);
+                }
+                Some(seen)
+                    if comparison.tips.seen.as_deref() != Some(seen.as_str())
+                        && seen == comparison.tips.head =>
+                {
+                    comparison.new = 0;
+                    comparison.tips.seen = Some(seen);
+                }
+                // A commit that passed a mark leaves the commit seen of the
+                // comparison behind, so that the next round reads it again.
+                _ => {}
+            }
+        }
+        self.comparisons.insert(worktree, comparison);
+        self.stale = true;
+    }
+
+    /// The comparison of the worktree at `worktree` with its base.
+    pub fn comparison(&self, worktree: &Path) -> Option<&Comparison> {
+        self.comparisons.get(worktree)
+    }
+
+    /// The main state of the worktree at `worktree`, once it has a status.
+    pub fn state(&self, worktree: &Path) -> Option<MainState> {
+        self.states.get(worktree).copied()
+    }
+
+    /// The worktrees the worktree at `worktree` overlaps with.
+    pub fn overlaps(&self, worktree: &Path) -> &[Overlap] {
+        self.overlaps.get(worktree).map_or(&[], Vec::as_slice)
+    }
+
+    /// Decides the main states at the time `now`, in seconds since 1970:
+    /// at the end of a round and at each tick of the timer.
+    pub fn set_now(&mut self, now: i64) {
+        if self.now != now {
+            self.now = now;
+            self.stale = true;
+        }
+    }
+
+    /// Builds the rows if something they depend on changed.
+    pub fn settle(&mut self) {
+        if self.stale {
+            self.build(false);
+        }
+    }
+
+    /// Takes the order of the active worktrees from their last activity
+    /// again, as when the home tab becomes shown and on Refresh; until the
+    /// next time it stays, so that rows do not move under the pointer.
+    pub fn freeze_order(&mut self) {
+        // The worktrees of reports applied in this frame count too.
+        self.settle();
+        self.order.clear();
+        for repository in &self.repositories {
+            let mut active: Vec<&PathBuf> = repository
+                .worktrees
+                .iter()
+                .filter(|path| !repository.gone.contains(path))
+                .collect();
+            active.sort_by_key(|path| {
+                let last = match self.statuses.get(*path) {
+                    Some(Status::Read { last_active, .. }) => *last_active,
+                    _ => None,
+                };
+                (std::cmp::Reverse(last), (*path).clone())
+            });
+            self.order.insert(
+                repository.path.clone(),
+                active.into_iter().cloned().collect(),
+            );
+        }
+        self.build(false);
+    }
+
+    /// The paths of the settings a round reads, in the order of the rows.
+    pub fn paths_to_read(&self) -> Vec<PathBuf> {
+        self.repositories
+            .iter()
+            .flat_map(|repository| repository.paths.iter().cloned())
+            .collect()
+    }
+
+    /// What a round starting now needs to know.
+    pub fn round_input(&self, compare_all: bool) -> RoundInput {
+        RoundInput {
+            compare_all,
+            bases: self.bases.clone(),
+            detected: self.detected.clone(),
+            tips: self
+                .comparisons
+                .iter()
+                .map(|(path, comparison)| (path.clone(), comparison.tips.clone()))
+                .collect(),
+            seen: self.seen.clone(),
+        }
+    }
+
+    /// The base the user set for the repository whose canonical path is
+    /// `repository`.
+    pub fn base_set(&self, repository: &Path) -> Option<&str> {
+        self.bases.get(repository).map(String::as_str)
+    }
+
+    /// What Git detected in the repository whose canonical path is
+    /// `repository`.
+    pub fn detected(&self, repository: &Path) -> Option<&Detected> {
+        self.detected.get(repository)
+    }
+
+    /// The key of what the user saw of the worktree at `worktree`.
+    pub(crate) fn key_of(&self, worktree: &Path) -> Option<Key> {
+        self.facts.iter().find_map(|(repository, (_, listed))| {
+            let found = listed.iter().find(|listed| listed.path == worktree)?;
+            Some(match &found.branch {
+                Some(branch) => Key::Branch {
+                    repository: repository.clone(),
+                    branch: branch.clone(),
+                },
+                None => Key::Detached {
+                    repository: repository.clone(),
+                    worktree: worktree.to_owned(),
+                },
+            })
+        })
+    }
+
+    /// The user saw the worktree at `worktree` as the home tab shows it, or,
+    /// for a repository, its main worktree and its branches without a
+    /// worktree. Returns whether anything changed.
+    pub fn mark_seen(&mut self, path: &Path) -> bool {
+        let mut changed = false;
+        if let Some(head) = self
+            .comparisons
+            .get(path)
+            .map(|comparison| comparison.tips.head.clone())
+            && let Some(key) = self.key_of(path)
+        {
+            changed |= self.seen.mark(key, &head);
+            if let Some(comparison) = self.comparisons.get_mut(path) {
+                changed |= comparison.new != 0;
+                comparison.new = 0;
+                // Read at that HEAD, it needs no reading again.
+                comparison.tips.seen = Some(head);
+            }
+        }
+        if let Some((facts, listed)) = self.facts.get(path) {
+            let checked_out: Vec<&str> = listed
+                .iter()
+                .filter_map(|listed| listed.branch.as_deref())
+                .collect();
+            let branches: Vec<(Key, String)> = facts
+                .branches
+                .iter()
+                .filter_map(|branch| {
+                    let name = branch.name.strip_prefix("refs/heads/")?;
+                    (!checked_out.contains(&name)).then(|| {
+                        (
+                            Key::Branch {
+                                repository: path.to_owned(),
+                                branch: name.to_owned(),
+                            },
+                            branch.commit.clone(),
+                        )
+                    })
+                })
+                .collect();
+            for (key, commit) in branches {
+                changed |= self.seen.mark(key, &commit);
+            }
+        }
+        if changed {
+            self.build(false);
+        }
+        changed
+    }
+
+    /// The user marked every row as seen. Returns whether anything changed.
+    pub fn mark_all_seen(&mut self) -> bool {
+        let mut paths: Vec<PathBuf> = self.comparisons.keys().cloned().collect();
+        paths.extend(self.facts.keys().cloned());
+        let mut changed = false;
+        for path in paths {
+            changed |= self.mark_seen(&path);
+        }
+        changed
     }
 
     pub fn repositories(&self) -> &[Repository] {
@@ -195,14 +648,40 @@ impl RepositoryList {
         }
         let path = repository.path.clone();
         if !self.collapsed.remove(&path) {
-            if self
-                .selected
-                .as_ref()
-                .is_some_and(|selected| repository.worktrees.contains(selected))
-            {
-                self.selected = Some(path.clone());
+            let inside = match &self.selected {
+                Some(Selected::Folder(selected)) => repository.worktrees.contains(selected),
+                Some(Selected::Done(done)) => *done == path,
+                None => false,
+            };
+            if inside {
+                self.selected = Some(Selected::Folder(path.clone()));
             }
             self.collapsed.insert(path);
+        }
+        self.build(false);
+    }
+
+    /// Expands or folds the done worktrees of the repository at `index`. A
+    /// done worktree selected gives the selection to the row "Done". While
+    /// the filter has text, nothing changes.
+    pub fn toggle_done(&mut self, index: usize) {
+        let Some(repository) = self.repositories.get(index) else {
+            return;
+        };
+        if !self.lower_filter.is_empty() {
+            return;
+        }
+        let path = repository.path.clone();
+        let inside = match &self.selected {
+            Some(Selected::Folder(selected)) => {
+                repository.worktrees.contains(selected) && self.is_done(selected)
+            }
+            _ => false,
+        };
+        if !self.done_expanded.remove(&path) {
+            self.done_expanded.insert(path);
+        } else if inside {
+            self.selected = Some(Selected::Done(path));
         }
         self.build(false);
     }
@@ -210,7 +689,7 @@ impl RepositoryList {
     /// The path of the folder of the row at `row`.
     pub fn path(&self, row: usize) -> Option<&Path> {
         match *self.rows.get(row)? {
-            Row::Title(_) => None,
+            Row::Title(_) | Row::Done { .. } => None,
             Row::Repository { index, .. } => Some(&self.repositories[index].path),
             Row::Worktree { repository, index } => {
                 Some(&self.repositories[repository].worktrees[index])
@@ -220,9 +699,18 @@ impl RepositoryList {
 
     /// Selects the row at `row`; a title selects nothing.
     pub fn select_row(&mut self, row: usize) {
-        if let Some(path) = self.path(row) {
-            self.selected = Some(path.to_owned());
+        if let Some(selected) = self.selection_of(row) {
+            self.selected = Some(selected);
             self.selected_row = Some(row);
+        }
+    }
+
+    fn selection_of(&self, row: usize) -> Option<Selected> {
+        match *self.rows.get(row)? {
+            Row::Done { repository, .. } => {
+                Some(Selected::Done(self.repositories[repository].path.clone()))
+            }
+            _ => self.path(row).map(|path| Selected::Folder(path.to_owned())),
         }
     }
 
@@ -230,11 +718,28 @@ impl RepositoryList {
         self.selected_row
     }
 
-    /// Left at `row`: collapses an expanded repository, or selects the
-    /// repository of a worktree. Returns whether anything changed.
+    /// Left at `row`: collapses an expanded repository or row "Done", or
+    /// selects the repository of a worktree or of a row "Done". Returns
+    /// whether anything changed.
     pub fn left(&mut self, row: usize) -> bool {
         match self.rows.get(row) {
             Some(&Row::Worktree { repository, .. }) => match self.row_of_repository(repository) {
+                Some(parent) => {
+                    self.select_row(parent);
+                    true
+                }
+                None => false,
+            },
+            Some(&Row::Done {
+                repository,
+                expanded: true,
+                ..
+            }) if self.lower_filter.is_empty() => {
+                self.select_row(row);
+                self.toggle_done(repository);
+                true
+            }
+            Some(&Row::Done { repository, .. }) => match self.row_of_repository(repository) {
                 Some(parent) => {
                     self.select_row(parent);
                     true
@@ -256,8 +761,9 @@ impl RepositoryList {
         }
     }
 
-    /// Right at `row`: expands a collapsed repository, or selects the first
-    /// worktree of an expanded one. Returns whether anything changed.
+    /// Right at `row`: expands a collapsed repository or row "Done", or
+    /// selects the first row inside an expanded one. Returns whether
+    /// anything changed.
     pub fn right(&mut self, row: usize) -> bool {
         match self.rows.get(row) {
             Some(&Row::Repository {
@@ -269,10 +775,23 @@ impl RepositoryList {
                 self.toggle(index);
                 true
             }
-            Some(&Row::Repository { index, .. }) => {
+            Some(&Row::Done {
+                repository,
+                expanded: false,
+                ..
+            }) => {
+                self.select_row(row);
+                self.toggle_done(repository);
+                true
+            }
+            Some(&Row::Repository { index, .. })
+            | Some(&Row::Done {
+                repository: index, ..
+            }) => {
                 let inside = matches!(
                     self.rows.get(row + 1),
-                    Some(&Row::Worktree { repository, .. }) if repository == index
+                    Some(&Row::Worktree { repository, .. }) | Some(&Row::Done { repository, .. })
+                        if repository == index
                 );
                 if inside {
                     self.select_row(row + 1);
@@ -289,12 +808,23 @@ impl RepositoryList {
             .position(|row| matches!(row, Row::Repository { index: i, .. } if *i == index))
     }
 
+    /// Whether the worktree at `worktree` is done or its folder is gone.
+    fn is_done(&self, worktree: &Path) -> bool {
+        self.states.get(worktree) == Some(&MainState::Done)
+            || self
+                .repositories
+                .iter()
+                .any(|repository| repository.gone.iter().any(|gone| gone == worktree))
+    }
+
     /// Builds the repositories and the rows from the paths, what was found,
     /// the filter and the collapsed repositories; with `first_match`, the
     /// first row that matches the filter takes the selection.
     fn build(&mut self, first_match: bool) {
         self.builds += 1;
+        self.stale = false;
         self.build_repositories();
+        self.build_states();
         self.build_rows();
         self.find_selection(first_match);
     }
@@ -307,19 +837,25 @@ impl RepositoryList {
             (Section::Recent, &self.recent),
         ] {
             for raw in paths {
-                let (path, bare, problem, mut worktrees) = match self.found.get(raw) {
+                let (path, bare, problem, mut worktrees, gone) = match self.found.get(raw) {
                     Some(Found::Repository {
                         path,
                         bare,
                         worktrees,
-                    }) => (path.clone(), *bare, None, worktrees.clone()),
-                    Some(Found::NotFound) => {
-                        (raw.clone(), false, Some(Problem::NotFound), Vec::new())
-                    }
+                        gone,
+                    }) => (path.clone(), *bare, None, worktrees.clone(), gone.clone()),
+                    Some(Found::NotFound) => (
+                        raw.clone(),
+                        false,
+                        Some(Problem::NotFound),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
                     Some(Found::Failed(message)) => (
                         raw.clone(),
                         false,
                         Some(Problem::Failed(message.clone())),
+                        Vec::new(),
                         Vec::new(),
                     ),
                     None => (
@@ -331,6 +867,7 @@ impl RepositoryList {
                             .find(|known| known.repository == *raw)
                             .map(|known| known.worktrees.clone())
                             .unwrap_or_default(),
+                        Vec::new(),
                     ),
                 };
                 // A repository known by several paths is listed once, in
@@ -342,10 +879,12 @@ impl RepositoryList {
                     }
                     continue;
                 }
+                worktrees.extend(gone.iter().cloned());
                 worktrees.retain(|worktree| *worktree != path);
                 worktrees.sort();
                 worktrees.dedup();
                 by_path.insert(path.clone(), self.repositories.len());
+                let new_branches = self.has_new_branches(&path);
                 self.repositories.push(Repository {
                     name: folder_name(&path),
                     path,
@@ -354,8 +893,104 @@ impl RepositoryList {
                     bare,
                     problem,
                     worktrees,
+                    gone,
+                    new_branches,
                 });
             }
+        }
+    }
+
+    /// Whether a branch of the repository at `repository` that no worktree
+    /// has checked out, and that is no base branch, has commits the user
+    /// has not seen: its commit differs from the one seen, or it has none
+    /// in a repository listed before.
+    fn has_new_branches(&self, repository: &Path) -> bool {
+        let Some((facts, listed)) = self.facts.get(repository) else {
+            return false;
+        };
+        let bases = Bases::new(facts, self.bases.get(repository).map(String::as_str));
+        facts.branches.iter().any(|branch| {
+            let Some(name) = branch.name.strip_prefix("refs/heads/") else {
+                return false;
+            };
+            if bases.is_base_branch(&branch.name)
+                || listed
+                    .iter()
+                    .any(|listed| listed.branch.as_deref() == Some(name))
+            {
+                return false;
+            }
+            let key = Key::Branch {
+                repository: repository.to_owned(),
+                branch: name.to_owned(),
+            };
+            match self.seen.commit(&key) {
+                Some(seen) => seen != branch.commit,
+                None => self.seen.knows(repository),
+            }
+        })
+    }
+
+    /// Decides the main state of every working copy with a status, and the
+    /// overlaps of the active worktrees of each repository.
+    fn build_states(&mut self) {
+        self.states.clear();
+        for repository in &self.repositories {
+            let mut working: Vec<&PathBuf> = repository.worktrees.iter().collect();
+            if !repository.bare {
+                working.push(&repository.path);
+            }
+            for path in working {
+                let Some(Status::Read {
+                    summary, changed, ..
+                }) = self.statuses.get(path)
+                else {
+                    continue;
+                };
+                let inputs = Inputs {
+                    conflicts: summary.conflicts,
+                    uncommitted: summary.changed,
+                    changed: *changed,
+                    committed: summary.committed,
+                    comparison: self.comparisons.get(path),
+                    main: *path == repository.path,
+                };
+                self.states.insert(path.clone(), state(&inputs, self.now));
+            }
+        }
+        self.overlaps.clear();
+        for repository in &self.repositories {
+            let mut active: Vec<&PathBuf> = repository
+                .worktrees
+                .iter()
+                .filter(|path| !repository.gone.contains(path))
+                .collect();
+            if !repository.bare {
+                active.push(&repository.path);
+            }
+            let changes: Vec<Changes<'_>> = active
+                .into_iter()
+                .filter(|path| self.states.get(*path) != Some(&MainState::Done))
+                .map(|path| {
+                    let mut paths = Vec::new();
+                    if let Some(lines) = self
+                        .comparisons
+                        .get(path)
+                        .and_then(|comparison| comparison.against.as_ref())
+                        .and_then(|against| against.lines.as_ref())
+                    {
+                        paths.extend(lines.files.iter().map(|file| &file.path));
+                    }
+                    if let Some(Status::Read { summary, .. }) = self.statuses.get(path) {
+                        paths.extend(summary.paths.iter().take(PATH_LIMIT));
+                    }
+                    Changes {
+                        worktree: path,
+                        paths,
+                    }
+                })
+                .collect();
+            self.overlaps.extend(overlaps(&changes));
         }
     }
 
@@ -369,13 +1004,13 @@ impl RepositoryList {
                     continue;
                 }
                 let matches = !filtering || self.matches(&repository.name, &repository.path);
-                let worktrees: Vec<usize> = (0..repository.worktrees.len())
+                let shown: Vec<usize> = (0..repository.worktrees.len())
                     .filter(|&worktree| {
                         let path = &repository.worktrees[worktree];
                         !filtering || self.matches(&folder_name(path), path)
                     })
                     .collect();
-                if !matches && worktrees.is_empty() {
+                if !matches && shown.is_empty() {
                     continue;
                 }
                 // While filtering, the worktrees that match are shown also
@@ -386,11 +1021,38 @@ impl RepositoryList {
                     expanded,
                     matches,
                 });
-                if expanded {
-                    rows.extend(worktrees.into_iter().map(|worktree| Row::Worktree {
+                if !expanded {
+                    continue;
+                }
+                let (mut active, done): (Vec<usize>, Vec<usize>) = shown
+                    .into_iter()
+                    .partition(|&worktree| !self.is_done(&repository.worktrees[worktree]));
+                let order = self.order.get(&repository.path);
+                // A worktree that appeared since the order was taken comes
+                // first, as the most recently active.
+                active.sort_by_key(|&worktree| {
+                    let path = &repository.worktrees[worktree];
+                    let place =
+                        order.and_then(|order| order.iter().position(|known| known == path));
+                    (place.map_or(0, |place| place + 1), path.clone())
+                });
+                rows.extend(active.into_iter().map(|worktree| Row::Worktree {
+                    repository: index,
+                    index: worktree,
+                }));
+                if !done.is_empty() {
+                    let open = filtering || self.done_expanded.contains(&repository.path);
+                    rows.push(Row::Done {
                         repository: index,
-                        index: worktree,
-                    }));
+                        expanded: open,
+                        count: done.len(),
+                    });
+                    if open {
+                        rows.extend(done.into_iter().map(|worktree| Row::Worktree {
+                            repository: index,
+                            index: worktree,
+                        }));
+                    }
                 }
             }
             if !rows.is_empty() {
@@ -421,13 +1083,13 @@ impl RepositoryList {
     /// is hidden.
     fn find_selection(&mut self, first_match: bool) {
         self.selected_row = self.selected.as_ref().and_then(|selected| {
-            (0..self.rows.len()).find(|&row| self.path(row) == Some(selected.as_path()))
+            (0..self.rows.len()).find(|&row| self.selection_of(row).as_ref() == Some(selected))
         });
         if !self.lower_filter.is_empty() && (first_match || self.selected_row.is_none()) {
             let first = self.rows.iter().position(|row| match row {
                 Row::Repository { matches, .. } => *matches,
                 Row::Worktree { .. } => true,
-                Row::Title(_) => false,
+                Row::Title(_) | Row::Done { .. } => false,
             });
             match first {
                 Some(row) => self.select_row(row),
@@ -492,334 +1154,94 @@ impl SettingsChange {
     }
 }
 
-/// How many Git processes a round runs at most at the same time.
-const WORKERS: usize = 4;
-
-/// One piece of work of a round.
-enum Job {
-    /// Find the repository and the worktrees of a path of the settings.
-    Worktrees(PathBuf),
-    /// Summarise the working copy at the path.
-    Summary(PathBuf),
-}
-
-/// What a job found.
-enum Report {
-    Found {
-        /// The path of the settings, and how the file system spells it.
-        path: PathBuf,
-        normalised: PathBuf,
-        found: Found,
-    },
-    Status {
-        worktree: PathBuf,
-        status: Status,
-    },
-}
-
-/// The jobs of a round, shared by its workers.
-#[derive(Default)]
-struct Queue {
-    jobs: VecDeque<Job>,
-    /// Jobs taken and not finished yet.
-    running: usize,
-}
-
-type Shared = Arc<(Mutex<Queue>, Condvar)>;
-
-struct Round {
-    cancel: CancelToken,
-    reports: Receiver<Report>,
-    queue: Shared,
-}
-
-/// Reads the repositories of the home tab in the background, by rounds: the
-/// worktrees of each path of the settings, then a summary of each working
-/// copy found, taken by [`WORKERS`] threads in the order of the rows.
-pub struct Overview {
-    backend: Arc<dyn Backend>,
-    notify: Notify,
-    round: Option<Round>,
-}
-
-impl Overview {
-    pub fn new(backend: Arc<dyn Backend>, notify: Notify) -> Overview {
-        Overview {
-            backend,
-            notify,
-            round: None,
-        }
-    }
-
-    /// Starts a round for `paths`, the paths of the settings in the order
-    /// of the rows; a round still running is cancelled first.
-    pub fn start(&mut self, paths: Vec<PathBuf>) {
-        self.cancel();
-        let cancel = CancelToken::new();
-        let (sender, reports) = mpsc::channel();
-        let queue: Shared = Arc::new((
-            Mutex::new(Queue {
-                jobs: paths.into_iter().map(Job::Worktrees).collect(),
-                running: 0,
-            }),
-            Condvar::new(),
-        ));
-        for _ in 0..WORKERS {
-            let backend = Arc::clone(&self.backend);
-            let notify = Arc::clone(&self.notify);
-            let (cancel, sender, queue) = (cancel.clone(), sender.clone(), Arc::clone(&queue));
-            std::thread::spawn(move || work(backend.as_ref(), &notify, &cancel, &sender, &queue));
-        }
-        self.round = Some(Round {
-            cancel,
-            reports,
-            queue,
-        });
-    }
-
-    /// Cancels the round: jobs not started are dropped, and the Git
-    /// processes running end.
-    pub fn cancel(&mut self) {
-        if let Some(round) = self.round.take() {
-            round.cancel.cancel();
-            let (queue, wake) = &*round.queue;
-            lock(queue).jobs.clear();
-            wake.notify_all();
-        }
-    }
-
-    /// Whether a round is running.
-    pub fn is_reading(&self) -> bool {
-        self.round.is_some()
-    }
-
-    /// Applies what arrived to `list`, and returns what the settings
-    /// should change.
-    pub fn poll(&mut self, list: &mut RepositoryList) -> Vec<SettingsChange> {
-        let Some(round) = &self.round else {
-            return Vec::new();
-        };
-        // Taken before the reports: every report of a finished round has
-        // been sent by then.
-        let finished = {
-            let queue = lock(&round.queue.0);
-            queue.jobs.is_empty() && queue.running == 0
-        };
-        let mut changes = Vec::new();
-        while let Ok(report) = round.reports.try_recv() {
-            match report {
-                Report::Found {
-                    path,
-                    normalised,
-                    found,
-                } => {
-                    if let Found::Repository {
-                        path: repository,
-                        worktrees,
-                        ..
-                    } = &found
-                    {
-                        // An earlier version recorded worktrees among the
-                        // recent repositories.
-                        let mut known_as = path.clone();
-                        if normalised != *repository && worktrees.contains(&normalised) {
-                            changes.push(SettingsChange::Replace {
-                                path: path.clone(),
-                                repository: repository.clone(),
-                            });
-                            list.set_found(repository.clone(), found.clone());
-                            known_as = repository.clone();
-                        }
-                        changes.push(SettingsChange::Worktrees {
-                            path: known_as,
-                            worktrees: worktrees.clone(),
-                        });
-                    }
-                    list.set_found(path, found);
-                }
-                Report::Status { worktree, status } => list.set_status(worktree, status),
-            }
-        }
-        if finished {
-            self.round = None;
-        }
-        changes
-    }
-}
-
-impl Drop for Overview {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-/// A worker of a round: takes jobs until none are left or the round is
-/// cancelled. The summaries of a repository go before the jobs still
-/// waiting, so that the rows fill in their order.
-fn work(
-    backend: &dyn Backend,
-    notify: &Notify,
-    cancel: &CancelToken,
-    reports: &Sender<Report>,
-    queue: &Shared,
-) {
-    let (queue, wake) = &**queue;
-    loop {
-        let job = {
-            let mut guard = lock(queue);
-            loop {
-                if cancel.is_cancelled() {
-                    return;
-                }
-                if let Some(job) = guard.jobs.pop_front() {
-                    guard.running += 1;
-                    break job;
-                }
-                if guard.running == 0 {
-                    wake.notify_all();
-                    return;
-                }
-                guard = wake.wait(guard).unwrap_or_else(|error| error.into_inner());
-            }
-        };
-        let (report, more) = run(backend, cancel, job);
-        if let Some(report) = report
-            && reports.send(report).is_ok()
-        {
-            notify();
-        }
-        let mut guard = lock(queue);
-        guard.running -= 1;
-        for job in more.into_iter().rev() {
-            guard.jobs.push_front(job);
-        }
-        wake.notify_all();
-    }
-}
-
-/// Runs `job`: what it found, if anything, and the jobs that follow from it.
-fn run(backend: &dyn Backend, cancel: &CancelToken, job: Job) -> (Option<Report>, Vec<Job>) {
-    use gitbull_git::Error;
-    let caught = |work: &mut dyn FnMut() -> Result<(Option<Report>, Vec<Job>), Error>| {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
-            .map_err(|payload| crate::workspace::panic_message(payload.as_ref()))
-    };
-    match job {
-        Job::Worktrees(path) => {
-            let result = caught(&mut || {
-                let listed = backend.worktrees(&path, cancel)?;
-                let normalised = normalise(&path);
-                let Some(main) = listed.first() else {
-                    return Ok((
-                        Some(Report::Found {
-                            path: path.clone(),
-                            normalised,
-                            found: Found::Failed("Git lists no worktree".to_owned()),
-                        }),
-                        Vec::new(),
-                    ));
-                };
-                let repository = normalise(&main.path);
-                // A worktree whose folder is gone has nothing to show.
-                let worktrees: Vec<PathBuf> = listed[1..]
-                    .iter()
-                    .filter(|worktree| !worktree.prunable)
-                    .map(|worktree| normalise(&worktree.path))
-                    .collect();
-                let mut jobs = Vec::new();
-                if !main.bare {
-                    jobs.push(Job::Summary(repository.clone()));
-                }
-                jobs.extend(worktrees.iter().cloned().map(Job::Summary));
-                let found = Found::Repository {
-                    path: repository,
-                    bare: main.bare,
-                    worktrees,
-                };
-                Ok((
-                    Some(Report::Found {
-                        path: path.clone(),
-                        normalised,
-                        found,
-                    }),
-                    jobs,
-                ))
-            });
-            let found = match result {
-                Ok(Ok(done)) => return done,
-                Ok(Err(Error::Cancelled)) => return (None, Vec::new()),
-                Ok(Err(Error::NotARepository(_))) => Found::NotFound,
-                Ok(Err(Error::DubiousOwnership { message, .. })) => Found::Failed(message),
-                Ok(Err(error)) => Found::Failed(error.to_string()),
-                Err(panic) => Found::Failed(panic),
-            };
-            let normalised = normalise(&path);
-            (
-                Some(Report::Found {
-                    path,
-                    normalised,
-                    found,
-                }),
-                Vec::new(),
-            )
-        }
-        Job::Summary(worktree) => {
-            let result = caught(&mut || {
-                let summary = backend.summary(&worktree, cancel)?;
-                let last_active = last_active(&worktree, &summary);
-                Ok((
-                    Some(Report::Status {
-                        worktree: worktree.clone(),
-                        status: Status::Read {
-                            summary,
-                            last_active,
-                        },
-                    }),
-                    Vec::new(),
-                ))
-            });
-            let status = match result {
-                Ok(Ok(done)) => return done,
-                Ok(Err(Error::Cancelled)) => return (None, Vec::new()),
-                Ok(Err(error)) => Status::Failed(error.to_string()),
-                Err(panic) => Status::Failed(panic),
-            };
-            (Some(Report::Status { worktree, status }), Vec::new())
-        }
-    }
-}
-
 /// When the working copy at `worktree` was last active, in seconds since
-/// 1970: the later of the commit time of HEAD and the last modification of
-/// a changed file or folder that still exists, of at most the first
-/// [`PATH_LIMIT`] of them.
+/// 1970: the later of the commit time of HEAD and [`latest_change`].
 pub fn last_active(worktree: &Path, summary: &Summary) -> Option<i64> {
-    last_active_with(worktree, summary, |path| {
-        std::fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .ok()
+    summary.committed.max(latest_change(worktree, summary))
+}
+
+/// At most this many changed paths and entries of untracked folders are
+/// looked up for the newest change.
+const LOOKUP_LIMIT: usize = 1_000;
+
+/// The last modification of a changed file or folder of the working copy
+/// at `worktree` that still exists, in seconds since 1970. An untracked
+/// folder, which the summary names once, counts by the newest entry in
+/// it, as editing a file leaves the time of its folder as it is (design of
+/// `worktree-cockpit`, decision 7). The changed paths come first, of at
+/// most the first [`PATH_LIMIT`]; [`LOOKUP_LIMIT`] lookups in all, and no
+/// link is followed.
+pub fn latest_change(worktree: &Path, summary: &Summary) -> Option<i64> {
+    latest_change_with(worktree, summary, |path, room| {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        let modified = meta.modified().ok()?;
+        let mut entries = Vec::new();
+        if room > 0
+            && meta.is_dir()
+            && let Ok(read) = std::fs::read_dir(path)
+        {
+            entries.extend(
+                read.filter_map(Result::ok)
+                    // Another repository's folder changes by itself.
+                    .filter(|entry| entry.file_name() != ".git")
+                    .map(|entry| entry.path())
+                    .take(room),
+            );
+        }
+        Some(Looked { modified, entries })
     })
 }
 
-/// [`last_active`] with `modified` telling when a file was last changed.
-fn last_active_with(
+/// What a lookup found: when the path was last modified, and the entries of
+/// a folder it was asked to open.
+struct Looked {
+    modified: SystemTime,
+    entries: Vec<PathBuf>,
+}
+
+/// [`latest_change`] with `look` telling when a path was last changed and,
+/// given room for more than none, which entries the folder at the path has,
+/// at most as many as the room.
+fn latest_change_with(
     worktree: &Path,
     summary: &Summary,
-    mut modified: impl FnMut(&Path) -> Option<SystemTime>,
+    mut look: impl FnMut(&Path, usize) -> Option<Looked>,
 ) -> Option<i64> {
-    let latest_change = summary
+    // Status names an untracked folder with a slash at its end.
+    let mut queue: std::collections::VecDeque<(PathBuf, bool)> = summary
         .paths
         .iter()
         .take(PATH_LIMIT)
-        .filter_map(|path| modified(&worktree.join(path.to_os_string())))
-        .max()
+        .map(|path| {
+            let folder = path.as_bytes().ends_with(b"/");
+            (worktree.join(path.to_os_string()), folder)
+        })
+        .collect();
+    let mut newest = None;
+    let mut lookups = 0;
+    while lookups < LOOKUP_LIMIT
+        && let Some((path, open)) = queue.pop_front()
+    {
+        lookups += 1;
+        let room = match open {
+            true => LOOKUP_LIMIT.saturating_sub(lookups + queue.len()),
+            false => 0,
+        };
+        let Some(looked) = look(&path, room) else {
+            continue;
+        };
+        newest = newest.max(Some(looked.modified));
+        queue.extend(
+            looked
+                .entries
+                .into_iter()
+                .take(room)
+                .map(|entry| (entry, true)),
+        );
+    }
+    newest
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|since| since.as_secs() as i64);
-    summary.committed.max(latest_change)
+        .map(|since| since.as_secs() as i64)
 }
 
 /// `path` as the file system knows it, so that two spellings of one folder
@@ -869,6 +1291,7 @@ mod tests {
             path: p(path),
             bare: false,
             worktrees: worktrees.iter().map(|path| p(path)).collect(),
+            gone: Vec::new(),
         }
     }
 
@@ -883,6 +1306,7 @@ mod tests {
                 paths: Vec::new(),
             },
             last_active: None,
+            changed: None,
         }
     }
 
@@ -908,6 +1332,9 @@ mod tests {
                     let path = &list.repositories()[repository].worktrees[index];
                     format!("  {}", path.file_name().unwrap().to_string_lossy())
                 }
+                Row::Done {
+                    expanded, count, ..
+                } => format!("  Done ({count}){}", if expanded { "" } else { "+" }),
             })
             .collect()
     }
@@ -1052,6 +1479,7 @@ mod tests {
                 path: p("/srv/project.git"),
                 bare: true,
                 worktrees: vec![p("/work/feature")],
+                gone: Vec::new(),
             },
         );
         assert_eq!(shown(&list), ["# Recent", "project.git", "  feature"]);
@@ -1185,11 +1613,35 @@ mod tests {
     }
 
     #[test]
+    fn the_latest_change_stays_apart_from_a_later_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        let ten_minutes_ago = now - std::time::Duration::from_secs(600);
+        std::fs::write(dir.path().join("changed.txt"), "x").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join("changed.txt"))
+            .unwrap()
+            .set_modified(ten_minutes_ago)
+            .unwrap();
+        let summary = summary_of(Some(seconds(now)), &["changed.txt"]);
+        assert_eq!(
+            latest_change(dir.path(), &summary),
+            Some(seconds(ten_minutes_ago))
+        );
+        assert_eq!(last_active(dir.path(), &summary), Some(seconds(now)));
+        assert_eq!(
+            latest_change(dir.path(), &summary_of(Some(seconds(now)), &[])),
+            None
+        );
+    }
+
+    #[test]
     fn at_most_the_first_thousand_changed_files_are_looked_up() {
         let names: Vec<String> = (0..5_000).map(|n| format!("file{n}.txt")).collect();
         let summary = summary_of(None, &names.iter().map(String::as_str).collect::<Vec<_>>());
         let mut lookups = 0;
-        let found = last_active_with(Path::new("/work"), &summary, |_| {
+        let found = latest_change_with(Path::new("/work"), &summary, |_, _| {
             lookups += 1;
             None
         });
@@ -1197,8 +1649,49 @@ mod tests {
         assert_eq!(lookups, 1_000);
     }
 
+    #[test]
+    fn a_file_edited_in_a_new_folder_counts_and_not_the_folders_own_time() {
+        // Status names the untracked folder once; editing a file in place
+        // leaves the time of its folder as it is (reproduced on NTFS).
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("newmodule").join("src");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("lib.rs"), "x").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        std::fs::File::options()
+            .write(true)
+            .open(deep.join("lib.rs"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        let summary = summary_of(None, &["newmodule/"]);
+        assert_eq!(latest_change(dir.path(), &summary), Some(seconds(later)));
+    }
+
+    #[test]
+    fn an_untracked_folder_is_looked_into_within_a_thousand_lookups() {
+        let summary = summary_of(None, &["big/", "small.txt"]);
+        let mut lookups = 0;
+        let mut opened = Vec::new();
+        latest_change_with(Path::new("/work"), &summary, |path, room| {
+            lookups += 1;
+            opened.push(room > 0);
+            let entries = (0..room.min(5_000))
+                .map(|n| path.join(format!("f{n}")))
+                .collect();
+            Some(Looked {
+                modified: UNIX_EPOCH,
+                entries,
+            })
+        });
+        assert_eq!(lookups, 1_000);
+        // The folder and its entries are opened, the changed file is not.
+        assert_eq!(opened[..2], [true, false]);
+    }
+
     // Reading in the background.
 
+    use crate::overview::{Overview, Request};
     use gitbull_git::worktrees::Worktree;
     use gitbull_testkit::{FakeBackend, Gate};
 
@@ -1228,10 +1721,10 @@ mod tests {
         let mut changes = Vec::new();
         while !done(overview, list) {
             assert!(std::time::Instant::now() < deadline, "timed out");
-            changes.extend(overview.poll(list));
+            changes.extend(overview.poll(list).changes);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        changes.extend(overview.poll(list));
+        changes.extend(overview.poll(list).changes);
         changes
     }
 
@@ -1257,7 +1750,7 @@ mod tests {
             .with_worktrees(vec![listed("/work/app"), listed("/work/app-fix")]);
         let mut list = RepositoryList::new(&[], &[p("/work/app")], &[]);
         let mut overview = overview(backend);
-        overview.start(vec![p("/work/app")]);
+        overview.request(&list, Request::Shown);
         assert!(overview.is_reading());
         let changes = poll_until(&mut overview, &mut list, |overview, list| {
             !overview.is_reading()
@@ -1285,7 +1778,7 @@ mod tests {
         let probe = backend.probe();
         let mut list = RepositoryList::new(&[], &paths, &[]);
         let mut overview = overview(backend);
-        overview.start(paths.clone());
+        overview.request(&list, Request::Shown);
         let summaries = || {
             paths
                 .iter()
@@ -1318,7 +1811,7 @@ mod tests {
         let probe = backend.probe();
         let mut list = RepositoryList::new(&[], &paths, &[]);
         let mut overview = overview(backend);
-        overview.start(paths.clone());
+        overview.request(&list, Request::Shown);
         let summaries = || {
             paths
                 .iter()
@@ -1348,13 +1841,13 @@ mod tests {
         let (backend, paths) = repositories(1);
         let mut list = RepositoryList::new(&[], &paths, &[]);
         let mut first = overview(backend);
-        first.start(paths.clone());
+        first.request(&list, Request::Shown);
         poll_until(&mut first, &mut list, |overview, list| {
             !overview.is_reading() && read_all(list)
         });
         let (backend, _) = repositories(1);
         let mut second = overview(backend.with_summary_gate(&gate));
-        second.start(paths.clone());
+        second.request(&list, Request::Shown);
         std::thread::sleep(std::time::Duration::from_millis(20));
         second.poll(&mut list);
         assert!(read_all(&list));
@@ -1369,7 +1862,7 @@ mod tests {
         let paths = vec![p("/work/gone"), p("/work/theirs"), p("/work/app")];
         let mut list = RepositoryList::new(&[], &paths, &[]);
         let mut overview = overview(backend);
-        overview.start(paths);
+        overview.request(&list, Request::Shown);
         poll_until(&mut overview, &mut list, |overview, _| {
             !overview.is_reading()
         });
@@ -1393,7 +1886,7 @@ mod tests {
             .with_worktrees(vec![listed("/work/app"), listed("/work/app-fix")]);
         let mut list = RepositoryList::new(&[], &[p("/work/app-fix")], &[]);
         let mut overview = overview(backend);
-        overview.start(vec![p("/work/app-fix")]);
+        overview.request(&list, Request::Shown);
         let changes = poll_until(&mut overview, &mut list, |overview, _| {
             !overview.is_reading()
         });
@@ -1435,5 +1928,501 @@ mod tests {
         );
         let gone = dir.path().join("gone");
         assert_eq!(normalise(&gone), gone);
+    }
+
+    // The cockpit: order, the row "Done", states, overlaps and what is new.
+
+    use crate::base::{Base, Found as BaseFound};
+    use crate::comparison::{Against, Tips};
+    use gitbull_git::changes::{FileLines, LineCount};
+    use gitbull_git::compare::BranchLines;
+    use gitbull_git::facts::Branch;
+    use gitbull_git::merged::{MergedBy, Prediction, Unpredicted};
+    use gitbull_git::path::RepoPath;
+
+    const NOW: i64 = 1_800_000_000;
+    const MINUTE: i64 = 60;
+
+    /// A status read at `committed`, with `paths` uncommitted, the newest
+    /// of them changed at `changed`.
+    fn status_at(committed: i64, paths: &[&str], changed: Option<i64>) -> Status {
+        Status::Read {
+            summary: Summary {
+                head: Head::Branch("feature".to_owned()),
+                commit: Some("head".to_owned()),
+                committed: Some(committed),
+                changed: paths.len(),
+                conflicts: 0,
+                paths: paths.iter().map(|path| RepoPath::from(*path)).collect(),
+            },
+            last_active: Some(committed).max(changed),
+            changed,
+        }
+    }
+
+    fn base() -> Base {
+        Base {
+            local: Some("refs/heads/dev".to_owned()),
+            remote: None,
+            shown: "dev".to_owned(),
+            found: BaseFound::Detected,
+        }
+    }
+
+    /// A comparison with `dev` at `head`, changing `files` since the commit
+    /// `left`.
+    fn compared(
+        ahead: u64,
+        behind: u64,
+        merged: bool,
+        new: u64,
+        head: &str,
+        files: &[&str],
+    ) -> Comparison {
+        Comparison {
+            against: Some(Against {
+                base: base(),
+                counted: "refs/heads/dev".to_owned(),
+                ahead,
+                behind,
+                lines: Some(BranchLines {
+                    merge_base: "left".to_owned(),
+                    files: files
+                        .iter()
+                        .map(|path| FileLines {
+                            path: RepoPath::from(*path),
+                            old_path: None,
+                            count: LineCount::Lines {
+                                added: 1,
+                                removed: 0,
+                            },
+                        })
+                        .collect(),
+                    added: files.len() as u64,
+                    removed: 0,
+                    changed: files.len(),
+                }),
+                merged: merged.then(|| ("refs/heads/dev".to_owned(), MergedBy::Ancestor)),
+                prediction: Prediction::Unknown(Unpredicted::NotAsked),
+            }),
+            new,
+            tips: Tips {
+                head: head.to_owned(),
+                ..Tips::default()
+            },
+        }
+    }
+
+    fn done() -> Comparison {
+        compared(0, 1, true, 0, "merged", &[])
+    }
+
+    fn ready() -> Comparison {
+        compared(2, 0, false, 0, "ready", &[])
+    }
+
+    /// `/work/app` with the worktrees `/work/wt/<name>`.
+    fn cockpit(worktrees: &[&str]) -> RepositoryList {
+        let paths: Vec<String> = worktrees
+            .iter()
+            .map(|name| format!("/work/wt/{name}"))
+            .collect();
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let mut list = RepositoryList::new(&[], &[p("/work/app")], &[]);
+        list.set_found(p("/work/app"), repository("/work/app", &paths));
+        list.set_now(NOW);
+        list
+    }
+
+    fn wt(name: &str) -> PathBuf {
+        p(&format!("/work/wt/{name}"))
+    }
+
+    fn facts(branches: &[(&str, &str)]) -> Arc<RepositoryFacts> {
+        Arc::new(RepositoryFacts {
+            overrides: Vec::new(),
+            merge_driver: false,
+            worktree_config: false,
+            remotes: Vec::new(),
+            common_dir: p("/work/app/.git"),
+            branches: branches
+                .iter()
+                .map(|(name, commit)| Branch {
+                    name: format!("refs/heads/{name}"),
+                    commit: (*commit).to_owned(),
+                    upstream: None,
+                })
+                .collect(),
+            origin_head: None,
+        })
+    }
+
+    fn on_branch(path: PathBuf, branch: &str, head: &str, main: bool) -> Listed {
+        Listed {
+            path,
+            head: Some(head.to_owned()),
+            branch: Some(branch.to_owned()),
+            main,
+            gone: false,
+        }
+    }
+
+    #[test]
+    fn worktrees_are_listed_most_recently_active_first() {
+        let mut list = cockpit(&["one", "two"]);
+        list.set_status(wt("one"), status_at(NOW - 2 * 24 * 3600, &[], None));
+        list.set_status(wt("two"), status_at(NOW - 10 * MINUTE, &[], None));
+        list.freeze_order();
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  one"]);
+    }
+
+    #[test]
+    fn the_order_takes_the_worktrees_a_round_found_in_its_last_frame() {
+        let mut list = cockpit(&["one"]);
+        list.found_later(
+            p("/work/app"),
+            repository("/work/app", &["/work/wt/one", "/work/wt/two"]),
+        );
+        list.set_status(wt("one"), status_at(NOW - 2 * 24 * 3600, &[], None));
+        list.set_status(wt("two"), status_at(NOW - 10 * MINUTE, &[], None));
+        list.freeze_order();
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  one"]);
+    }
+
+    #[test]
+    fn the_order_stays_while_the_user_looks() {
+        let mut list = cockpit(&["one", "two"]);
+        list.set_status(wt("one"), status_at(NOW - 2 * 24 * 3600, &[], None));
+        list.set_status(wt("two"), status_at(NOW - 10 * MINUTE, &[], None));
+        list.freeze_order();
+        list.set_status(wt("one"), status_at(NOW, &[], None));
+        list.settle();
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  one"]);
+        list.freeze_order();
+        assert_eq!(shown(&list), ["# Recent", "app", "  one", "  two"]);
+    }
+
+    #[test]
+    fn a_worktree_that_appears_meanwhile_comes_first() {
+        let mut list = cockpit(&["one", "two"]);
+        list.freeze_order();
+        list.set_found(
+            p("/work/app"),
+            repository(
+                "/work/app",
+                &["/work/wt/one", "/work/wt/two", "/work/wt/zzz"],
+            ),
+        );
+        assert_eq!(shown(&list), ["# Recent", "app", "  zzz", "  one", "  two"]);
+    }
+
+    #[test]
+    fn done_worktrees_fold_away() {
+        let mut list = cockpit(&["one", "two", "three"]);
+        for name in ["one", "two", "three"] {
+            list.set_status(wt(name), status_at(NOW - 60 * MINUTE, &[], None));
+        }
+        list.set_comparison(wt("one"), done());
+        list.set_comparison(wt("two"), done());
+        list.set_comparison(wt("three"), ready());
+        list.settle();
+        assert_eq!(list.state(&wt("one")), Some(MainState::Done));
+        assert_eq!(list.state(&wt("three")), Some(MainState::Ready));
+        assert_eq!(shown(&list), ["# Recent", "app", "  three", "  Done (2)+"]);
+        list.toggle_done(0);
+        assert_eq!(
+            shown(&list),
+            ["# Recent", "app", "  three", "  Done (2)", "  one", "  two"]
+        );
+    }
+
+    #[test]
+    fn a_worktree_whose_folder_is_gone_is_listed_as_done() {
+        let mut list = RepositoryList::new(&[], &[p("/work/app")], &[]);
+        list.set_found(
+            p("/work/app"),
+            Found::Repository {
+                path: p("/work/app"),
+                bare: false,
+                worktrees: vec![wt("one")],
+                gone: vec![wt("old")],
+            },
+        );
+        assert_eq!(shown(&list), ["# Recent", "app", "  one", "  Done (1)+"]);
+        list.toggle_done(0);
+        assert_eq!(
+            shown(&list),
+            ["# Recent", "app", "  one", "  Done (1)", "  old"]
+        );
+        assert_eq!(list.repositories()[0].gone, [wt("old")]);
+    }
+
+    #[test]
+    fn left_and_right_open_and_leave_the_row_done() {
+        let mut list = cockpit(&["one", "two"]);
+        list.set_status(wt("one"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_comparison(wt("one"), done());
+        list.settle();
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  Done (1)+"]);
+        list.select_row(3);
+        assert!(list.right(3));
+        assert_eq!(
+            shown(&list),
+            ["# Recent", "app", "  two", "  Done (1)", "  one"]
+        );
+        assert!(list.right(3));
+        assert_eq!(selected(&list).as_deref(), Some("one"));
+        assert!(list.left(4));
+        assert_eq!(selected(&list).as_deref(), Some("app"));
+        list.select_row(3);
+        assert!(list.left(3));
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  Done (1)+"]);
+        assert_eq!(selected(&list).as_deref(), Some("Done (1)+"));
+        assert!(list.left(3));
+        assert_eq!(selected(&list).as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn states_are_decided_again_as_time_passes() {
+        let mut list = cockpit(&["one"]);
+        list.set_status(
+            wt("one"),
+            status_at(NOW - 60 * MINUTE, &["src/ui.rs"], Some(NOW - 2 * MINUTE)),
+        );
+        list.set_comparison(wt("one"), ready());
+        list.settle();
+        assert_eq!(list.state(&wt("one")), Some(MainState::Working));
+        list.set_now(NOW + 10 * MINUTE);
+        list.settle();
+        assert_eq!(list.state(&wt("one")), Some(MainState::Paused));
+    }
+
+    #[test]
+    fn worktrees_that_change_the_same_file_overlap_but_not_with_a_done_one() {
+        let mut list = cockpit(&["fix-reload", "home-tab", "merged"]);
+        list.set_status(
+            wt("fix-reload"),
+            status_at(NOW - 60 * MINUTE, &["src/ui.rs"], Some(NOW - 60 * MINUTE)),
+        );
+        list.set_status(wt("home-tab"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_status(wt("merged"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_comparison(
+            wt("home-tab"),
+            compared(1, 0, false, 0, "h", &["src/ui.rs"]),
+        );
+        list.set_comparison(wt("merged"), compared(0, 1, true, 0, "m", &["src/ui.rs"]));
+        list.settle();
+        let overlap = list.overlaps(&wt("fix-reload"));
+        assert_eq!(overlap.len(), 1);
+        assert_eq!(overlap[0].other, wt("home-tab"));
+        assert_eq!(overlap[0].paths, [RepoPath::from("src/ui.rs")]);
+        assert_eq!(list.overlaps(&wt("home-tab"))[0].other, wt("fix-reload"));
+        assert!(list.overlaps(&wt("merged")).is_empty());
+    }
+
+    #[test]
+    fn a_new_worktree_of_an_agent_counts_its_commits_ahead_as_new() {
+        let mut list = cockpit(&[]);
+        let main = on_branch(p("/work/app"), "main", "m", true);
+        list.set_facts(p("/work/app"), facts(&[("main", "m")]), vec![main.clone()]);
+        list.set_found(p("/work/app"), repository("/work/app", &["/work/wt/agent"]));
+        let agent = on_branch(wt("agent"), "claude/new", "a3", false);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("main", "m"), ("claude/new", "a3")]),
+            vec![main, agent],
+        );
+        let key = Key::Branch {
+            repository: p("/work/app"),
+            branch: "claude/new".to_owned(),
+        };
+        assert_eq!(list.seen().commit(&key), None);
+        list.set_status(wt("agent"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_comparison(wt("agent"), compared(3, 0, false, 3, "a3", &[]));
+        list.settle();
+        assert_eq!(list.state(&wt("agent")), Some(MainState::New(3)));
+        // It starts as seen where it left its base.
+        assert_eq!(list.seen().commit(&key), Some("left"));
+    }
+
+    #[test]
+    fn marking_records_the_commit_the_home_tab_showed() {
+        let mut list = cockpit(&["agent"]);
+        let agent = on_branch(wt("agent"), "claude/fix", "old", false);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("claude/fix", "old")]),
+            vec![agent.clone()],
+        );
+        list.set_status(wt("agent"), status_at(NOW - 60 * MINUTE, &[], None));
+        list.set_comparison(wt("agent"), compared(2, 0, false, 2, "shown", &[]));
+        // A commit arrived after the last reading.
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("claude/fix", "newer")]),
+            vec![on_branch(wt("agent"), "claude/fix", "newer", false)],
+        );
+        assert!(list.mark_seen(&wt("agent")));
+        let key = Key::Branch {
+            repository: p("/work/app"),
+            branch: "claude/fix".to_owned(),
+        };
+        assert_eq!(list.seen().commit(&key), Some("shown"));
+        assert_eq!(list.comparison(&wt("agent")).unwrap().new, 0);
+    }
+
+    #[test]
+    fn a_branch_left_behind_by_an_agent_marks_its_repository() {
+        let mut list = cockpit(&[]);
+        let main = on_branch(p("/work/app"), "main", "m", true);
+        list.set_facts(p("/work/app"), facts(&[("main", "m")]), vec![main.clone()]);
+        assert!(!list.repositories()[0].new_branches);
+        // An agent made a worktree, committed and removed it, keeping its
+        // branch.
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("main", "m"), ("claude/old", "o2")]),
+            vec![main],
+        );
+        list.settle();
+        assert!(list.repositories()[0].new_branches);
+        // Seeing the repository sees its branches without a worktree.
+        assert!(list.mark_seen(&p("/work/app")));
+        assert!(!list.repositories()[0].new_branches);
+    }
+
+    #[test]
+    fn a_moved_branch_without_a_worktree_marks_its_repository() {
+        let mut list = cockpit(&[]);
+        let main = on_branch(p("/work/app"), "main", "m", true);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("main", "m"), ("feature", "f1")]),
+            vec![main.clone()],
+        );
+        list.settle();
+        assert!(!list.repositories()[0].new_branches);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("main", "m"), ("feature", "f2")]),
+            vec![main],
+        );
+        list.settle();
+        assert!(list.repositories()[0].new_branches);
+    }
+
+    #[test]
+    fn mark_all_as_seen_clears_every_new_commit() {
+        let mut list = cockpit(&["a", "b"]);
+        list.set_facts(
+            p("/work/app"),
+            facts(&[("claude/a", "a1"), ("claude/b", "b1")]),
+            vec![
+                on_branch(wt("a"), "claude/a", "a1", false),
+                on_branch(wt("b"), "claude/b", "b1", false),
+            ],
+        );
+        // The user saw both branches before their last commits.
+        for (branch, seen) in [("claude/a", "a0"), ("claude/b", "b0")] {
+            let key = Key::Branch {
+                repository: p("/work/app"),
+                branch: branch.to_owned(),
+            };
+            list.seen_mut().mark(key, seen);
+        }
+        for name in ["a", "b"] {
+            list.set_status(wt(name), status_at(NOW - 60 * MINUTE, &[], None));
+        }
+        list.set_comparison(wt("a"), compared(2, 0, false, 2, "a1", &[]));
+        list.set_comparison(wt("b"), compared(1, 0, false, 1, "b1", &[]));
+        list.settle();
+        assert!(list.mark_all_seen());
+        list.settle();
+        assert_eq!(list.state(&wt("a")), Some(MainState::Ready));
+        assert_eq!(list.state(&wt("b")), Some(MainState::Ready));
+    }
+
+    // Drive letters.
+
+    #[test]
+    fn a_path_on_a_drive_is_shown_with_its_letter() {
+        let drive = Drive {
+            canonical: p("/mnt/share"),
+            root: p("/z"),
+        };
+        assert_eq!(
+            drive.shown(Path::new("/mnt/share/repo-fix")),
+            Some(p("/z/repo-fix"))
+        );
+        assert_eq!(drive.shown(Path::new("/work/other")), None);
+    }
+
+    #[test]
+    fn a_repository_on_a_mapped_drive_is_listed_once_and_shown_with_its_letter() {
+        let mut list = RepositoryList::new(&[], &[p("/z/repo"), p("/mnt/share/repo")], &[]);
+        let found = Found::Repository {
+            path: p("/mnt/share/repo"),
+            bare: false,
+            worktrees: vec![p("/mnt/share/repo-fix")],
+            gone: Vec::new(),
+        };
+        list.set_found(p("/z/repo"), found.clone());
+        list.set_found(p("/mnt/share/repo"), found);
+        list.add_drive(Drive {
+            canonical: p("/mnt/share"),
+            root: p("/z"),
+        });
+        assert_eq!(shown(&list), ["# Recent", "repo", "  repo-fix"]);
+        assert_eq!(list.shown(&list.repositories()[0].path), p("/z/repo"));
+        assert_eq!(
+            list.shown(Path::new("/mnt/share/repo-fix")),
+            p("/z/repo-fix")
+        );
+        assert_eq!(list.shown(Path::new("/work/other")), p("/work/other"));
+    }
+
+    #[cfg(windows)]
+    fn canonical_as(answer: &'static str) -> impl Fn(&Path) -> std::io::Result<PathBuf> {
+        move |_| Ok(PathBuf::from(answer))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_mapped_network_drive_is_found_with_its_share() {
+        let drive = Drive::of(
+            Path::new(r"z:\Repo"),
+            canonical_as(r"\\?\UNC\server\share\"),
+        )
+        .unwrap();
+        assert_eq!(drive.root, p(r"Z:\"));
+        assert_eq!(drive.canonical, p(r"\\server\share\"));
+        assert_eq!(
+            drive.shown(Path::new(r"\\server\share\Repo-fix")),
+            Some(p(r"Z:\Repo-fix"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_substituted_drive_is_found_with_its_target() {
+        let drive = Drive::of(Path::new(r"X:\repo"), canonical_as(r"\\?\C:\real")).unwrap();
+        assert_eq!(drive.canonical, p(r"C:\real"));
+        assert_eq!(drive.shown(Path::new(r"C:\real\repo")), Some(p(r"X:\repo")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_plain_drive_and_a_network_path_have_no_drive_to_show() {
+        assert_eq!(
+            Drive::of(Path::new(r"C:\work"), canonical_as(r"\\?\C:\")),
+            None
+        );
+        assert_eq!(
+            Drive::of(
+                Path::new(r"\\server\share\Repo"),
+                canonical_as(r"\\?\UNC\server\share\")
+            ),
+            None
+        );
     }
 }

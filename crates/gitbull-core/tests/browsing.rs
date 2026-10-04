@@ -69,7 +69,8 @@ fn wait_until(session: &mut Session, done: impl Fn(&mut Session) -> bool) {
 /// What git-bull does while the user browses: open, load, read content,
 /// refresh, and look at the status and the diffs of the touched files.
 fn browse(repo: &TestRepo) {
-    let backend: Arc<dyn Backend> = Arc::new(CliBackend::new(git()));
+    let backend: Arc<dyn Backend> =
+        Arc::new(CliBackend::new(git(), gitbull_testkit::git_version()));
     let opened = open(backend.as_ref(), repo.path()).unwrap();
     let mut session = Session::new(opened, backend, Arc::new(|| {}));
     session.show();

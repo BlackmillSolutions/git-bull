@@ -6,20 +6,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gitbull_core::ai_context::AiCopy;
 use gitbull_core::diff_document::RowKey;
 
 use crate::components::RowsShown;
 use crate::diff_view::GapLabels;
 use gitbull_core::git_setup::GitCheck;
-use gitbull_core::repositories::{Overview, RepositoryList};
+use gitbull_core::overview::{Overview, Request};
+use gitbull_core::panel::Panel;
+use gitbull_core::repositories::RepositoryList;
 use gitbull_core::search::HashOutcome;
+use gitbull_core::seen::SeenFile;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
 use gitbull_core::settings::{
     ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
     WindowGeometry,
 };
 use gitbull_core::sidebar_tree::{SidebarKey, SidebarRow, SidebarState};
-use gitbull_core::workspace::{Event, Notify, TabId, View, Workspace};
+use gitbull_core::workspace::{Event, Failure, Notify, TabId, TabState, View, Workspace};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry};
@@ -48,6 +52,12 @@ pub enum GitStatus {
 
 /// How often changed settings are written at most.
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// At most this often what was seen is written.
+const SEEN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long after a reading ended the home tab reads again by itself.
+const HOME_READ_AGAIN: Duration = Duration::from_secs(20);
 
 /// Asks the user for a path, usually through the system's file dialogs.
 pub trait Picker {
@@ -92,6 +102,8 @@ pub enum Notice {
     NotInHistory(String),
     /// The file manager could not be started, with the error.
     FileManagerFailed(String),
+    /// Git could not read what Copy as AI context copies, with the error.
+    CopyFailed(String),
 }
 
 /// The settings dialog while it is open.
@@ -139,18 +151,46 @@ pub(crate) struct Home {
     /// The home tab was shown when the logic last ran, so that it reads
     /// the repositories again when it becomes shown.
     shown: bool,
+    /// When the last reading ended, in seconds since 1970, for the timer.
+    read_at: Option<i64>,
+    /// The detail panel; none without a usable Git.
+    pub(crate) panel: Option<Panel>,
+    pub(crate) panel_rows: ListState,
+    /// The user showed the panel in an area too narrow for it to show by
+    /// itself.
+    pub(crate) panel_shown: bool,
+    /// Copies as AI context; none without a usable Git.
+    ai_copy: Option<AiCopy>,
+    /// The button whose copy runs, which confirms it when it is done.
+    pub(crate) copy_target: Option<eframe::egui::Id>,
+    /// The row the user looks at in the panel, which counts as seen after
+    /// a second.
+    pub(crate) looking: Option<crate::home_view::Look>,
+    /// The window has the focus, as it reported it last; one that reports
+    /// nothing counts as focused.
+    pub(crate) focused: bool,
 }
 
 impl Home {
     fn new(settings: &Settings) -> Home {
+        let mut list = RepositoryList::new(&settings.pinned, &settings.recent, &settings.worktrees);
+        list.set_bases(&settings.bases);
         Home {
-            list: RepositoryList::new(&settings.pinned, &settings.recent, &settings.worktrees),
+            list,
             overview: None,
             filter: String::new(),
             rows: ListState::default(),
             menu: None,
             focus_filter: false,
             shown: false,
+            read_at: None,
+            panel: None,
+            panel_rows: ListState::default(),
+            panel_shown: false,
+            ai_copy: None,
+            copy_target: None,
+            looking: None,
+            focused: true,
         }
     }
 
@@ -301,6 +341,12 @@ pub(crate) enum DiffKey {
 /// Everything the window shows.
 pub struct App {
     settings_file: SettingsFile,
+    /// The file of what was seen in the home tab, beside the settings.
+    seen_file: SeenFile,
+    last_seen_saved: Instant,
+    /// A tab opened for a branch without a worktree, and the full name of
+    /// the branch it selects once its references are read.
+    opening_branch: Option<(TabId, String)>,
     pub(crate) settings: Settings,
     /// Whether the window was built with the system's title bar: the
     /// setting as it was at start-up, since a change takes effect at the
@@ -340,8 +386,15 @@ impl App {
         } = parts;
         let texts = Translations::load(&loaded.settings.language);
         let (git, backend) = checker(loaded.settings.git_path.as_deref());
-        let home = Home::new(&loaded.settings);
+        let mut home = Home::new(&loaded.settings);
+        // What was seen has a file of its own beside the settings; one that
+        // cannot be read leaves the settings as they are.
+        let seen_file = SeenFile::beside(settings_file.path());
+        home.list.set_seen(seen_file.load());
         let mut app = App {
+            seen_file,
+            last_seen_saved: Instant::now(),
+            opening_branch: None,
             settings_file,
             system_title_bar: loaded.settings.system_title_bar,
             settings: loaded.settings,
@@ -532,6 +585,9 @@ impl App {
             Arc::clone(&backend),
             Arc::clone(&self.notify),
         ));
+        self.home.panel = Some(Panel::new(Arc::clone(&backend), Arc::clone(&self.notify)));
+        self.home.ai_copy = Some(AiCopy::new(Arc::clone(&backend), Arc::clone(&self.notify)));
+        self.opening_branch = None;
         self.home.shown = false;
         let mut workspace = Workspace::new(backend, Arc::clone(&self.notify));
         workspace.restore(&self.settings.tabs, self.settings.active_tab);
@@ -543,7 +599,7 @@ impl App {
         match check {
             GitCheck::Ready { git, version, .. } => (
                 GitStatus::Ready { version },
-                Some(Arc::new(CliBackend::new(git))),
+                Some(Arc::new(CliBackend::new(git, version))),
             ),
             problem => (GitStatus::Problem(problem), None),
         }
@@ -585,17 +641,16 @@ impl App {
         self.home.is_reading()
     }
 
-    /// Reads the repositories of the home tab again.
-    pub(crate) fn read_home(&mut self) {
-        let paths: Vec<PathBuf> = self
-            .home
-            .list
-            .repositories()
-            .iter()
-            .flat_map(|repository| repository.paths.iter().cloned())
-            .collect();
+    /// Asks for a reading of the repositories of the home tab (design of
+    /// `worktree-cockpit`, decision 1): showing the home tab and Refresh take
+    /// the order of the worktrees again.
+    pub(crate) fn read_home(&mut self, request: Request) {
+        self.home.list.set_now(self.desktop.now());
+        if request != Request::Again {
+            self.home.list.freeze_order();
+        }
         if let Some(overview) = &mut self.home.overview {
-            overview.start(paths);
+            overview.request(&self.home.list, request);
         }
     }
 
@@ -619,15 +674,118 @@ impl App {
         self.known_changed();
     }
 
+    /// Marks the row with the canonical path `path` as seen at the commits
+    /// the home tab shows for it, and lets the panel read it again.
+    pub(crate) fn mark_seen(&mut self, path: &Path) {
+        if self.home.list.mark_seen(path)
+            && let Some(panel) = &mut self.home.panel
+        {
+            panel.renew(&self.home.list);
+        }
+    }
+
+    /// Marks every row as seen.
+    pub(crate) fn mark_all_seen(&mut self) {
+        if self.home.list.mark_all_seen()
+            && let Some(panel) = &mut self.home.panel
+        {
+            panel.renew(&self.home.list);
+        }
+    }
+
+    /// Copies the worktree with the canonical path `path` as AI context,
+    /// with its diff or not; the copy is read in the background.
+    pub(crate) fn copy_ai(&mut self, path: &Path, with_diff: bool) {
+        if let Some(copy) = &mut self.home.ai_copy {
+            copy.start(&self.home.list, path, with_diff);
+        }
+    }
+
+    /// Puts a copy that was read on the clipboard and confirms it on its
+    /// button; a failure shows a notice.
+    pub(crate) fn finish_ai_copy(&mut self, ctx: &eframe::egui::Context) {
+        let Some(result) = self.home.ai_copy.as_mut().and_then(AiCopy::poll) else {
+            return;
+        };
+        let target = self.home.copy_target.take();
+        match result {
+            Ok(text) => {
+                ctx.copy_text(text);
+                if let Some(id) = target {
+                    crate::components::confirm_copy(ctx, id);
+                }
+            }
+            Err(Failure::Git(gitbull_git::Error::Cancelled)) => {}
+            Err(Failure::Git(error)) => self.notice = Some(Notice::CopyFailed(error.to_string())),
+            Err(Failure::Panic(message)) => self.notice = Some(Notice::CopyFailed(message)),
+        }
+    }
+
+    /// Opens the repository at `path` in a tab and selects `branch`, a
+    /// local branch by its short name, in its history once its references
+    /// are read (design of `worktree-cockpit`, decision 11).
+    pub(crate) fn open_branch(&mut self, path: PathBuf, branch: &str) {
+        if let Some(workspace) = &mut self.workspace {
+            let id = workspace.open(path);
+            self.notice = None;
+            self.opening_branch = Some((id, format!("refs/heads/{branch}")));
+        }
+    }
+
+    /// Selects the branch of [`App::open_branch`] once its tab has read its
+    /// references, as a branch chosen in the sidebar; drops it when the tab
+    /// failed or was closed.
+    fn select_opened_branch(&mut self) {
+        let Some((id, _)) = &self.opening_branch else {
+            return;
+        };
+        let tab = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.tabs().iter().find(|tab| tab.id() == *id));
+        let ready = match tab.map(|tab| (tab.state(), tab.session())) {
+            None | Some((TabState::Failed(_), _)) => {
+                self.opening_branch = None;
+                return;
+            }
+            Some((_, Some(session))) => session.sidebar().is_some(),
+            Some((_, None)) => false,
+        };
+        let active = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active())
+            .is_some_and(|tab| tab.id() == *id);
+        if ready
+            && active
+            && let Some((_, name)) = self.opening_branch.take()
+        {
+            self.select_in_sidebar(SidebarKey::Reference(name));
+        }
+    }
+
+    /// Sets the base of the repository with the canonical path `repository`
+    /// to `branch`, or lets it be detected again with `None`, and compares
+    /// its worktrees again.
+    pub(crate) fn set_base(&mut self, repository: &Path, branch: Option<String>) {
+        if self.settings.set_base(repository, branch) {
+            self.known_changed();
+            self.read_home(Request::Again);
+        }
+    }
+
     /// Removes the repository known by `paths` from the home tab.
     pub(crate) fn forget(&mut self, paths: &[PathBuf]) {
         self.settings.forget(paths);
+        // Listed again, it counts as listed for the first time.
+        self.home.list.seen_mut().forget(paths);
         self.known_changed();
     }
 
     /// The repositories of the settings changed: the list follows, and the
     /// settings are saved.
     fn known_changed(&mut self) {
+        self.home.list.set_bases(&self.settings.bases);
         self.home.list.set_known(
             &self.settings.pinned,
             &self.settings.recent,
@@ -664,7 +822,13 @@ impl App {
         // stops when another tab is shown (design, decision 4).
         let shown = self.home_shown();
         if shown && !self.home.shown {
-            self.read_home();
+            self.read_home(Request::Shown);
+            // The panel reads its row again too, which may have been seen
+            // meanwhile, and the look at it starts again.
+            if let Some(panel) = &mut self.home.panel {
+                panel.renew(&self.home.list);
+            }
+            self.home.looking = None;
         } else if !shown
             && self.home.shown
             && let Some(overview) = &mut self.home.overview
@@ -672,17 +836,62 @@ impl App {
             overview.cancel();
         }
         self.home.shown = shown;
+        let mut ended = false;
         if let Some(overview) = &mut self.home.overview {
-            for change in overview.poll(&mut self.home.list) {
+            let polled = overview.poll(&mut self.home.list);
+            for change in polled.changes {
                 known_changed |= change.apply(&mut self.settings);
             }
+            ended = polled.ended;
+        }
+        // The main states depend on the time: they are decided again when
+        // a round ends.
+        if ended {
+            let now = self.desktop.now();
+            self.home.read_at = Some(now);
+            self.home.list.set_now(now);
+            self.home.list.settle();
+        }
+        // While the home tab is shown and the window has the focus, it reads
+        // again 20 seconds after the last reading ended (design of
+        // `worktree-cockpit`, decision 1).
+        if self.home_due_in() == Some(Duration::ZERO) {
+            self.read_home(Request::Again);
         }
         if known_changed {
             self.known_changed();
         }
+        self.select_opened_branch();
         if self.dirty && self.last_saved.elapsed() >= SAVE_INTERVAL {
             self.save();
         }
+        // What was seen changes with every look; it is written at most once
+        // a second.
+        if self.home.list.seen().is_dirty() && self.last_seen_saved.elapsed() >= SEEN_INTERVAL {
+            self.save_seen();
+        }
+    }
+
+    /// Writes what was seen now.
+    fn save_seen(&mut self) {
+        // A failed write is retried with the next change.
+        let _ = self.seen_file.save(self.home.list.seen_mut());
+        self.last_seen_saved = Instant::now();
+    }
+
+    /// How long until the home tab reads again by itself, or `None` while it
+    /// does not: it is not shown, the window has no focus, or a reading
+    /// runs. The window schedules another pass for then.
+    pub fn home_due_in(&self) -> Option<Duration> {
+        if !self.home_shown() || !self.home.focused || self.home.is_reading() {
+            return None;
+        }
+        let since = self.desktop.now() - self.home.read_at?;
+        Some(Duration::from_secs(
+            HOME_READ_AGAIN
+                .as_secs()
+                .saturating_sub(since.max(0) as u64),
+        ))
     }
 
     /// How long until pending changes are written, or `None` when nothing is
@@ -693,13 +902,17 @@ impl App {
             .then(|| SAVE_INTERVAL.saturating_sub(self.last_saved.elapsed()))
     }
 
-    /// Writes the settings now, for example when the window closes.
+    /// Writes the settings and what was seen now, for example when the
+    /// window closes.
     pub fn save(&mut self) {
         // A failed save is retried with the next change; git-bull keeps
         // working either way.
         let _ = self.settings_file.save(&self.settings);
         self.dirty = false;
         self.last_saved = Instant::now();
+        if self.home.list.seen().is_dirty() {
+            self.save_seen();
+        }
     }
 
     /// The appearance to draw with, given what the window reports.

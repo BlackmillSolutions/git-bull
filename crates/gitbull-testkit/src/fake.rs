@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+use gitbull_git::ai_diff::{AiDiff, AiDiffRequest};
 use gitbull_git::backend::{
     BlameEntries, CommitStream, ContentSource, FileCommitStream, MatchStream,
 };
@@ -12,11 +13,15 @@ use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::{FileChange, FileLines};
 use gitbull_git::commit_graph::GraphProgress;
+use gitbull_git::commits::{CommitEntry, Since};
+use gitbull_git::compare::{BaseComparison, CompareRequest, Counts};
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
+use gitbull_git::facts::RepositoryFacts;
 use gitbull_git::file_history::FileCommit;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
+use gitbull_git::merged::{Prediction, Unpredicted};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
 use gitbull_git::refs::Reference;
@@ -25,8 +30,10 @@ use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
 use gitbull_git::summary::Summary;
+use gitbull_git::uncommitted::Uncommitted;
+use gitbull_git::version::Capabilities;
 use gitbull_git::worktrees::Worktree;
-use gitbull_git::{Backend, Error};
+use gitbull_git::{Backend, ConfigOverride, Error};
 
 /// An object id made from a short name, such as the commits of a test.
 pub fn fake_id(name: &str) -> ObjectId {
@@ -81,8 +88,8 @@ pub struct FakeBackend {
     failing_statuses: Vec<PathBuf>,
     status_gates: Vec<(PathBuf, Gate)>,
     /// The worktrees of a repository, the main one first.
-    worktrees: Vec<Vec<Worktree>>,
-    summaries: Vec<(PathBuf, Summary)>,
+    worktrees: Mutex<Vec<Vec<Worktree>>>,
+    summaries: Mutex<Vec<(PathBuf, Summary)>>,
     /// Holds every summary.
     summary_gate: Option<Gate>,
     working_diffs: HashMap<(Group, String), FileDiff>,
@@ -99,6 +106,31 @@ pub struct FakeBackend {
     /// By revision and path.
     file_contents: HashMap<(String, String), Vec<u8>>,
     inspect_delay: Option<std::time::Duration>,
+    /// What the Git it stands for can do; everything when not set.
+    capabilities: Option<Capabilities>,
+    /// The facts of a repository, by a folder inside it.
+    facts: Mutex<Vec<(PathBuf, RepositoryFacts)>>,
+    /// The base Git detects for a tip, by a folder of its repository.
+    detected: Vec<(PathBuf, String, String)>,
+    /// Tips whose base Git fails to detect.
+    failing_detections: Vec<String>,
+    /// The comparison of a tip with its base, by a folder of its
+    /// repository.
+    comparisons: Mutex<Vec<(PathBuf, String, BaseComparison)>>,
+    /// Tips that Git fails to compare with their base.
+    failing_comparisons: Vec<String>,
+    /// Worktrees whose uncommitted files Git fails to read.
+    failing_uncommitted: Vec<PathBuf>,
+    /// Holds every comparison.
+    compare_gate: Option<Gate>,
+    /// What came after a seen commit, by the seen commit and the tip.
+    since: Mutex<HashMap<(String, String), Since>>,
+    /// The commits of a range, newest first, by its two ends.
+    commit_lists: HashMap<(String, String), Vec<CommitEntry>>,
+    /// The uncommitted files of a worktree.
+    uncommitted: Vec<(PathBuf, Uncommitted)>,
+    /// The diffs of a worktree for the AI context.
+    ai_diffs: Vec<(PathBuf, AiDiff)>,
     probe: Probe,
 }
 
@@ -128,6 +160,130 @@ enum History {
 }
 
 impl FakeBackend {
+    /// The facts of the repository at `root`; without them a repository
+    /// has no remotes, no branches and no configuration to neutralise.
+    pub fn with_facts(self, root: impl Into<PathBuf>, facts: RepositoryFacts) -> FakeBackend {
+        self.set_facts(root, facts);
+        self
+    }
+
+    /// Changes the facts of the repository at `root` while the backend is
+    /// in use, as when a branch moves.
+    pub fn set_facts(&self, root: impl Into<PathBuf>, facts: RepositoryFacts) {
+        let root = root.into();
+        let mut known = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|(path, _)| *path != root);
+        known.push((root, facts));
+    }
+
+    /// Lets Git detect `base` as the branch `tip` started from, both by
+    /// their full names, in the repository at `root`.
+    pub fn with_detected_base(
+        mut self,
+        root: impl Into<PathBuf>,
+        tip: &str,
+        base: &str,
+    ) -> FakeBackend {
+        self.detected
+            .push((root.into(), tip.to_owned(), base.to_owned()));
+        self
+    }
+
+    /// Detecting the base of `tip`, by its full name, fails as Git does.
+    pub fn with_failing_detection(mut self, tip: &str) -> FakeBackend {
+        self.failing_detections.push(tip.to_owned());
+        self
+    }
+
+    /// Comparing `tip`, by its full name, with its base fails as Git does.
+    pub fn with_failing_comparison(mut self, tip: &str) -> FakeBackend {
+        self.failing_comparisons.push(tip.to_owned());
+        self
+    }
+
+    /// Compares `tip` with its base as `comparison` says, in the
+    /// repository at `root`; without it, a tip is level with its base.
+    pub fn with_comparison(
+        self,
+        root: impl Into<PathBuf>,
+        tip: &str,
+        comparison: BaseComparison,
+    ) -> FakeBackend {
+        self.set_comparison(root, tip, comparison);
+        self
+    }
+
+    /// Changes the comparison of `tip` while the backend is in use, as when
+    /// a branch moves.
+    pub fn set_comparison(&self, root: impl Into<PathBuf>, tip: &str, comparison: BaseComparison) {
+        let root = root.into();
+        let mut comparisons = self.comparisons.lock().unwrap_or_else(|e| e.into_inner());
+        comparisons.retain(|(known, known_tip, _)| !(*known == root && known_tip == tip));
+        comparisons.push((root, tip.to_owned(), comparison));
+    }
+
+    /// Lets `since` commits have come on `tip` after `seen`; without it,
+    /// nothing came after a commit.
+    pub fn with_since(self, seen: &str, tip: &str, since: Since) -> FakeBackend {
+        self.set_since(seen, tip, since);
+        self
+    }
+
+    /// Changes what came on `tip` after `seen` while the backend is in use.
+    pub fn set_since(&self, seen: &str, tip: &str, since: Since) {
+        self.since
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((seen.to_owned(), tip.to_owned()), since);
+    }
+
+    /// The commits of `from..tip`, newest first.
+    pub fn with_commit_list(
+        mut self,
+        from: &str,
+        tip: &str,
+        commits: Vec<CommitEntry>,
+    ) -> FakeBackend {
+        self.commit_lists
+            .insert((from.to_owned(), tip.to_owned()), commits);
+        self
+    }
+
+    /// Reading the uncommitted files of the worktree at `worktree` fails as
+    /// Git does.
+    pub fn with_failing_uncommitted(mut self, worktree: impl Into<PathBuf>) -> FakeBackend {
+        self.failing_uncommitted.push(worktree.into());
+        self
+    }
+
+    /// The uncommitted files of the worktree at `worktree`.
+    pub fn with_uncommitted(
+        mut self,
+        worktree: impl Into<PathBuf>,
+        files: Uncommitted,
+    ) -> FakeBackend {
+        self.uncommitted.push((worktree.into(), files));
+        self
+    }
+
+    /// The diffs of the worktree at `worktree` for the AI context.
+    pub fn with_ai_diff(mut self, worktree: impl Into<PathBuf>, diff: AiDiff) -> FakeBackend {
+        self.ai_diffs.push((worktree.into(), diff));
+        self
+    }
+
+    /// Holds every comparison until `gate` opens.
+    pub fn with_compare_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.compare_gate = Some(gate.clone());
+        self
+    }
+
+    /// Answers as a Git that can do only `capabilities`.
+    pub fn with_capabilities(mut self, capabilities: Capabilities) -> FakeBackend {
+        self.capabilities = Some(capabilities);
+        self
+    }
+
     /// Adds a repository with a working tree at `work_tree`.
     pub fn with_repository(mut self, work_tree: impl Into<PathBuf>) -> FakeBackend {
         let work_tree = work_tree.into();
@@ -192,16 +348,36 @@ impl FakeBackend {
     /// The repository has `worktrees`, its main worktree first; asked from
     /// any of them, the backend lists them all, as Git does. Without this, a
     /// repository has its main worktree alone.
-    pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> FakeBackend {
-        self.worktrees.push(worktrees);
+    pub fn with_worktrees(self, worktrees: Vec<Worktree>) -> FakeBackend {
+        self.set_worktrees(worktrees);
         self
+    }
+
+    /// Changes the worktrees of the repository whose main worktree comes
+    /// first in `worktrees` while the backend is in use, as when a commit
+    /// moves the HEAD of one.
+    pub fn set_worktrees(&self, worktrees: Vec<Worktree>) {
+        let mut known = self.worktrees.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|listed| {
+            listed.first().map(|main| &main.path) != worktrees.first().map(|main| &main.path)
+        });
+        known.push(worktrees);
     }
 
     /// The summary of the working copy at `worktree`. Without it, a working
     /// copy is summarised from its HEAD and its status.
-    pub fn with_summary(mut self, worktree: impl Into<PathBuf>, summary: Summary) -> FakeBackend {
-        self.summaries.push((worktree.into(), summary));
+    pub fn with_summary(self, worktree: impl Into<PathBuf>, summary: Summary) -> FakeBackend {
+        self.set_summary(worktree, summary);
         self
+    }
+
+    /// Changes the summary of the working copy at `worktree` while the
+    /// backend is in use, as when a file changes.
+    pub fn set_summary(&self, worktree: impl Into<PathBuf>, summary: Summary) {
+        let worktree = worktree.into();
+        let mut known = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|(path, _)| *path != worktree);
+        known.push((worktree, summary));
     }
 
     /// Every summary waits until the test opens `gate`.
@@ -574,6 +750,10 @@ impl FakeBackend {
 }
 
 impl Backend for FakeBackend {
+    fn capabilities(&self) -> Capabilities {
+        self.capabilities.unwrap_or(Capabilities::ALL)
+    }
+
     fn head(&self, repo: &Path) -> Result<Head, Error> {
         self.gone(repo)?;
         if let Some(head) = self.live_of(repo).and_then(|live| live.head.clone()) {
@@ -920,7 +1100,12 @@ impl Backend for FakeBackend {
             return Err(Error::Cancelled);
         }
         self.gone(repo)?;
-        if let Some(listed) = self.worktrees.iter().find(|listed| {
+        let known = self
+            .worktrees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(listed) = known.iter().find(|listed| {
             listed
                 .iter()
                 .any(|worktree| repo.starts_with(&worktree.path))
@@ -953,7 +1138,184 @@ impl Backend for FakeBackend {
         }])
     }
 
-    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error> {
+    fn facts(&self, repo: &Path, cancel: &CancelToken) -> Result<RepositoryFacts, Error> {
+        self.probe.record("facts", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.gone(repo)?;
+        let known = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, facts)) = known.iter().find(|(root, _)| repo.starts_with(root)) {
+            return Ok(facts.clone());
+        }
+        Ok(RepositoryFacts {
+            overrides: Vec::new(),
+            merge_driver: false,
+            worktree_config: false,
+            remotes: Vec::new(),
+            common_dir: repo.join(".git"),
+            branches: Vec::new(),
+            origin_head: None,
+        })
+    }
+
+    fn detect_base(
+        &self,
+        repo: &Path,
+        tip: &str,
+        _integration: &[String],
+        cancel: &CancelToken,
+    ) -> Result<Option<String>, Error> {
+        self.probe.record("detect-base", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if !self.capabilities().is_base {
+            return Ok(None);
+        }
+        if self.failing_detections.iter().any(|failing| failing == tip) {
+            return Err(Error::failed(
+                "git for-each-ref".to_owned(),
+                Some(128),
+                format!("fatal: failed to find '{tip}'\n"),
+            ));
+        }
+        Ok(self
+            .detected
+            .iter()
+            .find(|(root, detected_tip, _)| repo.starts_with(root) && detected_tip == tip)
+            .map(|(_, _, base)| base.clone()))
+    }
+
+    fn compare(
+        &self,
+        repo: &Path,
+        _facts: &RepositoryFacts,
+        request: &CompareRequest,
+        cancel: &CancelToken,
+    ) -> Result<BaseComparison, Error> {
+        self.probe.record("compare", repo);
+        self.probe.lock().base_comparisons.push(request.clone());
+        if let Some(gate) = &self.compare_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if self.failing_comparisons.contains(&request.tip) {
+            return Err(Error::failed(
+                "git merge-base".to_owned(),
+                Some(128),
+                format!("fatal: Not a valid object name {}\n", request.tip),
+            ));
+        }
+        let comparisons = self.comparisons.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, comparison)) = comparisons
+            .iter()
+            .find(|(root, tip, _)| repo.starts_with(root) && *tip == request.tip)
+        {
+            return Ok(comparison.clone());
+        }
+        Ok(BaseComparison {
+            counted: request
+                .local
+                .clone()
+                .or_else(|| request.remote.clone())
+                .unwrap_or_default(),
+            counts: Counts::default(),
+            lines: None,
+            merged: None,
+            prediction: Prediction::Unknown(Unpredicted::NotAsked),
+        })
+    }
+
+    fn since(
+        &self,
+        repo: &Path,
+        seen: &str,
+        tip: &str,
+        cancel: &CancelToken,
+    ) -> Result<Since, Error> {
+        self.probe.record("since", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let since = self.since.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(since
+            .get(&(seen.to_owned(), tip.to_owned()))
+            .copied()
+            .unwrap_or(Since::Commits(0)))
+    }
+
+    fn commit_list(
+        &self,
+        repo: &Path,
+        from: &str,
+        tip: &str,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<CommitEntry>, Error> {
+        self.probe.record("commit-list", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut commits = self
+            .commit_lists
+            .get(&(from.to_owned(), tip.to_owned()))
+            .cloned()
+            .unwrap_or_default();
+        commits.truncate(limit);
+        Ok(commits)
+    }
+
+    fn uncommitted(
+        &self,
+        worktree: &Path,
+        _overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Uncommitted, Error> {
+        self.probe.record("uncommitted", worktree);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if self.failing_uncommitted.iter().any(|path| path == worktree) {
+            return Err(Error::failed(
+                "git status".to_owned(),
+                Some(128),
+                "fatal: index file corrupt\n".to_owned(),
+            ));
+        }
+        Ok(self
+            .uncommitted
+            .iter()
+            .find(|(path, _)| path == worktree)
+            .map(|(_, files)| files.clone())
+            .unwrap_or_default())
+    }
+
+    fn ai_diff(&self, request: &AiDiffRequest<'_>, cancel: &CancelToken) -> Result<AiDiff, Error> {
+        self.probe.record("ai-diff", request.worktree);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        Ok(self
+            .ai_diffs
+            .iter()
+            .find(|(path, _)| path == request.worktree)
+            .map(|(_, diff)| diff.clone())
+            .unwrap_or_default())
+    }
+
+    fn summary(
+        &self,
+        worktree: &Path,
+        _overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Summary, Error> {
         self.probe.record("summary", worktree);
         let _running = self.probe.summary_started();
         if let Some(gate) = &self.summary_gate {
@@ -967,11 +1329,20 @@ impl Backend for FakeBackend {
             return Err(Error::Cancelled);
         }
         self.gone(worktree)?;
-        if let Some((_, summary)) = self.summaries.iter().find(|(path, _)| path == worktree) {
+        let known = self
+            .summaries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some((_, summary)) = known.iter().find(|(path, _)| path == worktree) {
             return Ok(summary.clone());
         }
-        let listed = self
+        let known = self
             .worktrees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let listed = known
             .iter()
             .flatten()
             .find(|listed| listed.path == worktree);
@@ -1540,6 +1911,8 @@ struct ProbeLog {
     calls: Vec<(String, PathBuf)>,
     requested: Vec<ObjectId>,
     compared: Vec<(ObjectId, Option<ObjectId>)>,
+    /// Every comparison with a base asked for.
+    base_comparisons: Vec<CompareRequest>,
     diffs: Vec<(ObjectId, String, Option<usize>)>,
     working_diffs: Vec<(Group, String, Option<usize>)>,
     searches: Vec<(SearchKind, String)>,
@@ -1562,6 +1935,12 @@ impl Probe {
         let now = self.inner.summaries.fetch_add(1, Ordering::SeqCst) + 1;
         self.inner.most_summaries.fetch_max(now, Ordering::SeqCst);
         Running(&self.inner.summaries)
+    }
+
+    /// Every operation called, with the folder it was called for, in
+    /// order.
+    pub fn sequence(&self) -> Vec<(String, PathBuf)> {
+        self.lock().calls.clone()
     }
 
     /// The operations called on `repo`, in order, such as `"history"`.
@@ -1614,6 +1993,11 @@ impl Probe {
 
     fn record(&self, call: &str, repo: &Path) {
         self.lock().calls.push((call.to_owned(), repo.to_owned()));
+    }
+
+    /// Every comparison with a base asked for, in order.
+    pub fn base_comparisons(&self) -> Vec<CompareRequest> {
+        self.lock().base_comparisons.clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ProbeLog> {
@@ -1686,7 +2070,7 @@ mod tests {
                     ..WorkingStatus::default()
                 },
             );
-        let summary = backend.summary(&root, &CancelToken::new()).unwrap();
+        let summary = backend.summary(&root, None, &CancelToken::new()).unwrap();
         assert_eq!(summary.head, Head::Branch("dev".to_owned()));
         assert_eq!(summary.changed, 1);
     }
@@ -1704,7 +2088,7 @@ mod tests {
         let threads: Vec<_> = (0..3)
             .map(|_| {
                 let (backend, root) = (Arc::clone(&backend), root.clone());
-                std::thread::spawn(move || backend.summary(&root, &CancelToken::new()))
+                std::thread::spawn(move || backend.summary(&root, None, &CancelToken::new()))
             })
             .collect();
         while probe.calls(&root).len() < 3 {

@@ -15,7 +15,7 @@ use eframe::egui::{
 
 use crate::icons;
 use crate::style::active_palette;
-use crate::theme::{Palette, SHAPE, TYPE};
+use crate::theme::{Chip, Palette, SHAPE, TYPE};
 use crate::ui::color;
 
 /// The size of an icon in a control, in points.
@@ -187,17 +187,11 @@ pub fn copy_button(
     };
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), sense);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
-    let record = Id::new(COPIED);
     if response.clicked()
         && let Some(text) = text
     {
         ui.ctx().copy_text(text.to_owned());
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(record, response.id));
-    }
-    let confirmed = ui.ctx().data(|data| data.get_temp::<Id>(record)) == Some(response.id);
-    if confirmed && !response.hovered() {
-        ui.ctx().data_mut(|data| data.remove::<Id>(record));
+        confirm_copy(ui.ctx(), response.id);
     }
     let ink = match enabled {
         true => color(palette.text),
@@ -208,15 +202,35 @@ pub fn copy_button(
         ink,
     );
     paint_icon_button(ui, &response, rect, icon, radius(), colours);
-    // egui hides a tooltip after a click until the pointer moves; the
-    // confirmation shows at once.
-    if confirmed && response.hovered() {
-        response.show_tooltip_ui(|ui| {
-            ui.label(copied);
-        });
+    if show_copied(&response, copied) {
         return response;
     }
     tooltip(response, name, None)
+}
+
+/// Records that the button `id` copied its text, so that its tooltip
+/// confirms the copy until the pointer leaves it.
+pub fn confirm_copy(ctx: &Context, id: Id) {
+    ctx.data_mut(|data| data.insert_temp(Id::new(COPIED), id));
+}
+
+/// Shows `copied` in the tooltip of the button of `response` while its
+/// copy is confirmed and the pointer stays on it; returns whether it did.
+pub fn show_copied(response: &Response, copied: &str) -> bool {
+    let record = Id::new(COPIED);
+    let confirmed = response.ctx.data(|data| data.get_temp::<Id>(record)) == Some(response.id);
+    if confirmed && !response.hovered() {
+        response.ctx.data_mut(|data| data.remove::<Id>(record));
+    }
+    // egui hides a tooltip after a click until the pointer moves; the
+    // confirmation shows at once.
+    let shown = confirmed && response.hovered();
+    if shown {
+        response.show_tooltip_ui(|ui| {
+            ui.label(copied);
+        });
+    }
+    shown
 }
 
 /// An [`icon_button`] that switches `value` on and off. While on it is
@@ -1014,6 +1028,50 @@ pub fn changed_lines(ui: &mut Ui, added: u64, removed: u64, width: f32) -> Respo
     let (rect, response) = ui.allocate_exact_size(vec2(width, SHAPE.target), Sense::hover());
     paint_changed_lines(ui, rect.right(), rect.center().y, added, removed);
     response
+}
+
+/// The height of a chip, such as the main state of a worktree.
+pub const CHIP_HEIGHT: f32 = 18.0;
+const CHIP_PADDING: f32 = 6.0;
+const CHIP_ICON: f32 = 12.0;
+const CHIP_ICON_GAP: f32 = 4.0;
+
+/// The size of a chip that shows `word` after its icon.
+pub fn chip_size(ui: &Ui, word: &str) -> egui::Vec2 {
+    let font = TextStyle::Small.resolve(ui.style());
+    let text = ui
+        .painter()
+        .layout_no_wrap(word.to_owned(), font, Color32::PLACEHOLDER)
+        .size()
+        .x;
+    vec2(
+        CHIP_PADDING + CHIP_ICON + CHIP_ICON_GAP + text + CHIP_PADDING,
+        CHIP_HEIGHT,
+    )
+}
+
+/// Paints a chip into `rect`: `icon` and `word` in its ink on its fill,
+/// which is opaque, so that it reads the same on every row.
+pub fn paint_chip(ui: &Ui, rect: Rect, icon: &str, word: &str, chip: Chip) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, SHAPE.radius_small, color(chip.fill));
+    let ink = color(chip.ink);
+    let middle = rect.center().y;
+    let left = rect.left() + CHIP_PADDING;
+    painter.text(
+        egui::pos2(left, middle),
+        Align2::LEFT_CENTER,
+        icon,
+        icons::font(ui.ctx(), CHIP_ICON),
+        ink,
+    );
+    painter.text(
+        egui::pos2(left + CHIP_ICON + CHIP_ICON_GAP, middle),
+        Align2::LEFT_CENTER,
+        word,
+        TextStyle::Small.resolve(ui.style()),
+        ink,
+    );
 }
 
 #[cfg(test)]

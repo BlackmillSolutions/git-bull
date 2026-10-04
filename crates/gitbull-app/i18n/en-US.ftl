@@ -45,6 +45,64 @@ home-changed = { $count ->
 home-conflicts = Conflicts
 home-not-found = Not found
 home-bare = Bare repository
+home-done = Done ({ $count })
+home-state-conflict = Conflict
+home-state-working = Working
+home-state-new = New { $count }
+home-state-ready = Ready
+home-state-paused = Paused
+home-overlap = Overlaps another worktree
+home-new-branches = New branches
+home-folder-gone = Folder gone
+home-ahead-behind = { $ahead } ahead, { $behind } behind
+home-lines = { $added } added, { $removed } removed
+home-mark-seen = Mark as seen
+home-mark-all-seen = Mark all as seen
+cockpit-details = Details
+cockpit-show = Show details
+cockpit-base-detected = Base { $base }, detected
+cockpit-base-set = Base { $base }, set
+cockpit-base-upstream = Compared with its upstream { $base }
+cockpit-no-base = No base
+cockpit-base = Base
+cockpit-detect = Detect
+cockpit-counts = { $ahead } ahead, { $behind } behind
+cockpit-lines = +{ $added } −{ $removed } in { $files ->
+    [one] 1 file
+   *[other] { $files } files
+}
+cockpit-no-prediction-git = Conflicts cannot be predicted with this Git
+cockpit-no-prediction-driver = Conflicts cannot be predicted: a merge driver is configured
+cockpit-new-commits = { $count ->
+    [one] 1 new commit
+   *[other] { $count } new commits
+}
+cockpit-more-commits = { $count ->
+    [one] 1 more is new
+   *[other] { $count } more are new
+}
+cockpit-files = Changed against { $base }
+cockpit-more-files = { $count ->
+    [one] 1 more file
+   *[other] { $count } more files
+}
+cockpit-uncommitted = Uncommitted
+cockpit-overlaps = Overlaps
+cockpit-overlap-with = With { $name }
+cockpit-worktrees = Worktrees
+cockpit-branches = Branches without a worktree
+cockpit-reading = Reading…
+cockpit-nothing = Select a repository or a worktree.
+cockpit-copy-ai = Copy as AI context
+cockpit-copy-choices = More ways to copy as AI context
+cockpit-copy-summary = Summary
+cockpit-copy-diff = With diff
+cockpit-copied = Copied
+cockpit-copy-ai-diff = Copy as AI context with diff
+cockpit-copy-failed = Could not copy as AI context: { $error }
+cockpit-read-failed = Could not read: { $error }
+cockpit-branch-failed = Could not be read
+cockpit-open-remote = Open remote
 home-active-now = Just now
 home-active-minutes = { $count } min
 home-active-hours = { $count } h
