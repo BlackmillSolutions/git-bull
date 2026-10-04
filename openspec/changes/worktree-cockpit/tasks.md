@@ -41,7 +41,7 @@
 
 ## 5. Performance
 
-- [ ] 5.1 Extend the benchmark `home_tab` in `tests/benchmarks.rs`: 40 repositories with five worktrees each whose summaries and comparisons arrive through a gate, three timer ticks, the list scrolled, a filter typed, the panel of a worktree with 1,000 files and 50 new commits scrolled, and the rows built with the overlaps of 40 worktrees of 1,000 paths each, 50 of them shared with the next; verify that each frame takes less than 16.7 ms and the build of the overlaps less than 3 ms in a release build (1 ms was planned; inserting the 40,000 paths alone takes 0.7 ms), for the scenarios "Many repositories" and "Large worktree in the panel" of `repository-manager`, and that the table and the machine are recorded in `docs/benchmarks.md`
+- [x] 5.1 Extend the benchmark `home_tab` in `tests/benchmarks.rs`: 40 repositories with five worktrees each whose summaries and comparisons arrive through a gate, three timer ticks, the list scrolled, a filter typed, the panel of a worktree with 1,000 files and 50 new commits scrolled, and the rows built with the overlaps of 40 worktrees of 1,000 paths each, 50 of them shared with the next; verify that each frame takes less than 16.7 ms and the build of the overlaps less than 3 ms in a release build (1 ms was planned; inserting the 40,000 paths alone takes 0.7 ms), for the scenarios "Many repositories" and "Large worktree in the panel" of `repository-manager`, and that the table and the machine are recorded in `docs/benchmarks.md`
 
 ## 6. Snapshots and manual check
 

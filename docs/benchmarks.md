@@ -475,3 +475,48 @@ part; the slowest of three runs is shown.
   summary only while a filter may look at the branch.
 - A change of the filter builds the rows in the frame of the change, which
   shows them.
+
+## The cockpit in the home tab (change `worktree-cockpit`, task 5.1)
+
+Measured on 2026-10-04 on Windows 11 Enterprise, Intel Core i7-12700H with
+14 cores, 31.7 GB RAM, release build, with
+`cargo test --release -p gitbull-app --test benchmarks home_tab -- --ignored --nocapture`.
+The repositories come from the fake backend, so Git and the disk take no
+part. The run shown was made on a quiet machine; runs while the machine was
+busy took up to twice as long, the first frame among them.
+
+Each of the 200 agents' worktrees is three commits ahead of `main` and one
+behind, with 21 changed files, one of them shared with a neighbour; one has
+1,000 changed files and 50 new commits. The summaries and the comparisons
+wait behind gates of their own, and the timer reads three times, 20 seconds
+apart.
+
+| Home tab, 40 repositories with 5 worktrees each | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Worktrees found, summaries waiting | 60 | 0.1 ms | 0.3 ms | 10.6 ms | yes |
+| Summaries arriving, comparisons waiting | 60 | 0.2 ms | 5.2 ms | 7.2 ms | yes |
+| Comparisons arriving | 3 | 1.3 ms | 1.3 ms | 5.1 ms | yes |
+| Three readings by the timer | 18 | 2.2 ms | 2.9 ms | 3.4 ms | yes |
+| Page Down and wheel in turn | 400 | 0.4 ms | 1.8 ms | 11.1 ms | yes |
+| Typing `task-3` and clearing it, one character a frame | 7 | 2.0 ms | 2.5 ms | 2.6 ms | yes |
+| Panel of 1,000 files and 50 new commits, until it shows them | 1 | 0.2 ms | 0.2 ms | 0.2 ms | yes |
+| Panel, Page Down and wheel in turn | 400 | 0.3 ms | 0.4 ms | 0.4 ms | yes |
+
+| Overlaps | Builds | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| 40 worktrees of 1,000 paths each, 50 shared with the next | 100 | 1.2 ms | 1.5 ms | 1.5 ms | yes |
+| 40 worktrees of 1,000 paths each, every one shared with a neighbour | 100 | 7.1 ms | 9.7 ms | 10.5 ms | — |
+
+- Every frame stays below the target of 16.7 ms. The slowest while the
+  worktrees are found is the first one, which lays out the window and its
+  fonts.
+- The benchmark first showed frames of up to 25 ms when the reports of
+  many repositories came at once, because each repository found built the
+  rows again. A round now builds them once at the end of its frame.
+- The panel draws only the rows in view, so 1,000 files scroll as fast as
+  a few.
+- The overlaps are built once per reading, from up to 1,000 changed and
+  1,000 uncommitted paths per worktree. Inserting the 40,000 paths into a
+  table alone takes 0.7 ms, so the target is 3 ms rather than the 1 ms
+  first planned. When every path is shared with a neighbour, the build
+  takes 10.5 ms at most; this case has no target.
