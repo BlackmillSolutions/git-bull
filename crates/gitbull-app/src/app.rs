@@ -163,6 +163,9 @@ pub(crate) struct Home {
     ai_copy: Option<AiCopy>,
     /// The button whose copy runs, which confirms it when it is done.
     pub(crate) copy_target: Option<eframe::egui::Id>,
+    /// The row the user looks at in the panel, which counts as seen after
+    /// a second.
+    pub(crate) looking: Option<crate::home_view::Look>,
     /// The window has the focus, as it reported it last; one that reports
     /// nothing counts as focused.
     pub(crate) focused: bool,
@@ -186,6 +189,7 @@ impl Home {
             panel_shown: false,
             ai_copy: None,
             copy_target: None,
+            looking: None,
             focused: true,
         }
     }
@@ -670,6 +674,25 @@ impl App {
         self.known_changed();
     }
 
+    /// Marks the row with the canonical path `path` as seen at the commits
+    /// the home tab shows for it, and lets the panel read it again.
+    pub(crate) fn mark_seen(&mut self, path: &Path) {
+        if self.home.list.mark_seen(path)
+            && let Some(panel) = &mut self.home.panel
+        {
+            panel.renew(&self.home.list);
+        }
+    }
+
+    /// Marks every row as seen.
+    pub(crate) fn mark_all_seen(&mut self) {
+        if self.home.list.mark_all_seen()
+            && let Some(panel) = &mut self.home.panel
+        {
+            panel.renew(&self.home.list);
+        }
+    }
+
     /// Copies the worktree with the canonical path `path` as AI context,
     /// with its diff or not; the copy is read in the background.
     pub(crate) fn copy_ai(&mut self, path: &Path, with_diff: bool) {
@@ -798,6 +821,12 @@ impl App {
         let shown = self.home_shown();
         if shown && !self.home.shown {
             self.read_home(Request::Shown);
+            // The panel reads its row again too, which may have been seen
+            // meanwhile, and the look at it starts again.
+            if let Some(panel) = &mut self.home.panel {
+                panel.renew(&self.home.list);
+            }
+            self.home.looking = None;
         } else if !shown
             && self.home.shown
             && let Some(overview) = &mut self.home.overview

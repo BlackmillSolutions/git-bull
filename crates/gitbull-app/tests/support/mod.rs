@@ -978,6 +978,29 @@ pub fn compared_with_dev(
     }
 }
 
+/// The worktrees of `git-bull` in [`cockpit_setup`], all at
+/// [`head_commit`].
+pub fn cockpit_worktrees() -> Vec<Worktree> {
+    let wt = |name: &str| path(&["work", "wt", name]);
+    let mut listed = vec![worktree(path(&["work", "git-bull"]), Some("dev"))];
+    listed.extend(
+        COCKPIT_AGENTS
+            .iter()
+            .map(|(name, branch)| worktree(wt(name), *branch)),
+    );
+    listed
+}
+
+/// The folders and branches of the agents' worktrees of `git-bull`.
+const COCKPIT_AGENTS: [(&str, Option<&str>); 6] = [
+    ("fix-reload", Some("claude/fix-reload")),
+    ("home-tab", Some("claude/home-tab")),
+    ("review", None),
+    ("paused", Some("claude/paused")),
+    ("merged", Some("claude/merged")),
+    ("conflict", Some("claude/conflict")),
+];
+
 /// The repositories of a developer whose coding agents work in
 /// worktrees, in every main state: `git-bull` on `dev`, two commits ahead
 /// of `origin/dev`, with the worktrees `fix-reload` at work, `home-tab`
@@ -995,20 +1018,8 @@ pub fn cockpit_setup() -> Setup {
     let days = 24 * hours;
     let root = work("git-bull");
     let head = head_commit();
-    let agents = [
-        ("fix-reload", Some("claude/fix-reload")),
-        ("home-tab", Some("claude/home-tab")),
-        ("review", None),
-        ("paused", Some("claude/paused")),
-        ("merged", Some("claude/merged")),
-        ("conflict", Some("claude/conflict")),
-    ];
-    let mut listed = vec![worktree(root.clone(), Some("dev"))];
-    listed.extend(
-        agents
-            .iter()
-            .map(|(name, branch)| worktree(wt(name), *branch)),
-    );
+    let agents = COCKPIT_AGENTS;
+    let listed = cockpit_worktrees();
     let local = |name: &str, upstream: Option<&str>| Branch {
         name: format!("refs/heads/{name}"),
         commit: head.clone(),

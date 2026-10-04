@@ -18,7 +18,7 @@ use gitbull_core::repositories::{Problem, Repository, RepositoryList, Row, Secti
 use gitbull_core::state::MainState;
 use gitbull_git::head::Head;
 
-use crate::app::App;
+use crate::app::{App, Home};
 use crate::commit_list::{SHORT_HASH, color, take_copy};
 use crate::components::{self, Button, Kind, TREE_INDENT, TREE_LEFT};
 use crate::home_panel::{self, HOME_PANEL, PanelAction};
@@ -68,6 +68,7 @@ enum HomeAction {
     Pin(PathBuf),
     Unpin(Vec<PathBuf>),
     Forget(Vec<PathBuf>),
+    MarkAllSeen,
     /// The panel's actions, which the context menu shares.
     Panel(PanelAction),
 }
@@ -95,6 +96,8 @@ struct Texts {
     copy_ai: String,
     copy_ai_diff: String,
     open_remote: String,
+    mark_seen: String,
+    mark_all_seen: String,
 }
 
 impl Texts {
@@ -121,6 +124,8 @@ impl Texts {
             copy_ai: texts.text(Msg::CockpitCopyAi),
             copy_ai_diff: texts.text(Msg::CockpitCopyAiDiff),
             open_remote: texts.text(Msg::CockpitOpenRemote),
+            mark_seen: texts.text(Msg::HomeMarkSeen),
+            mark_all_seen: texts.text(Msg::HomeMarkAllSeen),
         }
     }
 }
@@ -152,6 +157,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui) {
             HomeAction::Pin(path) => app.pin(path),
             HomeAction::Unpin(paths) => app.unpin(&paths),
             HomeAction::Forget(paths) => app.forget(&paths),
+            HomeAction::MarkAllSeen => app.mark_all_seen(),
             HomeAction::Panel(action) => match action {
                 PanelAction::Open(path) => app.open(path),
                 PanelAction::Reveal(path) => app.reveal(&path),
@@ -164,6 +170,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui) {
                     let path = app.home.list.shown(&repository);
                     app.open_branch(path, &branch);
                 }
+                PanelAction::MarkSeen(path) => app.mark_seen(&path),
             },
         }
     }
@@ -181,9 +188,11 @@ fn draw(
 ) {
     let (home, translations) = (&mut app.home, &app.texts);
     // The panel shows beside the list where the area is wide enough, and
-    // in a narrow one when the user shows it.
+    // in a narrow one when the user shows it; with nothing listed, the
+    // home tab says how to add a repository instead.
     let wide = ui.available_width() >= NARROW;
-    let panel_visible = wide || home.panel_shown;
+    let listed = !home.list.repositories().is_empty();
+    let panel_visible = listed && (wide || home.panel_shown);
     match panel_visible {
         true => move_between_areas(ui, &[HOME_FILTER, HOME_LIST, HOME_PANEL]),
         false => move_between_areas(ui, &[HOME_FILTER, HOME_LIST]),
@@ -200,11 +209,12 @@ fn draw(
             .kind(Kind::Primary)
             .icon(icons::FOLDER);
         let gap = ui.spacing().item_spacing.x;
-        let toggle = match wide {
-            true => 0.0,
-            false => SHAPE.control_height + gap,
-        };
-        let width = ui.available_width() - button.width(ui) - gap - toggle;
+        // Mark all as seen, and in a narrow area the toggle of the panel.
+        let icons = match wide {
+            true => 1.0,
+            false => 2.0,
+        } * (SHAPE.control_height + gap);
+        let width = ui.available_width() - button.width(ui) - gap - icons;
         let keys = EventFilter {
             horizontal_arrows: true,
             vertical_arrows: true,
@@ -242,6 +252,9 @@ fn draw(
         {
             open_selected = true;
         }
+        if components::icon_button(ui, icons::SEEN, &texts.mark_all_seen, None).clicked() {
+            actions.push(HomeAction::MarkAllSeen);
+        }
         if !wide {
             let name = translations.text(Msg::CockpitShow);
             components::toggle_icon_button(ui, icons::PANEL, &name, &mut home.panel_shown);
@@ -273,11 +286,13 @@ fn draw(
             actions,
         );
     });
+    let typing = ui.memory(|memory| memory.has_focus(field));
     if panel_visible {
         let selected = home
             .list
             .selected_row()
             .and_then(|row| selected_of(&home.list, row));
+        look(ui, home, selected.as_ref(), typing);
         if let Some(panel) = &mut home.panel {
             panel.poll();
             panel.show(&home.list, selected.clone());
@@ -305,8 +320,65 @@ fn draw(
             );
         });
         actions.extend(panel_actions.into_iter().map(HomeAction::Panel));
+    } else {
+        // With the panel hidden, selecting marks nothing.
+        home.looking = None;
     }
     ui.advance_cursor_after_rect(area);
+}
+
+/// How long a row stays selected while the panel shows it before it counts
+/// as seen, in seconds.
+const LOOK: f64 = 1.0;
+
+/// The row the user looks at in the panel: since when, by the time of egui,
+/// and whether it was marked as seen.
+pub(crate) struct Look {
+    selected: Selected,
+    since: f64,
+    marked: bool,
+}
+
+/// Marks `selected` as seen once it has stayed selected for [`LOOK`] while
+/// the panel shows it (design of `worktree-cockpit`, decision 9): the time
+/// is checked when the selection changes and by a repaint asked for at the
+/// second. A row selected while the user is `typing` into the filter is not
+/// looked at.
+fn look(ui: &Ui, home: &mut Home, selected: Option<&Selected>, typing: bool) {
+    let now = ui.input(|input| input.time);
+    let selected = selected.filter(|_| !typing);
+    let same = matches!(
+        (&home.looking, selected),
+        (Some(look), Some(selected)) if look.selected == *selected
+    );
+    if !same {
+        if let Some(look) = home.looking.take()
+            && !look.marked
+            && now - look.since >= LOOK
+        {
+            home.list.mark_seen(look.selected.path());
+        }
+        home.looking = selected.map(|selected| Look {
+            selected: selected.clone(),
+            since: now,
+            marked: false,
+        });
+    }
+    let Some(look) = &mut home.looking else {
+        return;
+    };
+    if look.marked {
+        return;
+    }
+    let left = LOOK - (now - look.since);
+    if left > 0.0 {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        return;
+    }
+    // The panel keeps the commits it shows as new while the row stays.
+    look.marked = true;
+    home.list.mark_seen(look.selected.path());
 }
 
 /// What the panel shows for the row at `row`.
@@ -493,6 +565,9 @@ fn list_area(
         && let Some(row) = list.selected_row()
         && let Some(path) = openable(list, row)
     {
+        if let Some(seen) = list.path(row) {
+            actions.push(HomeAction::Panel(PanelAction::MarkSeen(seen.to_owned())));
+        }
         actions.push(HomeAction::Open(path));
     }
     if let Some(row) = output.menu_opened {
@@ -582,20 +657,23 @@ fn menu_of(list: &RepositoryList, row: &Row) -> Option<RowMenu> {
 /// found offers only Copy path and Remove from list, and one that Git
 /// refuses no Open.
 fn context_menu(ui: &mut Ui, menu: &RowMenu, texts: &Texts, actions: &mut Vec<HomeAction>) {
-    let mut item = |ui: &mut Ui, label: &str, action: Option<HomeAction>| {
+    let mut item = |ui: &mut Ui, label: &str, chosen: Vec<HomeAction>| {
         if components::menu_item(ui, None, label, None).clicked() {
-            actions.extend(action);
+            actions.extend(chosen);
             ui.close();
         }
     };
+    let seen = || HomeAction::Panel(PanelAction::MarkSeen(menu.canonical.clone()));
     if menu.found {
         if menu.readable {
-            item(ui, &texts.open, Some(HomeAction::Open(menu.path.clone())));
+            // Opening a row counts as seeing it.
+            let open = HomeAction::Open(menu.path.clone());
+            item(ui, &texts.open, vec![seen(), open]);
         }
         item(
             ui,
             &texts.reveal,
-            Some(HomeAction::Reveal(menu.path.clone())),
+            vec![HomeAction::Reveal(menu.path.clone())],
         );
     }
     if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
@@ -605,21 +683,24 @@ fn context_menu(ui: &mut Ui, menu: &RowMenu, texts: &Texts, actions: &mut Vec<Ho
     if menu.found && menu.copies {
         for (label, with_diff) in [(&texts.copy_ai, false), (&texts.copy_ai_diff, true)] {
             let copy = PanelAction::CopyAi(menu.canonical.clone(), with_diff);
-            item(ui, label, Some(HomeAction::Panel(copy)));
+            item(ui, label, vec![HomeAction::Panel(copy)]);
         }
     }
     if let Some(address) = &menu.remote {
         let open = PanelAction::OpenRemote(address.clone());
-        item(ui, &texts.open_remote, Some(HomeAction::Panel(open)));
+        item(ui, &texts.open_remote, vec![HomeAction::Panel(open)]);
+    }
+    if menu.found && menu.readable {
+        item(ui, &texts.mark_seen, vec![seen()]);
     }
     if let Some((paths, pinned)) = &menu.repository {
         if menu.found {
             match pinned {
-                true => item(ui, &texts.unpin, Some(HomeAction::Unpin(paths.clone()))),
-                false => item(ui, &texts.pin, Some(HomeAction::Pin(menu.path.clone()))),
+                true => item(ui, &texts.unpin, vec![HomeAction::Unpin(paths.clone())]),
+                false => item(ui, &texts.pin, vec![HomeAction::Pin(menu.path.clone())]),
             }
         }
-        item(ui, &texts.remove, Some(HomeAction::Forget(paths.clone())));
+        item(ui, &texts.remove, vec![HomeAction::Forget(paths.clone())]);
     }
 }
 

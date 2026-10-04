@@ -9,7 +9,7 @@ use eframe::egui::accesskit::Role;
 use eframe::egui::{Align, ComboBox, Rect, Sense, Ui, UiBuilder, WidgetInfo, WidgetType, pos2};
 use fluent_bundle::FluentArgs;
 use gitbull_core::base::{Base, Found};
-use gitbull_core::panel::{Heading, PanelRow, Selected};
+use gitbull_core::panel::{Heading, Panel, PanelRow, Selected};
 use gitbull_core::repositories::RepositoryList;
 use gitbull_core::state::MainState;
 use gitbull_git::changes::{ChangeKind, LineCount};
@@ -42,6 +42,8 @@ pub(crate) enum PanelAction {
     SetBase(PathBuf, Option<String>),
     /// Open the branch without a worktree in the tab of its repository.
     OpenBranch(PathBuf, String),
+    /// Mark the row with the canonical path as seen, as when it opens.
+    MarkSeen(PathBuf),
 }
 
 /// Draws the panel for `selected` into the area `ui` gives it.
@@ -68,9 +70,7 @@ pub(crate) fn show(
         );
         return;
     };
-    let path = match selected {
-        Selected::Worktree(path) | Selected::Repository(path) => path.clone(),
-    };
+    let path = selected.path().to_owned();
     let shown = home.list.shown(&path);
     // The actions of the row, Open first, on two lines in a narrow panel.
     ui.horizontal_wrapped(|ui| {
@@ -79,6 +79,7 @@ pub(crate) fn show(
             .show(ui)
             .clicked()
         {
+            actions.push(PanelAction::MarkSeen(path.clone()));
             actions.push(PanelAction::Open(shown.clone()));
         }
         let copies = match selected {
@@ -109,6 +110,14 @@ pub(crate) fn show(
             if response.clicked() {
                 actions.push(PanelAction::OpenRemote(address.to_owned()));
             }
+        }
+        // Said beside the actions, so that the rows below, read before,
+        // stay where they are.
+        if home.panel.as_ref().is_some_and(Panel::is_reading) {
+            ui.label(
+                eframe::egui::RichText::new(translations.text(Msg::CockpitReading))
+                    .color(color(palette.text_muted)),
+            );
         }
     });
     ui.add_space(SHAPE.space[0]);
@@ -153,6 +162,7 @@ pub(crate) fn show(
                 actions.push(PanelAction::OpenBranch(path.clone(), branch.name.clone()));
             }
             Some(PanelRow::Worktree { path, .. }) if output.activated.is_some() => {
+                actions.push(PanelAction::MarkSeen(path.clone()));
                 actions.push(PanelAction::Open(home.list.shown(path)));
             }
             _ => {}
@@ -430,14 +440,6 @@ fn draw_row(
             );
             line(ui, rect, indent + 6.0, &said, text, selected);
         }
-        PanelRow::Reading => line(
-            ui,
-            rect,
-            left,
-            &translations.text(Msg::CockpitReading),
-            muted,
-            selected,
-        ),
     }
 }
 

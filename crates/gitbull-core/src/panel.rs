@@ -39,6 +39,15 @@ pub enum Selected {
     Repository(PathBuf),
 }
 
+impl Selected {
+    /// The canonical path of the row.
+    pub fn path(&self) -> &Path {
+        match self {
+            Selected::Worktree(path) | Selected::Repository(path) => path,
+        }
+    }
+}
+
 /// A heading of the panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Heading {
@@ -114,8 +123,6 @@ pub enum PanelRow {
         count: usize,
         expanded: bool,
     },
-    /// What is shown below is being read; the values last read stay.
-    Reading,
 }
 
 /// What only the panel reads, for the row selected.
@@ -123,7 +130,10 @@ pub enum PanelRow {
 pub enum Read {
     Worktree {
         uncommitted: Uncommitted,
-        /// The new commits, newest first.
+        /// How many commits were new when they were read, and the newest
+        /// of them, newest first. They stay listed while the row stays
+        /// shown, also once it counts as seen.
+        new: u64,
         commits: Vec<CommitEntry>,
     },
     Repository {
@@ -209,7 +219,7 @@ impl Panel {
     }
 
     /// The rows of the panel for the row shown, from `list` and what was
-    /// read for it.
+    /// read for it; while [`Panel::is_reading`], the values last read stay.
     pub fn rows(&self, list: &RepositoryList) -> Vec<PanelRow> {
         let Some((selected, _)) = &self.shown else {
             return Vec::new();
@@ -219,14 +229,10 @@ impl Panel {
             .as_ref()
             .filter(|(read_for, _)| read_for == selected)
             .map(|(_, read)| read);
-        let mut rows = match selected {
+        match selected {
             Selected::Worktree(path) => worktree_rows(list, path, read),
             Selected::Repository(path) => repository_rows(list, path, read, self.done_expanded),
-        };
-        if self.is_reading() {
-            rows.insert(0, PanelRow::Reading);
         }
-        rows
     }
 }
 
@@ -391,6 +397,7 @@ impl Work {
                 }
                 Ok(Read::Worktree {
                     uncommitted,
+                    new,
                     commits,
                 })
             }
@@ -498,7 +505,12 @@ fn worktree_rows(list: &RepositoryList, path: &Path, read: Option<&Read>) -> Vec
         None if comparison.is_some() => rows.push(PanelRow::NoBase),
         None => {}
     }
-    let new = comparison.map_or(0, |comparison| comparison.new);
+    // What was new when the panel read it, so that the commits the user is
+    // looking at stay when the row counts as seen.
+    let new = match read {
+        Some(Read::Worktree { new, .. }) => *new,
+        _ => comparison.map_or(0, |comparison| comparison.new),
+    };
     if new > 0 {
         rows.push(PanelRow::Heading(Heading::NewCommits(new)));
         if let Some(Read::Worktree { commits, .. }) = read {
@@ -858,6 +870,37 @@ mod tests {
             StatusKind::Untracked,
             12
         ))));
+    }
+
+    #[test]
+    fn the_new_commits_stay_listed_once_seen_until_the_panel_reads_again() {
+        let backend = FakeBackend::default()
+            .with_since("seen", "tip", Since::Commits(2))
+            .with_commit_list("seen", "tip", vec![commit(2), commit(1)]);
+        let mut list = list(&[]);
+        list.seen_mut().mark(
+            Key::Branch {
+                repository: p("/work/app"),
+                branch: "claude/fix".to_owned(),
+            },
+            "seen",
+        );
+        list.set_comparison(agent(), compared(3, 2));
+        let mut panel = panel(backend);
+        shown(&mut panel, &list, Selected::Worktree(agent()));
+
+        assert!(list.mark_seen(&agent()));
+        let rows = panel.rows(&list);
+        assert!(rows.contains(&PanelRow::Heading(Heading::NewCommits(2))));
+        assert!(rows.contains(&PanelRow::Commit(commit(2))));
+
+        panel.renew(&list);
+        let rows = shown(&mut panel, &list, Selected::Worktree(agent()));
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row, PanelRow::Heading(Heading::NewCommits(_))))
+        );
     }
 
     #[test]

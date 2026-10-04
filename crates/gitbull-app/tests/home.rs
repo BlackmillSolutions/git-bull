@@ -679,13 +679,14 @@ fn a_double_click_opens_a_worktree() {
 }
 
 /// The entries a context menu of the home tab can have.
-const ENTRIES: [&str; 9] = [
+const ENTRIES: [&str; 10] = [
     "Open",
     "Show in file manager",
     "Copy path",
     "Copy as AI context",
     "Copy as AI context with diff",
     "Open remote",
+    "Mark as seen",
     "Pin",
     "Unpin",
     "Remove from list",
@@ -772,6 +773,7 @@ fn the_context_menu_of_a_repository_offers_every_action() {
             "Copy path",
             "Copy as AI context",
             "Copy as AI context with diff",
+            "Mark as seen",
             "Pin",
             "Remove from list"
         ]
@@ -789,7 +791,8 @@ fn the_context_menu_of_a_worktree_offers_no_pin_and_no_remove() {
             "Show in file manager",
             "Copy path",
             "Copy as AI context",
-            "Copy as AI context with diff"
+            "Copy as AI context with diff",
+            "Mark as seen"
         ]
     );
 }
@@ -1451,10 +1454,16 @@ fn the_panel_of_a_repository_shows_its_base_its_worktrees_and_its_branches() {
         "fix-reload, Working, 3 ahead, 0 behind",
         "review, Ready, 1 ahead, 0 behind",
         "Branches without a worktree",
-        "claude/old, New 2, 2 ahead, 6 behind",
     ] {
         assert!(rows.iter().any(|label| label == row), "{row} in {rows:?}");
     }
+    // New until the look at the repository counts as seeing it.
+    assert!(
+        rows.iter().any(
+            |label| label.starts_with("claude/old, ") && label.ends_with(", 2 ahead, 6 behind")
+        ),
+        "{rows:?}"
+    );
 }
 
 /// Chooses `entry` in the chooser of the base of the repository shown in
@@ -1824,4 +1833,163 @@ fn a_branch_waiting_for_its_merge_is_ready_and_opens_in_its_repository_tab() {
         tab.sidebar_selection(),
         &SidebarKey::Reference("refs/heads/claude/old".to_owned())
     );
+}
+
+// What was seen (spec `repository-manager`, "New since the user looked").
+
+use gitbull_core::seen::SeenFile;
+use gitbull_git::commits::Since;
+use support::{TestApp, cockpit_worktrees};
+
+/// Steps through `seconds` of looking, a quarter of a second a frame.
+fn look_for(harness: &mut Harness<'_, App>, seconds: f64) {
+    for _ in 0..(seconds * 4.0).ceil() as usize {
+        harness.step();
+    }
+}
+
+/// Whether the row named `name` shows new commits.
+fn shows_new(harness: &Harness<'_, App>, name: &str) -> bool {
+    row_label(harness, name).contains(", New ")
+}
+
+/// The cockpit in a window too narrow for the panel, where selecting a
+/// row marks nothing.
+fn narrow_cockpit() -> Harness<'static, App> {
+    let mut harness = support::sized_window((800.0, 700.0), build(cockpit_setup()).app);
+    wait_for_home(&mut harness);
+    harness
+}
+
+#[test]
+fn a_row_looked_at_for_a_second_counts_as_seen_and_keeps_its_commits_listed() {
+    let mut harness = home(cockpit_setup());
+    assert!(shows_new(&harness, "home-tab"));
+    select(
+        &mut harness,
+        "home-tab",
+        "2222222 Show the panel beside the list",
+    );
+    look_for(&mut harness, 1.25);
+
+    let label = row_label(&harness, "home-tab");
+    assert!(label.starts_with("home-tab, Ready, "), "{label}");
+    // The commits the user looks at stay in the panel.
+    harness.get_by_label("2222222 Show the panel beside the list");
+}
+
+#[test]
+fn passing_a_row_with_the_keyboard_marks_nothing() {
+    let mut harness = home(cockpit_setup());
+    select(&mut harness, "paused", "claude/paused");
+    harness.key_press(Key::ArrowDown);
+    harness.step();
+    assert_eq!(rows(&harness).1.as_deref(), Some("home-tab"));
+    harness.key_press(Key::ArrowDown);
+    harness.step();
+    look_for(&mut harness, 2.0);
+
+    assert_eq!(rows(&harness).1.as_deref(), Some("conflict"));
+    assert!(shows_new(&harness, "home-tab"));
+}
+
+#[test]
+fn a_row_the_filter_selects_while_the_user_types_counts_as_not_seen() {
+    let mut harness = home(cockpit_setup());
+    ctrl_o(&mut harness);
+    type_text(&mut harness, "home-t");
+    assert_eq!(rows(&harness).1.as_deref(), Some("home-tab"));
+    look_for(&mut harness, 2.0);
+    type_text(&mut harness, "x");
+    harness.key_press(Key::Escape);
+    harness.run();
+
+    assert!(shows_new(&harness, "home-tab"));
+}
+
+#[test]
+fn opening_a_row_in_a_tab_counts_as_seeing_it() {
+    let mut harness = narrow_cockpit();
+    let at = home_row(&harness, "home-tab").expect("the row").center();
+    click_with(&mut harness, at, PointerButton::Primary);
+    look_for(&mut harness, 2.0);
+    assert!(shows_new(&harness, "home-tab"), "the panel is hidden");
+
+    harness.key_press(Key::Enter);
+    settle_window(&mut harness);
+    harness.state_mut().show_home(false);
+    wait_for_home(&mut harness);
+    assert!(!shows_new(&harness, "home-tab"));
+}
+
+#[test]
+fn mark_as_seen_in_the_context_menu_marks_a_worktree() {
+    let mut harness = narrow_cockpit();
+    choose(&mut harness, "home-tab", "Mark as seen");
+    assert!(!shows_new(&harness, "home-tab"));
+}
+
+#[test]
+fn mark_all_as_seen_marks_every_row_and_every_branch() {
+    let mut harness = narrow_cockpit();
+    assert!(row_label(&harness, "git-bull").contains(", New branches, "));
+    harness
+        .get_by_role_and_label(Role::Button, "Mark all as seen")
+        .click();
+    harness.run();
+
+    assert!(!shows_new(&harness, "home-tab"));
+    assert!(!row_label(&harness, "git-bull").contains("New branches"));
+}
+
+#[test]
+fn a_commit_made_during_the_look_stays_new() {
+    let setup = cockpit_setup();
+    let clock = Arc::clone(&setup.desktop.now);
+    let (test, backend) = build_shared(setup);
+    let mut harness = window(test.app);
+    wait_for_home(&mut harness);
+    // The agent commits on `claude/home-tab`; the home tab has not read it.
+    let mut listed = cockpit_worktrees();
+    let home_tab = path(&["work", "wt", "home-tab"]);
+    for worktree in &mut listed {
+        if worktree.path == home_tab {
+            worktree.head = Some("after".to_owned());
+        }
+    }
+    backend.set_worktrees(listed);
+    backend.set_since(&head_commit(), "after", Since::Commits(1));
+
+    select(
+        &mut harness,
+        "home-tab",
+        "2222222 Show the panel beside the list",
+    );
+    look_for(&mut harness, 2.0);
+    assert!(!shows_new(&harness, "home-tab"));
+    later(&clock, 20);
+    harness.step();
+    step_until(&mut harness, |harness| {
+        row_label(harness, "home-tab").starts_with("home-tab, New 1, ")
+    });
+}
+
+#[test]
+fn what_was_seen_just_before_closing_is_kept() {
+    let TestApp { dir, app } = build(cockpit_setup());
+    let mut harness = window(app);
+    wait_for_home(&mut harness);
+    select(
+        &mut harness,
+        "home-tab",
+        "2222222 Show the panel beside the list",
+    );
+    look_for(&mut harness, 2.0);
+    // As when the window closes.
+    harness.state_mut().save();
+
+    let mut setup = cockpit_setup();
+    setup.seen = Some(SeenFile::beside(&dir.path().join("settings.toml")).load());
+    let harness = home(setup);
+    assert!(!shows_new(&harness, "home-tab"));
 }
