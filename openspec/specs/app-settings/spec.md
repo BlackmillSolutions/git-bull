@@ -14,7 +14,8 @@ configuration directory for applications: theme, colour vision, interface
 size, whether to use the system title bar, whether the diff shows invisible
 characters, whether file lists show a tree of folders, language, the path
 to the Git executable, recently opened and pinned repositories with the
-worktrees last found in them, open tabs in their order and the active tab,
+worktrees last found in them and the base branch the user set for a
+repository, open tabs in their order and the active tab,
 which may be the home tab, window size and position, divider positions and
 column widths. A path that is not valid UTF-8 SHALL be left out of the
 saved settings; the other settings SHALL still be saved.
@@ -64,13 +65,26 @@ saved settings; the other settings SHALL still be saved.
 - **WHEN** git-bull starts with a settings file that names no pinned repositories and no worktrees
 - **THEN** no repository is pinned, the home tab finds the worktrees when it reads the repositories, and every other setting from the file is kept
 
+#### Scenario: Base of a repository survives a restart
+- **WHEN** the user set `dev` as the base of a repository, closes git-bull and starts it again
+- **THEN** the repository is compared with `dev`, shown as set
+
+#### Scenario: Settings file without bases
+- **WHEN** git-bull starts with a settings file that names no base for any repository
+- **THEN** every base is detected, and every other setting from the file is kept
+
+#### Scenario: Base set through another path of the repository
+- **WHEN** the recently opened repositories name a repository by a path written as Git writes it, the user pinned it under its path as the file system writes it, and set its base in the home tab
+- **THEN** the base applies to the repository whichever of its paths lists it, and is kept once in the settings
+
 ### Requirement: Recently opened repositories
 git-bull SHALL remember the 20 most recently opened repositories, most
 recent first. Opening a worktree SHALL count as opening its repository, so
 that the worktrees of one repository take one place. Pinned repositories
 SHALL be kept apart from this limit, in the order the user pinned them.
 Removing a repository from the list of the home tab SHALL remove every path
-of it from the recently opened and from the pinned repositories.
+of it from the recently opened and from the pinned repositories, and SHALL
+forget the base the user set for it.
 
 #### Scenario: List is capped
 - **WHEN** 20 repositories are in the list and the user opens another one
@@ -91,6 +105,10 @@ of it from the recently opened and from the pinned repositories.
 #### Scenario: Removed repository
 - **WHEN** the user removes a pinned repository from the list of the home tab
 - **THEN** it is neither pinned nor among the recently opened repositories
+
+#### Scenario: Removed repository forgets its base
+- **WHEN** the user set the base of a repository to `dev` and removes it from the list of the home tab
+- **THEN** the settings no longer name a base for it
 
 ### Requirement: Settings dialog
 The settings dialog SHALL offer, in a section "Appearance", the theme, the
