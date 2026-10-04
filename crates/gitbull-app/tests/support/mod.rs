@@ -21,7 +21,7 @@ use gitbull_core::settings::{Loaded, Settings, SettingsFile};
 use gitbull_core::workspace::TabState;
 use gitbull_git::Error;
 use gitbull_git::changes::{FileLines, LineCount};
-use gitbull_git::commits::Since;
+use gitbull_git::commits::{CommitEntry, Since};
 use gitbull_git::compare::{BaseComparison, BranchLines, Counts};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::facts::{Branch, Remote, RepositoryFacts, Upstream};
@@ -30,7 +30,9 @@ use gitbull_git::history::CommitLine;
 use gitbull_git::locate::LocateError;
 use gitbull_git::merged::{MergedBy, Prediction};
 use gitbull_git::path::RepoPath;
+use gitbull_git::status::StatusKind;
 use gitbull_git::summary::Summary;
+use gitbull_git::uncommitted::{Uncommitted, UncommittedFile};
 use gitbull_git::version::GitVersion;
 use gitbull_git::worktrees::Worktree;
 use gitbull_testkit::{FakeBackend, fake_id};
@@ -1081,6 +1083,48 @@ pub fn cockpit_setup() -> Setup {
         )
         .with_summary(work("billing-api"), summary(branch("main"), 0, 0, 3 * days))
         .with_since("seen-home", &head, Since::Commits(2))
+        .with_commit_list(
+            "seen-home",
+            &head,
+            vec![
+                CommitEntry {
+                    id: "2".repeat(40),
+                    subject: "Show the panel beside the list".to_owned(),
+                    time: NOW - 40 * minutes,
+                },
+                CommitEntry {
+                    id: "1".repeat(40),
+                    subject: "Fold done worktrees away".to_owned(),
+                    time: NOW - 2 * hours,
+                },
+            ],
+        )
+        .with_uncommitted(
+            wt("fix-reload"),
+            Uncommitted {
+                files: vec![
+                    UncommittedFile {
+                        path: RepoPath::from("src/ui.rs"),
+                        old_path: None,
+                        kind: StatusKind::Changed(gitbull_git::changes::ChangeKind::Modified),
+                        lines: Some(LineCount::Lines {
+                            added: 18,
+                            removed: 4,
+                        }),
+                    },
+                    UncommittedFile {
+                        path: RepoPath::from("notes/reload.md"),
+                        old_path: None,
+                        kind: StatusKind::Untracked,
+                        lines: Some(LineCount::Lines {
+                            added: 12,
+                            removed: 0,
+                        }),
+                    },
+                ],
+                total: 2,
+            },
+        )
         .with_comparison(
             &root,
             "refs/heads/dev",
@@ -1136,13 +1180,18 @@ pub fn cockpit_setup() -> Setup {
                 prediction: Prediction::Conflict,
                 ..compared_with_dev(2, 4, &["src/theme.rs"], 30, 12)
             },
-        );
-    for (name, branch) in agents {
+        )
+        .with_comparison(
+            &root,
+            "refs/heads/claude/old",
+            compared_with_dev(2, 6, &["src/old.rs"], 9, 1),
+        )
+        .with_detected_base(&root, "refs/heads/claude/old", "refs/heads/dev");
+    for (_, branch) in agents {
         let tip = match branch {
             Some(branch) => format!("refs/heads/{branch}"),
             None => head.clone(),
         };
-        let _ = name;
         backend = backend.with_detected_base(&root, &tip, "refs/heads/dev");
     }
     // What was seen: every branch and the detached worktree at their

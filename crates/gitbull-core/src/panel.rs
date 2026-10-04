@@ -455,7 +455,7 @@ impl Work {
 
 /// The repository of the worktree at `path`, by its canonical path, with
 /// its facts.
-fn repository_of<'a>(
+pub(crate) fn repository_of<'a>(
     list: &'a RepositoryList,
     path: &Path,
 ) -> Option<(PathBuf, &'a Arc<RepositoryFacts>)> {

@@ -187,17 +187,11 @@ pub fn copy_button(
     };
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), sense);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
-    let record = Id::new(COPIED);
     if response.clicked()
         && let Some(text) = text
     {
         ui.ctx().copy_text(text.to_owned());
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(record, response.id));
-    }
-    let confirmed = ui.ctx().data(|data| data.get_temp::<Id>(record)) == Some(response.id);
-    if confirmed && !response.hovered() {
-        ui.ctx().data_mut(|data| data.remove::<Id>(record));
+        confirm_copy(ui.ctx(), response.id);
     }
     let ink = match enabled {
         true => color(palette.text),
@@ -208,15 +202,35 @@ pub fn copy_button(
         ink,
     );
     paint_icon_button(ui, &response, rect, icon, radius(), colours);
-    // egui hides a tooltip after a click until the pointer moves; the
-    // confirmation shows at once.
-    if confirmed && response.hovered() {
-        response.show_tooltip_ui(|ui| {
-            ui.label(copied);
-        });
+    if show_copied(&response, copied) {
         return response;
     }
     tooltip(response, name, None)
+}
+
+/// Records that the button `id` copied its text, so that its tooltip
+/// confirms the copy until the pointer leaves it.
+pub fn confirm_copy(ctx: &Context, id: Id) {
+    ctx.data_mut(|data| data.insert_temp(Id::new(COPIED), id));
+}
+
+/// Shows `copied` in the tooltip of the button of `response` while its
+/// copy is confirmed and the pointer stays on it; returns whether it did.
+pub fn show_copied(response: &Response, copied: &str) -> bool {
+    let record = Id::new(COPIED);
+    let confirmed = response.ctx.data(|data| data.get_temp::<Id>(record)) == Some(response.id);
+    if confirmed && !response.hovered() {
+        response.ctx.data_mut(|data| data.remove::<Id>(record));
+    }
+    // egui hides a tooltip after a click until the pointer moves; the
+    // confirmation shows at once.
+    let shown = confirmed && response.hovered();
+    if shown {
+        response.show_tooltip_ui(|ui| {
+            ui.label(copied);
+        });
+    }
+    shown
 }
 
 /// An [`icon_button`] that switches `value` on and off. While on it is

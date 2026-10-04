@@ -83,9 +83,11 @@ pub const OPEN_REMOTE: &str = phosphor::ARROW_SQUARE_OUT;
 pub const PANEL: &str = phosphor::SIDEBAR_SIMPLE;
 /// Marks everything as seen.
 pub const SEEN: &str = phosphor::CHECKS;
+/// Opens the choices of a button, such as how to copy.
+pub const CHOICES: &str = phosphor::CARET_DOWN;
 
 /// Every icon with its name.
-pub const ALL: [(&str, &str); 37] = [
+pub const ALL: [(&str, &str); 38] = [
     ("folder", FOLDER),
     ("refresh", REFRESH),
     ("sun", SUN),
@@ -123,4 +125,5 @@ pub const ALL: [(&str, &str); 37] = [
     ("open remote", OPEN_REMOTE),
     ("panel", PANEL),
     ("seen", SEEN),
+    ("choices", CHOICES),
 ];

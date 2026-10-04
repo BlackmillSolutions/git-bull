@@ -3,17 +3,24 @@
 //! `worktree-cockpit`, decision 12). The text is English, the language
 //! agents are prompted in, whatever the language of the interface.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use gitbull_git::ai_diff::{AiDiff, DiffPart};
+use gitbull_git::ai_diff::{AiDiff, AiDiffRequest, DiffPart};
+use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::LineCount;
 use gitbull_git::commits::CommitEntry;
 use gitbull_git::head::Head;
 use gitbull_git::status::StatusKind;
 use gitbull_git::uncommitted::Uncommitted;
+use gitbull_git::{Backend, ConfigOverride};
 
 use crate::base::Found;
 use crate::comparison::Against;
+use crate::panel::repository_of;
+use crate::pending::Pending;
+use crate::repositories::{RepositoryList, Status};
+use crate::workspace::{Failure, Notify};
 
 /// At most this many commits ahead are listed, the newest of them.
 pub const COMMIT_LIMIT: usize = 100;
@@ -157,6 +164,130 @@ pub fn markdown(context: &Context<'_>) -> String {
         }
     }
     text
+}
+
+/// Copies run in the background: what Git reads for them, and the
+/// Markdown when it is read.
+pub struct AiCopy {
+    backend: Arc<dyn Backend>,
+    notify: Notify,
+    work: Pending<String>,
+}
+
+impl AiCopy {
+    pub fn new(backend: Arc<dyn Backend>, notify: Notify) -> AiCopy {
+        AiCopy {
+            backend,
+            notify,
+            work: Pending::none(),
+        }
+    }
+
+    /// Starts reading the worktree at the canonical `path` of `list`, with
+    /// its diff or not; a copy under way is dropped. Returns whether a copy
+    /// started, which needs the worktree's status.
+    pub fn start(&mut self, list: &RepositoryList, path: &Path, with_diff: bool) -> bool {
+        let Some(reading) = Reading::of(list, path, with_diff) else {
+            return false;
+        };
+        let backend = Arc::clone(&self.backend);
+        self.work.start(&self.notify, move |cancel| {
+            reading.run(backend.as_ref(), cancel)
+        });
+        true
+    }
+
+    /// The Markdown, once it is read.
+    pub fn poll(&mut self) -> Option<Result<String, Failure>> {
+        self.work.take()
+    }
+
+    pub fn is_copying(&self) -> bool {
+        self.work.is_running()
+    }
+}
+
+/// What a copy reads, with everything it needs from the list.
+struct Reading {
+    repository: PathBuf,
+    worktree: PathBuf,
+    head: Head,
+    /// The commit of HEAD.
+    tip: Option<String>,
+    against: Option<Against>,
+    overrides: Vec<ConfigOverride>,
+    /// The worktree reads its own configuration.
+    own_config: bool,
+    with_diff: bool,
+}
+
+impl Reading {
+    fn of(list: &RepositoryList, path: &Path, with_diff: bool) -> Option<Reading> {
+        let (repository, facts) = repository_of(list, path)?;
+        let Status::Read { summary, .. } = list.status(path) else {
+            return None;
+        };
+        let comparison = list.comparison(path);
+        Some(Reading {
+            repository: list.shown(&repository),
+            worktree: list.shown(path),
+            head: summary.head.clone(),
+            tip: comparison.map(|comparison| comparison.tips.head.clone()),
+            against: comparison.and_then(|comparison| comparison.against.clone()),
+            overrides: facts.overrides.clone(),
+            own_config: facts.worktree_config && path != repository,
+            with_diff,
+        })
+    }
+
+    fn run(
+        self,
+        backend: &dyn Backend,
+        cancel: &CancelToken,
+    ) -> Result<String, gitbull_git::Error> {
+        let shared = (!self.own_config).then_some(self.overrides.as_slice());
+        let uncommitted = backend.uncommitted(&self.worktree, shared, cancel)?;
+        let mut commits = Vec::new();
+        if let (Some(against), Some(tip)) = (&self.against, &self.tip)
+            && against.ahead > 0
+        {
+            commits = backend.commit_list(
+                &self.repository,
+                &against.counted,
+                tip,
+                COMMIT_LIMIT,
+                cancel,
+            )?;
+        }
+        let diff = match self.with_diff {
+            true => {
+                let left_at = self
+                    .against
+                    .as_ref()
+                    .and_then(|against| against.lines.as_ref())
+                    .map(|lines| lines.merge_base.as_str());
+                let branch = left_at.zip(self.tip.as_deref());
+                let request = AiDiffRequest {
+                    repo: &self.repository,
+                    overrides: &self.overrides,
+                    branch,
+                    worktree: &self.worktree,
+                    own_config: self.own_config,
+                };
+                Some(backend.ai_diff(&request, cancel)?)
+            }
+            false => None,
+        };
+        Ok(markdown(&Context {
+            repository: &self.repository,
+            worktree: &self.worktree,
+            head: &self.head,
+            against: self.against.as_ref(),
+            commits: &commits,
+            uncommitted: &uncommitted,
+            diff: diff.as_ref(),
+        }))
+    }
 }
 
 /// `parts` in a code block of a diff, fenced with more backticks than any

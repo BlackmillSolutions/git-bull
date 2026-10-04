@@ -678,26 +678,14 @@ fn a_double_click_opens_a_worktree() {
     assert_eq!(tab_titles(harness.state()), ["git-bull-fix-reload"]);
 }
 
-#[test]
-fn tab_and_shift_tab_move_between_the_filter_and_the_list() {
-    let mut harness = tab_shown();
-    ctrl_o(&mut harness);
-    assert!(focused(&harness, gitbull_app::home_view::HOME_FILTER));
-
-    harness.key_press(Key::Tab);
-    harness.run();
-    assert!(focused(&harness, gitbull_app::home_view::HOME_LIST));
-
-    harness.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
-    harness.run();
-    assert!(focused(&harness, gitbull_app::home_view::HOME_FILTER));
-}
-
 /// The entries a context menu of the home tab can have.
-const ENTRIES: [&str; 6] = [
+const ENTRIES: [&str; 9] = [
     "Open",
     "Show in file manager",
     "Copy path",
+    "Copy as AI context",
+    "Copy as AI context with diff",
+    "Open remote",
     "Pin",
     "Unpin",
     "Remove from list",
@@ -726,17 +714,23 @@ fn open_menu(harness: &mut Harness<'_, App>, name: &str) {
 }
 
 /// The entries of the context menu open now, without the toolbar's Open,
-/// which lies above every row.
+/// which lies above every row, and the actions of the panel, which lie
+/// right of the list.
 fn entries(harness: &Harness<'_, App>) -> Vec<String> {
     let toolbar = harness
         .query_all_by_role_and_label(Role::Button, "Open")
         .map(|node| node.rect().top())
         .fold(f32::INFINITY, f32::min);
+    let panel = harness
+        .query_by_role_and_label(Role::List, "Details")
+        .map_or(f32::INFINITY, |node| node.rect().left());
     harness
         .query_all_by_role(Role::Button)
         .filter(|node| {
             let label = node.accesskit_node().label().unwrap_or_default();
-            ENTRIES.contains(&label.as_str()) && !(label == "Open" && node.rect().top() == toolbar)
+            ENTRIES.contains(&label.as_str())
+                && !(label == "Open" && node.rect().top() == toolbar)
+                && node.rect().left() < panel
         })
         .map(|node| node.accesskit_node().label().unwrap_or_default())
         .collect()
@@ -776,6 +770,8 @@ fn the_context_menu_of_a_repository_offers_every_action() {
             "Open",
             "Show in file manager",
             "Copy path",
+            "Copy as AI context",
+            "Copy as AI context with diff",
             "Pin",
             "Remove from list"
         ]
@@ -788,7 +784,13 @@ fn the_context_menu_of_a_worktree_offers_no_pin_and_no_remove() {
     open_menu(&mut harness, "git-bull-fix-reload");
     assert_eq!(
         entries(&harness),
-        ["Open", "Show in file manager", "Copy path"]
+        [
+            "Open",
+            "Show in file manager",
+            "Copy path",
+            "Copy as AI context",
+            "Copy as AI context with diff"
+        ]
     );
 }
 
@@ -1356,4 +1358,470 @@ fn a_repository_with_new_branches_shows_a_mark() {
     let label = row_label(&harness, "git-bull");
     assert!(label.contains(", New branches, "), "{label}");
     assert!(!row_label(&harness, "web-shop").contains("New branches"));
+}
+
+// The detail panel (spec `repository-manager`, "Detail panel", "Base
+// branch" and the keyboard of "Switching between repositories").
+
+use gitbull_app::home_panel::HOME_PANEL;
+use gitbull_app::home_view::{HOME_FILTER, HOME_LIST};
+
+/// Selects the row of the list named `name` with a click and steps until
+/// the panel shows `shown`.
+fn select(harness: &mut Harness<'_, App>, name: &str, shown: &str) {
+    let at = home_row(harness, name)
+        .unwrap_or_else(|| panic!("no row {name}"))
+        .center();
+    click_with(harness, at, PointerButton::Primary);
+    step_until(harness, |harness| harness.query_by_label(shown).is_some());
+}
+
+/// The labels of the rows and headings of the panel; the list of the home
+/// tab has tree items instead.
+fn panel_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::ListItem)
+        .chain(harness.query_all_by_role(Role::Heading))
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
+#[test]
+fn the_panel_of_a_worktree_shows_its_base_its_new_commits_its_files_and_its_actions() {
+    let mut harness = home(cockpit_setup());
+    select(
+        &mut harness,
+        "home-tab",
+        "2222222 Show the panel beside the list",
+    );
+
+    let rows = panel_rows(&harness);
+    for row in [
+        "claude/home-tab",
+        "Base dev, detected",
+        "5 ahead, 1 behind",
+        "+1240 −312 in 2 files",
+        "2 new commits",
+        "2222222 Show the panel beside the list",
+        "1111111 Fold done worktrees away",
+        "Changed against dev",
+        "src/ui.rs, 620 added, 156 removed",
+        "src/home_view.rs, 620 added, 156 removed",
+        "With fix-reload",
+    ] {
+        assert!(rows.iter().any(|label| label == row), "{row} in {rows:?}");
+    }
+    assert_eq!(
+        harness
+            .query_all_by_role_and_label(Role::Button, "Open")
+            .count(),
+        2,
+        "Open in the toolbar and in the panel"
+    );
+    for action in ["Copy as AI context", "Show in file manager", "Open remote"] {
+        harness.get_by_role_and_label(Role::Button, action);
+    }
+}
+
+#[test]
+fn the_panel_lists_uncommitted_files_and_an_untracked_one_as_added() {
+    let mut harness = home(cockpit_setup());
+    select(&mut harness, "fix-reload", "Uncommitted");
+
+    let rows = panel_rows(&harness);
+    for row in [
+        "src/ui.rs, Modified, 18 added, 4 removed",
+        "notes/reload.md, Added, 12 added, 0 removed",
+    ] {
+        assert!(rows.iter().any(|label| label == row), "{row} in {rows:?}");
+    }
+}
+
+#[test]
+fn the_panel_of_a_repository_shows_its_base_its_worktrees_and_its_branches() {
+    let mut harness = home(cockpit_setup());
+    select(&mut harness, "git-bull", "Branches without a worktree");
+
+    let combo = harness.get_by_role_and_label(Role::ComboBox, "Base");
+    assert_eq!(combo.accesskit_node().value().as_deref(), Some("Detect"));
+    let rows = panel_rows(&harness);
+    for row in [
+        "Worktrees",
+        "conflict, Conflict, 2 ahead, 4 behind",
+        "fix-reload, Working, 3 ahead, 0 behind",
+        "review, Ready, 1 ahead, 0 behind",
+        "Branches without a worktree",
+        "claude/old, New 2, 2 ahead, 6 behind",
+    ] {
+        assert!(rows.iter().any(|label| label == row), "{row} in {rows:?}");
+    }
+}
+
+/// Chooses `entry` in the chooser of the base of the repository shown in
+/// the panel.
+fn choose_base(harness: &mut Harness<'_, App>, entry: &str) {
+    harness
+        .get_by_role_and_label(Role::ComboBox, "Base")
+        .click();
+    harness.run();
+    harness
+        .query_all_by_label(entry)
+        .rfind(|node| node.accesskit_node().role() != Role::ComboBox)
+        .expect("the entry of the chooser")
+        .click();
+    harness.run();
+}
+
+#[test]
+fn a_base_set_by_the_user_applies_to_every_worktree_also_after_a_restart() {
+    let mut harness = home(cockpit_setup());
+    select(&mut harness, "git-bull", "Branches without a worktree");
+    choose_base(&mut harness, "dev");
+
+    let set = &harness.state().settings().bases;
+    assert_eq!(set.len(), 1);
+    assert_eq!(set[0].branch, "dev");
+    select(&mut harness, "home-tab", "Base dev, set");
+
+    let mut setup = cockpit_setup();
+    setup.settings = harness.state().settings().clone();
+    let mut harness = home(setup);
+    select(&mut harness, "fix-reload", "Base dev, set");
+}
+
+#[test]
+fn choosing_detect_lets_the_base_be_detected_again() {
+    let mut harness = home(cockpit_setup());
+    select(&mut harness, "git-bull", "Branches without a worktree");
+    choose_base(&mut harness, "dev");
+    choose_base(&mut harness, "Detect");
+
+    assert!(harness.state().settings().bases.is_empty());
+    select(&mut harness, "home-tab", "Base dev, detected");
+}
+
+#[test]
+fn a_narrow_window_hides_the_panel_until_the_user_shows_it() {
+    let mut harness = support::sized_window((800.0, 700.0), build(cockpit_setup()).app);
+    wait_for_home(&mut harness);
+    let at = home_row(&harness, "home-tab").expect("the row").center();
+    click_with(&mut harness, at, PointerButton::Primary);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::List, "Details")
+            .is_none()
+    );
+
+    harness.get_by_label("Show details").click();
+    step_until(&mut harness, |harness| {
+        harness.query_by_label("Base dev, detected").is_some()
+    });
+    harness.get_by_role_and_label(Role::List, "Details");
+}
+
+#[test]
+fn tab_and_shift_tab_move_between_the_filter_the_list_and_the_panel() {
+    let mut harness = tab_shown();
+    ctrl_o(&mut harness);
+    assert!(focused(&harness, HOME_FILTER));
+
+    for area in [HOME_LIST, HOME_PANEL, HOME_FILTER] {
+        harness.key_press(Key::Tab);
+        harness.run();
+        assert!(focused(&harness, area), "{area}");
+    }
+    for area in [HOME_PANEL, HOME_LIST, HOME_FILTER] {
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+        harness.run();
+        assert!(focused(&harness, area), "{area}");
+    }
+    // The panel is a named area for assistive technology.
+    harness.get_by_role_and_label(Role::List, "Details");
+}
+
+#[test]
+fn tab_leaves_out_the_hidden_panel() {
+    let mut setup = home_setup();
+    setup.settings.tabs = vec![path(&["work", "git-bull"])];
+    setup.settings.active_tab = Some(0);
+    let mut harness = support::sized_window((800.0, 700.0), build(setup).app);
+    settle_window(&mut harness);
+    ctrl_o(&mut harness);
+    harness.key_press(Key::Tab);
+    harness.run();
+    assert!(focused(&harness, HOME_LIST));
+
+    harness.key_press(Key::Tab);
+    harness.run();
+    assert!(focused(&harness, HOME_FILTER));
+}
+
+// The actions of the panel and of the context menu (spec
+// `repository-manager`, "Copy as AI context", "Open remote" and "Branches
+// without a worktree").
+
+use gitbull_core::seen::Key as SeenKey;
+use gitbull_core::sidebar_tree::SidebarKey;
+use gitbull_git::ai_diff::{AiDiff, DiffPart};
+use gitbull_git::commits::CommitEntry;
+use gitbull_git::history::CommitLine;
+use gitbull_git::refs::{RefKind, Reference};
+use support::{head_commit, wait_for_references};
+
+/// Steps until a frame puts text on the clipboard, and returns it.
+fn copied_soon(harness: &mut Harness<'_, App>) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        harness.step();
+        if let Some(text) = copied(harness) {
+            return text;
+        }
+        assert!(Instant::now() < deadline, "nothing was copied");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Clicks the button named `name` with the pointer, which stays on it,
+/// and leaves the frames that follow to the caller.
+fn press_button(harness: &mut Harness<'_, App>, name: &str) {
+    let at = harness
+        .get_by_role_and_label(Role::Button, name)
+        .rect()
+        .center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+}
+
+/// The cockpit, with three commits of `claude/fix-reload` ahead of `dev`
+/// and the diffs of `fix-reload`.
+fn copy_setup() -> Setup {
+    let mut setup = cockpit_setup();
+    let commit = |n: u8, subject: &str| CommitEntry {
+        id: n.to_string().repeat(40),
+        subject: subject.to_owned(),
+        time: 0,
+    };
+    setup.backend = setup
+        .backend
+        .with_commit_list(
+            "refs/heads/dev",
+            &head_commit(),
+            vec![
+                commit(3, "Read the tab again"),
+                commit(2, "Keep the selection"),
+                commit(1, "Watch the folder"),
+            ],
+        )
+        .with_ai_diff(
+            path(&["work", "wt", "fix-reload"]),
+            AiDiff {
+                branch: vec![DiffPart::Text(
+                    b"diff --git a/src/ui.rs b/src/ui.rs\n+committed line\n".to_vec(),
+                )],
+                uncommitted: vec![DiffPart::Text(
+                    b"diff --git a/notes/reload.md b/notes/reload.md\n+uncommitted line\n".to_vec(),
+                )],
+                left_out: 0,
+            },
+        );
+    setup
+}
+
+#[test]
+fn copy_as_ai_context_copies_the_summary_and_confirms_it() {
+    let mut harness = home(copy_setup());
+    select(&mut harness, "fix-reload", "Uncommitted");
+    press_button(&mut harness, "Copy as AI context");
+    let text = copied_soon(&mut harness);
+
+    for part in [
+        "# Worktree `fix-reload` of `git-bull`",
+        "- Branch: `claude/fix-reload`",
+        "- Base: `dev` (detected)",
+        "- Ahead: 3, behind: 0",
+        "- `src/ui.rs` +24 −8",
+        "- `Cargo.toml` +24 −8",
+        "- modified `src/ui.rs` +18 −4",
+        "- untracked `notes/reload.md` +12 −0",
+    ] {
+        assert!(text.contains(part), "{part} in\n{text}");
+    }
+    let order: Vec<usize> = [
+        "Watch the folder",
+        "Keep the selection",
+        "Read the tab again",
+    ]
+    .iter()
+    .map(|subject| text.find(subject).expect(subject))
+    .collect();
+    assert!(order.is_sorted(), "oldest first:\n{text}");
+    assert!(!text.contains("```diff"));
+
+    harness.run();
+    harness.get_by_label("Copied");
+}
+
+#[test]
+fn with_diff_adds_the_diffs_of_the_branch_and_of_the_uncommitted_changes() {
+    let mut harness = home(copy_setup());
+    select(&mut harness, "fix-reload", "Uncommitted");
+    press_button(&mut harness, "More ways to copy as AI context");
+    harness.run();
+    harness.get_by_label("With diff").click();
+    let text = copied_soon(&mut harness);
+
+    let summary = text.find("## Uncommitted files").expect("the summary");
+    let branch = text
+        .find("+committed line")
+        .expect("the diff of the branch");
+    let uncommitted = text
+        .find("+uncommitted line")
+        .expect("the uncommitted diff");
+    assert!(summary < branch && branch < uncommitted, "{text}");
+    assert!(!text.contains("left out"), "{text}");
+}
+
+#[test]
+fn the_context_menu_copies_a_worktree_as_ai_context() {
+    let mut harness = home(copy_setup());
+    open_menu(&mut harness, "fix-reload");
+    harness
+        .query_all_by_role_and_label(Role::Button, "Copy as AI context with diff")
+        .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("the entry")
+        .click();
+    let text = copied_soon(&mut harness);
+    assert!(text.contains("+uncommitted line"), "{text}");
+}
+
+/// The address the last frame asked the browser to open.
+fn opened_url(harness: &Harness<'_, App>) -> Option<String> {
+    harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+            _ => None,
+        })
+}
+
+#[test]
+fn open_remote_opens_the_web_page_of_an_ssh_remote_and_names_it_first() {
+    let mut harness = home(cockpit_setup());
+    select(&mut harness, "git-bull", "Worktrees");
+    let at = harness
+        .get_by_role_and_label(Role::Button, "Open remote")
+        .rect()
+        .center();
+    harness.hover_at(at);
+    harness.run();
+    harness.get_by_label("https://github.com/blackmill/git-bull");
+
+    harness
+        .get_by_role_and_label(Role::Button, "Open remote")
+        .click();
+    harness.step();
+    assert_eq!(
+        opened_url(&harness).as_deref(),
+        Some("https://github.com/blackmill/git-bull")
+    );
+
+    select(&mut harness, "fix-reload", "Uncommitted");
+    harness
+        .get_by_role_and_label(Role::Button, "Open remote")
+        .click();
+    harness.step();
+    assert_eq!(
+        opened_url(&harness).as_deref(),
+        Some("https://github.com/blackmill/git-bull/tree/claude/fix-reload")
+    );
+    open_menu(&mut harness, "fix-reload");
+    assert!(entries(&harness).contains(&"Open remote".to_owned()));
+}
+
+#[test]
+fn a_repository_without_a_web_address_offers_no_open_remote() {
+    let mut harness = home(cockpit_setup());
+    let at = home_row(&harness, "web-shop").expect("the row").center();
+    click_with(&mut harness, at, PointerButton::Primary);
+    step_until(&mut harness, |harness| {
+        harness
+            .query_all_by_role_and_label(Role::Button, "Open")
+            .count()
+            == 2
+    });
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Open remote")
+            .is_none()
+    );
+    open_menu(&mut harness, "web-shop");
+    assert!(!entries(&harness).contains(&"Open remote".to_owned()));
+}
+
+#[test]
+fn a_branch_waiting_for_its_merge_is_ready_and_opens_in_its_repository_tab() {
+    let mut setup = cockpit_setup();
+    let root = path(&["work", "git-bull"]);
+    // The user saw `claude/old` at its tip, kept when its worktree went.
+    if let Some(seen) = &mut setup.seen {
+        let key = SeenKey::Branch {
+            repository: root.clone(),
+            branch: "claude/old".to_owned(),
+        };
+        seen.mark(key, "old-tip");
+    }
+    setup.backend = setup
+        .backend
+        .with_history(
+            &root,
+            vec![CommitLine {
+                timestamp: 0,
+                id: fake_id("old"),
+                parents: Vec::new(),
+            }],
+        )
+        .with_references(
+            &root,
+            vec![Reference {
+                name: "refs/heads/claude/old".to_owned(),
+                short: "claude/old".to_owned(),
+                kind: RefKind::Branch,
+                commit: Some(fake_id("old").to_string()),
+                upstream: None,
+            }],
+        );
+    // A double click needs the time of real frames between its clicks.
+    let mut harness = support::window_at_60_fps(build(setup).app);
+    wait_for_home(&mut harness);
+    let branch = "claude/old, Ready, 2 ahead, 6 behind";
+    select(&mut harness, "git-bull", branch);
+
+    // Apart from the click that selected the repository, so that egui
+    // does not count three clicks.
+    for _ in 0..40 {
+        harness.step();
+    }
+    let at = harness.get_by_label(branch).rect().center();
+    support::double_click_at(&mut harness, at);
+    settle_window(&mut harness);
+    wait_for_references(&mut harness);
+    harness.run();
+
+    assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
+    let workspace = harness.state().workspace().expect("the workspace");
+    let tab = workspace.active().expect("the tab");
+    assert_eq!(
+        tab.sidebar_selection(),
+        &SidebarKey::Reference("refs/heads/claude/old".to_owned())
+    );
 }

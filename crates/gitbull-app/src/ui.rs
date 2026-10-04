@@ -668,6 +668,11 @@ fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>
             args.set("error", error.clone());
             app.texts.text_with(Msg::HomeFileManagerFailed, Some(&args))
         }
+        Notice::CopyFailed(error) => {
+            let mut args = FluentArgs::new();
+            args.set("error", error.clone());
+            app.texts.text_with(Msg::CockpitCopyFailed, Some(&args))
+        }
     };
     let show_all = app.texts.text(Msg::NoticeShowAllBranches);
     let offered: &[&str] = match notice {
@@ -696,7 +701,8 @@ fn notice_kind(notice: &Notice) -> BannerKind {
         | Notice::NotACommit(_)
         | Notice::HashUnknown(_)
         | Notice::HashAmbiguous(_)
-        | Notice::FileManagerFailed(_) => BannerKind::Warning,
+        | Notice::FileManagerFailed(_)
+        | Notice::CopyFailed(_) => BannerKind::Warning,
     }
 }
 

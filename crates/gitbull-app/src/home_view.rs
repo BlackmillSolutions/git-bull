@@ -12,6 +12,8 @@ use eframe::egui::{
     TextFormat, TextStyle, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 use fluent_bundle::FluentArgs;
+use gitbull_core::panel::Selected;
+use gitbull_core::remote_web::open_remote;
 use gitbull_core::repositories::{Problem, Repository, RepositoryList, Row, Section, Status};
 use gitbull_core::state::MainState;
 use gitbull_git::head::Head;
@@ -19,6 +21,7 @@ use gitbull_git::head::Head;
 use crate::app::App;
 use crate::commit_list::{SHORT_HASH, color, take_copy};
 use crate::components::{self, Button, Kind, TREE_INDENT, TREE_LEFT};
+use crate::home_panel::{self, HOME_PANEL, PanelAction};
 use crate::i18n::{Msg, Translations};
 use crate::icons;
 use crate::style;
@@ -37,13 +40,21 @@ const CHANGES_WIDTH: f32 = 104.0;
 const ACTIVE_WIDTH: f32 = 64.0;
 /// The width of the columns of the commits ahead and behind, and of the
 /// lines against the base.
-const COUNTS_WIDTH: f32 = 72.0;
-const LINES_WIDTH: f32 = 96.0;
+const COUNTS_WIDTH: f32 = 60.0;
+const LINES_WIDTH: f32 = 88.0;
 /// The room of a mark beside the chip, such as an overlap.
 const MARK: f32 = 14.0;
-/// Below this width the home tab leaves out the changed files and writes
-/// numbers short.
+/// Below this width the home tab leaves out the changed files, writes
+/// numbers short, and hides the panel until the user shows it.
 const NARROW: f32 = 900.0;
+/// Below this width a row leaves out its lines as well, which the panel
+/// shows for the row selected.
+const SLIM: f32 = 600.0;
+/// The share of the area the panel takes, and its least and greatest
+/// width.
+const PANEL_SHARE: f32 = 0.4;
+const PANEL_MIN: f32 = 320.0;
+const PANEL_MAX: f32 = 560.0;
 /// The room of the triangle left of a repository's name.
 const TRIANGLE: f32 = 14.0;
 
@@ -57,6 +68,8 @@ enum HomeAction {
     Pin(PathBuf),
     Unpin(Vec<PathBuf>),
     Forget(Vec<PathBuf>),
+    /// The panel's actions, which the context menu shares.
+    Panel(PanelAction),
 }
 
 /// The texts of the home tab, read before the list is borrowed.
@@ -79,6 +92,9 @@ struct Texts {
     pin: String,
     unpin: String,
     remove: String,
+    copy_ai: String,
+    copy_ai_diff: String,
+    open_remote: String,
 }
 
 impl Texts {
@@ -102,6 +118,9 @@ impl Texts {
             pin: texts.text(Msg::HomePin),
             unpin: texts.text(Msg::HomeUnpin),
             remove: texts.text(Msg::HomeRemove),
+            copy_ai: texts.text(Msg::CockpitCopyAi),
+            copy_ai_diff: texts.text(Msg::CockpitCopyAiDiff),
+            open_remote: texts.text(Msg::CockpitOpenRemote),
         }
     }
 }
@@ -133,8 +152,22 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui) {
             HomeAction::Pin(path) => app.pin(path),
             HomeAction::Unpin(paths) => app.unpin(&paths),
             HomeAction::Forget(paths) => app.forget(&paths),
+            HomeAction::Panel(action) => match action {
+                PanelAction::Open(path) => app.open(path),
+                PanelAction::Reveal(path) => app.reveal(&path),
+                PanelAction::OpenRemote(address) => {
+                    ui.ctx().open_url(eframe::egui::OpenUrl::new_tab(address));
+                }
+                PanelAction::SetBase(repository, branch) => app.set_base(&repository, branch),
+                PanelAction::CopyAi(path, with_diff) => app.copy_ai(&path, with_diff),
+                PanelAction::OpenBranch(repository, branch) => {
+                    let path = app.home.list.shown(&repository);
+                    app.open_branch(path, &branch);
+                }
+            },
         }
     }
+    app.finish_ai_copy(ui.ctx());
 }
 
 fn draw(
@@ -147,7 +180,14 @@ fn draw(
     actions: &mut Vec<HomeAction>,
 ) {
     let (home, translations) = (&mut app.home, &app.texts);
-    move_between_areas(ui, &[HOME_FILTER, HOME_LIST]);
+    // The panel shows beside the list where the area is wide enough, and
+    // in a narrow one when the user shows it.
+    let wide = ui.available_width() >= NARROW;
+    let panel_visible = wide || home.panel_shown;
+    match panel_visible {
+        true => move_between_areas(ui, &[HOME_FILTER, HOME_LIST, HOME_PANEL]),
+        false => move_between_areas(ui, &[HOME_FILTER, HOME_LIST]),
+    }
     let (field, list_id) = (Id::new(HOME_FILTER), Id::new(HOME_LIST));
     if std::mem::take(&mut home.focus_filter) {
         ui.memory_mut(|memory| memory.request_focus(field));
@@ -160,7 +200,11 @@ fn draw(
             .kind(Kind::Primary)
             .icon(icons::FOLDER);
         let gap = ui.spacing().item_spacing.x;
-        let width = ui.available_width() - button.width(ui) - gap;
+        let toggle = match wide {
+            true => 0.0,
+            false => SHAPE.control_height + gap,
+        };
+        let width = ui.available_width() - button.width(ui) - gap - toggle;
         let keys = EventFilter {
             horizontal_arrows: true,
             vertical_arrows: true,
@@ -198,11 +242,123 @@ fn draw(
         {
             open_selected = true;
         }
+        if !wide {
+            let name = translations.text(Msg::CockpitShow);
+            components::toggle_icon_button(ui, icons::PANEL, &name, &mut home.panel_shown);
+        }
         if button.show(ui).clicked() {
             actions.push(HomeAction::ChooseFolder);
         }
     });
     ui.add_space(SHAPE.space[1] - ui.spacing().item_spacing.y);
+
+    // The list and the panel share the area as two columns.
+    let area = ui.available_rect_before_wrap();
+    let panel_width = match panel_visible {
+        true => (area.width() * PANEL_SHARE).clamp(PANEL_MIN, PANEL_MAX),
+        false => 0.0,
+    };
+    let list_rect = Rect::from_min_max(area.min, pos2(area.right() - panel_width, area.bottom()));
+    let panel_rect = Rect::from_min_max(pos2(list_rect.right(), area.top()), area.max);
+    ui.scope_builder(UiBuilder::new().max_rect(list_rect), |ui| {
+        list_area(
+            ui,
+            home,
+            translations,
+            texts,
+            palette,
+            now,
+            !wide,
+            open_selected,
+            actions,
+        );
+    });
+    if panel_visible {
+        let selected = home
+            .list
+            .selected_row()
+            .and_then(|row| selected_of(&home.list, row));
+        if let Some(panel) = &mut home.panel {
+            panel.poll();
+            panel.show(&home.list, selected.clone());
+        }
+        let remote = selected
+            .as_ref()
+            .and_then(|selected| remote_of(&home.list, selected));
+        ui.painter().vline(
+            panel_rect.left(),
+            panel_rect.y_range(),
+            eframe::egui::Stroke::new(1.0, color(palette.border)),
+        );
+        let inner = panel_rect.shrink2(vec2(SHAPE.space[2], 0.0));
+        let mut panel_actions = Vec::new();
+        ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
+            home_panel::show(
+                ui,
+                home,
+                selected.as_ref(),
+                remote.as_deref(),
+                translations,
+                palette,
+                now,
+                &mut panel_actions,
+            );
+        });
+        actions.extend(panel_actions.into_iter().map(HomeAction::Panel));
+    }
+    ui.advance_cursor_after_rect(area);
+}
+
+/// What the panel shows for the row at `row`.
+fn selected_of(list: &RepositoryList, row: usize) -> Option<Selected> {
+    match *list.rows().get(row)? {
+        Row::Repository { index, .. } => Some(Selected::Repository(
+            list.repositories()[index].path.clone(),
+        )),
+        Row::Worktree { repository, index } => Some(Selected::Worktree(
+            list.repositories()[repository].worktrees[index].clone(),
+        )),
+        Row::Title(_) | Row::Done { .. } => None,
+    }
+}
+
+/// The web page Open remote opens for `selected`, if its remote has one.
+fn remote_of(list: &RepositoryList, selected: &Selected) -> Option<String> {
+    let (repository, branch) = match selected {
+        Selected::Repository(path) => (path.clone(), None),
+        Selected::Worktree(path) => {
+            let repository = list
+                .repositories()
+                .iter()
+                .find(|repository| repository.worktrees.contains(path))?;
+            let branch = match list.status(path) {
+                Status::Read { summary, .. } => match &summary.head {
+                    Head::Branch(branch) => Some(branch.clone()),
+                    Head::Detached(_) => None,
+                },
+                _ => None,
+            };
+            (repository.path.clone(), branch)
+        }
+    };
+    let (facts, _) = list.facts(&repository)?;
+    open_remote(facts, branch.as_deref())
+}
+
+/// The list of the home tab, below the filter.
+#[allow(clippy::too_many_arguments)]
+fn list_area(
+    ui: &mut Ui,
+    home: &mut crate::app::Home,
+    translations: &Translations,
+    texts: &Texts,
+    palette: &Palette,
+    now: i64,
+    narrow: bool,
+    mut open_selected: bool,
+    actions: &mut Vec<HomeAction>,
+) {
+    let list_id = Id::new(HOME_LIST);
 
     let list = &mut home.list;
     list.set_filter(&home.filter);
@@ -223,7 +379,6 @@ fn draw(
 
     let before = home.rows.selected();
     let rows = list.rows().to_vec();
-    let narrow = ui.available_width() < NARROW;
     let output = VirtualList::new(list_id, Role::Tree, &texts.name, rows.len() as u64).show(
         ui,
         &mut home.rows,
@@ -368,6 +523,13 @@ fn draw(
 #[derive(Clone, Debug)]
 pub(crate) struct RowMenu {
     path: PathBuf,
+    /// The canonical path, by which the list knows the row.
+    canonical: PathBuf,
+    /// It has a working copy whose status was read, which Copy as AI
+    /// context copies.
+    copies: bool,
+    /// The web page Open remote opens.
+    remote: Option<String>,
     /// For a repository, every path it is known by, and whether it is
     /// pinned.
     repository: Option<(Vec<PathBuf>, bool)>,
@@ -386,11 +548,18 @@ fn menu_of(list: &RepositoryList, row: &Row) -> Option<RowMenu> {
                     paths.push(path.clone());
                 }
             }
+            let readable = readable(repository, list);
+            let selected = Selected::Repository(repository.path.clone());
             Some(RowMenu {
                 path: list.shown(&repository.path),
+                canonical: repository.path.clone(),
+                copies: readable
+                    && !repository.bare
+                    && matches!(list.status(&repository.path), Status::Read { .. }),
+                remote: remote_of(list, &selected),
                 repository: Some((paths, repository.section == Section::Pinned)),
                 found: repository.problem != Some(Problem::NotFound),
-                readable: readable(repository, list),
+                readable,
             })
         }
         Row::Worktree { repository, index } => {
@@ -398,6 +567,9 @@ fn menu_of(list: &RepositoryList, row: &Row) -> Option<RowMenu> {
             let readable = !matches!(list.status(path), Status::Failed(_));
             Some(RowMenu {
                 path: list.shown(path),
+                canonical: path.clone(),
+                copies: matches!(list.status(path), Status::Read { .. }),
+                remote: remote_of(list, &Selected::Worktree(path.clone())),
                 repository: None,
                 found: true,
                 readable,
@@ -429,6 +601,16 @@ fn context_menu(ui: &mut Ui, menu: &RowMenu, texts: &Texts, actions: &mut Vec<Ho
     if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
         ui.ctx().copy_text(menu.path.display().to_string());
         ui.close();
+    }
+    if menu.found && menu.copies {
+        for (label, with_diff) in [(&texts.copy_ai, false), (&texts.copy_ai_diff, true)] {
+            let copy = PanelAction::CopyAi(menu.canonical.clone(), with_diff);
+            item(ui, label, Some(HomeAction::Panel(copy)));
+        }
+    }
+    if let Some(address) = &menu.remote {
+        let open = PanelAction::OpenRemote(address.clone());
+        item(ui, &texts.open_remote, Some(HomeAction::Panel(open)));
     }
     if let Some((paths, pinned)) = &menu.repository {
         if menu.found {
@@ -557,7 +739,11 @@ impl Cockpit {
 
 /// The chip of a main state: its icon, its word and its colours; Done and
 /// Idle have none.
-fn chip_of(state: MainState, translations: &Translations, palette: &Palette) -> Option<Chip3> {
+pub(crate) fn chip_of(
+    state: MainState,
+    translations: &Translations,
+    palette: &Palette,
+) -> Option<Chip3> {
     let (icon, word, chip) = match state {
         MainState::Conflict => (
             icons::CONFLICT,
@@ -594,7 +780,7 @@ fn chip_of(state: MainState, translations: &Translations, palette: &Palette) -> 
 }
 
 /// A chip: its icon, its word and its colours.
-type Chip3 = (&'static str, String, Chip);
+pub(crate) type Chip3 = (&'static str, String, Chip);
 
 /// The texts of the cells of a row, and how they are coloured.
 struct Cells {
@@ -759,13 +945,13 @@ fn short_number(count: u64, narrow: bool) -> String {
     }
 }
 
-fn first_line(message: &str) -> String {
+pub(crate) fn first_line(message: &str) -> String {
     message.lines().next().unwrap_or_default().trim().to_owned()
 }
 
 /// How long ago `then` was before `now`, both in seconds since 1970: just
 /// now, or minutes, hours, days or weeks.
-fn ago(translations: &Translations, now: i64, then: i64) -> String {
+pub(crate) fn ago(translations: &Translations, now: i64, then: i64) -> String {
     let (msg, count) = ago_in(now - then);
     let mut args = FluentArgs::new();
     args.set("count", count);
@@ -810,7 +996,8 @@ fn title_row(ui: &mut Ui, title: &str) {
 /// A repository at `depth` 0 or a worktree at 1: its triangle when it has
 /// worktrees, expanded or not, its name and its cells, and its node for
 /// assistive technology. In a `narrow` area the column of the changed
-/// files is left out and numbers are short.
+/// files is left out and numbers are short; in a slim row the column of the
+/// lines too.
 #[allow(clippy::too_many_arguments)]
 fn working_copy_row(
     ui: &mut Ui,
@@ -858,10 +1045,14 @@ fn working_copy_row(
         next = at.left() - SHAPE.space[1];
         at
     });
-    let lines = column(next, LINES_WIDTH);
-    let counts = column(lines.left() - SHAPE.space[1], COUNTS_WIDTH);
+    let lines = (rect.width() >= SLIM).then(|| {
+        let at = column(next, LINES_WIDTH);
+        next = at.left() - SHAPE.space[1];
+        at
+    });
+    let counts = column(next, COUNTS_WIDTH);
     let name_left = left + TRIANGLE;
-    let head_left = (rect.left() + rect.width() * 0.4).max(name_left + 80.0);
+    let head_left = (rect.left() + rect.width() * 0.3).max(name_left + 140.0);
 
     // The chip and the marks stand at the end of the name's column.
     let mut name_right = head_left - gap;
@@ -948,7 +1139,7 @@ fn working_copy_row(
             .collect();
         paint_text(ui, counts, &parts.join(" "), muted, Align::Max);
     }
-    if let Some((added, removed)) = cells.lines {
+    if let (Some(lines), Some((added, removed))) = (lines, cells.lines) {
         let (plus, minus) = components::line_colours(palette);
         let mut right_edge = lines.right();
         for (sign, count, colour) in [("−", removed, minus), ("+", added, plus)] {
@@ -980,7 +1171,7 @@ fn text_width(ui: &Ui, text: &str) -> f32 {
 
 /// `text` in `rect`, ending in "…" where it is too long, at the left or
 /// the right of `rect`.
-fn paint_text(ui: &Ui, rect: Rect, text: &str, colour: Color32, align: Align) {
+pub(crate) fn paint_text(ui: &Ui, rect: Rect, text: &str, colour: Color32, align: Align) {
     if rect.width() <= 0.0 {
         return;
     }
