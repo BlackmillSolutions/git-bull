@@ -7,9 +7,10 @@ use crate::cancel::CancelToken;
 use crate::error::Error;
 use crate::invoke::Git;
 
-/// Above this many branches to leave out, the command line could grow too
-/// long for Windows, and nothing is detected.
-const EXCLUDE_LIMIT: usize = 500;
+/// Above this many characters of branches to leave out, the command line
+/// could grow longer than the 32,767 that Windows allows, as 490 agent
+/// branches already do, and nothing is detected.
+const EXCLUDE_LENGTH: usize = 24_000;
 
 /// The full name of the branch that `tip` most likely started from, among
 /// the local and remote-tracking branches, or `None` when Git marks none.
@@ -20,7 +21,9 @@ const EXCLUDE_LIMIT: usize = 500;
 /// by their full names in the order of preference, stay candidates. When the
 /// branch Git marks is no integration branch, an integration branch that
 /// leaves `tip` at the same commit (`git merge-base`) is taken instead, as
-/// branches that started from the same commit tie.
+/// branches that started from the same commit tie. `%(is-base)` gets the
+/// commit of `tip`, as Git ends the atom at the first `)`, which a branch
+/// name may contain.
 pub fn detect_base(
     git: &Git,
     repo: &Path,
@@ -34,22 +37,37 @@ pub fn detect_base(
         &[],
         [
             "for-each-ref",
-            "--format=%(refname)",
+            "--format=%(refname)%00%(objectname)",
             containing.as_str(),
             "refs/heads",
             "refs/remotes",
         ],
         cancel,
     )?;
-    let excluded: Vec<String> = String::from_utf8_lossy(&output)
-        .lines()
-        .filter(|name| !name.is_empty() && !integration.iter().any(|kept| kept == name))
-        .map(|name| format!("--exclude={name}"))
-        .collect();
-    if excluded.len() > EXCLUDE_LIMIT {
+    // A branch contains itself, so the listing names its commit; a
+    // detached HEAD is named by its commit already.
+    let mut commit = tip.to_owned();
+    let mut excluded = Vec::new();
+    let mut length = 0;
+    for line in String::from_utf8_lossy(&output).lines() {
+        let (name, object) = line.split_once('\0').unwrap_or((line, ""));
+        if name.is_empty() {
+            continue;
+        }
+        if name == tip && !object.is_empty() {
+            commit = object.to_owned();
+        }
+        if integration.iter().any(|kept| kept == name) {
+            continue;
+        }
+        let exclude = format!("--exclude={name}");
+        length += exclude.len() + 1;
+        excluded.push(exclude);
+    }
+    if length > EXCLUDE_LENGTH {
         return Ok(None);
     }
-    let format = format!("--format=%(refname)%00%(is-base:{tip})");
+    let format = format!("--format=%(refname)%00%(is-base:{commit})");
     let mut args = vec![
         "for-each-ref".to_owned(),
         format,

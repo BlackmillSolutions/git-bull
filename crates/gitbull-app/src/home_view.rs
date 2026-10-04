@@ -294,7 +294,7 @@ fn draw(
             .and_then(|row| selected_of(&home.list, row));
         look(ui, home, selected.as_ref(), typing);
         if let Some(panel) = &mut home.panel {
-            panel.poll();
+            panel.poll(&mut home.list);
             panel.show(&home.list, selected.clone());
         }
         let remote = selected
@@ -1242,7 +1242,7 @@ fn working_copy_row(
     }
 }
 
-fn text_width(ui: &Ui, text: &str) -> f32 {
+pub(crate) fn text_width(ui: &Ui, text: &str) -> f32 {
     let font = TextStyle::Body.resolve(ui.style());
     ui.painter()
         .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER)

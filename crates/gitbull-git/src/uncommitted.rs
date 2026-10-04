@@ -110,15 +110,21 @@ pub fn uncommitted(
 /// in conflict or deleted in the working copy.
 fn merge_tracked(staged: &[StatusEntry], unstaged: &[StatusEntry]) -> Vec<StatusEntry> {
     let mut merged: Vec<StatusEntry> = Vec::new();
+    // Where each path is in `merged`, so that 20,000 changed files cost no
+    // more than they are.
+    let mut at: HashMap<&RepoPath, usize> = HashMap::new();
     for entry in staged.iter().chain(unstaged) {
-        match merged.iter_mut().find(|known| known.path == entry.path) {
-            Some(known) => {
+        match at.get(&entry.path) {
+            Some(&index) => {
                 let deleted = entry.kind == StatusKind::Changed(ChangeKind::Deleted);
                 if entry.kind == StatusKind::Conflicted || deleted {
-                    known.kind = entry.kind;
+                    merged[index].kind = entry.kind;
                 }
             }
-            None => merged.push(entry.clone()),
+            None => {
+                at.insert(&entry.path, merged.len());
+                merged.push(entry.clone());
+            }
         }
     }
     merged

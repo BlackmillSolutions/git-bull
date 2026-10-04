@@ -40,20 +40,27 @@ pub struct Against {
     pub prediction: Prediction,
 }
 
-/// The commits a comparison was read for: HEAD and the tips of the local
-/// base and its remote-tracking branch.
+/// The commits a comparison was read for: HEAD, the tips of the local base
+/// and its remote-tracking branch, and the commit seen its new commits
+/// count from.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Tips {
     pub head: String,
     pub base: Option<Base>,
     pub local: Option<String>,
     pub remote: Option<String>,
+    pub seen: Option<String>,
 }
 
 impl Tips {
     /// The tips of a worktree at `head` with `base`, from the facts of its
-    /// repository.
-    pub fn of(facts: &RepositoryFacts, head: &str, base: Option<&Base>) -> Tips {
+    /// repository, whose new commits count from `seen`.
+    pub fn of(
+        facts: &RepositoryFacts,
+        head: &str,
+        base: Option<&Base>,
+        seen: Option<&str>,
+    ) -> Tips {
         let commit = |name: &Option<String>| {
             name.as_deref()
                 .and_then(|name| facts.branch(name))
@@ -64,6 +71,7 @@ impl Tips {
             base: base.cloned(),
             local: base.and_then(|base| commit(&base.local)),
             remote: base.and_then(|base| commit(&base.remote)),
+            seen: seen.map(str::to_owned),
         }
     }
 }
@@ -137,10 +145,14 @@ pub fn compare(
         SeenAt::Nothing => ahead,
         SeenAt::FirstListing => 0,
     };
+    let seen = match subject.seen {
+        SeenAt::Commit(seen) => Some(seen),
+        SeenAt::Nothing | SeenAt::FirstListing => None,
+    };
     Ok(Comparison {
         against,
         new,
-        tips: Tips::of(subject.facts, subject.head, subject.base),
+        tips: Tips::of(subject.facts, subject.head, subject.base, seen),
     })
 }
 

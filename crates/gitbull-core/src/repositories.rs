@@ -191,8 +191,6 @@ impl Drive {
 pub struct RoundInput {
     /// Every worktree is compared, not only those that moved.
     pub compare_all: bool,
-    /// The drives known so far, by which Git is run with drive letters.
-    pub drives: Vec<Drive>,
     /// The base the user set, by the canonical path of the repository.
     pub bases: HashMap<PathBuf, String>,
     /// What Git detected, by the canonical path of the repository.
@@ -394,21 +392,49 @@ impl RepositoryList {
         self.detected.insert(repository, detected);
     }
 
+    /// Keeps what the panel detected in the repository at `repository`,
+    /// with what the rounds detected there.
+    pub(crate) fn keep_detected(&mut self, repository: &Path, detected: Detected) {
+        let Some((facts, _)) = self.facts.get(repository) else {
+            return;
+        };
+        self.detected
+            .entry(repository.to_owned())
+            .or_default()
+            .absorb(facts, detected);
+    }
+
     /// The comparison of the worktree at `worktree`. A worktree that
     /// appeared in a repository listed before starts as seen where it left
-    /// its base, so that its commits ahead count as new.
-    pub(crate) fn set_comparison(&mut self, worktree: PathBuf, comparison: Comparison) {
-        if let Some(key) = self.key_of(&worktree)
-            && self.seen.commit(&key).is_none()
-            && self.seen.knows(key.repository())
-        {
-            let left_at = comparison
-                .against
-                .as_ref()
-                .and_then(|against| against.lines.as_ref())
-                .map(|lines| lines.merge_base.clone())
-                .unwrap_or_else(|| comparison.tips.head.clone());
-            self.seen.mark(key, &left_at);
+    /// its base, so that its commits ahead count as new. One read from what
+    /// was seen before the user marked its HEAD has no new commits, so that
+    /// a round under way during a look does not bring them back (design of
+    /// `worktree-cockpit`, decision 9).
+    pub(crate) fn set_comparison(&mut self, worktree: PathBuf, mut comparison: Comparison) {
+        if let Some(key) = self.key_of(&worktree) {
+            let seen = self.seen.commit(&key).map(str::to_owned);
+            match seen {
+                None if self.seen.knows(key.repository()) => {
+                    let left_at = comparison
+                        .against
+                        .as_ref()
+                        .and_then(|against| against.lines.as_ref())
+                        .map(|lines| lines.merge_base.clone())
+                        .unwrap_or_else(|| comparison.tips.head.clone());
+                    self.seen.mark(key, &left_at);
+                    comparison.tips.seen = Some(left_at);
+                }
+                Some(seen)
+                    if comparison.tips.seen.as_deref() != Some(seen.as_str())
+                        && seen == comparison.tips.head =>
+                {
+                    comparison.new = 0;
+                    comparison.tips.seen = Some(seen);
+                }
+                // A commit that passed a mark leaves the commit seen of the
+                // comparison behind, so that the next round reads it again.
+                _ => {}
+            }
         }
         self.comparisons.insert(worktree, comparison);
         self.stale = true;
@@ -485,7 +511,6 @@ impl RepositoryList {
     pub fn round_input(&self, compare_all: bool) -> RoundInput {
         RoundInput {
             compare_all,
-            drives: self.drives.clone(),
             bases: self.bases.clone(),
             detected: self.detected.clone(),
             tips: self
@@ -541,6 +566,8 @@ impl RepositoryList {
             if let Some(comparison) = self.comparisons.get_mut(path) {
                 changed |= comparison.new != 0;
                 comparison.new = 0;
+                // Read at that HEAD, it needs no reading again.
+                comparison.tips.seen = Some(head);
             }
         }
         if let Some((facts, listed)) = self.facts.get(path) {
@@ -1133,29 +1160,86 @@ pub fn last_active(worktree: &Path, summary: &Summary) -> Option<i64> {
     summary.committed.max(latest_change(worktree, summary))
 }
 
+/// At most this many changed paths and entries of untracked folders are
+/// looked up for the newest change.
+const LOOKUP_LIMIT: usize = 1_000;
+
 /// The last modification of a changed file or folder of the working copy
-/// at `worktree` that still exists, of at most the first [`PATH_LIMIT`] of
-/// them, in seconds since 1970.
+/// at `worktree` that still exists, in seconds since 1970. An untracked
+/// folder, which the summary names once, counts by the newest entry in
+/// it, as editing a file leaves the time of its folder as it is (design of
+/// `worktree-cockpit`, decision 7). The changed paths come first, of at
+/// most the first [`PATH_LIMIT`]; [`LOOKUP_LIMIT`] lookups in all, and no
+/// link is followed.
 pub fn latest_change(worktree: &Path, summary: &Summary) -> Option<i64> {
-    latest_change_with(worktree, summary, |path| {
-        std::fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .ok()
+    latest_change_with(worktree, summary, |path, room| {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        let modified = meta.modified().ok()?;
+        let mut entries = Vec::new();
+        if room > 0
+            && meta.is_dir()
+            && let Ok(read) = std::fs::read_dir(path)
+        {
+            entries.extend(
+                read.filter_map(Result::ok)
+                    // Another repository's folder changes by itself.
+                    .filter(|entry| entry.file_name() != ".git")
+                    .map(|entry| entry.path())
+                    .take(room),
+            );
+        }
+        Some(Looked { modified, entries })
     })
 }
 
-/// [`latest_change`] with `modified` telling when a file was last changed.
+/// What a lookup found: when the path was last modified, and the entries of
+/// a folder it was asked to open.
+struct Looked {
+    modified: SystemTime,
+    entries: Vec<PathBuf>,
+}
+
+/// [`latest_change`] with `look` telling when a path was last changed and,
+/// given room for more than none, which entries the folder at the path has,
+/// at most as many as the room.
 fn latest_change_with(
     worktree: &Path,
     summary: &Summary,
-    mut modified: impl FnMut(&Path) -> Option<SystemTime>,
+    mut look: impl FnMut(&Path, usize) -> Option<Looked>,
 ) -> Option<i64> {
-    summary
+    // Status names an untracked folder with a slash at its end.
+    let mut queue: std::collections::VecDeque<(PathBuf, bool)> = summary
         .paths
         .iter()
         .take(PATH_LIMIT)
-        .filter_map(|path| modified(&worktree.join(path.to_os_string())))
-        .max()
+        .map(|path| {
+            let folder = path.as_bytes().ends_with(b"/");
+            (worktree.join(path.to_os_string()), folder)
+        })
+        .collect();
+    let mut newest = None;
+    let mut lookups = 0;
+    while lookups < LOOKUP_LIMIT
+        && let Some((path, open)) = queue.pop_front()
+    {
+        lookups += 1;
+        let room = match open {
+            true => LOOKUP_LIMIT.saturating_sub(lookups + queue.len()),
+            false => 0,
+        };
+        let Some(looked) = look(&path, room) else {
+            continue;
+        };
+        newest = newest.max(Some(looked.modified));
+        queue.extend(
+            looked
+                .entries
+                .into_iter()
+                .take(room)
+                .map(|entry| (entry, true)),
+        );
+    }
+    newest
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|since| since.as_secs() as i64)
 }
@@ -1557,12 +1641,52 @@ mod tests {
         let names: Vec<String> = (0..5_000).map(|n| format!("file{n}.txt")).collect();
         let summary = summary_of(None, &names.iter().map(String::as_str).collect::<Vec<_>>());
         let mut lookups = 0;
-        let found = latest_change_with(Path::new("/work"), &summary, |_| {
+        let found = latest_change_with(Path::new("/work"), &summary, |_, _| {
             lookups += 1;
             None
         });
         assert_eq!(found, None);
         assert_eq!(lookups, 1_000);
+    }
+
+    #[test]
+    fn a_file_edited_in_a_new_folder_counts_and_not_the_folders_own_time() {
+        // Status names the untracked folder once; editing a file in place
+        // leaves the time of its folder as it is (reproduced on NTFS).
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("newmodule").join("src");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("lib.rs"), "x").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        std::fs::File::options()
+            .write(true)
+            .open(deep.join("lib.rs"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        let summary = summary_of(None, &["newmodule/"]);
+        assert_eq!(latest_change(dir.path(), &summary), Some(seconds(later)));
+    }
+
+    #[test]
+    fn an_untracked_folder_is_looked_into_within_a_thousand_lookups() {
+        let summary = summary_of(None, &["big/", "small.txt"]);
+        let mut lookups = 0;
+        let mut opened = Vec::new();
+        latest_change_with(Path::new("/work"), &summary, |path, room| {
+            lookups += 1;
+            opened.push(room > 0);
+            let entries = (0..room.min(5_000))
+                .map(|n| path.join(format!("f{n}")))
+                .collect();
+            Some(Looked {
+                modified: UNIX_EPOCH,
+                entries,
+            })
+        });
+        assert_eq!(lookups, 1_000);
+        // The folder and its entries are opened, the changed file is not.
+        assert_eq!(opened[..2], [true, false]);
     }
 
     // Reading in the background.
@@ -2198,6 +2322,14 @@ mod tests {
                 on_branch(wt("b"), "claude/b", "b1", false),
             ],
         );
+        // The user saw both branches before their last commits.
+        for (branch, seen) in [("claude/a", "a0"), ("claude/b", "b0")] {
+            let key = Key::Branch {
+                repository: p("/work/app"),
+                branch: branch.to_owned(),
+            };
+            list.seen_mut().mark(key, seen);
+        }
         for name in ["a", "b"] {
             list.set_status(wt(name), status_at(NOW - 60 * MINUTE, &[], None));
         }

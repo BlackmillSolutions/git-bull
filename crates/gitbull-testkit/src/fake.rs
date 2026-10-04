@@ -112,9 +112,15 @@ pub struct FakeBackend {
     facts: Mutex<Vec<(PathBuf, RepositoryFacts)>>,
     /// The base Git detects for a tip, by a folder of its repository.
     detected: Vec<(PathBuf, String, String)>,
+    /// Tips whose base Git fails to detect.
+    failing_detections: Vec<String>,
     /// The comparison of a tip with its base, by a folder of its
     /// repository.
     comparisons: Mutex<Vec<(PathBuf, String, BaseComparison)>>,
+    /// Tips that Git fails to compare with their base.
+    failing_comparisons: Vec<String>,
+    /// Worktrees whose uncommitted files Git fails to read.
+    failing_uncommitted: Vec<PathBuf>,
     /// Holds every comparison.
     compare_gate: Option<Gate>,
     /// What came after a seen commit, by the seen commit and the tip.
@@ -183,6 +189,18 @@ impl FakeBackend {
         self
     }
 
+    /// Detecting the base of `tip`, by its full name, fails as Git does.
+    pub fn with_failing_detection(mut self, tip: &str) -> FakeBackend {
+        self.failing_detections.push(tip.to_owned());
+        self
+    }
+
+    /// Comparing `tip`, by its full name, with its base fails as Git does.
+    pub fn with_failing_comparison(mut self, tip: &str) -> FakeBackend {
+        self.failing_comparisons.push(tip.to_owned());
+        self
+    }
+
     /// Compares `tip` with its base as `comparison` says, in the
     /// repository at `root`; without it, a tip is level with its base.
     pub fn with_comparison(
@@ -228,6 +246,13 @@ impl FakeBackend {
     ) -> FakeBackend {
         self.commit_lists
             .insert((from.to_owned(), tip.to_owned()), commits);
+        self
+    }
+
+    /// Reading the uncommitted files of the worktree at `worktree` fails as
+    /// Git does.
+    pub fn with_failing_uncommitted(mut self, worktree: impl Into<PathBuf>) -> FakeBackend {
+        self.failing_uncommitted.push(worktree.into());
         self
     }
 
@@ -1148,6 +1173,13 @@ impl Backend for FakeBackend {
         if !self.capabilities().is_base {
             return Ok(None);
         }
+        if self.failing_detections.iter().any(|failing| failing == tip) {
+            return Err(Error::failed(
+                "git for-each-ref".to_owned(),
+                Some(128),
+                format!("fatal: failed to find '{tip}'\n"),
+            ));
+        }
         Ok(self
             .detected
             .iter()
@@ -1173,6 +1205,13 @@ impl Backend for FakeBackend {
         }
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
+        }
+        if self.failing_comparisons.contains(&request.tip) {
+            return Err(Error::failed(
+                "git merge-base".to_owned(),
+                Some(128),
+                format!("fatal: Not a valid object name {}\n", request.tip),
+            ));
         }
         let comparisons = self.comparisons.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, _, comparison)) = comparisons
@@ -1242,6 +1281,13 @@ impl Backend for FakeBackend {
         self.probe.record("uncommitted", worktree);
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
+        }
+        if self.failing_uncommitted.iter().any(|path| path == worktree) {
+            return Err(Error::failed(
+                "git status".to_owned(),
+                Some(128),
+                "fatal: index file corrupt\n".to_owned(),
+            ));
         }
         Ok(self
             .uncommitted

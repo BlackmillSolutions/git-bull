@@ -143,6 +143,35 @@ fn a_squash_merge_of_three_commits_with_the_oldest_git() {
 }
 
 #[test]
+fn a_squash_merge_with_personal_diff_settings() {
+    // Two changes in a file of forty lines, so that the context of a hunk
+    // counts; the oldest Git leaves the patch ids to decide.
+    let mut repo = TestRepo::new();
+    repo.write("long.txt", &lines(40, "line"));
+    repo.commit("Base");
+    repo.git(&["switch", "--quiet", "--create", "dev"]);
+    repo.git(&["switch", "--quiet", "--create", "feature"]);
+    for (n, at) in [(0, 20), (1, 25)] {
+        let text = std::fs::read_to_string(repo.path().join("long.txt")).unwrap();
+        repo.write(
+            "long.txt",
+            &text.replace(&format!("line {at}\n"), &format!("changed {at}\n")),
+        );
+        repo.commit(&format!("Feature {n}"));
+    }
+    squash_into_dev(&mut repo);
+    // Porcelain reads these, plumbing does not (review of PR #32).
+    repo.config("diff.context", "5");
+    repo.config("diff.algorithm", "histogram");
+
+    let found = compare_with(version(34), &repo, "feature");
+    assert_eq!(
+        found.merged,
+        Some(("refs/heads/dev".to_owned(), MergedBy::Squash))
+    );
+}
+
+#[test]
 fn a_squash_merge_whose_lines_the_base_changed_again() {
     let mut repo = started();
     repo.write("shared.txt", &lines(10, "feature"));

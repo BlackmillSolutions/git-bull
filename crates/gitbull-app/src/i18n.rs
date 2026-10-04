@@ -108,6 +108,8 @@ messages! {
     CockpitCopied => "cockpit-copied",
     CockpitCopyAiDiff => "cockpit-copy-ai-diff",
     CockpitCopyFailed => "cockpit-copy-failed",
+    CockpitReadFailed => "cockpit-read-failed",
+    CockpitBranchFailed => "cockpit-branch-failed",
     CockpitOpenRemote => "cockpit-open-remote",
     HomeMarkSeen => "home-mark-seen",
     HomeMarkAllSeen => "home-mark-all-seen",

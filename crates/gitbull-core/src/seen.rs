@@ -96,14 +96,15 @@ impl Seen {
         self.dirty |= self.commits.len() != before;
     }
 
-    /// Forgets every repository but those in `kept`, the canonical paths of
-    /// the repositories listed.
-    pub fn keep_only(&mut self, kept: &[PathBuf]) {
+    /// Forgets a repository the user removed from the list, by `paths`, every
+    /// path it was known by, its canonical path among them; listed again,
+    /// it counts as listed for the first time.
+    pub fn forget(&mut self, paths: &[PathBuf]) {
         let before = (self.commits.len(), self.repositories.len());
         self.repositories
-            .retain(|repository| kept.contains(repository));
+            .retain(|repository| !paths.contains(repository));
         self.commits
-            .retain(|key, _| kept.iter().any(|path| path == key.repository()));
+            .retain(|key, _| !paths.iter().any(|path| path == key.repository()));
         self.dirty |= (self.commits.len(), self.repositories.len()) != before;
     }
 
@@ -324,8 +325,22 @@ mod tests {
         assert_eq!(seen.commit(&gone), None);
         // A found commit does not mark a known key as seen.
         assert_eq!(seen.commit(&kept), Some("k"));
-        seen.keep_only(&[]);
-        assert_eq!(seen.seen_at(&kept), SeenAt::FirstListing);
+    }
+
+    #[test]
+    fn a_removed_repository_is_forgotten_with_every_path_it_had() {
+        let mut seen = Seen::default();
+        let app = branch("/work/app", "claude/fix");
+        let other = branch("/work/other", "main");
+        seen.found(Path::new("/work/app"), &[(app.clone(), "a".to_owned())]);
+        seen.found(Path::new("/work/other"), &[(other.clone(), "o".to_owned())]);
+        let dir = tempfile::tempdir().unwrap();
+        file_in(&dir).save(&mut seen).unwrap();
+        // Remove from list passes every path of the repository.
+        seen.forget(&[PathBuf::from("/work/App"), PathBuf::from("/work/app")]);
+        assert_eq!(seen.seen_at(&app), SeenAt::FirstListing);
+        assert_eq!(seen.commit(&other), Some("o"));
+        assert!(seen.is_dirty());
     }
 
     #[test]

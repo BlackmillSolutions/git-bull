@@ -1390,6 +1390,38 @@ fn panel_rows(harness: &Harness<'_, App>) -> Vec<String> {
 }
 
 #[test]
+fn a_reading_of_the_panel_that_fails_is_said_with_git_s_message() {
+    let mut setup = cockpit_setup();
+    setup.backend = setup
+        .backend
+        .with_failing_uncommitted(path(&["work", "wt", "home-tab"]));
+    let mut harness = home(setup);
+    select(
+        &mut harness,
+        "home-tab",
+        "Could not read: fatal: index file corrupt",
+    );
+    // Said above what the list knows of the worktree.
+    let rows = panel_rows(&harness);
+    assert_eq!(rows[0], "Could not read: fatal: index file corrupt");
+    assert!(rows.contains(&"Base dev, detected".to_owned()), "{rows:?}");
+}
+
+#[test]
+fn a_branch_that_cannot_be_read_is_listed_with_a_note() {
+    let mut setup = cockpit_setup();
+    setup.backend = setup
+        .backend
+        .with_failing_comparison("refs/heads/claude/old");
+    let mut harness = home(setup);
+    select(
+        &mut harness,
+        "git-bull",
+        "claude/old, Could not be read: fatal: Not a valid object name refs/heads/claude/old",
+    );
+}
+
+#[test]
 fn the_panel_of_a_worktree_shows_its_base_its_new_commits_its_files_and_its_actions() {
     let mut harness = home(cockpit_setup());
     select(
@@ -1919,6 +1951,22 @@ fn opening_a_row_in_a_tab_counts_as_seeing_it() {
     settle_window(&mut harness);
     harness.state_mut().show_home(false);
     wait_for_home(&mut harness);
+    assert!(!shows_new(&harness, "home-tab"));
+}
+
+#[test]
+fn a_repository_removed_and_opened_again_shows_nothing_new() {
+    let mut harness = narrow_cockpit();
+    assert!(shows_new(&harness, "home-tab"));
+    choose(&mut harness, "git-bull", "Remove from list");
+    assert!(!rows(&harness).0.contains(&"git-bull".to_owned()));
+
+    // Opened again later, it counts as listed for the first time.
+    harness.state_mut().open(path(&["work", "git-bull"]));
+    settle_window(&mut harness);
+    harness.state_mut().show_home(false);
+    wait_for_home(&mut harness);
+    assert!(rows(&harness).0.contains(&"git-bull".to_owned()));
     assert!(!shows_new(&harness, "home-tab"));
 }
 

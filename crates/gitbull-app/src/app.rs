@@ -777,6 +777,8 @@ impl App {
     /// Removes the repository known by `paths` from the home tab.
     pub(crate) fn forget(&mut self, paths: &[PathBuf]) {
         self.settings.forget(paths);
+        // Listed again, it counts as listed for the first time.
+        self.home.list.seen_mut().forget(paths);
         self.known_changed();
     }
 

@@ -239,6 +239,13 @@ fn draw_row(
     let left = rect.left() + SHAPE.space[1];
     let indent = left + TREE_INDENT;
     match row {
+        PanelRow::Failed(message) => {
+            let said = translations.text_with(
+                Msg::CockpitReadFailed,
+                Some(&args(&[("error", message.clone())])),
+            );
+            line(ui, rect, left, &said, color(palette.error_fg), selected);
+        }
         PanelRow::Head(head) => {
             let (icon, name) = match head {
                 Head::Branch(name) => (icons::BRANCH, name.clone()),
@@ -411,24 +418,53 @@ fn draw_row(
                 selected,
             );
         }
-        PanelRow::Branch(branch) => {
-            let counts = branch
-                .comparison
-                .against
-                .as_ref()
-                .map(|against| (against.ahead, against.behind));
-            state_row(
-                ui,
-                rect,
-                indent,
-                &branch.name,
-                Some(branch.state),
-                counts,
-                translations,
-                palette,
-                selected,
-            );
-        }
+        PanelRow::Branch(branch) => match &branch.comparison {
+            Ok(comparison) => {
+                let counts = comparison
+                    .against
+                    .as_ref()
+                    .map(|against| (against.ahead, against.behind));
+                state_row(
+                    ui,
+                    rect,
+                    indent,
+                    &branch.name,
+                    Some(branch.state),
+                    counts,
+                    translations,
+                    palette,
+                    selected,
+                );
+            }
+            Err(message) => {
+                let note = translations.text(Msg::CockpitBranchFailed);
+                node(
+                    ui,
+                    rect,
+                    &format!("{}, {note}: {message}", branch.name),
+                    selected,
+                );
+                let right = rect.right() - SHAPE.space[1];
+                let note_left = right - crate::home_view::text_width(ui, &note);
+                crate::home_view::paint_text(
+                    ui,
+                    Rect::from_min_max(pos2(note_left, rect.top()), pos2(right, rect.bottom())),
+                    &note,
+                    color(palette.error_fg),
+                    Align::Max,
+                );
+                crate::home_view::paint_text(
+                    ui,
+                    Rect::from_min_max(
+                        pos2(indent, rect.top()),
+                        pos2(note_left - SHAPE.space[1], rect.bottom()),
+                    ),
+                    &branch.name,
+                    text,
+                    Align::Min,
+                );
+            }
+        },
         PanelRow::DoneBranches { count, expanded } => {
             let said =
                 translations.text_with(Msg::HomeDone, Some(&numbers(&[("count", *count as u64)])));

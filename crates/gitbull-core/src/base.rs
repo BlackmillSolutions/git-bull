@@ -10,8 +10,11 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 
+use gitbull_git::cancel::CancelToken;
 use gitbull_git::facts::RepositoryFacts;
+use gitbull_git::{Backend, Error};
 
 /// The names an integration branch has besides the default branch of
 /// `origin`, in the order of preference.
@@ -65,6 +68,9 @@ pub struct Bases<'a> {
     facts: &'a RepositoryFacts,
     /// The base the user set, by its local name, if that branch exists.
     set: Option<String>,
+    /// The integration branches that exist, decided once, as each branch
+    /// asks whether it is a base branch.
+    integration: Vec<String>,
 }
 
 impl<'a> Bases<'a> {
@@ -74,27 +80,28 @@ impl<'a> Bases<'a> {
         let set = set
             .filter(|name| facts.branch(&format!("{LOCAL}{name}")).is_some())
             .map(str::to_owned);
-        Bases { facts, set }
+        let mut names: Vec<String> = origin_default(facts).into_iter().collect();
+        names.extend(INTEGRATION_NAMES.iter().map(|name| (*name).to_owned()));
+        let mut integration = Vec::new();
+        for name in names {
+            for full in [format!("{LOCAL}{name}"), format!("{REMOTE}origin/{name}")] {
+                if facts.branch(&full).is_some() && !integration.contains(&full) {
+                    integration.push(full);
+                }
+            }
+        }
+        Bases {
+            facts,
+            set,
+            integration,
+        }
     }
 
     /// The integration branches that exist, by their full names, in the
     /// order of preference: the default branch of `origin`, then `main`,
     /// `master`, `develop` and `dev`, each local before remote-tracking.
-    pub fn integration(&self) -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
-        if let Some(default) = self.origin_default() {
-            names.push(default);
-        }
-        names.extend(INTEGRATION_NAMES.iter().map(|name| (*name).to_owned()));
-        let mut found = Vec::new();
-        for name in names {
-            for full in [format!("{LOCAL}{name}"), format!("{REMOTE}origin/{name}")] {
-                if self.facts.branch(&full).is_some() && !found.contains(&full) {
-                    found.push(full);
-                }
-            }
-        }
-        found
+    pub fn integration(&self) -> &[String] {
+        &self.integration
     }
 
     /// Whether the branch with the full name `branch` is a base branch: the
@@ -103,11 +110,7 @@ impl<'a> Bases<'a> {
         let Some(short) = branch.strip_prefix(LOCAL) else {
             return false;
         };
-        self.set.as_deref() == Some(short)
-            || self
-                .integration()
-                .iter()
-                .any(|name| name.as_str() == branch)
+        self.set.as_deref() == Some(short) || self.integration.iter().any(|name| name == branch)
     }
 
     /// Whether the base of `tip` has to be detected: it is no base branch
@@ -133,6 +136,8 @@ impl<'a> Bases<'a> {
                 .as_ref()?
                 .tracking
                 .clone();
+            // An upstream deleted on the remote and pruned is still named.
+            self.facts.branch(&tracking)?;
             return Some(Base {
                 shown: short(&tracking),
                 local: None,
@@ -148,7 +153,7 @@ impl<'a> Bases<'a> {
             return self.base_named(&format!("{LOCAL}{set}"), Found::Set, own);
         }
         let mut candidates: Vec<String> = detected.map(str::to_owned).into_iter().collect();
-        if let Some(default) = self.origin_default() {
+        if let Some(default) = origin_default(self.facts) {
             candidates.push(format!("{LOCAL}{default}"));
             candidates.push(format!("{REMOTE}origin/{default}"));
         }
@@ -194,27 +199,32 @@ impl<'a> Bases<'a> {
     }
 
     /// The remote-tracking branch of the local branch `local`: its
-    /// upstream, else the branch of the same name on `origin`.
+    /// upstream, else the branch of the same name on `origin`; either only
+    /// while it exists, as `%(upstream)` still names one deleted on the
+    /// remote and pruned.
     fn tracking_of(&self, local: &str) -> Option<String> {
         let branch = self.facts.branch(local)?;
         if let Some(upstream) = &branch.upstream
             && upstream.tracking.starts_with(REMOTE)
         {
-            return Some(upstream.tracking.clone());
+            return self
+                .facts
+                .branch(&upstream.tracking)
+                .map(|_| upstream.tracking.clone());
         }
         let name = local.strip_prefix(LOCAL)?;
         let origin = format!("{REMOTE}origin/{name}");
         self.facts.branch(&origin).map(|_| origin)
     }
+}
 
-    /// The short name of the default branch of `origin`, such as `main`.
-    fn origin_default(&self) -> Option<String> {
-        self.facts
-            .origin_head
-            .as_deref()?
-            .strip_prefix(&format!("{REMOTE}origin/"))
-            .map(str::to_owned)
-    }
+/// The short name of the default branch of `origin`, such as `main`.
+fn origin_default(facts: &RepositoryFacts) -> Option<String> {
+    facts
+        .origin_head
+        .as_deref()?
+        .strip_prefix(&format!("{REMOTE}origin/"))
+        .map(str::to_owned)
 }
 
 impl Base {
@@ -253,6 +263,21 @@ impl Detected {
         self.bases.get(tip).cloned()
     }
 
+    /// Takes what `other` detected among the branches of `facts`, as the
+    /// panel detects the bases of branches without a worktree; what it
+    /// detected among branches that moved since is dropped.
+    pub fn absorb(&mut self, facts: &RepositoryFacts, other: Detected) {
+        let now = fingerprint(facts);
+        if other.fingerprint != now {
+            return;
+        }
+        if self.fingerprint != now {
+            *self = other;
+            return;
+        }
+        self.bases.extend(other.bases);
+    }
+
     /// Keeps `base` as detected for `tip` among the branches of `facts`.
     pub fn store(&mut self, facts: &RepositoryFacts, tip: &str, base: Option<String>) {
         let now = fingerprint(facts);
@@ -261,6 +286,35 @@ impl Detected {
             self.bases.clear();
         }
         self.bases.insert(tip.to_owned(), base);
+    }
+}
+
+/// The branch Git detects the tip named `tip` started from: as kept in
+/// `detected` for the branches of `facts`, else asked of `backend` in
+/// `repo` and kept. A detection that fails counts as none found and is not
+/// kept, so that the next reading tries again and the other branches are
+/// compared as usual (design of `worktree-cockpit`, decision 3); only a
+/// cancel is an error.
+pub fn detect(
+    backend: &dyn Backend,
+    repo: &Path,
+    facts: &RepositoryFacts,
+    detected: &mut Detected,
+    tip: &str,
+    integration: &[String],
+    cancel: &CancelToken,
+) -> Result<Option<String>, Error> {
+    if let Some(known) = detected.get(facts, tip) {
+        return Ok(known);
+    }
+    match backend.detect_base(repo, tip, integration, cancel) {
+        Ok(found) => {
+            detected.store(facts, tip, found.clone());
+            Ok(found)
+        }
+        Err(_) if cancel.is_cancelled() => Err(Error::Cancelled),
+        Err(Error::Cancelled) => Err(Error::Cancelled),
+        Err(_) => Ok(None),
     }
 }
 
@@ -442,6 +496,39 @@ mod tests {
     fn a_base_branch_without_an_upstream_has_no_comparison() {
         let found = facts(&["refs/heads/dev", "refs/heads/feature"], None);
         let bases = Bases::new(&found, None);
+        assert_eq!(bases.base_of(Tip::Branch("refs/heads/dev"), None), None);
+    }
+
+    /// `branch` tracks `tracking`, whether that branch exists or not.
+    fn tracking(facts: &mut RepositoryFacts, branch: &str, tracking: &str) {
+        let found = facts
+            .branches
+            .iter_mut()
+            .find(|known| known.name == branch)
+            .unwrap();
+        found.upstream = Some(Upstream {
+            tracking: tracking.to_owned(),
+            remote: "origin".to_owned(),
+            merge: tracking.replace("refs/remotes/origin/", "refs/heads/"),
+        });
+    }
+
+    #[test]
+    fn an_upstream_deleted_on_the_remote_counts_as_none() {
+        // `%(upstream)` still names it once the remote branch was pruned.
+        let mut found = agents(&["refs/heads/feat-1", "refs/heads/feat-2"]);
+        tracking(
+            &mut found,
+            "refs/heads/feat-1",
+            "refs/remotes/origin/feat-1",
+        );
+        tracking(&mut found, "refs/heads/dev", "refs/remotes/origin/gone");
+        let bases = Bases::new(&found, None);
+        assert_eq!(
+            bases.base_of(Tip::Branch("refs/heads/feat-2"), Some("refs/heads/feat-1")),
+            Some(detected("feat-1", "refs/heads/feat-1", None))
+        );
+        // A base branch whose upstream is gone has no comparison.
         assert_eq!(bases.base_of(Tip::Branch("refs/heads/dev"), None), None);
     }
 

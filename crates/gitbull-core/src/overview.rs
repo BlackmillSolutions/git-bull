@@ -16,7 +16,7 @@ use gitbull_git::cancel::CancelToken;
 use gitbull_git::facts::RepositoryFacts;
 use gitbull_git::{Backend, ConfigOverride};
 
-use crate::base::{Base, Bases, Detected, Tip};
+use crate::base::{Base, Bases, Detected, Tip, detect};
 use crate::comparison::{self, Comparison, SeenAt, Subject, Tips};
 use crate::repositories::{
     Drive, Found, Listed, RepositoryList, RoundInput, SettingsChange, Status, latest_change,
@@ -670,23 +670,19 @@ fn bases(
             Some(branch) => Tip::Branch(branch),
             None => Tip::Detached(head),
         };
-        let marked = if bases.needs_detection(tip) {
-            match detected.get(facts, tip.name()) {
-                Some(known) => known,
-                None => {
-                    let found = backend.detect_base(main, tip.name(), &integration, cancel)?;
-                    detected.store(facts, tip.name(), found.clone());
-                    found
-                }
-            }
-        } else {
-            None
+        let marked = match bases.needs_detection(tip) {
+            true => detect(
+                backend,
+                main,
+                facts,
+                &mut detected,
+                tip.name(),
+                integration,
+                cancel,
+            )?,
+            false => None,
         };
         let base = bases.base_of(tip, marked.as_deref());
-        let tips = Tips::of(facts, head, base.as_ref());
-        if !input.compare_all && input.tips.get(&worktree.path) == Some(&tips) {
-            continue;
-        }
         let key = match &worktree.branch {
             Some(name) => Key::Branch {
                 repository: repository.to_owned(),
@@ -697,6 +693,13 @@ fn bases(
                 worktree: worktree.path.clone(),
             },
         };
+        let seen = input.seen.commit(&key);
+        // A changed commit seen counts too: a mark that a commit passed
+        // while the comparison was read is read again (decision 9).
+        let tips = Tips::of(facts, head, base.as_ref(), seen);
+        if !input.compare_all && input.tips.get(&worktree.path) == Some(&tips) {
+            continue;
+        }
         back.push(Job::Compare(Box::new(CompareJob {
             worktree: worktree.path.clone(),
             main: main.to_owned(),
@@ -704,7 +707,7 @@ fn bases(
             tip: tip.name().to_owned(),
             head: head.clone(),
             base,
-            seen: input.seen.commit(&key).map(str::to_owned),
+            seen: seen.map(str::to_owned),
             listed_before: input.seen.knows(repository),
         })));
     }
@@ -721,6 +724,7 @@ fn bases(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gitbull_git::commits::Since;
     use gitbull_git::facts::{Branch, Upstream};
     use gitbull_git::worktrees::Worktree;
     use gitbull_testkit::{FakeBackend, Gate, Probe};
@@ -868,6 +872,122 @@ mod tests {
         assert_eq!(count(&probe, "compare"), 3);
         assert!(list.comparison(&agent(2)).is_some());
         assert!(list.comparison(Path::new("/work/app")).is_some());
+    }
+
+    /// A list of `/work/app`, listed before, where the user saw the branch
+    /// of agent 0 at the commit `seen`.
+    fn seen_at(seen: &str) -> RepositoryList {
+        let mut list = RepositoryList::new(&[], &[p("/work/app")], &[]);
+        let mut known = crate::seen::Seen::default();
+        known.found(Path::new("/work/app"), &[]);
+        known.mark(
+            Key::Branch {
+                repository: p("/work/app"),
+                branch: "claude/0".to_owned(),
+            },
+            seen,
+        );
+        list.set_seen(known);
+        list
+    }
+
+    fn new_of(list: &RepositoryList) -> u64 {
+        list.comparison(&agent(0)).unwrap().new
+    }
+
+    /// Runs a round on `backend` until it ends.
+    fn round(backend: FakeBackend, list: &mut RepositoryList, request: Request) {
+        let mut overview = Overview::new(Arc::new(backend), Arc::new(|| {}));
+        overview.request(list, request);
+        settle(&mut overview, list);
+    }
+
+    #[test]
+    fn a_look_during_a_round_is_not_undone_by_its_comparison() {
+        let mut list = seen_at("old");
+        let since = |backend: FakeBackend| backend.with_since("old", "head-0", Since::Commits(2));
+        round(since(backend(1, false)), &mut list, Request::Shown);
+        assert_eq!(new_of(&list), 2);
+
+        // Showing the home tab again compares every worktree, behind a gate.
+        let gate = Gate::new();
+        let gated = Arc::new(since(backend(1, false)).with_compare_gate(&gate));
+        let probe = gated.probe();
+        let mut overview = Overview::new(gated, Arc::new(|| {}));
+        overview.request(&list, Request::Shown);
+        while count(&probe, "compare") == 0 {
+            overview.poll(&mut list);
+            std::thread::yield_now();
+        }
+        // The user looks at agent 0 while its comparison is under way.
+        assert!(list.mark_seen(&agent(0)));
+        assert_eq!(new_of(&list), 0);
+        gate.open();
+        settle(&mut overview, &mut list);
+        assert_eq!(new_of(&list), 0, "the round brought back what was seen");
+
+        // Seen at the HEAD it was read at, it needs no comparison again.
+        let again = since(backend(1, false));
+        let probe = again.probe();
+        round(again, &mut list, Request::Again);
+        assert_eq!(count(&probe, "compare"), 0);
+    }
+
+    #[test]
+    fn a_mark_that_a_commit_passed_during_the_round_is_compared_again() {
+        let mut list = seen_at("old");
+        round(
+            backend(1, false).with_since("old", "head-0", Since::Commits(2)),
+            &mut list,
+            Request::Shown,
+        );
+        // A commit arrives while a round compares, gated, and the user
+        // marks the commit the home tab showed.
+        let moved = worktrees(1, Some(0));
+        let after = |backend: FakeBackend| {
+            backend
+                .with_facts(p("/work/app"), facts(&moved, "d"))
+                .with_worktrees(moved.clone())
+                .with_since("old", "head-0-moved", Since::Commits(3))
+                .with_since("head-0", "head-0-moved", Since::Commits(1))
+        };
+        let gate = Gate::new();
+        let gated = Arc::new(after(backend(1, false)).with_compare_gate(&gate));
+        let probe = gated.probe();
+        let mut overview = Overview::new(gated, Arc::new(|| {}));
+        overview.request(&list, Request::Again);
+        while count(&probe, "compare") == 0 {
+            overview.poll(&mut list);
+            std::thread::yield_now();
+        }
+        list.mark_seen(&agent(0));
+        gate.open();
+        settle(&mut overview, &mut list);
+
+        // The next round reads it again from the commit seen.
+        round(after(backend(1, false)), &mut list, Request::Again);
+        assert_eq!(new_of(&list), 1);
+    }
+
+    #[test]
+    fn a_detection_that_fails_leaves_the_other_worktrees_compared() {
+        let backend = Arc::new(backend(3, false).with_failing_detection("refs/heads/claude/1"));
+        let (mut overview, mut list) = start(backend);
+        overview.request(&list, Request::Shown);
+        settle(&mut overview, &mut list);
+        let shown = |n: usize| {
+            list.comparison(&agent(n))
+                .and_then(|comparison| comparison.against.as_ref())
+                .map(|against| against.base.shown.clone())
+        };
+        // The one that failed falls back as with an older Git.
+        assert_eq!(shown(1).as_deref(), Some("main"));
+        assert_eq!(shown(0).as_deref(), Some("dev"));
+        assert_eq!(shown(2).as_deref(), Some("dev"));
+        // It is not kept, so that the next round tries again.
+        let detected = list.detected(Path::new("/work/app")).unwrap();
+        let facts = list.facts(Path::new("/work/app")).unwrap().0;
+        assert_eq!(detected.get(facts, "refs/heads/claude/1"), None);
     }
 
     #[test]

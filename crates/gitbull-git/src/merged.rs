@@ -120,8 +120,10 @@ pub fn rebased(
 
 /// Whether the whole change of `tip` since `merge_base` is one of the
 /// commits `merge_base..base`, the newest [`SQUASH_LIMIT`] of them, by
-/// patch id. Both sides are made by plumbing or with `--no-ext-diff
-/// --no-textconv`, with the same rename detection.
+/// patch id. Both sides are made by plumbing, `git diff-tree`, with
+/// `--no-ext-diff --no-textconv` and the same rename detection: plumbing
+/// reads none of the user's diff settings, while `git log -p` applied
+/// `diff.context` and `diff.algorithm` to the commits of the base only.
 pub fn squashed(
     git: &Git,
     repo: &Path,
@@ -162,14 +164,9 @@ pub fn squashed(
             .collect()
     };
     if !unknown.is_empty() {
-        let mut args: Vec<&str> = vec![
-            "log",
-            "-p",
-            "-M",
-            "--format=commit %H",
-            "--no-walk=unsorted",
-            "--stdin",
-        ];
+        // Each patch follows the line of its commit, which `git patch-id`
+        // takes as the commit's name.
+        let mut args: Vec<&str> = vec!["diff-tree", "--stdin", "-p", "-M"];
         args.extend(flags::DIFF);
         let mut input = String::new();
         for commit in &unknown {

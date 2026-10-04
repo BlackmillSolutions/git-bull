@@ -209,3 +209,32 @@ fn an_older_git_detects_nothing() {
         .unwrap();
     assert_eq!(found, None);
 }
+
+#[test]
+fn a_branch_name_with_parentheses_is_detected_by_its_commit() {
+    // Git ends an atom at the first `)`: `%(is-base:refs/heads/fix(ui))`
+    // stopped with "fatal: failed to find 'refs/heads/fix(ui'".
+    let mut repo = main_and_dev();
+    branch_from(&mut repo, "fix(ui)", "dev");
+    commit_on(&mut repo, "fix(ui)", "f1");
+
+    assert_base(&repo, "fix(ui)", "refs/heads/dev");
+}
+
+#[test]
+fn a_branch_contained_in_many_long_branches_detects_nothing_without_an_error() {
+    // 490 excludes of agent branches exceed the 32,767 characters of a
+    // command line on Windows, which then refuses to start Git.
+    let mut repo = main_and_dev();
+    branch_from(&mut repo, "claude/old", "dev");
+    commit_on(&mut repo, "claude/old", "o1");
+    let mut refs = String::new();
+    for n in 0..490 {
+        refs.push_str(&format!(
+            "create refs/remotes/origin/claude/fix-the-reload-button-of-the-panel-{n:03} claude/old\n"
+        ));
+    }
+    repo.git_with_input(&["update-ref", "--stdin"], &refs);
+
+    assert_eq!(detected(&repo, "claude/old"), None);
+}

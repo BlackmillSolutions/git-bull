@@ -11,7 +11,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gitbull_git::Backend;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::FileLines;
 use gitbull_git::commits::{CommitEntry, Since};
@@ -20,14 +19,15 @@ use gitbull_git::head::Head;
 use gitbull_git::merged::{Prediction, Unpredicted};
 use gitbull_git::path::RepoPath;
 use gitbull_git::uncommitted::{Uncommitted, UncommittedFile};
+use gitbull_git::{Backend, Error};
 
-use crate::base::{Base, Bases, Detected, Tip};
+use crate::base::{Base, Bases, Detected, Tip, detect};
 use crate::comparison::{self, Comparison, SeenAt, Subject};
 use crate::pending::Pending;
 use crate::repositories::{RepositoryList, Status};
 use crate::seen::Key;
 use crate::state::{Inputs, MainState, state};
-use crate::workspace::Notify;
+use crate::workspace::{Failure, Notify};
 
 /// At most this many new commits are listed.
 pub const COMMIT_LIMIT: usize = 50;
@@ -69,15 +69,19 @@ pub enum Heading {
 pub struct BranchRow {
     /// Its short name, such as `claude/old`.
     pub name: String,
-    pub comparison: Comparison,
+    /// Its comparison, or Git's message when it could not be compared.
+    pub comparison: Result<Comparison, String>,
     /// New, Ready, Done or Idle, as for a worktree without uncommitted
-    /// changes.
+    /// changes; Idle when it could not be compared.
     pub state: MainState,
 }
 
 /// One row of the panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PanelRow {
+    /// The reading of the row failed, with Git's message; the values last
+    /// read follow.
+    Failed(String),
     /// The branch, or the commit of a detached HEAD.
     Head(Head),
     /// The base and how it was found, or the upstream of a base branch.
@@ -138,6 +142,9 @@ pub enum Read {
     },
     Repository {
         branches: Vec<BranchRow>,
+        /// The bases it detected, which the list keeps with those of the
+        /// rounds.
+        detected: Detected,
     },
 }
 
@@ -149,6 +156,8 @@ pub struct Panel {
     /// The row shown, and what its reading depends on.
     shown: Option<(Selected, u64)>,
     read: Option<(Selected, Read)>,
+    /// The row whose last reading failed, with the message.
+    failed: Option<(Selected, String)>,
     work: Pending<(Selected, Read)>,
     /// The done branches of a repository are shown.
     done_expanded: bool,
@@ -161,6 +170,7 @@ impl Panel {
             notify,
             shown: None,
             read: None,
+            failed: None,
             work: Pending::none(),
             done_expanded: false,
         }
@@ -201,10 +211,30 @@ impl Panel {
         }
     }
 
-    /// Takes what the reading found.
-    pub fn poll(&mut self) {
-        if let Some(Ok(read)) = self.work.take() {
-            self.read = Some(read);
+    /// Takes what the reading found, and keeps the bases it detected in
+    /// `list`; a reading that failed is said in the rows.
+    pub fn poll(&mut self, list: &mut RepositoryList) {
+        match self.work.take() {
+            Some(Ok((selected, mut read))) => {
+                if let (Selected::Repository(path), Read::Repository { detected, .. }) =
+                    (&selected, &mut read)
+                {
+                    list.keep_detected(path, std::mem::take(detected));
+                }
+                self.failed = None;
+                self.read = Some((selected, read));
+            }
+            Some(Err(Failure::Git(Error::Cancelled))) | None => {}
+            Some(Err(failure)) => {
+                let message = match failure {
+                    Failure::Git(error) => git_message(&error),
+                    Failure::Panic(message) => message,
+                };
+                self.failed = self
+                    .shown
+                    .as_ref()
+                    .map(|(selected, _)| (selected.clone(), message));
+            }
         }
     }
 
@@ -229,27 +259,42 @@ impl Panel {
             .as_ref()
             .filter(|(read_for, _)| read_for == selected)
             .map(|(_, read)| read);
-        match selected {
+        let mut rows: Vec<PanelRow> = self
+            .failed
+            .iter()
+            .filter(|(failed_for, _)| failed_for == selected)
+            .map(|(_, message)| PanelRow::Failed(message.clone()))
+            .collect();
+        rows.extend(match selected {
             Selected::Worktree(path) => worktree_rows(list, path, read),
             Selected::Repository(path) => repository_rows(list, path, read, self.done_expanded),
-        }
+        });
+        rows
     }
 }
 
-/// What the reading of `selected` depends on: its HEAD and status, or the
-/// branches of its repository and what was seen of them.
+/// What the reading of `selected` depends on: its HEAD, its status and the
+/// newest change of its changed paths, or the branches of its repository.
+/// Not what was seen: a look leaves what the panel shows as it is.
 fn depends_on(list: &RepositoryList, selected: &Selected) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     match selected {
         Selected::Worktree(path) => {
+            // Not the commit seen: a look leaves the commits listed.
             list.comparison(path)
                 .map(|comparison| &comparison.tips)
+                .map(|tips| (&tips.head, &tips.base, &tips.local, &tips.remote))
                 .hash(&mut hasher);
-            if let Status::Read { summary, .. } = list.status(path) {
+            if let Status::Read {
+                summary, changed, ..
+            } = list.status(path)
+            {
                 summary.paths.hash(&mut hasher);
                 summary.changed.hash(&mut hasher);
                 summary.commit.hash(&mut hasher);
+                // A file that was already changed may have changed again.
+                changed.hash(&mut hasher);
             }
         }
         Selected::Repository(path) => {
@@ -257,13 +302,6 @@ fn depends_on(list: &RepositoryList, selected: &Selected) -> u64 {
                 for branch in &facts.branches {
                     branch.name.hash(&mut hasher);
                     branch.commit.hash(&mut hasher);
-                    if let Some(name) = branch.name.strip_prefix("refs/heads/") {
-                        let key = Key::Branch {
-                            repository: path.clone(),
-                            branch: name.to_owned(),
-                        };
-                        list.seen().commit(&key).hash(&mut hasher);
-                    }
                 }
                 listed.len().hash(&mut hasher);
             }
@@ -369,7 +407,7 @@ impl Work {
         }
     }
 
-    fn run(self, backend: &dyn Backend, cancel: &CancelToken) -> Result<Read, gitbull_git::Error> {
+    fn run(self, backend: &dyn Backend, cancel: &CancelToken) -> Result<Read, Error> {
         match self {
             Work::Worktree {
                 worktree,
@@ -414,18 +452,17 @@ impl Work {
                 for (name, commit, seen) in branches {
                     let full = format!("refs/heads/{name}");
                     let tip = Tip::Branch(&full);
-                    let marked = if bases.needs_detection(tip) {
-                        match detected.get(&facts, &full) {
-                            Some(known) => known,
-                            None => {
-                                let found =
-                                    backend.detect_base(&main, &full, &integration, cancel)?;
-                                detected.store(&facts, &full, found.clone());
-                                found
-                            }
-                        }
-                    } else {
-                        None
+                    let marked = match bases.needs_detection(tip) {
+                        true => detect(
+                            backend,
+                            &main,
+                            &facts,
+                            &mut detected,
+                            &full,
+                            integration,
+                            cancel,
+                        )?,
+                        false => None,
                     };
                     let base = bases.base_of(tip, marked.as_deref());
                     let seen = match &seen {
@@ -442,9 +479,14 @@ impl Work {
                         predict: false,
                         seen,
                     };
-                    let comparison = comparison::compare(backend, &subject, cancel)?;
+                    // One branch that cannot be compared leaves the others.
+                    let comparison = match comparison::compare(backend, &subject, cancel) {
+                        Ok(comparison) => Ok(comparison),
+                        Err(_) if cancel.is_cancelled() => return Err(Error::Cancelled),
+                        Err(error) => Err(git_message(&error)),
+                    };
                     let inputs = Inputs {
-                        comparison: Some(&comparison),
+                        comparison: comparison.as_ref().ok(),
                         ..Inputs::default()
                     };
                     let state = state(&inputs, 0);
@@ -454,9 +496,26 @@ impl Work {
                         state,
                     });
                 }
-                Ok(Read::Repository { branches: rows })
+                Ok(Read::Repository {
+                    branches: rows,
+                    detected,
+                })
             }
         }
+    }
+}
+
+/// What Git said of `error`: the last line it wrote, such as `fatal: index
+/// file corrupt`, else what failed.
+fn git_message(error: &Error) -> String {
+    match error {
+        Error::CommandFailed { stderr, .. } => stderr
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map_or_else(|| error.to_string(), str::to_owned),
+        _ => error.to_string(),
     }
 }
 
@@ -601,7 +660,7 @@ fn repository_rows(
                 state: list.state(worktree),
             }),
     );
-    if let Some(Read::Repository { branches }) = read
+    if let Some(Read::Repository { branches, .. }) = read
         && !branches.is_empty()
     {
         rows.push(PanelRow::Heading(Heading::Branches));
@@ -790,15 +849,15 @@ mod tests {
     }
 
     /// Shows `selected` and waits for its reading.
-    fn shown(panel: &mut Panel, list: &RepositoryList, selected: Selected) -> Vec<PanelRow> {
+    fn shown(panel: &mut Panel, list: &mut RepositoryList, selected: Selected) -> Vec<PanelRow> {
         panel.show(list, Some(selected));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while panel.is_reading() {
             assert!(std::time::Instant::now() < deadline, "timed out");
-            panel.poll();
+            panel.poll(list);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        panel.poll();
+        panel.poll(list);
         panel.rows(list)
     }
 
@@ -831,7 +890,7 @@ mod tests {
         );
         list.set_comparison(agent(), compared(3, 2));
         list.settle();
-        let rows = shown(&mut panel(backend), &list, Selected::Worktree(agent()));
+        let rows = shown(&mut panel(backend), &mut list, Selected::Worktree(agent()));
 
         assert_eq!(
             rows[0],
@@ -887,7 +946,7 @@ mod tests {
         );
         list.set_comparison(agent(), compared(3, 2));
         let mut panel = panel(backend);
-        shown(&mut panel, &list, Selected::Worktree(agent()));
+        shown(&mut panel, &mut list, Selected::Worktree(agent()));
 
         assert!(list.mark_seen(&agent()));
         let rows = panel.rows(&list);
@@ -895,7 +954,7 @@ mod tests {
         assert!(rows.contains(&PanelRow::Commit(commit(2))));
 
         panel.renew(&list);
-        let rows = shown(&mut panel, &list, Selected::Worktree(agent()));
+        let rows = shown(&mut panel, &mut list, Selected::Worktree(agent()));
         assert!(
             !rows
                 .iter()
@@ -918,7 +977,7 @@ mod tests {
             "seen",
         );
         list.set_comparison(agent(), compared(70, 70));
-        let rows = shown(&mut panel(backend), &list, Selected::Worktree(agent()));
+        let rows = shown(&mut panel(backend), &mut list, Selected::Worktree(agent()));
         let listed = rows
             .iter()
             .filter(|row| matches!(row, PanelRow::Commit(_)))
@@ -941,7 +1000,7 @@ mod tests {
             "seen",
         );
         list.set_comparison(agent(), compared(1, 1));
-        let rows = shown(&mut panel(backend), &list, Selected::Worktree(agent()));
+        let rows = shown(&mut panel(backend), &mut list, Selected::Worktree(agent()));
         assert!(rows.contains(&PanelRow::Commit(commit(1))));
     }
 
@@ -964,10 +1023,10 @@ mod tests {
                     prediction: Prediction::Unknown(Unpredicted::NotAsked),
                 },
             );
-        let list = list(&[("left-a", "a"), ("left-b", "b")]);
+        let mut list = list(&[("left-a", "a"), ("left-b", "b")]);
         let rows = shown(
             &mut panel(backend),
-            &list,
+            &mut list,
             Selected::Repository(p("/work/app")),
         );
         assert!(
@@ -1020,9 +1079,9 @@ mod tests {
                 );
             others.push((name.as_str(), "c"));
         }
-        let list = list(&others);
+        let mut list = list(&others);
         let mut panel = panel(backend);
-        let rows = shown(&mut panel, &list, Selected::Repository(p("/work/app")));
+        let rows = shown(&mut panel, &mut list, Selected::Repository(p("/work/app")));
         let branches = rows
             .iter()
             .filter(|row| matches!(row, PanelRow::Branch(_)))
@@ -1042,19 +1101,138 @@ mod tests {
     }
 
     #[test]
+    fn files_changed_again_are_read_again() {
+        let backend = FakeBackend::default();
+        let probe = backend.probe();
+        let mut list = list(&[]);
+        list.set_comparison(agent(), compared(3, 0));
+        let mut panel = panel(backend);
+        shown(&mut panel, &mut list, Selected::Worktree(agent()));
+        // The same paths and HEAD, but a file changed again.
+        let Status::Read { summary, .. } = list.status(&agent()).clone() else {
+            unreachable!()
+        };
+        list.set_status(
+            agent(),
+            Status::Read {
+                summary,
+                last_active: Some(60),
+                changed: Some(60),
+            },
+        );
+        shown(&mut panel, &mut list, Selected::Worktree(agent()));
+        assert_eq!(probe.calls(&agent()), ["uncommitted", "uncommitted"]);
+    }
+
+    #[test]
+    fn a_failed_reading_is_said_above_the_values_last_read() {
+        let backend = FakeBackend::default().with_failing_uncommitted(agent());
+        let mut list = list(&[]);
+        list.set_comparison(agent(), compared(3, 0));
+        let rows = shown(&mut panel(backend), &mut list, Selected::Worktree(agent()));
+        assert!(
+            matches!(&rows[0], PanelRow::Failed(message) if message.contains("index file corrupt")),
+            "{rows:?}"
+        );
+        assert_eq!(
+            rows[1],
+            PanelRow::Head(Head::Branch("claude/fix".to_owned()))
+        );
+    }
+
+    /// A backend that detects `dev` for each of `names` and compares it two
+    /// commits ahead.
+    fn branches_ahead(names: &[&str]) -> FakeBackend {
+        let mut backend = FakeBackend::default();
+        for name in names {
+            let full = format!("refs/heads/{name}");
+            backend = backend
+                .with_detected_base(p("/work/app"), &full, "refs/heads/dev")
+                .with_comparison(
+                    p("/work/app"),
+                    &full,
+                    BaseComparison {
+                        counted: "refs/heads/dev".to_owned(),
+                        counts: Counts {
+                            ahead: 2,
+                            behind: 0,
+                        },
+                        lines: None,
+                        merged: None,
+                        prediction: Prediction::Unknown(Unpredicted::NotAsked),
+                    },
+                );
+        }
+        backend
+    }
+
+    #[test]
+    fn a_branch_that_cannot_be_compared_is_listed_with_git_s_message() {
+        let backend = branches_ahead(&["left-a", "left-b", "left-c"])
+            .with_failing_comparison("refs/heads/left-b");
+        let mut list = list(&[("left-a", "a"), ("left-b", "b"), ("left-c", "c")]);
+        let rows = shown(
+            &mut panel(backend),
+            &mut list,
+            Selected::Repository(p("/work/app")),
+        );
+        let branches: Vec<(&str, bool)> = rows
+            .iter()
+            .filter_map(|row| match row {
+                PanelRow::Branch(branch) => Some((branch.name.as_str(), branch.comparison.is_ok())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            branches,
+            [("left-a", true), ("left-b", false), ("left-c", true)]
+        );
+    }
+
+    #[test]
+    fn a_look_at_a_repository_reads_its_panel_not_again_and_keeps_its_bases() {
+        let backend = branches_ahead(&["left-a"]);
+        let probe = backend.probe();
+        let mut list = list(&[("left-a", "a")]);
+        let key = Key::Branch {
+            repository: p("/work/app"),
+            branch: "left-a".to_owned(),
+        };
+        list.seen_mut().mark(key, "older");
+        let mut panel = panel(backend);
+        shown(&mut panel, &mut list, Selected::Repository(p("/work/app")));
+        let reads = probe.sequence().len();
+        // The bases detected for the panel join those of the rounds.
+        let facts = Arc::clone(list.facts(Path::new("/work/app")).unwrap().0);
+        let kept = list.detected(Path::new("/work/app")).unwrap();
+        assert_eq!(
+            kept.get(&facts, "refs/heads/left-a"),
+            Some(Some("refs/heads/dev".to_owned()))
+        );
+
+        assert!(list.mark_seen(Path::new("/work/app")));
+        shown(&mut panel, &mut list, Selected::Repository(p("/work/app")));
+        assert_eq!(
+            probe.sequence().len(),
+            reads,
+            "the look read the panel again"
+        );
+    }
+
+    #[test]
     fn the_reading_is_kept_until_head_or_status_change() {
         let backend = FakeBackend::default();
         let probe = backend.probe();
         let mut list = list(&[]);
         list.set_comparison(agent(), compared(3, 0));
         let mut panel = panel(backend);
-        shown(&mut panel, &list, Selected::Worktree(agent()));
-        shown(&mut panel, &list, Selected::Worktree(agent()));
+        shown(&mut panel, &mut list, Selected::Worktree(agent()));
+        shown(&mut panel, &mut list, Selected::Worktree(agent()));
         assert_eq!(probe.calls(&agent()), ["uncommitted"]);
         let mut moved = compared(3, 0);
         moved.tips.head = "moved".to_owned();
         list.set_comparison(agent(), moved);
-        shown(&mut panel, &list, Selected::Worktree(agent()));
+        shown(&mut panel, &mut list, Selected::Worktree(agent()));
         assert_eq!(probe.calls(&agent()), ["uncommitted", "uncommitted"]);
     }
 }
