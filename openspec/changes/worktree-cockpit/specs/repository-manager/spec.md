@@ -182,8 +182,8 @@ seen, which for a repository marks its main worktree and its branches
 without a worktree; Pin or Unpin, for a repository; and Remove from list,
 for a
 repository, which removes every path of it from the pinned and the recently
-opened repositories and forgets the base set for it, but leaves its folder
-as it is. Ctrl+C on a row SHALL
+opened repositories and forgets the base set for it and what was seen of
+it, but leaves its folder as it is. Ctrl+C on a row SHALL
 copy its path. A row whose folder was not found SHALL offer only Copy path
 and, for a repository, Remove from list, and a row that Git refuses to read
 SHALL not offer Open; Enter and a double click SHALL do nothing on either.
@@ -205,6 +205,10 @@ repository brings along.
 #### Scenario: Remove from the list
 - **WHEN** the user chooses Remove from list for a repository whose base the user had set to `dev`
 - **THEN** it is no longer listed, and its folder is unchanged; opened again later, its base is detected
+
+#### Scenario: Removed repository listed again
+- **WHEN** the user chooses Remove from list for a repository whose worktrees showed new commits, and opens the repository again later
+- **THEN** none of its worktrees and branches shows new commits
 
 #### Scenario: Remove a repository known through its worktrees
 - **WHEN** the recently opened repositories hold a repository and, from an earlier version, two of its worktrees, and the user chooses Remove from list for the repository
@@ -312,7 +316,9 @@ integration branches of a repository SHALL be those of the default branch
 of the remote `origin`, `main`, `master`, `develop` and `dev` that exist,
 local or remote-tracking. The base branches of a repository, that is the
 base the user set and its local integration branches, SHALL be compared
-with their upstream, and SHALL show no comparison when they have none.
+with their upstream, and SHALL show no comparison when they have none. A
+remote-tracking branch that no longer exists, such as an upstream whose
+branch was deleted on the remote and pruned, SHALL count as none.
 When the user set a base for a repository, that base SHALL apply to every
 branch of it that is not a base branch. Otherwise git-bull SHALL detect the
 base of each such branch: with Git 2.47 or newer, the local or remote-tracking branch it most
@@ -320,7 +326,9 @@ likely started from, among the integration branches and the branches that
 do not already contain it; when that branch leaves it at the same commit as
 an integration branch, the integration branch is the base instead; with an
 older Git, or when none is found, the default branch of the remote
-`origin`; else `main`; else `master`. A branch SHALL never be its own base,
+`origin`; else `main`; else `master`. When Git cannot detect the base of a
+branch, its base SHALL be found as with an older Git, and the other
+branches SHALL be compared as usual. A branch SHALL never be its own base,
 and the base of a branch SHALL not depend on the bases of other branches.
 The user
 SHALL be able to set the base of a repository in the detail panel, choosing
@@ -362,6 +370,18 @@ comparison and say that it has no base.
 - **WHEN** the main worktree is on `dev`, the worktrees of two agents are compared with `dev`, and `dev` has two commits that `origin/dev` does not have
 - **THEN** the main worktree shows 2 ahead of `origin/dev`, says that it is compared with its upstream, and is never Ready
 
+#### Scenario: Upstream deleted on the remote
+- **WHEN** Git is 2.47 or newer, the worktree of `feat-2` was created from `feat-1`, and the branch that `feat-1` tracks was deleted on the remote and pruned
+- **THEN** `feat-2` is compared with `feat-1` alone
+
+#### Scenario: Branch name with parentheses
+- **WHEN** Git is 2.47 or newer and a worktree's branch `fix(ui)` was created from `dev`
+- **THEN** the worktree is compared with `dev`, and the other worktrees of its repository with their bases
+
+#### Scenario: Detection that fails
+- **WHEN** Git cannot detect the base of one worktree's branch
+- **THEN** that worktree is compared with the default branch of `origin`, and every other worktree of its repository with its detected base
+
 #### Scenario: Older Git
 - **WHEN** Git is 2.40 and the default branch of the remote `origin` is `main`
 - **THEN** every worktree is compared with `main`, shown as detected
@@ -390,7 +410,7 @@ one of its commits applied under another hash as after a rebase, with all
 of its changes applied in one commit as after a squash merge, also when the
 base changed the same lines again later, or, with Git 2.38 or newer, when
 merging it would add nothing. Recognising merged branches SHALL need no
-setting.
+setting and SHALL not depend on the user's diff settings.
 
 #### Scenario: Ahead and behind
 - **WHEN** a worktree's branch has three commits that its base `dev` does not have, and `dev` has one commit that the branch does not have
@@ -420,6 +440,10 @@ setting.
 - **WHEN** the changes of a branch were applied to `dev` as one squashed commit, and a later commit on `dev` changed the same lines again
 - **THEN** the branch counts as merged, and no conflict is predicted for it
 
+#### Scenario: Squash merge with personal diff settings
+- **WHEN** the user's Git configuration sets `diff.context` to 5, and the three commits of a branch were applied to `dev` as one squashed commit
+- **THEN** the branch counts as merged
+
 ### Requirement: Main state of a worktree
 Each worktree SHALL show one main state, the first of these that applies:
 Conflict, when an operation such as a merge or a rebase stopped with files
@@ -448,6 +472,10 @@ include its state.
 
 #### Scenario: Working
 - **WHEN** a worktree has uncommitted changes and one of the files changed two minutes ago
+- **THEN** its row shows the state Working
+
+#### Scenario: Working in a new folder
+- **WHEN** a worktree has a new untracked folder that was created ten minutes ago, and a file in it changed two minutes ago
 - **THEN** its row shows the state Working
 
 #### Scenario: Paused after five quiet minutes
@@ -552,6 +580,10 @@ SHALL count as new and the settings SHALL stay as they are.
 - **WHEN** the home tab last read a worktree with 2 new commits, an agent then makes a commit on its branch, and the user looks at its panel for two seconds
 - **THEN** after the next reading the worktree shows 1 new commit
 
+#### Scenario: Seen while a reading runs
+- **WHEN** a reading of the home tab is under way, and the user looks for two seconds at the panel of a worktree with 2 new commits that the reading has not compared yet
+- **THEN** after the reading the worktree shows no new commits
+
 #### Scenario: Repository listed for the first time
 - **WHEN** the user opens a repository for the first time whose branches without a worktree are ahead of its base
 - **THEN** none of them shows new commits
@@ -584,7 +616,9 @@ context, Show in file manager and Open remote, Open being the primary one.
 For a repository it SHALL show its base, where the user can set it, its
 worktrees by their state, and its branches without a worktree. While a row
 of the panel is being read, the panel SHALL say so; the values last read
-SHALL stay meanwhile. The panel SHALL be a named area for assistive
+SHALL stay meanwhile. What the panel read for a worktree SHALL be read
+again when its HEAD, its status or the newest change of its uncommitted
+files changed; when the panel cannot read a row, it SHALL say so. The panel SHALL be a named area for assistive
 technology that Tab reaches after the list. While the home tab is narrower
 than 900 points, the panel SHALL be hidden until the user shows it with a
 button, and the numbers in the rows SHALL be shortened.
@@ -605,6 +639,10 @@ button, and the numbers in the rows SHALL be shortened.
 - **WHEN** the user selects a repository with three worktrees and two branches without a worktree
 - **THEN** the panel shows its base, its worktrees by their state and the two branches
 
+#### Scenario: Files changed again
+- **WHEN** the panel shows a worktree whose uncommitted file has 3 lines added, and an agent adds 5 more lines to that file
+- **THEN** after the next reading the panel shows 8 lines added for the file
+
 #### Scenario: Narrow window
 - **WHEN** the window is 800 points wide and the home tab is shown
 - **THEN** the panel is hidden, a button shows it, and the rows show shortened numbers
@@ -617,7 +655,9 @@ button, and the numbers in the rows SHALL be shortened.
 The panel of a repository SHALL list its local branches that no worktree
 has checked out, except its base branches, each with its commits ahead of
 and behind its base and its main state among New, Ready, Done and Idle, as
-for a worktree without uncommitted changes. Branches that are done SHALL be
+for a worktree without uncommitted changes. A branch that cannot be
+compared SHALL be listed with a note that it could not be read, and the
+others as usual. Branches that are done SHALL be
 folded into a row "Done" that names their number. Opening such a branch
 SHALL open its repository's tab with the branch selected in the history.
 
@@ -628,6 +668,10 @@ SHALL open its repository's tab with the branch selected in the history.
 #### Scenario: Merged branches fold away
 - **WHEN** a repository has twelve local branches without a worktree, ten of them merged into the base
 - **THEN** its panel lists two branches and a row "Done (10)"
+
+#### Scenario: Branch that cannot be read
+- **WHEN** a repository has three branches without a worktree and one of them cannot be compared
+- **THEN** its panel lists all three, that one with a note that it could not be read
 
 ### Requirement: Copy as AI context
 The detail panel and the context menu of a worktree, and of a repository

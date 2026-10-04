@@ -184,11 +184,12 @@ Every other branch gets the first of these:
 
 1. the base the user set for the repository, if that branch still exists;
 2. with Git 2.47 or newer, the ref that `git for-each-ref
-   --format='%(refname)%00%(is-base:<branch>)'` marks among the candidates:
-   the local and remote-tracking branches without `refs/remotes/*/HEAD`
-   and without the branches that already contain the branch, which `git
-   for-each-ref --contains=<branch>` names, except the integration
-   branches (`--exclude` for each, Git 2.42 and newer);
+   --format='%(refname)%00%(is-base:<commit>)'` marks among the candidates,
+   where `<commit>` is the commit of the branch: the local and
+   remote-tracking branches without `refs/remotes/*/HEAD` and without the
+   branches that already contain the branch, which `git for-each-ref
+   --contains=<branch>` names, except the integration branches
+   (`--exclude` for each, Git 2.42 and newer);
 3. the default branch of `origin`, as a local branch when one of that name
    exists, else as the remote-tracking branch;
 4. `main`, then `master`, local first.
@@ -215,6 +216,26 @@ commit, that integration branch is the base. A stacked branch keeps its
 parent as the base, because the parent leaves it at a later commit
 (reproduced in the second review). The names of integration branches only
 break ties; they never decide alone.
+
+The review of PR #32 reproduced four ways in which this failed, now
+handled:
+
+- `%(is-base:…)` takes the commit, not the branch's name: Git ends an atom
+  at the first `)`, which a ref name may contain, and stopped with `fatal:
+  failed to find 'refs/heads/fix(ui'` for the branch `fix(ui)`.
+- The `--exclude` arguments are bounded by their summed length, 24,000
+  characters, not by their number: Windows refuses a command line longer
+  than 32,767 characters, which 490 excludes of agent branches already
+  exceed. Beyond the bound nothing is detected, as with an older Git.
+- A remote-tracking branch counts only when the facts list it: `%(upstream)`
+  still names the upstream of a branch whose branch on the remote was
+  deleted and pruned (`[gone]`), and `git merge-base` refuses that name. A
+  base branch with such an upstream has no comparison; a local base with
+  such a remote-tracking branch is compared alone.
+- A detection that fails counts as none found for that branch only, in the
+  round as in the panel, and is not cached, so that it is tried again in
+  the next round; one branch no longer keeps every other worktree of its
+  repository from being compared.
 
 A base found as a remote-tracking branch (`origin/dev`) is shown by its
 short name; when a local branch of the same name exists, the local one is
@@ -267,14 +288,18 @@ they diverged, against both:
    merge of a single commit);
 3. the whole change of `B` is one commit of the base: the patch id of `git
    diff-tree -p -M <merge-base> B` equals the patch id of one of the
-   commits `<merge-base>..<base>`, at most 1,000, whose patches come from
-   `git log -p -M --no-ext-diff --no-textconv -n 1000
-   <merge-base>..<base>`; both outputs go through `git patch-id --stable`
-   fed on its standard input (`Git::spawn` with stdin, as `cat-file
-   --batch` is fed). Both sides are made with the same rename detection and
-   without text conversion or an external diff, so that equal changes give
-   equal ids and nothing a repository brings along runs; `git log -p`
-   alone would use both. The patch id of a commit never changes, so it is
+   commits `<merge-base>..<base>`, at most 1,000 (`git rev-list -n 1000`),
+   whose patches come from `git diff-tree --stdin -p -M --no-ext-diff
+   --no-textconv` fed with those commits; both outputs go through `git
+   patch-id --stable` fed on its standard input (`Git::spawn` with stdin,
+   as `cat-file --batch` is fed). Both sides are plumbing, made with the
+   same rename detection and without text conversion or an external diff,
+   so that equal changes give equal ids and nothing a repository brings
+   along runs. Plumbing reads none of the user's diff settings, while `git
+   log -p`, as first planned, applies `diff.context`, `diff.algorithm` and
+   the like to the commits of the base only: with `diff.context=5` a
+   squash merge was no longer recognised (reproduced in the review of PR
+   #32). The patch id of a commit never changes, so it is
    kept per commit and shared by the worktrees of a repository. This works
    with Git 2.34 and recognises a squash merge also when the base changed
    the same lines again later, which the first review reproduced as a
@@ -341,7 +366,12 @@ implementing the scenario "Idle"); after a merge commit, or once the base
 moved on, it is Done. The five minutes are
 measured from the later of the newest modification time of a changed path
 and the commit time of HEAD, which `summary` reports separately from
-`last_active`. Because states depend on the time, the rows are built again
+`last_active`. For an untracked folder, which the summary names once, the
+time is that of the newest file in it: editing a file leaves the time of
+its folder as it is (reproduced on NTFS in the review of PR #32), so an
+agent at work in a folder it created looked Paused after five minutes.
+The lookups stop after 1,000, the changed paths and the entries of their
+folders together, and do not follow links. Because states depend on the time, the rows are built again
 at every round's end and every timer tick, never per frame.
 
 The rows gain `Row::Done { repository, expanded, count }` after a
@@ -409,6 +439,19 @@ empty; the settings are not touched.
 - Marking sets a key to the commit the home tab showed for it, from the
   last reading, never to one read later, so that a commit that arrived in
   between stays new; Mark all as seen does so for every row.
+- A comparison keeps, in its `Tips`, the commit seen it was read with, and
+  a round compares a worktree again when that commit changed. A mark sets
+  it in the comparison too, together with no new commits, since the mark
+  is at the HEAD the comparison was read at; when the list takes a
+  comparison read before a mark and its HEAD is the commit now seen, it
+  has no new commits either. So a round that was under way while the user
+  looked no longer brings back the commits the user saw, which the review
+  of PR #32 found; one whose HEAD moved past the mark is read again in the
+  next round. The panel's reading does not depend on the commit seen, so
+  that the commits it lists stay while the row is looked at.
+- Remove from list forgets what was seen of the repository, as it forgets
+  its base, so that a repository listed again counts as listed for the
+  first time.
 
 Alternative: keeping what was seen in the settings. Rejected in the
 exploration: it changes on every look, while the settings change when the
@@ -425,7 +468,12 @@ actions sit in a fixed row above the list. The files against the base come
 from the comparison (decision 4). What only the panel needs, the
 uncommitted files with their lines and the new commits, is read by a
 `PanelWork` when a row is selected, cancelled when the selection moves on,
-and kept until its HEAD or status changes. The tracked files come from
+and kept until its HEAD, its status or the newest modification of its
+changed paths (decision 7) changes; without the last, an agent editing
+files that were already changed left their lines in the panel as they
+were when the row was selected (found in the review of PR #32). A look at
+a row reads nothing again (decision 9). A reading that fails is said in
+the panel with Git's message, above the values last read. The tracked files come from
 `git diff --numstat -z HEAD` with the filters neutralised, `--no-ext-diff
 --no-textconv`. That leaves out untracked files, the new files an agent
 makes all the time (reproduced in the second review), and `git add -N`,
@@ -450,7 +498,12 @@ While a repository's panel is shown, its local branches that no worktree
 has checked out, except its base branches, are compared as in decisions 3
 to 5,
 without conflict prediction, in a `PanelWork`. Their states are New,
-Ready, Done and Idle. Opening one opens the repository's tab and selects
+Ready, Done and Idle. Each branch is read on its own: one whose base
+cannot be detected is compared as decision 3 says, and one that cannot be
+compared is listed with a note that it could not be read, while the others
+are listed as usual; a single failure emptied the whole list before (found
+in the review of PR #32). The bases detected there are kept with those of
+the round, so that the next reading does not detect them again. Opening one opens the repository's tab and selects
 the branch in the history, through the same navigation as a branch chosen
 in the sidebar, applied once the tab has loaded its references.
 
@@ -578,9 +631,14 @@ tooltip, and both go into the row's name for assistive technology.
   repository] → said in the panel; squash merges are still recognised by
   their patch id; running no command a configuration names is the rule of
   ADR 0006.
-- [The state file grows with every branch ever seen] → keys of
-  repositories no longer listed and of branches that no longer exist are
-  dropped when a round finds the repository without them.
+- [The state file grows with every branch ever seen] → keys of branches
+  that no longer exist are dropped when a round finds the repository
+  without them, and those of a repository when the user removes it from
+  the list.
+- [An untracked folder with many files, such as a build folder that is not
+  ignored, would cost a lookup per file every 20 s for the state Working]
+  → the lookups stop after 1,000; a change deeper in such a folder may be
+  missed, as the state describes what was looked at.
 - [The timer and a gain of focus wait for a slow round, so fast
   repositories are read less often while one repository is slow] → a round
   is bounded by the pool and by cancelling when the home tab is left;
