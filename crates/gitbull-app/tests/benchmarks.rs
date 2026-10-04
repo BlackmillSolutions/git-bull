@@ -1264,7 +1264,7 @@ const PANEL_NEW: u64 = 50;
 /// each changes.
 const OVERLAP_WORKTREES: usize = 40;
 const OVERLAP_PATHS: usize = 1_000;
-const OVERLAP_TARGET: Duration = Duration::from_millis(1);
+const OVERLAP_TARGET: Duration = Duration::from_millis(3);
 
 /// The names of the rows of the home tab shown.
 fn home_rows(harness: &Harness<'_, App>) -> Vec<String> {

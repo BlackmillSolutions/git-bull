@@ -301,7 +301,7 @@ fn snapshot(name: &str, appearance: Appearance, vision: ColourVision) {
         toggles: [true, false],
     };
     let mut harness = Harness::builder()
-        .with_size((900.0, 860.0))
+        .with_size((900.0, 900.0))
         .wgpu()
         .build_ui_state(gallery, state);
     harness.ctx.set_fonts(fonts::definitions());

@@ -337,3 +337,65 @@ fn home_tab_in_the_dark_palette() {
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "home_dark", &options());
 }
+
+/// The cockpit of [`support::cockpit_setup`] in a window of `size`, in
+/// `theme`, with `fix-reload` selected where the panel shows: a worktree at
+/// work with uncommitted files, overlapping another.
+fn cockpit(theme: ThemeSetting, size: (f32, f32)) -> Harness<'static, App> {
+    let mut setup = support::cockpit_setup();
+    setup.settings.theme = theme;
+    let harness = Harness::builder().with_size(size).wgpu().build_ui_state(
+        |ui, app: &mut App| {
+            app.logic();
+            ui::show(app, ui);
+        },
+        build(setup).app,
+    );
+    harness.ctx.set_fonts(gitbull_app::fonts::definitions());
+    let mut harness = harness;
+    harness.step();
+    wait_for(&mut harness, |h| !h.state().home_reading());
+    if size.0 >= 900.0 {
+        let row = support::home_row(&harness, "fix-reload").expect("the row of fix-reload");
+        harness.hover_at(row.center());
+        for pressed in [true, false] {
+            harness.event(eframe::egui::Event::PointerButton {
+                pos: row.center(),
+                button: eframe::egui::PointerButton::Primary,
+                pressed,
+                modifiers: eframe::egui::Modifiers::NONE,
+            });
+        }
+        wait_for(&mut harness, |h| h.query_by_label("Uncommitted").is_some());
+    }
+    // The pointer leaves the window.
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+/// Scenarios "Panel of a worktree" and "Chips of the main states": every
+/// main state, the overlap and new-branch marks, the comparisons, and the
+/// panel of a worktree at work.
+#[test]
+fn cockpit_in_the_light_palette() {
+    let mut harness = cockpit(ThemeSetting::Light, (1280.0, 800.0));
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "cockpit_light", &options());
+}
+
+#[test]
+fn cockpit_in_the_dark_palette() {
+    let mut harness = cockpit(ThemeSetting::Dark, (1280.0, 800.0));
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "cockpit_dark", &options());
+}
+
+/// Scenario "Narrow window": the panel hidden behind its button, numbers
+/// shortened.
+#[test]
+fn cockpit_in_a_narrow_window() {
+    let mut harness = cockpit(ThemeSetting::Light, (800.0, 700.0));
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "cockpit_narrow", &options());
+}
