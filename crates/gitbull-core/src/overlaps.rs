@@ -2,7 +2,7 @@
 //! `repository-manager`, requirement "Overlapping worktrees"; design of
 //! `worktree-cockpit`, decision 8).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gitbull_git::path::RepoPath;
@@ -21,48 +21,75 @@ pub struct Overlap {
     pub paths: Vec<RepoPath>,
 }
 
+/// No list of further worktrees, as for most paths.
+const ALONE: u32 = u32::MAX;
+
 /// The overlaps of the active worktrees of one repository, by worktree;
-/// a worktree without overlaps is left out. Linear in the number of paths.
+/// a worktree without overlaps is left out, and the files two worktrees
+/// share are in the order of their names. Linear in the number of paths: a
+/// path that one worktree changes alone costs one entry of 24 bytes in a
+/// table and nothing more, as the shared paths are found from the table.
 pub fn overlaps(worktrees: &[Changes<'_>]) -> HashMap<PathBuf, Vec<Overlap>> {
-    let mut by_path: HashMap<&RepoPath, Vec<usize>> = HashMap::new();
+    let total = worktrees.iter().map(|changes| changes.paths.len()).sum();
+    // The first worktree that changes a path, and where the list of the
+    // further ones is.
+    let mut by_path: hashbrown::HashMap<&RepoPath, (u32, u32)> =
+        hashbrown::HashMap::with_capacity(total);
+    let mut further: Vec<Vec<u32>> = Vec::new();
     for (index, changes) in worktrees.iter().enumerate() {
+        let index = index as u32;
         for path in &changes.paths {
-            let changing = by_path.entry(*path).or_default();
-            if changing.last() != Some(&index) {
-                changing.push(index);
+            let (first, list) = by_path.entry(*path).or_insert((index, ALONE));
+            // A worktree may list a path twice: changed against its base and
+            // uncommitted.
+            if *first == index {
+                continue;
+            }
+            if *list == ALONE {
+                *list = further.len() as u32;
+                further.push(Vec::new());
+            }
+            let others = &mut further[*list as usize];
+            if others.last() != Some(&index) {
+                others.push(index);
+            }
+        }
+    }
+    // Every two worktrees that change a path share it.
+    let mut shared: Vec<Vec<(u32, Vec<RepoPath>)>> = vec![Vec::new(); worktrees.len()];
+    for (path, &(first, list)) in &by_path {
+        if list == ALONE {
+            continue;
+        }
+        let changing = || std::iter::once(first).chain(further[list as usize].iter().copied());
+        for one in changing() {
+            for other in changing().filter(|other| *other != one) {
+                let lists = &mut shared[one as usize];
+                match lists.iter_mut().find(|(known, _)| *known == other) {
+                    Some((_, paths)) => paths.push((*path).clone()),
+                    None => lists.push((other, vec![(*path).clone()])),
+                }
             }
         }
     }
     let mut found: HashMap<PathBuf, Vec<Overlap>> = HashMap::new();
-    for (index, changes) in worktrees.iter().enumerate() {
-        let mut shared: Vec<(usize, Vec<RepoPath>)> = Vec::new();
-        let mut done: HashSet<&RepoPath> = HashSet::new();
-        for path in &changes.paths {
-            if !done.insert(*path) {
-                continue;
-            }
-            for &other in &by_path[path] {
-                if other == index {
-                    continue;
-                }
-                match shared.iter_mut().find(|(known, _)| *known == other) {
-                    Some((_, paths)) => paths.push((*path).clone()),
-                    None => shared.push((other, vec![(*path).clone()])),
-                }
-            }
+    for (index, mut lists) in shared.into_iter().enumerate() {
+        if lists.is_empty() {
+            continue;
         }
-        if !shared.is_empty() {
-            found.insert(
-                changes.worktree.to_owned(),
-                shared
-                    .into_iter()
-                    .map(|(other, paths)| Overlap {
-                        other: worktrees[other].worktree.to_owned(),
-                        paths,
-                    })
-                    .collect(),
-            );
-        }
+        // The table has no order of its own.
+        lists.sort_unstable_by_key(|(other, _)| *other);
+        let overlaps = lists
+            .into_iter()
+            .map(|(other, mut paths)| {
+                paths.sort_unstable();
+                Overlap {
+                    other: worktrees[other as usize].worktree.to_owned(),
+                    paths,
+                }
+            })
+            .collect();
+        found.insert(worktrees[index].worktree.to_owned(), overlaps);
     }
     found
 }

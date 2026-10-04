@@ -1256,6 +1256,15 @@ fn diff() {
 /// worktrees of each.
 const HOME_REPOSITORIES: usize = 40;
 const HOME_WORKTREES: usize = 5;
+/// The worktree whose panel the benchmark scrolls, its files changed
+/// against its base and its new commits.
+const PANEL_FILES: usize = 1_000;
+const PANEL_NEW: u64 = 50;
+/// The worktrees of one repository whose overlaps are built, and the paths
+/// each changes.
+const OVERLAP_WORKTREES: usize = 40;
+const OVERLAP_PATHS: usize = 1_000;
+const OVERLAP_TARGET: Duration = Duration::from_millis(1);
 
 /// The names of the rows of the home tab shown.
 fn home_rows(harness: &Harness<'_, App>) -> Vec<String> {
@@ -1268,6 +1277,14 @@ fn home_rows(harness: &Harness<'_, App>) -> Vec<String> {
         .collect()
 }
 
+/// The labels of the rows of the panel shown.
+fn panel_rows(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::ListItem)
+        .filter_map(|node| node.accesskit_node().label())
+        .collect()
+}
+
 /// A frame with `event`, timed.
 fn frame_with(harness: &mut Harness<'_, App>, event: Event) -> Duration {
     harness.input_mut().events.push(event);
@@ -1276,21 +1293,89 @@ fn frame_with(harness: &mut Harness<'_, App>, event: Event) -> Duration {
     started.elapsed()
 }
 
+/// Frames until `done`, timed.
+fn frames_until(
+    harness: &mut Harness<'_, App>,
+    done: impl Fn(&Harness<'_, App>) -> bool,
+) -> Vec<Duration> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut times = Vec::new();
+    while !done(harness) {
+        assert!(Instant::now() < deadline, "timed out");
+        let started = Instant::now();
+        harness.step();
+        times.push(started.elapsed());
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    times
+}
+
+/// A comparison with `main` of three commits ahead and one behind, changing
+/// `files`.
+fn ahead_of_main(files: Vec<String>) -> gitbull_git::compare::BaseComparison {
+    use gitbull_git::changes::{FileLines, LineCount};
+    use gitbull_git::compare::{BaseComparison, BranchLines, Counts};
+    use gitbull_git::merged::Prediction;
+    use gitbull_git::path::RepoPath;
+    let changed = files.len();
+    BaseComparison {
+        counted: "refs/heads/main".to_owned(),
+        counts: Counts {
+            ahead: 3,
+            behind: 1,
+        },
+        lines: Some(BranchLines {
+            merge_base: "left".to_owned(),
+            files: files
+                .into_iter()
+                .map(|path| FileLines {
+                    path: RepoPath::from(path.as_str()),
+                    old_path: None,
+                    count: LineCount::Lines {
+                        added: 12,
+                        removed: 3,
+                    },
+                })
+                .collect(),
+            added: 12 * changed as u64,
+            removed: 3 * changed as u64,
+            changed,
+        }),
+        merged: None,
+        prediction: Prediction::NoConflict,
+    }
+}
+
 #[test]
 #[ignore]
 fn home_tab() {
+    use gitbull_core::seen::{Key as SeenKey, Seen};
+    use gitbull_git::commits::{CommitEntry, Since};
+    use gitbull_git::facts::{Branch, RepositoryFacts};
     use gitbull_git::head::Head;
-    use gitbull_testkit::{FakeBackend, Gate};
+    use gitbull_testkit::{FakeBackend, Gate, fake_id};
+    use std::sync::atomic::Ordering;
     use support::{path, worktree};
     let summary_of = support::summary;
 
     let name = |repository: usize| format!("repository-{repository:02}");
-    let gate = Gate::new();
+    let head = fake_id("head").to_string();
+    let summaries = Gate::new();
+    let comparisons = Gate::new();
     let mut backend = FakeBackend::default();
     let mut paths = Vec::new();
+    // The first agent of the first repository has a panel to scroll; the
+    // user saw its branch 50 commits ago.
+    let panel_branch = "agent/task-00-0";
+    let mut seen = Seen::default();
     for repository in 0..HOME_REPOSITORIES {
         let root = path(&["work", &name(repository)]);
         let mut listed = vec![worktree(root.clone(), Some("main"))];
+        let mut branches = vec![Branch {
+            name: "refs/heads/main".to_owned(),
+            commit: head.clone(),
+            upstream: None,
+        }];
         backend = backend.with_repository(&root).with_summary(
             &root,
             summary_of(Head::Branch("main".to_owned()), repository, 0, 600),
@@ -1298,28 +1383,90 @@ fn home_tab() {
         for agent in 0..HOME_WORKTREES {
             let folder = path(&["work", &format!("{}-agent-{agent}", name(repository))]);
             let branch = format!("agent/task-{repository:02}-{agent}");
+            let tip = format!("refs/heads/{branch}");
             listed.push(worktree(folder.clone(), Some(&branch)));
-            backend = backend.with_summary(
-                &folder,
-                summary_of(Head::Branch(branch), agent, 0, 60 * agent as i64),
-            );
+            branches.push(Branch {
+                name: tip.clone(),
+                commit: head.clone(),
+                upstream: None,
+            });
+            // Neighbouring agents share a file, which overlaps.
+            let files = match branch == panel_branch {
+                true => (0..PANEL_FILES)
+                    .map(|n| format!("src/file-{n:04}.rs"))
+                    .collect(),
+                false => (0..20)
+                    .map(|n| format!("src/agent-{agent}/file-{n}.rs"))
+                    .chain([format!("src/shared-{}.rs", agent / 2)])
+                    .collect(),
+            };
+            backend = backend
+                .with_summary(
+                    &folder,
+                    summary_of(Head::Branch(branch), agent, 0, 60 * agent as i64),
+                )
+                .with_detected_base(&root, &tip, "refs/heads/main")
+                .with_comparison(&root, &tip, ahead_of_main(files));
         }
-        backend = backend.with_worktrees(listed);
+        let facts = RepositoryFacts {
+            overrides: Vec::new(),
+            merge_driver: false,
+            worktree_config: false,
+            remotes: Vec::new(),
+            common_dir: root.join(".git"),
+            branches,
+            origin_head: None,
+        };
+        let current: Vec<(SeenKey, String)> = listed
+            .iter()
+            .filter_map(|listed| listed.branch.clone())
+            .map(|branch| {
+                let key = SeenKey::Branch {
+                    repository: root.clone(),
+                    branch,
+                };
+                (key, head.clone())
+            })
+            .collect();
+        seen.found(&root, &current);
+        backend = backend.with_facts(&root, facts).with_worktrees(listed);
         paths.push(root);
     }
-    let backend = backend.with_summary_gate(&gate);
-    let test = build(Setup {
+    seen.mark(
+        SeenKey::Branch {
+            repository: paths[0].clone(),
+            branch: panel_branch.to_owned(),
+        },
+        "seen-at",
+    );
+    let commits = (0..=PANEL_NEW)
+        .map(|n| CommitEntry {
+            id: format!("{n:040}"),
+            subject: format!("Commit {n} of the agent"),
+            time: 0,
+        })
+        .collect();
+    let backend = backend
+        .with_since("seen-at", &head, Since::Commits(PANEL_NEW))
+        .with_commit_list("seen-at", &head, commits)
+        .with_summary_gate(&summaries)
+        .with_compare_gate(&comparisons);
+    let setup = Setup {
         settings: Settings {
             pinned: paths[..HOME_REPOSITORIES / 2].to_vec(),
             recent: paths[HOME_REPOSITORIES / 2..].to_vec(),
             ..Settings::default()
         },
         backend,
+        seen: Some(seen),
         ..Setup::default()
-    });
+    };
+    let clock = Arc::clone(&setup.desktop.now);
+    let test = build(setup);
     let mut harness = window(test.app);
 
-    // The worktrees are found while the summaries wait; then they arrive.
+    // The worktrees are found while the summaries wait; then they arrive
+    // while the comparisons wait; then those arrive.
     let mut finding = Vec::new();
     for _ in 0..60 {
         let started = Instant::now();
@@ -1327,14 +1474,16 @@ fn home_tab() {
         finding.push(started.elapsed());
         std::thread::sleep(Duration::from_millis(1));
     }
-    gate.open();
+    summaries.open();
     let mut arriving = Vec::new();
-    while harness.state().home_reading() {
+    for _ in 0..60 {
         let started = Instant::now();
         harness.step();
         arriving.push(started.elapsed());
-        std::thread::sleep(Duration::from_micros(200));
+        std::thread::sleep(Duration::from_millis(1));
     }
+    comparisons.open();
+    let compared = frames_until(&mut harness, |harness| !harness.state().home_reading());
     let all = HOME_REPOSITORIES * (HOME_WORKTREES + 1);
     assert_eq!(
         harness
@@ -1352,6 +1501,26 @@ fn home_tab() {
         "{HOME_REPOSITORIES} repositories, {} worktrees",
         all - HOME_REPOSITORIES
     ));
+    assert!(
+        harness.query_all_by_role(Role::TreeItem).any(|node| node
+            .accesskit_node()
+            .label()
+            .is_some_and(|label| label.contains("3 ahead"))),
+        "the comparisons arrived"
+    );
+
+    // Three readings by the timer, 20 seconds apart.
+    let mut ticking = Vec::new();
+    for _ in 0..3 {
+        clock.fetch_add(20, Ordering::SeqCst);
+        let started = Instant::now();
+        harness.step();
+        ticking.push(started.elapsed());
+        assert!(harness.state().home_reading(), "the timer reads again");
+        ticking.extend(frames_until(&mut harness, |harness| {
+            !harness.state().home_reading()
+        }));
+    }
 
     // Page Down and the wheel in turn over the list.
     let list = harness
@@ -1406,6 +1575,51 @@ fn home_tab() {
         "Escape cleared the filter"
     );
 
+    // The panel of the agent with 1,000 files and 50 new commits: the
+    // filter selects it, Down and Tab take the focus into the panel, which
+    // Page Down and the wheel scroll in turn.
+    for character in "task-00-0".chars() {
+        harness
+            .input_mut()
+            .events
+            .push(Event::Text(character.to_string()));
+        harness.step();
+    }
+    let mut opening = vec![frame_with(&mut harness, key(Key::ArrowDown))];
+    opening.extend(frames_until(&mut harness, |harness| {
+        harness.query_by_label("50 new commits").is_some()
+    }));
+    opening.extend(frames_until(&mut harness, |harness| {
+        harness
+            .query_by_label("0000000 Commit 0 of the agent")
+            .is_some()
+    }));
+    harness.key_press(Key::Tab);
+    harness.run();
+    let panel = harness.get_by_role_and_label(Role::List, "Details").rect();
+    harness.hover_at(panel.center());
+    harness.run();
+    let shown = panel_rows(&harness);
+    let mut panel_scrolling = Vec::new();
+    for frame in 0..400 {
+        let event = match frame % 2 {
+            0 => key(Key::PageDown),
+            _ => Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: vec2(0.0, -240.0),
+                phase: TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            },
+        };
+        panel_scrolling.push(frame_with(&mut harness, event));
+    }
+    assert_ne!(panel_rows(&harness), shown, "the panel scrolled");
+
+    // The overlaps of one repository with 40 active worktrees of 1,000
+    // paths each: 50 shared with the next, and, for comparison, every one.
+    let some_shared = overlap_builds(50);
+    let all_shared = overlap_builds(OVERLAP_PATHS / 2);
+
     eprintln!();
     eprintln!(
         "| Home tab, {HOME_REPOSITORIES} repositories with {HOME_WORKTREES} worktrees each | Frames | Median | 99th percentile | Slowest |"
@@ -1413,14 +1627,71 @@ fn home_tab() {
     eprintln!("|---|---|---|---|---|");
     let slowest = [
         summary("Worktrees found, summaries waiting", finding),
-        summary("Summaries arriving", arriving),
+        summary("Summaries arriving, comparisons waiting", arriving),
+        summary("Comparisons arriving", compared),
+        summary("Three readings by the timer", ticking),
         summary("Page Down and wheel in turn", scrolling),
         summary(
             "Typing `task-3` and clearing it, one character a frame",
             filtering,
         ),
+        summary(
+            "Panel of 1,000 files and 50 new commits, until it shows them",
+            opening,
+        ),
+        summary("Panel, Page Down and wheel in turn", panel_scrolling),
     ];
+    eprintln!();
+    eprintln!("| Overlaps | Builds | Median | 99th percentile | Slowest |");
+    eprintln!("|---|---|---|---|---|");
+    let overlaps = summary(
+        "40 worktrees of 1,000 paths each, 50 shared with the next",
+        some_shared,
+    );
+    summary(
+        "40 worktrees of 1,000 paths each, every one shared with a neighbour",
+        all_shared,
+    );
     for slowest in slowest {
         assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
     }
+    assert!(overlaps < OVERLAP_TARGET, "the overlaps took {overlaps:?}");
+}
+
+/// Builds the overlaps of [`OVERLAP_WORKTREES`] worktrees of
+/// [`OVERLAP_PATHS`] paths each a hundred times, timed, where each worktree
+/// shares `shared` of its paths with the next.
+fn overlap_builds(shared: usize) -> Vec<Duration> {
+    use gitbull_core::overlaps::{Changes, overlaps};
+    use gitbull_git::path::RepoPath;
+    let folders: Vec<PathBuf> = (0..OVERLAP_WORKTREES)
+        .map(|n| PathBuf::from(format!("/work/wt/agent-{n}")))
+        .collect();
+    let step = OVERLAP_PATHS - shared;
+    let paths: Vec<Vec<RepoPath>> = (0..OVERLAP_WORKTREES)
+        .map(|n| {
+            (n * step..n * step + OVERLAP_PATHS)
+                .map(|file| {
+                    RepoPath::from(format!("src/module-{}/file-{file}.rs", file % 50).as_str())
+                })
+                .collect()
+        })
+        .collect();
+    let changes: Vec<Changes<'_>> = folders
+        .iter()
+        .zip(&paths)
+        .map(|(worktree, paths)| Changes {
+            worktree,
+            paths: paths.iter().collect(),
+        })
+        .collect();
+    let found = overlaps(&changes);
+    assert_eq!(found.len(), OVERLAP_WORKTREES, "every worktree overlaps");
+    (0..100)
+        .map(|_| {
+            let started = Instant::now();
+            std::hint::black_box(overlaps(std::hint::black_box(&changes)));
+            started.elapsed()
+        })
+        .collect()
 }

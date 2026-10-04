@@ -292,7 +292,7 @@ fn apply(report: Report, list: &mut RepositoryList, changes: &mut Vec<SettingsCh
                         path: path.clone(),
                         repository: repository.clone(),
                     });
-                    list.set_found(repository.clone(), found.clone());
+                    list.found_later(repository.clone(), found.clone());
                     known_as = repository.clone();
                 }
                 changes.push(SettingsChange::Worktrees {
@@ -300,7 +300,7 @@ fn apply(report: Report, list: &mut RepositoryList, changes: &mut Vec<SettingsCh
                     worktrees: worktrees.clone(),
                 });
             }
-            list.set_found(path, found);
+            list.found_later(path, found);
         }
         Report::Facts {
             repository,

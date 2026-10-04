@@ -312,9 +312,17 @@ impl RepositoryList {
 
     /// What a round found for the path `path` of the settings.
     pub fn set_found(&mut self, path: PathBuf, found: Found) {
+        self.found_later(path, found);
+        self.settle();
+    }
+
+    /// Like [`RepositoryList::set_found`], with the rows built by the next
+    /// [`RepositoryList::settle`], as a round applies many reports in one
+    /// frame.
+    pub(crate) fn found_later(&mut self, path: PathBuf, found: Found) {
         if self.found.get(&path) != Some(&found) {
             self.found.insert(path, found);
-            self.build(false);
+            self.stale = true;
         }
     }
 
@@ -441,6 +449,8 @@ impl RepositoryList {
     /// again, as when the home tab becomes shown and on Refresh; until the
     /// next time it stays, so that rows do not move under the pointer.
     pub fn freeze_order(&mut self) {
+        // The worktrees of reports applied in this frame count too.
+        self.settle();
         self.order.clear();
         for repository in &self.repositories {
             let mut active: Vec<&PathBuf> = repository
@@ -1936,6 +1946,19 @@ mod tests {
     #[test]
     fn worktrees_are_listed_most_recently_active_first() {
         let mut list = cockpit(&["one", "two"]);
+        list.set_status(wt("one"), status_at(NOW - 2 * 24 * 3600, &[], None));
+        list.set_status(wt("two"), status_at(NOW - 10 * MINUTE, &[], None));
+        list.freeze_order();
+        assert_eq!(shown(&list), ["# Recent", "app", "  two", "  one"]);
+    }
+
+    #[test]
+    fn the_order_takes_the_worktrees_a_round_found_in_its_last_frame() {
+        let mut list = cockpit(&["one"]);
+        list.found_later(
+            p("/work/app"),
+            repository("/work/app", &["/work/wt/one", "/work/wt/two"]),
+        );
         list.set_status(wt("one"), status_at(NOW - 2 * 24 * 3600, &[], None));
         list.set_status(wt("two"), status_at(NOW - 10 * MINUTE, &[], None));
         list.freeze_order();
