@@ -486,8 +486,9 @@ part. The run shown was made on a quiet machine; runs while the machine was
 busy took up to twice as long, the first frame among them.
 
 Each of the 200 agents' worktrees is three commits ahead of `main` and one
-behind, with 21 changed files, one of them shared with a neighbour; one has
-1,000 changed files and 50 new commits. The summaries and the comparisons
+behind, with 21 changed files, of which the first four agents of each
+repository share one in pairs; one worktree has 1,000 changed files and 50
+new commits instead. The summaries and the comparisons
 wait behind gates of their own, and the timer reads three times, 20 seconds
 apart.
 
