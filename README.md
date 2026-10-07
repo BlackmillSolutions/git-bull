@@ -136,6 +136,16 @@ cargo deny check
 `cargo deny` checks the licences of all dependencies and known security
 advisories. Install it once with `cargo install cargo-deny --locked`.
 
+### OpenSpec
+
+The shared Claude Code and Codex workflows in `.claude/` and `.agents/`
+are generated with **OpenSpec 1.13.2**. Use the same CLI version when
+running `openspec init` or `openspec update`:
+
+```sh
+npm install --global @fission-ai/openspec@1.13.2
+```
+
 ## Licence
 
 git-bull is licensed under either of
