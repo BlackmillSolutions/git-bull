@@ -14,7 +14,7 @@ use std::time::Instant;
 use crate::cancel::CancelToken;
 use crate::error::Error;
 use crate::log::{CommandLog, Outcome};
-use crate::process::{Process, StderrWatcher};
+use crate::process::{FailurePolicy, Process, StderrWatcher};
 use crate::write::{WriteHooks, WriteInvocation};
 
 #[derive(Clone, Copy)]
@@ -191,10 +191,28 @@ impl Git {
         S: AsRef<OsStr>,
     {
         let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
-        let command_line = command_line(&args);
-        let started = Instant::now();
         let mut command = self.command(repo, overrides, &args);
         command.envs(env.iter().copied());
+        self.spawn_prepared(command, &args, stdin, watcher, FailurePolicy::Read)
+    }
+
+    pub(crate) fn spawn_prepared(
+        &self,
+        mut command: Command,
+        args: &[OsString],
+        stdin: bool,
+        watcher: Option<StderrWatcher>,
+        failure_policy: FailurePolicy,
+    ) -> Result<Process, Error> {
+        let command_line = command_line(args);
+        let started = Instant::now();
+        // A private group owns foreground descendants, including hook/filter
+        // children, without sharing the application's process group.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let child = command
             .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
@@ -213,6 +231,7 @@ impl Git {
             self.log.clone(),
             started,
             watcher,
+            failure_policy,
         ))
     }
 

@@ -12,5 +12,8 @@ publish.workspace = true
 encoding_rs = "0.8.42"
 tempfile = "3.27.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
 [dev-dependencies]
 gitbull-testkit.workspace = true
