@@ -40,6 +40,11 @@ fn write_invocations_preserve_git_behaviour() {
     post_checkout_failure_keeps_the_changed_branch(&git);
     post_commit_failure_keeps_git_success(&git);
     write_output_arrives_before_completion(&git);
+    skipping_commit_hooks_is_local_to_one_invocation(&git);
+    skipping_hooks_preserves_filters_and_signing(&git);
+    amend_can_skip_hooks(&git);
+    skipping_commit_hooks_includes_fsmonitor(&git);
+    invalid_skip_never_starts_git(&git);
 }
 
 fn repository() -> TestRepo {
@@ -211,6 +216,191 @@ fn reads_remain_protected_after_writes(git: &Git) {
 
 fn shell_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn write_with_hooks(
+    git: &Git,
+    repo: &TestRepo,
+    hooks: WriteHooks,
+    args: &[&str],
+) -> Result<Vec<u8>, Error> {
+    let mut process = git.write(hooks).spawn(repo.path(), args, false, None)?;
+    let mut output = Vec::new();
+    process
+        .take_stdout()
+        .unwrap()
+        .read_to_end(&mut output)
+        .unwrap();
+    process.wait()?;
+    Ok(output)
+}
+
+fn install_commit_hooks(repo: &TestRepo, marker: &Marker) {
+    for name in [
+        "pre-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+        "reference-transaction",
+        "post-index-change",
+    ] {
+        marker.hook(&repo.path().join(".git/hooks"), name);
+    }
+}
+
+fn skipping_commit_hooks_is_local_to_one_invocation(git: &Git) {
+    let repo = repository();
+    let marker = Marker::new();
+    install_commit_hooks(&repo, &marker);
+    commit(git, repo.path());
+    let before = marker.labels();
+    for name in [
+        "pre-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+        "reference-transaction",
+    ] {
+        assert!(before.contains(&format!("hook:{name}")), "{before:?}");
+    }
+    write_with_hooks(
+        git,
+        &repo,
+        WriteHooks::SkipCommitHooks,
+        &["commit", "--allow-empty", "-m", "Skip"],
+    )
+    .unwrap();
+    assert_eq!(marker.labels(), before);
+    commit(git, repo.path());
+    assert!(marker.labels().len() > before.len());
+    // Characterise why --no-verify cannot implement skip-all.
+    let before = marker.labels().len();
+    write(
+        git,
+        repo.path(),
+        &["commit", "--allow-empty", "--no-verify", "-m", "No verify"],
+    )
+    .unwrap();
+    let labels = marker.labels();
+    let delta = &labels[before..];
+    assert!(delta.contains(&"hook:prepare-commit-msg".into()));
+    assert!(delta.contains(&"hook:post-commit".into()));
+    assert!(!delta.contains(&"hook:pre-commit".into()));
+    assert!(!delta.contains(&"hook:commit-msg".into()));
+}
+
+fn skipping_hooks_preserves_filters_and_signing(git: &Git) {
+    let repo = repository();
+    let hooks = Marker::new();
+    install_commit_hooks(&repo, &hooks);
+    let filter = Marker::new();
+    install_filter(&repo, &filter, "sed 's/raw/clean/g'");
+    repo.write("file.txt", "raw skipped\n");
+    write_with_hooks(
+        git,
+        &repo,
+        WriteHooks::SkipCommitHooks,
+        &["commit", "--all", "-m", "Filtered"],
+    )
+    .unwrap();
+    assert_eq!(repo.git(&["show", "HEAD:file.txt"]), "clean skipped\n");
+    assert!(!filter.labels().is_empty());
+    assert!(hooks.labels().is_empty());
+
+    let signer = Marker::new();
+    repo.config("gpg.program", &signer.script("skipped-signer", "exit 1"));
+    repo.config("commit.gpgsign", "true");
+    let before = hooks.labels();
+    assert!(matches!(
+        write_with_hooks(
+            git,
+            &repo,
+            WriteHooks::SkipCommitHooks,
+            &["commit", "--allow-empty", "-m", "Signed skip"]
+        ),
+        Err(Error::CommandFailed { .. })
+    ));
+    assert_eq!(signer.labels(), ["skipped-signer"]);
+    assert_eq!(hooks.labels(), before);
+}
+
+fn amend_can_skip_hooks(git: &Git) {
+    let repo = repository();
+    let marker = Marker::new();
+    install_commit_hooks(&repo, &marker);
+    let parent = repo.git(&["rev-list", "--count", "HEAD"]);
+    write_with_hooks(
+        git,
+        &repo,
+        WriteHooks::SkipCommitHooks,
+        &["commit", "--amend", "-m", "Amended"],
+    )
+    .unwrap();
+    assert!(marker.labels().is_empty());
+    assert_eq!(repo.git(&["log", "-1", "--format=%s"]).trim(), "Amended");
+    assert_eq!(repo.git(&["rev-list", "--count", "HEAD"]), parent);
+}
+
+fn skipping_commit_hooks_includes_fsmonitor(git: &Git) {
+    let repo = repository();
+    let hooks = Marker::new();
+    install_commit_hooks(&repo, &hooks);
+    let monitor = Marker::new();
+    // Version 2 returns a token followed by '/' to invalidate the whole tree.
+    let script = monitor.script("fsmonitor", "printf 'test-token\\000/\\000'");
+    repo.config("core.fsmonitor", &script);
+    repo.config("core.fsmonitorHookVersion", "2");
+    commit(git, repo.path());
+    let before = monitor.labels();
+    let hook_before = hooks.labels();
+    assert!(
+        !before.is_empty(),
+        "ordinary commit must trigger the valid monitor fixture"
+    );
+    for args in [
+        vec!["commit", "--allow-empty", "-m", "No hooks"],
+        vec!["commit", "--amend", "--allow-empty", "--no-edit"],
+    ] {
+        write_with_hooks(git, &repo, WriteHooks::SkipCommitHooks, &args).unwrap();
+        assert_eq!(monitor.labels(), before);
+        assert_eq!(hooks.labels(), hook_before);
+    }
+    commit(git, repo.path());
+    assert!(monitor.labels().len() > before.len());
+    assert!(hooks.labels().len() > hook_before.len());
+}
+
+fn invalid_skip_never_starts_git(git: &Git) {
+    let repo = repository();
+    let marker = Marker::new();
+    install_commit_hooks(&repo, &marker);
+    let root = tempfile::tempdir().unwrap();
+    let log = root.path().join("commands.log");
+    let git = git
+        .clone()
+        .with_log(Arc::new(CommandLog::new(log.clone(), 1024 * 1024)));
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let index = fs::read(repo.path().join(".git/index")).unwrap();
+    repo.write("file.txt", "changed\n");
+    for args in [
+        vec![],
+        vec!["add", "file.txt"],
+        vec!["switch", "-c", "unexpected"],
+        vec!["checkout", "HEAD", "--", "file.txt"],
+        vec!["--no-pager", "commit"],
+    ] {
+        assert!(
+            matches!(write_with_hooks(&git, &repo, WriteHooks::SkipCommitHooks, &args), Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidInput)
+        );
+    }
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read(repo.path().join(".git/index")).unwrap(), index);
+    assert_eq!(
+        fs::read_to_string(repo.path().join("file.txt")).unwrap(),
+        "changed\n"
+    );
+    assert!(marker.labels().is_empty());
+    assert!(!log.exists());
 }
 
 /// Releases blocked scripts and joins collectors even during an assertion panic.

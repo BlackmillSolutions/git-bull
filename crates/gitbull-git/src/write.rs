@@ -1,10 +1,11 @@
 //! Explicit user actions honour ordinary Git hooks, filters and signing.
 
 use std::ffi::{OsStr, OsString};
+use std::io;
 use std::path::Path;
 use std::process::Command;
 
-use crate::invoke::ExecutionPolicy;
+use crate::invoke::{ExecutionPolicy, command_line};
 use crate::process::{FailurePolicy, StderrWatcher};
 use crate::{Error, Git, Process};
 
@@ -13,6 +14,10 @@ use crate::{Error, Git, Process};
 pub enum WriteHooks {
     /// Honour the effective Git hook configuration.
     Run,
+    /// Skip hook-directory and fsmonitor hooks for this commit only.
+    /// Filters and signing remain active. Only a literal `commit` as the
+    /// first argument is accepted, including commits with `--amend`.
+    SkipCommitHooks,
 }
 
 /// Ordinary Git execution selected by an explicit user action (ADR 0007).
@@ -29,18 +34,35 @@ impl<'a> WriteInvocation<'a> {
         Self { git, hooks }
     }
 
-    /// Prepares `git <args>` with ordinary hooks, filters and signing.
+    /// Prepares `git <args>` with the selected hooks, ordinary filters and signing.
     ///
     /// Keeps noninteractive prompts, literal pathspecs, output formatting and
     /// inherited repository-redirection protections common to both policies.
+    /// SkipCommitHooks rejects any first argument other than `commit` before
+    /// execution. It skips more hooks than Git's `--no-verify` option.
     pub fn command<I, S>(&self, repo: &Path, args: I) -> Result<Command, Error>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        let args: Vec<OsString> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_owned())
+            .collect();
+        if self.hooks == WriteHooks::SkipCommitHooks
+            && args.first().map(OsString::as_os_str) != Some(OsStr::new("commit"))
+        {
+            return Err(Error::Io {
+                command: command_line(&args),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "skipping hooks is only supported for git commit",
+                ),
+            });
+        }
         Ok(self
             .git
-            .command_with_policy(repo, &[], args, ExecutionPolicy::Write(self.hooks)))
+            .command_with_policy(repo, &[], &args, ExecutionPolicy::Write(self.hooks)))
     }
 
     /// Starts an explicit write using the shared process streams and log.

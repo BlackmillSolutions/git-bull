@@ -62,3 +62,19 @@ status. A failing post-commit hook can accompany Git success and a new commit.
 Future action callers own write lifetime across view changes and refresh actual
 repository state after success, failure or cancellation. This foundation does
 not connect write lifetime to browsing's selection cancellation.
+
+## One commit without hooks
+
+`WriteHooks::SkipCommitHooks` requires literal `commit` as the first argument;
+amend is supported. Other commands, empty argument lists and leading global
+options fail with InvalidInput before command execution or logging. The policy
+points `core.hooksPath` at the application-owned empty folder and disables
+`core.fsmonitor`, whose configured hook runs independently of that folder.
+
+This skips pre-commit, prepare-commit-msg, commit-msg, post-commit and other
+hooks Git dispatches during the commit, including reference-transaction and
+post-index-change. `--no-verify` skips only pre-commit and commit-msg, leaving
+prepare-commit-msg and post-commit active, so it cannot implement this choice.
+Filters and signing remain active. Both hook overrides belong to the current
+command only; the next ordinary write honours hooks and fsmonitor again. The
+future commit change owns the UI option; no setting remembers this choice.

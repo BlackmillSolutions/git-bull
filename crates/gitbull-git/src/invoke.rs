@@ -102,7 +102,13 @@ impl Git {
                     .env("GIT_OPTIONAL_LOCKS", "0")
                     .env("GIT_NO_LAZY_FETCH", "1");
             }
-            ExecutionPolicy::Write(WriteHooks::Run) => {
+            ExecutionPolicy::Write(hooks) => {
+                if hooks == WriteHooks::SkipCommitHooks {
+                    command
+                        .args(["-c", "core.fsmonitor=false"])
+                        .arg("-c")
+                        .arg(hooks_path);
+                }
                 command
                     .env_remove("GIT_OPTIONAL_LOCKS")
                     .env_remove("GIT_NO_LAZY_FETCH");

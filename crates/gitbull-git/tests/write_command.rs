@@ -2,6 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use gitbull_git::Error;
 use gitbull_git::{ConfigOverride, Git, WriteHooks};
 
 fn git() -> Git {
@@ -95,4 +96,30 @@ fn constructing_a_writer_keeps_read_defaults() {
     let after = git.command(Path::new("/repo"), &overrides, ["status"]);
     assert_eq!(arguments(&before), arguments(&after));
     assert_eq!(environment(&before), environment(&after));
+}
+
+#[test]
+fn skip_commit_hooks_rejects_other_commands() {
+    let git = git();
+    let writer = git.write(WriteHooks::SkipCommitHooks);
+    for args in [
+        vec![],
+        vec!["add", "."],
+        vec!["switch", "topic"],
+        vec!["checkout", "topic"],
+        vec!["-c", "user.name=Override", "commit"],
+        vec!["--no-pager", "commit"],
+    ] {
+        let error = writer.command(Path::new("/repo"), &args).unwrap_err();
+        assert!(
+            matches!(error, Error::Io { source, .. } if source.kind() == std::io::ErrorKind::InvalidInput && source.to_string() == "skipping hooks is only supported for git commit")
+        );
+    }
+    let command = writer
+        .command(Path::new("/repo"), ["commit", "--amend", "--no-edit"])
+        .unwrap();
+    let args = arguments(&command);
+    assert!(args.contains(&OsString::from("core.fsmonitor=false")));
+    assert!(args.contains(&OsString::from("core.hooksPath=/empty-hooks")));
+    assert!(!args.contains(&OsString::from("--no-verify")));
 }
