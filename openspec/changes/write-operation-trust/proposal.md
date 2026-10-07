@@ -19,9 +19,14 @@ filter behaviour, while browsing must keep its current guarantees.
   configuration for write invocations. Keep argument, environment and
   process handling centralised, and never bypass Git's ownership check.
 - Provide an explicit per-commit mode that disables all commit hooks. It
-  does not disable filters or signing and is rejected for other commands.
+  disables the configured fsmonitor hook as well, but does not disable
+  filters or signing, and is rejected for other commands.
   The future commit UI will expose it as "Commit without hooks".
-- Reuse the existing subprocess streams, error output, cancellation and log.
+- Reuse the existing subprocess streams, error output and log, and fix
+  cancellation of ordinary hook/filter descendants before adding writers.
+  Unix tracked processes use an owned process group; cancellation and Drop
+  terminate the group, keeping PID ownership safe until cleanup finishes.
+  Windows retains its process-tree termination for foreground descendants.
   A write failure keeps Git's actual exit status and output, without an
   automatic retry, hook bypass or rollback. Later action callers must read
   the resulting repository state even after failure or cancellation.
@@ -52,10 +57,15 @@ None.
 - `crates/gitbull-git/src/invoke.rs`: shared command construction and process
   start, with the existing public methods retaining read semantics.
 - New `crates/gitbull-git/src/write.rs`: the explicit write invocation API,
-  exported by `lib.rs`, without new dependencies.
-- `crates/gitbull-git/src/process.rs`: retain the existing pipe, cancellation
-  and logging machinery; distinguish write failures from the read-only
-  missing-content heuristic.
+  exported by `lib.rs`.
+- `crates/gitbull-git/src/process.rs`: extend the shared cancellation/Drop
+  lifecycle to stop Unix process groups and close their pipes; retain the
+  stream and log machinery, and distinguish write failures from the
+  read-only missing-content heuristic.
+- `crates/gitbull-git/Cargo.toml` and `Cargo.lock`: declare Unix-only
+  `libc = "0.2.189"` for native process-group signalling and non-reaping exit
+  observation. That version is already resolved and included in the notices;
+  check the generated notices after updating the dependency edge.
 - Existing testkit `TestRepo` and `Marker`: real Git tests for hooks,
   filters, writes followed by reads, output and failed operations.
 - ADR 0006 and a new ADR 0007: document the boundary between protected

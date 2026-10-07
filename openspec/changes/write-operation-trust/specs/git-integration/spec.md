@@ -184,7 +184,8 @@ the application interface.
 A caller SHALL be able to request that all hooks triggered by one commit
 invocation, including amend, are disabled. This choice MUST NOT disable
 filters or signing, persist to another invocation, or be accepted for a
-non-commit command. The future commit interface SHALL expose the choice;
+non-commit command. It SHALL also disable a configured fsmonitor hook for
+that invocation. The future commit interface SHALL expose the choice;
 this foundation change SHALL provide the execution support only.
 
 #### Scenario: All commit hooks are skipped
@@ -194,6 +195,11 @@ this foundation change SHALL provide the execution support only.
 #### Scenario: Skip does not carry over
 - **WHEN** a commit skips hooks and the next commit requests ordinary execution
 - **THEN** the next commit runs its configured hooks
+
+#### Scenario: File-system monitor hook is skipped
+- **WHEN** a repository configures a fsmonitor hook and a commit or amend requests skipping hooks
+- **THEN** the fsmonitor hook does not execute for that invocation
+- **AND** a subsequent ordinary commit honours that configuration again
 
 #### Scenario: Filters remain active when hooks are skipped
 - **WHEN** a commit skips hooks and Git needs a configured filter for that operation
@@ -211,8 +217,10 @@ error output SHALL keep the existing bound. Failures SHALL preserve Git's
 returned exit status and error output without interpreting arbitrary hook
 text as the viewer's missing-content notice. A failed or explicitly
 cancelled write SHALL not be automatically retried, run again without
-hooks, or rolled back. Cancellation and process logging SHALL use the
-existing lifecycle. A nonzero exit SHALL not be taken as proof that the
+hooks, or rolled back. Cancellation SHALL stop Git and its ordinary
+foreground hook/filter descendants, closing the pipes they hold; the shared
+lifecycle SHALL be corrected wherever it does not provide this behaviour.
+Process logging SHALL retain its existing outcome contract. A nonzero exit SHALL not be taken as proof that the
 repository was unchanged.
 
 #### Scenario: Hook output precedes completion
@@ -242,5 +250,14 @@ repository was unchanged.
 
 #### Scenario: Write is cancelled
 - **WHEN** the caller explicitly cancels a write process
-- **THEN** the process is stopped through the existing cancellation mechanism
+- **THEN** Git and its ordinary foreground hook/filter descendants are stopped and their pipes close before any fixture cleanup timeout
 - **AND** cancellation is returned and recorded without assuming the repository is unchanged
+
+#### Scenario: Descendant tries to continue after cancellation
+- **WHEN** an ordinary foreground hook waits for another process and the caller cancels the write after both have reported readiness
+- **THEN** both processes stop without writing a later marker after confirmed cancellation
+- **AND** the result does not depend on their emergency fixture timeout
+
+#### Scenario: Late cancellation after completion
+- **WHEN** the caller keeps a cancellation handle after the process lifecycle has completed and then invokes it
+- **THEN** it does not signal a stale process or group identifier or affect an unrelated process

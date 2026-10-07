@@ -15,11 +15,16 @@ requested writes, without a repository trust dialog.
   thread, offers `StderrWatcher`, retains at most 64 KiB of stderr, logs the
   outcome and supports cancellation. Its `wait` classifies error text using
   `Error::failed`, which recognises missing content for protected reads.
+  Cancellation currently stops only Git on Unix; Windows calls `taskkill /T`.
+  Reusing that Unix stop path unchanged would leave hooks running and pipes
+  open, so this change must extend it before write execution is delivered.
 - `gitbull-testkit::TestRepo` and `Marker` already provide real repositories,
   linked-repository setup through Git commands, executable hooks, filters,
   failing scripts and markers. Reuse them.
-- No write methods exist in `Backend`, and no repository trust state exists
-  in settings. This change does not introduce either.
+- No checkout, staging or commit methods exist in `Backend`, and no
+  repository trust state exists in settings. The existing `write_commit_graph`
+  operation retains its hardened execution. This change adds no action
+  method or trust state.
 
 ## Goals / Non-Goals
 
@@ -76,7 +81,8 @@ argument ordering and overrides, including the tests that check them.
 | No pager, no colour, raw path output, `LC_ALL=C` | Existing | Same |
 | `GIT_TERMINAL_PROMPT=0`, literal pathspecs | Existing | Same |
 | Clear `REDIRECTING_VARIABLES`, reset inherited command configuration count | Existing | Same |
-| `core.fsmonitor=false`, `log.showSignature=false`, `diff.autoRefreshIndex=false` | Existing | Do not add |
+| `core.fsmonitor=false` | Existing | Only SkipCommitHooks; Run honours configuration |
+| `log.showSignature=false`, `diff.autoRefreshIndex=false` | Existing | Do not add |
 | Empty `core.hooksPath` | Always | Only SkipCommitHooks |
 | Neutralising filter overrides | Supplied by existing callers | Never supplied |
 | `GIT_OPTIONAL_LOCKS=0`, `GIT_NO_LAZY_FETCH=1` | Existing | Explicitly remove these inherited variables |
@@ -108,15 +114,19 @@ the skip interface. Amend is a commit argument and remains supported.
 SkipCommitHooks points `core.hooksPath` at the same application-owned empty
 folder already used for reads. This disables pre-commit, prepare-commit-msg,
 commit-msg, post-commit and other hooks Git dispatches through that hook
-directory during the commit. It does not neutralise filters, the file-system
-monitor configuration or signing. It is not stored between invocations.
+directory during the commit. It does not neutralise filters or signing.
+In addition, set
+`core.fsmonitor=false` for SkipCommitHooks: Git invokes a configured fsmonitor
+hook independently of `core.hooksPath`. Run continues to honour fsmonitor
+configuration. Neither override is stored between invocations.
 
 `--no-verify` is insufficient. A scratch probe with Git 2.53.0 on
 2026-10-07 observed all four standard hooks for an ordinary commit,
 prepare-commit-msg and post-commit for `--no-verify`, and no hooks with an
-empty hooks path. This matches the scope documented for GitKraken's skip
-option. The future commit change supplies the UI choice; this change adds
-and tests the execution mode.
+empty hooks path. The independent review then confirmed that a configured
+fsmonitor hook still runs with only that empty-path override. Both overrides
+are necessary for the promised skip-all mode. The future commit change
+supplies the UI choice; this change adds and tests the execution mode.
 
 ### 4. Reuse Process and classify write errors by their exit status
 
@@ -135,7 +145,8 @@ A hook controls its own text; phrases such as `lazy fetching disabled`
 cannot turn a failed write into the viewer's missing-content notice. No
 public error variant or existing consumer match needs to change.
 
-Reuse stdin/stdout pipes, `StderrWatcher`, `Canceller`, Drop and `CommandLog`.
+Reuse stdin/stdout pipes, `StderrWatcher` and `CommandLog`. Extend the shared
+`Canceller` and Drop machinery as specified in decision 5.
 The calling worker drains stdout while stderr is drained on its existing
 thread. It keeps any stdout it needs before calling `wait`, including on
 failure. There is no new output console or result model. A later action
@@ -166,7 +177,58 @@ The probe observed a post-commit hook returning 7 while Git returned 0 and
 HEAD contained the new commit. Report the hook output without inventing a
 failed operation from text when Git returned success.
 
-### 5. Real Git tests and the existing fixtures
+### 5. Owned cancellation targets on Unix
+
+All tracked processes started by `spawn_prepared`, for reads and writes,
+use `std::os::unix::process::CommandExt::process_group(0)` before spawn.
+Store the positive child PID as the owned PGID in the shared process
+lifetime state used by both Process and its Canceller. Use Unix-only
+`libc = "0.2.189"`, already present in the lockfile, for `killpg`, `waitid`
+and their platform constants. Do not add a shell-based kill command or
+manually duplicate native ABI declarations.
+
+On cancellation or abandonment through Drop, signal this owned group with
+`SIGKILL` on the existing background stopping thread, then reap Git. This
+includes ordinary hook/filter children and their non-detaching descendants.
+Never signal group 0, the application group or a caller-supplied identifier.
+Treat an already-gone group as completed cleanup; handle and test real
+signalling errors. Keep cancellation nonblocking for the UI and record its
+outcome once. A program deliberately escaping the owned tree or group is
+outside this lifecycle guarantee; this is not a process sandbox.
+
+Do not keep a bare PGID available after its leader has been reaped: its PID
+could be reused for an unrelated process. While the cancellable lifecycle
+is active, observe Unix exit with
+`waitid(P_PID, pid, ..., WEXITED | WNOHANG | WNOWAIT)` and leave the leader
+unreaped. Retain cancellation ownership while output is being drained,
+including after the leader exits. Under the same lifetime lock, disable
+further signalling before the final `Child::wait` reaps the leader. The
+stopper and waiter share the cached exit/reaped state, so they neither
+double-reap nor mistake an expected ECHILD after owned cleanup for a fresh
+failure. A late Canceller after completion performs no signal. Update every
+Unix `try_wait`/Drop path that could otherwise reap the leader early.
+
+The caller drains stdout before waiting; Process drains/joins stderr without
+holding the lifetime lock, so cancellation can close pipes held by a hook.
+On Windows, keep `taskkill /T /F` before killing the active Git launcher to
+stop ordinary foreground descendants; do not regress its no-console and
+nonblocking behaviour. The cross-platform foreground-tree tests cover both
+strategies. An additional Unix test covers an exited, unreaped leader with
+a descendant still holding a pipe.
+
+The Linux scratch probe confirmed that an owned process group closed both
+pipes immediately and prevented the child marker, including when the leader
+had already exited and was observed with WNOWAIT. This verifies the native
+strategy, not an implementation of the revised Process. The real shared
+Process tests and macOS/Windows CI remain implementation acceptance checks.
+
+Alternative: call `Child::kill` and rely on the fixture's five-second timeout.
+Rejected because the timeout hid a continuing hook and an unbounded pipe
+join. Unix PID-tree enumeration is also rejected: children can be reparented
+before enumeration. Group signalling with an owned, unreaped leader gives
+the operation a bounded target without signalling a reused PID.
+
+### 6. Real Git tests and the existing fixtures
 
 Add command-policy tests in `crates/gitbull-git/tests/write_command.rs` and
 a real-Git integration test binary `crates/gitbull-git/tests/write.rs`.
@@ -197,11 +259,12 @@ with missing content, while ordinary checkout fetched and wrote the blob.
 Use that explicit tree/path form in the test; an index-only `checkout -- .`
 has no tracked entries to restore in a no-checkout clone.
 
-Use the existing ownership fixture technique from
-`tests/repository_refused.rs`, with Git's test-only ownership variable and
-an empty global/system configuration. Keep that case isolated or use a
-prepared write Command's per-command environment. Do not change ownership
-or require administrator privileges.
+Reuse the ownership variable and empty-configuration setup from
+`tests/repository_refused.rs`, but apply these values to the prepared write
+Command with `Command::env`. That test currently mutates process-global
+variables; the per-command adaptation is new and must not change the new
+integration binary's process-global environment. Do not change ownership or
+require administrator privileges.
 
 ## Risks / Trade-offs
 
@@ -214,20 +277,29 @@ or require administrator privileges.
   concurrently with the existing stderr reader, with bounded test gates.
 - Reusing Process could change a reader's error mapping -> explicit failure
   policy defaults at read call sites and regression coverage of all readers.
+- A hook outlives Git and holds a pipe -> owned Unix group termination,
+  retained leader ownership until drainage ends and foreground-tree tests.
+- A cached PID is signalled after reuse -> non-reaping exit observation and
+  a shared lifetime lock that disarms the target before final reaping.
 
 ## Migration Plan
 
-Add the writer and shared helpers without changing any existing public read
-method signature or application caller. Update the three requirement blocks
+Add Unix group ownership and the writer/shared helpers without changing an
+existing public read method signature or application caller. Update the
+direct Unix dependency edge and verify notices. Update the three requirement blocks
 and add the write requirements through the delta spec when implementation
 is completed and verified. Add ADR 0007 for the explicit-action boundary and
 narrow ADR 0006's invocation-wide wording to protected reads.
 
 No settings or data migration is needed. A rollback removes the unused
-write API and retains the old read constructor. The later checkout, staging
+write API; retain the corrected cancellation lifecycle and protected read
+constructor. The later checkout, staging
 and commit plans use this foundation after it is implemented; none is
 silently folded into this change.
 
 References: [Git hooks](https://git-scm.com/docs/githooks),
 [Git filters](https://git-scm.com/docs/gitattributes), and
 [GitKraken hook skipping](https://help.gitkraken.com/gitkraken-desktop/githooks/).
+Native cancellation references: [Rust process groups](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group),
+[libc killpg](https://docs.rs/libc/0.2.189/libc/fn.killpg.html) and
+[libc waitid](https://docs.rs/libc/0.2.189/libc/fn.waitid.html).
