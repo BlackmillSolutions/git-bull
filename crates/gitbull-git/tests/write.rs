@@ -45,6 +45,9 @@ fn write_invocations_preserve_git_behaviour() {
     amend_can_skip_hooks(&git);
     skipping_commit_hooks_includes_fsmonitor(&git);
     invalid_skip_never_starts_git(&git);
+    inherited_repository_redirection_is_removed(&git);
+    ownership_refusal_is_preserved(&git);
+    missing_content_policy_is_invocation_local(&git);
 }
 
 fn repository() -> TestRepo {
@@ -216,6 +219,89 @@ fn reads_remain_protected_after_writes(git: &Git) {
 
 fn shell_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn inherited_repository_redirection_is_removed(git: &Git) {
+    let repo = repository();
+    let command = git
+        .write(WriteHooks::Run)
+        .command(repo.path(), ["add", "file.txt"])
+        .unwrap();
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_EXTERNAL_DIFF",
+    ] {
+        assert_eq!(
+            command.get_envs().find(|(k, _)| *k == key).map(|(_, v)| v),
+            Some(None),
+            "{key}"
+        );
+    }
+    assert_eq!(command.get_current_dir(), Some(repo.path()));
+}
+
+fn ownership_refusal_is_preserved(git: &Git) {
+    let repo = repository();
+    let empty_config = tempfile::NamedTempFile::new().unwrap();
+    let mut command = git
+        .write(WriteHooks::Run)
+        .command(repo.path(), ["commit", "--allow-empty", "-m", "Refused"])
+        .unwrap();
+    assert!(
+        !command
+            .get_args()
+            .any(|arg| arg.to_string_lossy().contains("safe.directory"))
+    );
+    // Git's own ownership fixture flag is invocation-local here. No global
+    // environment or real filesystem ownership changes while threads run.
+    command
+        .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        .env("GIT_CONFIG_GLOBAL", empty_config.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("dubious ownership"));
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head);
+}
+
+fn missing_content_policy_is_invocation_local(git: &Git) {
+    let source = repository();
+    let blob = source
+        .git(&["rev-parse", "HEAD:file.txt"])
+        .trim()
+        .to_owned();
+    let writing = TestRepo::partial_clone(&source);
+    let reading = TestRepo::partial_clone(&source);
+    let missing = ["rev-list", "--objects", "--all", "--missing=print"];
+    for repo in [&writing, &reading] {
+        let output = git.run(repo.path(), &[], missing).unwrap();
+        assert!(String::from_utf8_lossy(&output).contains(&format!("?{blob}")));
+    }
+    write(git, writing.path(), &["checkout", "HEAD", "--", "file.txt"]).unwrap();
+    assert_eq!(fs::read(writing.path().join("file.txt")).unwrap(), b"raw\n");
+    let marker = Marker::new();
+    reading.config(
+        "remote.origin.uploadpack",
+        &marker.script("unexpected-fetch", "exit 1"),
+    );
+    assert!(
+        git.run(reading.path(), &[], ["cat-file", "-p", &blob])
+            .is_err()
+    );
+    assert!(
+        marker.labels().is_empty(),
+        "protected read must not invoke transport"
+    );
+    let output = git.run(reading.path(), &[], missing).unwrap();
+    assert!(String::from_utf8_lossy(&output).contains(&format!("?{blob}")));
 }
 
 fn write_with_hooks(
