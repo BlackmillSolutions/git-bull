@@ -123,7 +123,8 @@ Windows).
 
 ### Checks
 
-These are the checks that CI runs on every push:
+CI runs these checks for pull requests into `dev` or `master`, except for
+planning-only branches under `plan/`:
 
 ```sh
 cargo fmt --all --check

@@ -1,12 +1,9 @@
 name: CI
 
-# Branches under plan/ hold only OpenSpec artifacts, so neither their pushes
-# nor pull requests from them run the checks. Tags still do.
+# CI runs only for pull requests targeting dev or master.
 on:
-  push:
-    branches-ignore: ["plan/**"]
-    tags: ["**"]
   pull_request:
+    branches: ["dev", "master"]
 
 permissions:
   contents: read
@@ -17,8 +14,7 @@ env:
 jobs:
   check:
     name: Check (${{ matrix.os }})
-    # Pull requests are filtered by their target only; this skips those from
-    # plan/ branches.
+    # Skip planning-only pull requests, which contain only OpenSpec artifacts.
     if: ${{ !startsWith(github.head_ref, 'plan/') }}
     strategy:
       fail-fast: false
