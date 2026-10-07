@@ -6,14 +6,16 @@ remotes and stashes, a commit list with graph, and commit details with diffs
 below. It is built to stay fluid on repositories with more than a million
 commits.
 
-git-bull is in early development. The first milestone is a read-only viewer,
-and the second, now under way, improves its interface. The first release,
-0.1.0, holds the viewer and the improvements done so far; it is on the
-releases page. What git-bull does is
+git-bull is in early development. The first release, 0.1.0, holds the
+read-only viewer and the interface improvements done so far; it is on the
+releases page. The next development priority is local Git operations:
+checkout, branch creation, staging and committing. The commit graph's
+visual redesign is deferred with low priority. What git-bull does is
 specified in [`openspec/specs`](openspec/specs), the changes being planned
 or built are in [`openspec/changes`](openspec/changes), the architecture
-decisions are in [`docs/adr`](docs/adr), and the plan ahead is on the
-[roadmap](https://github.com/users/BlackmillSolutions/projects/1).
+decisions are in [`docs/adr`](docs/adr), and the next steps are in the
+[roadmap overview](docs/roadmap.md) and on the
+[GitHub roadmap](https://github.com/users/BlackmillSolutions/projects/1).
 
 ## Installation
 
