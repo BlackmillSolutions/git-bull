@@ -1,8 +1,8 @@
 //! The single place where git-bull starts Git.
 //!
-//! Every invocation applies the rules of ADR 0006, so that a repository
-//! cannot make Git execute commands it brings along. Starting Git anywhere
-//! else is a defect.
+//! Browsing applies the protections of ADR 0006. Explicit user writes select
+//! the ordinary Git configuration policy of ADR 0007. Both share construction
+//! and subprocess handling here; starting Git elsewhere is a defect.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -15,6 +15,13 @@ use crate::cancel::CancelToken;
 use crate::error::Error;
 use crate::log::{CommandLog, Outcome};
 use crate::process::{Process, StderrWatcher};
+use crate::write::{WriteHooks, WriteInvocation};
+
+#[derive(Clone, Copy)]
+pub(crate) enum ExecutionPolicy {
+    Read,
+    Write(WriteHooks),
+}
 
 /// A configuration value passed to Git through `GIT_CONFIG_COUNT`.
 ///
@@ -26,7 +33,7 @@ pub struct ConfigOverride {
     pub value: String,
 }
 
-/// The Git executable and how to run it safely.
+/// The Git executable with protected browsing defaults and explicit writes.
 #[derive(Clone, Debug)]
 pub struct Git {
     executable: PathBuf,
@@ -51,8 +58,30 @@ impl Git {
         self
     }
 
-    /// Builds the command for `git <args>` in `repo`.
+    /// Selects ordinary Git configuration for an explicit user write.
+    ///
+    /// This borrowed value changes neither subsequent reads nor repository
+    /// configuration. The caller owns the permission boundary (ADR 0007).
+    pub fn write(&self, hooks: WriteHooks) -> WriteInvocation<'_> {
+        WriteInvocation::new(self, hooks)
+    }
+
+    /// Builds a protected browsing command for `git <args>` in `repo`.
     pub fn command<I, S>(&self, repo: &Path, overrides: &[ConfigOverride], args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.command_with_policy(repo, overrides, args, ExecutionPolicy::Read)
+    }
+
+    pub(crate) fn command_with_policy<I, S>(
+        &self,
+        repo: &Path,
+        overrides: &[ConfigOverride],
+        args: I,
+        policy: ExecutionPolicy,
+    ) -> Command
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -61,20 +90,30 @@ impl Git {
         hooks_path.push(&self.hooks_dir);
 
         let mut command = Command::new(&self.executable);
+        command.arg("--no-pager");
+        match policy {
+            ExecutionPolicy::Read => {
+                command
+                    .args(["-c", "core.fsmonitor=false"])
+                    .args(["-c", "log.showSignature=false"])
+                    .arg("-c")
+                    .arg(hooks_path)
+                    .args(["-c", "diff.autoRefreshIndex=false"])
+                    .env("GIT_OPTIONAL_LOCKS", "0")
+                    .env("GIT_NO_LAZY_FETCH", "1");
+            }
+            ExecutionPolicy::Write(WriteHooks::Run) => {
+                command
+                    .env_remove("GIT_OPTIONAL_LOCKS")
+                    .env_remove("GIT_NO_LAZY_FETCH");
+            }
+        }
         command
-            .arg("--no-pager")
-            .args(["-c", "core.fsmonitor=false"])
-            .args(["-c", "log.showSignature=false"])
-            .arg("-c")
-            .arg(hooks_path)
-            .args(["-c", "diff.autoRefreshIndex=false"])
             .args(["-c", "color.ui=false"])
             .args(["-c", "core.quotepath=false"])
             .args(args)
             .current_dir(repo)
-            .env("GIT_OPTIONAL_LOCKS", "0")
             .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_LITERAL_PATHSPECS", "1")
             .env("LC_ALL", "C");
 
