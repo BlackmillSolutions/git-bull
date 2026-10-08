@@ -17,13 +17,15 @@ use gitbull_core::panel::Panel;
 use gitbull_core::repositories::RepositoryList;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::seen::SeenFile;
-use gitbull_core::session::{BranchFilter, Navigation, Session};
+use gitbull_core::session::{Action as WriteAction, BranchFilter, Navigation, Session};
 use gitbull_core::settings::{
     ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
     WindowGeometry,
 };
 use gitbull_core::sidebar_tree::{SidebarKey, SidebarRow, SidebarState};
-use gitbull_core::workspace::{Event, Failure, Notify, TabId, TabState, View, Workspace};
+use gitbull_core::workspace::{
+    CloseRequest, Event, Failure, Notify, TabAction, TabId, TabState, View, Workspace,
+};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry};
@@ -117,6 +119,18 @@ pub struct SettingsDialog {
 pub enum GitMessage {
     Applied,
     Problem(GitCheck),
+    /// Another Git is not applied while this write action runs: applying it
+    /// opens every tab again and would stop the action.
+    Busy(WriteAction),
+}
+
+/// What the user is asked before something stops a write action that runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseQuestion {
+    /// Closing this tab.
+    Tab(TabId),
+    /// Closing the window.
+    Window,
 }
 
 /// What the application is built from.
@@ -365,6 +379,12 @@ pub struct App {
     pub(crate) home: Home,
     pub(crate) notice: Option<Notice>,
     pub(crate) dialog: Option<SettingsDialog>,
+    /// Asked while a write action runs and the user closes a tab or the window.
+    pub(crate) close_question: Option<CloseQuestion>,
+    /// The user chose to close the window although an action runs.
+    pub(crate) close_confirmed: bool,
+    /// The window is to be told to close in this frame.
+    pub(crate) send_close: bool,
     dirty: bool,
     last_saved: Instant,
     pub(crate) time_zone: TimeZone,
@@ -410,6 +430,9 @@ impl App {
             home,
             notice: None,
             dialog: None,
+            close_question: None,
+            close_confirmed: false,
+            send_close: false,
             dirty: false,
             last_saved: Instant::now(),
             time_zone,
@@ -554,6 +577,12 @@ impl App {
         let Some(input) = self.dialog.as_ref().map(|d| d.git_input.trim().to_owned()) else {
             return;
         };
+        if let Some(running) = self.running_actions().into_iter().next() {
+            if let Some(dialog) = &mut self.dialog {
+                dialog.git_message = Some(GitMessage::Busy(running.action));
+            }
+            return;
+        }
         let result = if input.is_empty() {
             match (self.checker)(None) {
                 (GitStatus::Problem(problem), _) => Err(problem),
@@ -927,6 +956,40 @@ impl App {
     /// Whether the window has the system's title bar, as it was built.
     pub fn system_title_bar(&self) -> bool {
         self.system_title_bar
+    }
+
+    /// The write actions that run now, one per tab at most.
+    pub fn running_actions(&self) -> Vec<TabAction> {
+        self.workspace
+            .as_ref()
+            .map(Workspace::running_actions)
+            .unwrap_or_default()
+    }
+
+    /// Closes the tab, or asks first when a write action runs in it.
+    pub(crate) fn request_close_tab(&mut self, id: TabId) {
+        let Some(workspace) = self.workspace.as_mut() else {
+            return;
+        };
+        if let CloseRequest::Ask(_) = workspace.close_request(id) {
+            self.close_question = Some(CloseQuestion::Tab(id));
+        }
+    }
+
+    /// The user decided to close what the question names, stopping the action.
+    pub(crate) fn close_anyway(&mut self) {
+        match self.close_question.take() {
+            Some(CloseQuestion::Tab(id)) => {
+                if let Some(workspace) = self.workspace.as_mut() {
+                    workspace.close(id);
+                }
+            }
+            Some(CloseQuestion::Window) => {
+                self.close_confirmed = true;
+                self.send_close = true;
+            }
+            None => {}
+        }
     }
 
     pub fn workspace(&self) -> Option<&Workspace> {

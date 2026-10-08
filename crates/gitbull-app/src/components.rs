@@ -8,9 +8,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
-    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Rect, Response, RichText, ScrollArea,
-    Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
+    self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id, Key,
+    KeyboardShortcut, Label, Layout, Margin, Modal, ModifierNames, Modifiers, Rect, Response,
+    RichText, ScrollArea, Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType,
+    vec2,
 };
 
 use crate::icons;
@@ -20,6 +21,54 @@ use crate::ui::color;
 
 /// The size of an icon in a control, in points.
 const ICON_SIZE: f32 = 16.0;
+
+/// The widest a dialog of a write action gets, in points.
+const DIALOG_WIDTH: f32 = 460.0;
+
+/// What a [`dialog`] returns.
+pub struct DialogOutcome<T> {
+    /// What the contents returned, such as the button that was chosen.
+    pub inner: T,
+    /// Escape was pressed in this frame.
+    pub escape: bool,
+}
+
+/// A dialog in the frame that all dialogs of write actions share (spec
+/// `checkout`, requirement "Dialogs of write actions"), built like the
+/// settings dialog: the window behind takes no input, a click beside the dialog
+/// does not close it, and what does not fit the window scrolls. It has a title
+/// in the style of titles, which assistive technology reads with the contents.
+///
+/// Escape is reported, not acted on: the caller decides what it means.
+pub fn dialog<T>(
+    ctx: &Context,
+    id: Id,
+    title: &str,
+    add_contents: impl FnOnce(&mut Ui) -> T,
+) -> DialogOutcome<T> {
+    // The dialog keeps a margin to the edges of the window, which may be small
+    // at a large interface size.
+    let room = ctx.content_rect().size() - egui::Vec2::splat(4.0 * SHAPE.space[3]);
+    let modal = Modal::new(id).show(ctx, |ui| {
+        ui.set_width(room.x.min(DIALOG_WIDTH));
+        // egui offers a modal the height it had in the last frame, at first
+        // 400 points; the scroll area below may grow to the room.
+        ui.set_max_height(room.y);
+        ui.label(RichText::new(title).text_style(TextStyle::Name(crate::style::TITLE.into())));
+        ui.add_space(SHAPE.space[1]);
+        ScrollArea::vertical()
+            .id_salt(id.with("scroll"))
+            .max_height(room.y - ui.min_rect().height())
+            .auto_shrink([false, true])
+            .show(ui, add_contents)
+            .inner
+    });
+    let escape = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
+    DialogOutcome {
+        inner: modal.inner,
+        escape,
+    }
+}
 
 /// How a button looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -10,6 +10,7 @@ use eframe::egui::{
     RichText, Sense, Ui,
 };
 use fluent_bundle::FluentArgs;
+use gitbull_core::session::Action as WriteAction;
 use gitbull_core::workspace::{Failure, Tab, TabId, TabState, View, Workspace};
 use gitbull_git::Error;
 
@@ -23,7 +24,9 @@ use gitbull_git::version::GitVersion;
 
 use gitbull_core::settings::{ColourVision, InterfaceSize, ThemeSetting};
 
-use crate::app::{App, GitMessage, GitStatus, HunkMove, Notice, Overlay, SettingsDialog};
+use crate::app::{
+    App, CloseQuestion, GitMessage, GitStatus, HunkMove, Notice, Overlay, SettingsDialog,
+};
 use crate::blame_view;
 use crate::commit_list;
 use crate::commit_panel;
@@ -113,6 +116,12 @@ enum Action {
     BrowseGit,
     ApplyGit,
     CloseActive,
+    /// The user asked to close the window; asks first when a write action
+    /// runs.
+    AskCloseWindow,
+    /// Answers of the question asked before closing while an action runs.
+    KeepOpen,
+    CloseAnyway,
     NextTab,
     PreviousTab,
     /// Move the active tab this many places to the right, or to the left.
@@ -179,8 +188,18 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     // The window behind the settings dialog takes no keys, as it takes no
     // clicks.
-    if app.dialog.is_none() {
+    if app.dialog.is_none() && app.close_question.is_none() {
         actions.extend(shortcuts(ui));
+    }
+    // A close request of the system, such as Alt+F4 or the title bar of the
+    // system, is asked about like the button of the window.
+    if ui.ctx().input(|input| input.viewport().close_requested())
+        && !app.close_confirmed
+        && !app.running_actions().is_empty()
+    {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        actions.push(Action::AskCloseWindow);
     }
     let focus_search = actions
         .iter()
@@ -221,6 +240,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if app.dialog.is_some() {
         settings_dialog(app, ui, &mut actions);
     }
+    if app.close_question.is_some() {
+        close_question_dialog(app, ui, &mut actions);
+    }
     Panel::bottom("status_bar").show(ui, |ui| status_bar(app, ui));
     if let Some(notice) = &app.notice {
         Panel::top("notice").show(ui, |ui| notice_bar(app, notice, ui, &mut actions));
@@ -259,6 +281,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     apply(app, actions);
     app.forget_closed_views();
+    if std::mem::take(&mut app.send_close) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+    }
 }
 
 fn apply(app: &mut App, actions: Vec<Action>) {
@@ -269,11 +294,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
                     workspace.activate(id);
                 }
             }
-            Action::Close(id) => {
-                if let Some(workspace) = app.workspace_mut() {
-                    workspace.close(id);
-                }
-            }
+            Action::Close(id) => app.request_close_tab(id),
             Action::ShowHome(focus_filter) => app.show_home(focus_filter),
             Action::Open(path) => app.open(path),
             Action::DismissNotice => app.notice = None,
@@ -321,12 +342,17 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::BrowseGit => app.browse_git(),
             Action::ApplyGit => app.apply_git_input(),
             Action::CloseActive => {
-                if let Some(workspace) = app.workspace_mut()
-                    && let Some(id) = workspace.active().map(|tab| tab.id())
+                if let Some(id) = app
+                    .workspace()
+                    .and_then(|workspace| workspace.active())
+                    .map(|tab| tab.id())
                 {
-                    workspace.close(id);
+                    app.request_close_tab(id);
                 }
             }
+            Action::AskCloseWindow => app.close_question = Some(CloseQuestion::Window),
+            Action::KeepOpen => app.close_question = None,
+            Action::CloseAnyway => app.close_anyway(),
             Action::Retry(id) => {
                 if let Some(workspace) = app.workspace_mut() {
                     workspace.retry(id);
@@ -909,14 +935,14 @@ fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
                 row.left_top(),
                 egui::pos2(ui.max_rect().right(), row.bottom()),
             ) + frame.inner_margin;
-            window_buttons(app, ui.ctx(), bar);
+            window_buttons(app, ui.ctx(), bar, actions);
         }
     });
 }
 
 /// Minimize, Maximize or Restore, and Close window at the right end of
 /// `bar`, on the layer of the window controls (design, decision 3).
-fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
+fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect, actions: &mut Vec<Action>) {
     let mut ui = window_controls(ctx, "window-buttons", bar);
     let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
     let size = if maximized {
@@ -942,7 +968,7 @@ fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
         (icons::CLOSE, Msg::WindowClose, egui::ViewportCommand::Close),
     ];
     // While the settings dialog is open, Tab stays in it.
-    let focusable = app.dialog.is_none();
+    let focusable = app.dialog.is_none() && app.close_question.is_none();
     let count = buttons.len();
     for (index, (icon, name, command)) in buttons.into_iter().enumerate() {
         let right = bar.right() - WINDOW_BUTTON * (count - 1 - index) as f32;
@@ -953,7 +979,11 @@ fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
         let closes = matches!(command, egui::ViewportCommand::Close);
         let name = app.texts.text(name);
         if components::window_button(&mut ui, rect, icon, &name, closes, focusable).clicked() {
-            ctx.send_viewport_cmd(command);
+            if closes && !app.close_confirmed && !app.running_actions().is_empty() {
+                actions.push(Action::AskCloseWindow);
+            } else {
+                ctx.send_viewport_cmd(command);
+            }
         }
     }
 }
@@ -1517,6 +1547,82 @@ fn theme_choice(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     }
 }
 
+/// What a write action is called, such as "Checking out feature".
+pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
+    match action {
+        WriteAction::Checkout { target } => {
+            let mut args = FluentArgs::new();
+            args.set("target", target.clone());
+            app.texts.text_with(Msg::ActionCheckout, Some(&args))
+        }
+    }
+}
+
+/// The question before a tab or the window closes while a write action runs.
+/// Keep open is the default: it has the focus first, and Escape means it.
+fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let Some(question) = app.close_question else {
+        return;
+    };
+    let running = app.running_actions();
+    let relevant: Vec<_> = running
+        .iter()
+        .filter(|action| match question {
+            CloseQuestion::Tab(id) => action.id == id,
+            CloseQuestion::Window => true,
+        })
+        .collect();
+    // The action ended meanwhile: nothing is left to stop, so the close goes on.
+    let Some(first) = relevant.first() else {
+        actions.push(Action::CloseAnyway);
+        return;
+    };
+    let texts = &app.texts;
+    let mut args = FluentArgs::new();
+    args.set("action", action_text(app, &first.action));
+    args.set("tab", first.title.clone());
+    let body = match (question, relevant.len()) {
+        (CloseQuestion::Tab(_), _) => texts.text_with(Msg::CloseQuestionTab, Some(&args)),
+        (CloseQuestion::Window, 1) => texts.text_with(Msg::CloseQuestionWindow, Some(&args)),
+        (CloseQuestion::Window, count) => {
+            args.set("count", count as i64);
+            texts.text_with(Msg::CloseQuestionWindowMany, Some(&args))
+        }
+    };
+    let keep = texts.text(Msg::CloseKeepOpen);
+    let anyway = texts.text(Msg::CloseAnyway);
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("close-question"),
+        &texts.text(Msg::CloseQuestionTitle),
+        |ui| {
+            ui.label(body);
+            ui.add_space(SHAPE.space[2]);
+            let mut choice = None;
+            ui.horizontal(|ui| {
+                let keep = components::Button::new(&keep)
+                    .kind(components::Kind::Primary)
+                    .show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    keep.request_focus();
+                }
+                if keep.clicked() {
+                    choice = Some(Action::KeepOpen);
+                }
+                if components::Button::new(&anyway).show(ui).clicked() {
+                    choice = Some(Action::CloseAnyway);
+                }
+            });
+            choice
+        },
+    );
+    if let Some(choice) = outcome.inner {
+        actions.push(choice);
+    } else if outcome.escape {
+        actions.push(Action::KeepOpen);
+    }
+}
+
 fn settings_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let Some(dialog) = &app.dialog else {
         return;
@@ -1693,6 +1799,11 @@ fn settings_sections(app: &App, dialog: &SettingsDialog, ui: &mut Ui, actions: &
         }
         Some(GitMessage::Problem(problem)) => {
             components::error_text(ui, git_problem(app, problem));
+        }
+        Some(GitMessage::Busy(action)) => {
+            let mut args = FluentArgs::new();
+            args.set("action", action_text(app, action));
+            components::error_text(ui, texts.text_with(Msg::SettingsGitBusy, Some(&args)));
         }
         None => {}
     }

@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use gitbull_git::{Backend, Error};
 
 use crate::opening::{self, OpenedRepository};
-use crate::session::Session;
+use crate::session::{Action, Session};
 use crate::sidebar_tree::SidebarKey;
 
 /// Asks the UI to draw again, because background work has finished.
@@ -21,6 +21,24 @@ pub type Notify = Arc<dyn Fn() + Send + Sync>;
 /// Identifies a tab for as long as it is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TabId(u64);
+
+/// The write action that runs in a tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabAction {
+    pub id: TabId,
+    /// The name on the tab.
+    pub title: String,
+    pub action: Action,
+}
+
+/// What [`Workspace::close_request`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloseRequest {
+    /// The tab is closed.
+    Closed,
+    /// A write action runs in the tab, which stays open until the user decides.
+    Ask(TabAction),
+}
 
 /// The views of a tab, chosen in the Workspace section of the sidebar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -299,7 +317,35 @@ impl Workspace {
         self.move_tab(id, index);
     }
 
-    /// Closes the tab; its background work stops.
+    /// The write actions that run now, one per tab at most (ADR 0008).
+    pub fn running_actions(&self) -> Vec<TabAction> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| {
+                let action = tab.session()?.action()?.clone();
+                Some(TabAction {
+                    id: tab.id,
+                    title: tab.title(),
+                    action,
+                })
+            })
+            .collect()
+    }
+
+    /// Closes the tab at once, or, when a write action runs in it, returns
+    /// that action so that the interface can ask first: closing stops it, and
+    /// Git may leave the working copy half updated (spec `application-shell`,
+    /// requirement "Closing while a write action runs").
+    pub fn close_request(&mut self, id: TabId) -> CloseRequest {
+        if let Some(running) = self.running_actions().into_iter().find(|a| a.id == id) {
+            return CloseRequest::Ask(running);
+        }
+        self.close(id);
+        CloseRequest::Closed
+    }
+
+    /// Closes the tab; its background work stops, and so does a write action
+    /// that runs in it. Use [`Workspace::close_request`] to ask first.
     pub fn close(&mut self, id: TabId) {
         let Some(position) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
@@ -1234,5 +1280,90 @@ mod tests {
 
         assert_eq!(shown(&workspace, before), (View::History, branch()));
         assert_eq!(shown(&workspace, after), shown(&workspace, before));
+    }
+
+    // ---- closing while a write action runs (spec `application-shell`)
+
+    use crate::session::{Action, CheckoutRequest, CheckoutStart};
+    use gitbull_testkit::Gate;
+
+    /// Two tabs, the first active, with a checkout started in it that `gate`
+    /// holds.
+    fn busy_workspace(gate: &Gate) -> Workspace {
+        let mut workspace = workspace(two_repositories().with_checkout_gate(gate));
+        workspace.restore(
+            &[path(&["work", "git-bull"]), path(&["work", "linux"])],
+            Some(0),
+        );
+        settle(&mut workspace);
+        let started = workspace
+            .active_mut()
+            .and_then(Tab::session_mut)
+            .map(|session| session.start_checkout(CheckoutRequest::Branch("feature".to_owned())));
+        assert_eq!(started, Some(CheckoutStart::Started));
+        workspace
+    }
+
+    fn checking_out_feature(id: TabId) -> TabAction {
+        TabAction {
+            id,
+            title: "git-bull".to_owned(),
+            action: Action::Checkout {
+                target: "feature".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn closing_asks_for_a_tab_with_a_running_action_and_closes_any_other() {
+        let gate = Gate::new();
+        let mut workspace = busy_workspace(&gate);
+        let (first, second) = (workspace.tabs()[0].id(), workspace.tabs()[1].id());
+        assert_eq!(workspace.running_actions(), [checking_out_feature(first)]);
+        assert_eq!(
+            workspace.close_request(first),
+            CloseRequest::Ask(checking_out_feature(first))
+        );
+        assert_eq!(titles(&workspace), ["git-bull", "linux"]);
+        assert_eq!(workspace.close_request(second), CloseRequest::Closed);
+        assert_eq!(titles(&workspace), ["git-bull"]);
+        gate.open();
+    }
+
+    #[test]
+    fn closing_anyway_stops_the_action() {
+        let gate = Gate::new();
+        let mut workspace = busy_workspace(&gate);
+        let first = workspace.tabs()[0].id();
+        workspace.close(first);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gate.was_cancelled() {
+            assert!(Instant::now() < deadline, "the action was not stopped");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(titles(&workspace), ["linux"]);
+    }
+
+    #[test]
+    fn no_action_runs_in_a_tab_that_has_none() {
+        let mut workspace = workspace(two_repositories());
+        workspace.restore(&[path(&["work", "git-bull"])], Some(0));
+        settle(&mut workspace);
+        let id = workspace.tabs()[0].id();
+        assert!(workspace.running_actions().is_empty());
+        assert_eq!(workspace.close_request(id), CloseRequest::Closed);
+        assert!(workspace.tabs().is_empty());
+    }
+
+    #[test]
+    fn an_action_ends_and_the_tab_closes_at_once_again() {
+        let gate = Gate::new();
+        let mut workspace = busy_workspace(&gate);
+        let first = workspace.tabs()[0].id();
+        gate.open();
+        wait_for(&mut workspace, |workspace| {
+            workspace.running_actions().is_empty()
+        });
+        assert_eq!(workspace.close_request(first), CloseRequest::Closed);
     }
 }
