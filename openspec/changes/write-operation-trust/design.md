@@ -18,6 +18,12 @@ requested writes, without a repository trust dialog.
   Cancellation currently stops only Git on Unix; Windows calls `taskkill /T`.
   Reusing that Unix stop path unchanged would leave hooks running and pipes
   open, so this change must extend it before write execution is delivered.
+  The first Windows CI run of the implementation (PR #33, 2026-10-08) showed
+  that `taskkill /T /F` is not enough either: it ended Git and its hook shell
+  but left the hook's background child and that child's subshell running.
+  They held the stderr pipe to which Git routes hook output, so `wait`
+  blocked. Their parent was already gone, so a walk down the process tree
+  could not find them.
 - `gitbull-testkit::TestRepo` and `Marker` already provide real repositories,
   linked-repository setup through Git commands, executable hooks, filters,
   failing scripts and markers. Reuse them.
@@ -210,11 +216,34 @@ Unix `try_wait`/Drop path that could otherwise reap the leader early.
 
 The caller drains stdout before waiting; Process drains/joins stderr without
 holding the lifetime lock, so cancellation can close pipes held by a hook.
-On Windows, keep `taskkill /T /F` before killing the active Git launcher to
-stop ordinary foreground descendants; do not regress its no-console and
-nonblocking behaviour. The cross-platform foreground-tree tests cover both
-strategies. An additional Unix test covers an exited, unreaped leader with
-a descendant still holding a pipe.
+On Windows, every tracked process is created suspended (`CREATE_SUSPENDED`
+added to the existing no-console flag), placed in its own unnamed job object
+and then resumed, so that no descendant can exist before the job owns the
+process. Cancellation and Drop call `TerminateJobObject` on the existing
+background stopper. Job membership is inherited by all descendants, including
+those whose parent has already exited, which a walk down the process tree
+cannot find. The job has no kill-on-close limit, so a normally completed
+process does not take detached Git helpers such as the fsmonitor daemon down
+with it, matching the Unix lifecycle. Do not regress the no-console and
+nonblocking behaviour.
+
+The handle lives in the shared lifetime state and is closed under the
+lifetime lock when the leader is reaped, so a late cancellation finds nothing
+to terminate; the handle also replaces the PID as the identity of the target.
+If the job cannot be created or assigned, the process falls back to the
+former `taskkill /T /F` path before killing the active Git launcher. If
+resuming fails, the process is killed and the spawn fails, because a process
+that never runs would block its caller. The primary thread is found with a
+Toolhelp thread snapshot of the suspended process, because
+`std::process::Child` does not expose it. The Windows-only direct dependency
+is `windows-sys = "0.61.2"`, already resolved in the lockfile and listed in
+the notices, with the Foundation, Security, JobObjects, Threading and
+ToolHelp features. No new crate is added.
+
+The cross-platform foreground-tree tests cover both strategies. An additional
+Unix test covers an exited, unreaped leader with a descendant still holding a
+pipe. A Windows-only test covers a job member whose parent has already
+exited, and a sentinel process outside the job that must stay alive.
 
 The Linux scratch probe confirmed that an owned process group closed both
 pipes immediately and prevented the child marker, including when the leader
@@ -227,6 +256,14 @@ Rejected because the timeout hid a continuing hook and an unbounded pipe
 join. Unix PID-tree enumeration is also rejected: children can be reparented
 before enumeration. Group signalling with an owned, unreaped leader gives
 the operation a bounded target without signalling a reused PID.
+
+Alternative on Windows: keep `taskkill /T /F`. Rejected because the Windows CI
+run showed that it misses descendants whose parent is gone. Alternative:
+assign the job after an unsuspended spawn. Rejected because a descendant
+created in the gap, and everything below it, would escape the job.
+Alternative: use the job for write invocations only and keep `taskkill` for
+reads. Not chosen: one lifecycle for all tracked processes matches Unix, and
+the whole Windows suite then exercises the new path.
 
 ### 6. Real Git tests and the existing fixtures
 
@@ -281,19 +318,25 @@ require administrator privileges.
   retained leader ownership until drainage ends and foreground-tree tests.
 - A cached PID is signalled after reuse -> non-reaping exit observation and
   a shared lifetime lock that disarms the target before final reaping.
+- A Windows process that is created suspended is never resumed -> a failed
+  resume kills the child and fails the spawn; every Windows read exercises
+  this path in CI. The thread snapshot adds about a millisecond per start.
+- The Windows code cannot be executed on the development machine -> type-check
+  it with a Windows cross target locally and rely on Windows CI to run it.
 
 ## Migration Plan
 
-Add Unix group ownership and the writer/shared helpers without changing an
-existing public read method signature or application caller. Update the
-direct Unix dependency edge and verify notices. Update the three requirement blocks
+Add Unix group ownership, Windows job ownership and the writer/shared helpers
+without changing an existing public read method signature or application
+caller. Update the direct Unix and Windows dependency edges and verify
+notices. Update the three requirement blocks
 and add the write requirements through the delta spec when implementation
 is completed and verified. Add ADR 0007 for the explicit-action boundary and
 narrow ADR 0006's invocation-wide wording to protected reads.
 
 No settings or data migration is needed. A rollback removes the unused
-write API; retain the corrected cancellation lifecycle and protected read
-constructor. The later checkout, staging
+write API; retain the corrected cancellation lifecycle, including the Windows
+job object, and the protected read constructor. The later checkout, staging
 and commit plans use this foundation after it is implemented; none is
 silently folded into this change.
 
