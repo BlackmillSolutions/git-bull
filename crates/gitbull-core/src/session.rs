@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -27,6 +28,7 @@ use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::Group;
 use gitbull_git::switch::{CheckoutTarget, local_name_of};
+use gitbull_git::worktrees::Worktree;
 use gitbull_git::{Backend, Error};
 
 use crate::badges::{self, Badge};
@@ -115,6 +117,9 @@ pub enum CheckoutRequest {
 pub enum CheckoutStart {
     /// The checkout runs; [`Session::action`] names it.
     Started,
+    /// Another worktree has the branch checked out: nothing runs, and the
+    /// interface shows that worktree instead.
+    OpenWorktree(PathBuf),
     /// Another write action runs in this tab.
     Busy,
     /// It is checked out already, so nothing runs.
@@ -138,6 +143,9 @@ pub enum ActionDialog {
         /// What it follows, such as `origin/other`.
         upstream: Option<String>,
     },
+    /// Another worktree has the branch checked out, and git-bull did not know
+    /// it: Git refused, naming the folder.
+    WorktreeInUse { target: String, folder: PathBuf },
     /// Git failed, with its message in full.
     Failed { action: Action, message: String },
     /// Git reported a failure after it had done the action, as a failing
@@ -195,6 +203,9 @@ pub struct Sidebar {
     pub references: Vec<Reference>,
     pub stashes: Vec<Stash>,
     pub submodules: Vec<Submodule>,
+    /// The worktrees of the repository, which tell the branches that are
+    /// checked out elsewhere. Empty when Git could not list them.
+    pub worktrees: Vec<Worktree>,
 }
 
 /// One open repository.
@@ -368,6 +379,7 @@ impl Session {
                 references: read.open_after(|| backend.references(&root))?,
                 stashes: backend.stashes(&root)?,
                 submodules: backend.submodules(&root)?,
+                worktrees: read_worktrees(backend.as_ref(), &root),
             })
         }));
 
@@ -720,6 +732,7 @@ impl Session {
                 references: backend.references(&root)?,
                 stashes: backend.stashes(&root)?,
                 submodules: backend.submodules(&root)?,
+                worktrees: read_worktrees(backend.as_ref(), &root),
             };
             Ok((head, sidebar))
         }));
@@ -890,6 +903,9 @@ impl Session {
                 if self.opened.head == expected {
                     return Err(CheckoutStart::AlreadyThere);
                 }
+                if let Some(folder) = self.worktree_of(name) {
+                    return Err(CheckoutStart::OpenWorktree(folder));
+                }
                 Ok((CheckoutTarget::Branch(name.clone()), name.clone(), expected))
             }
             CheckoutRequest::Tag(full) => {
@@ -925,6 +941,11 @@ impl Session {
                     .is_some_and(|twin| twin.upstream.as_deref() == Some(full.as_str()));
                 if self.opened.head == expected && follows {
                     return Err(CheckoutStart::AlreadyThere);
+                }
+                // The twin follows the remote branch and is checked out in
+                // another worktree.
+                if follows && let Some(folder) = self.worktree_of(&local) {
+                    return Err(CheckoutStart::OpenWorktree(folder));
                 }
                 Ok((CheckoutTarget::RemoteBranch(full.clone()), local, expected))
             }
@@ -969,6 +990,17 @@ impl Session {
         CheckoutStart::Started
     }
 
+    /// The folder of the other worktree that has the local branch `name`
+    /// checked out, if the sidebar knows one.
+    fn worktree_of(&self, name: &str) -> Option<PathBuf> {
+        let sidebar = self.sidebar.as_ref()?.as_ref().ok()?;
+        sidebar
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.branch.as_deref() == Some(name))
+            .map(|worktree| worktree.path.clone())
+    }
+
     /// The reference of a full name such as `refs/tags/v1`.
     fn reference(&self, full: &str) -> Option<&Reference> {
         let sidebar = self.sidebar.as_ref()?.as_ref().ok()?;
@@ -988,6 +1020,12 @@ impl Session {
             }
             Err(WriteFailure::Refused(Refusal::UntrackedFiles(files))) => {
                 Ended::Dialog(ActionDialog::BlockedByUntracked { target, files })
+            }
+            Err(WriteFailure::Refused(Refusal::BranchInUse { folder, .. })) => {
+                Ended::Dialog(ActionDialog::WorktreeInUse {
+                    target,
+                    folder: PathBuf::from(folder),
+                })
             }
             Err(WriteFailure::Refused(Refusal::LocalBranchFollowsOther { local, upstream })) => {
                 Ended::Dialog(ActionDialog::LocalBranchFollowsOther {
@@ -1492,6 +1530,15 @@ fn load(
 }
 
 /// Runs `work`, turning an error or a panic into a failure.
+/// The worktrees of the repository. A failure is not one of the read: without
+/// them no branch is marked, and a checkout of a branch that is in use falls
+/// back to Git's refusal.
+fn read_worktrees(backend: &dyn Backend, root: &Path) -> Vec<Worktree> {
+    backend
+        .worktrees(root, &CancelToken::new())
+        .unwrap_or_default()
+}
+
 /// Runs the work of a write action; a panic becomes a failure with its message.
 fn catch_write(work: impl FnOnce() -> Result<(), WriteFailure>) -> Result<(), WriteFailure> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|payload| {
@@ -1652,7 +1699,8 @@ mod tests {
                 "references",
                 "stashes",
                 "status",
-                "submodules"
+                "submodules",
+                "worktrees"
             ]
         );
     }
@@ -3225,5 +3273,162 @@ mod tests {
                 upstream: None,
             })
         );
+    }
+
+    // ---- branches of other worktrees (spec `checkout`, `repository-sidebar`)
+
+    fn worktree_of(path: &str, branch: &str) -> gitbull_git::worktrees::Worktree {
+        gitbull_git::worktrees::Worktree {
+            path: PathBuf::from(path),
+            head: Some(fake_id("head").to_string()),
+            branch: Some(branch.to_owned()),
+            bare: false,
+            detached: false,
+            prunable: false,
+        }
+    }
+
+    fn two_worktrees() -> Vec<gitbull_git::worktrees::Worktree> {
+        vec![
+            worktree_of(&root().to_string_lossy(), "main"),
+            worktree_of("work/git-bull-fix", "fix"),
+        ]
+    }
+
+    fn sidebar_worktrees(session: &Session) -> Vec<gitbull_git::worktrees::Worktree> {
+        session
+            .sidebar()
+            .and_then(|sidebar| sidebar.as_ref().ok())
+            .map(|sidebar| sidebar.worktrees.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_sidebar_carries_the_worktrees() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_worktrees(two_worktrees());
+        let session = ready(backend);
+        assert_eq!(sidebar_worktrees(&session), two_worktrees());
+    }
+
+    #[test]
+    fn a_refresh_reads_the_worktrees_again() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_worktrees(two_worktrees());
+        let probe = backend.probe();
+        let shared = Arc::new(backend);
+        let mut session = Session::new(opened(), Arc::clone(&shared) as _, Arc::new(|| {}));
+        session.show();
+        wait_until(&mut session, |s| loaded(s) && s.sidebar().is_some());
+        let reads = count(&probe, "worktrees");
+        shared.set_worktrees(vec![worktree_of(&root().to_string_lossy(), "main")]);
+        session.refresh();
+        wait_until(&mut session, |s| sidebar_worktrees(s).len() == 1);
+        assert!(count(&probe, "worktrees") > reads);
+    }
+
+    #[test]
+    fn a_failing_worktree_read_does_not_fail_the_refresh() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_failing_worktrees(root());
+        let mut session = ready(backend);
+        assert!(sidebar_worktrees(&session).is_empty());
+        assert!(session.failure().is_none());
+        session.refresh();
+        std::thread::sleep(Duration::from_millis(30));
+        session.poll();
+        assert!(session.failure().is_none());
+        assert!(session.sidebar().is_some_and(|sidebar| sidebar.is_ok()));
+    }
+
+    #[test]
+    fn a_worktree_change_alone_does_not_reload_the_history() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_worktrees(vec![worktree_of(&root().to_string_lossy(), "main")]);
+        let probe = backend.probe();
+        let shared = Arc::new(backend);
+        let mut session = Session::new(opened(), Arc::clone(&shared) as _, Arc::new(|| {}));
+        session.show();
+        wait_until(&mut session, |s| loaded(s) && s.sidebar().is_some());
+        let (generation, version, histories_before) = (
+            session.history_generation(),
+            session.sidebar_version(),
+            histories(&probe),
+        );
+        shared.set_worktrees(two_worktrees());
+        session.refresh();
+        wait_until(&mut session, |s| sidebar_worktrees(s).len() == 2);
+        assert!(session.sidebar_version() > version);
+        assert_eq!(session.history_generation(), generation);
+        assert_eq!(histories(&probe), histories_before);
+    }
+
+    #[test]
+    fn checking_out_a_branch_of_another_worktree_opens_it() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_worktrees(two_worktrees());
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        let request = named("fix");
+        assert_eq!(
+            session.preview_checkout(&request),
+            CheckoutStart::OpenWorktree(PathBuf::from("work/git-bull-fix"))
+        );
+        assert_eq!(
+            session.start_checkout(request),
+            CheckoutStart::OpenWorktree(PathBuf::from("work/git-bull-fix"))
+        );
+        assert!(session.action().is_none());
+        assert!(probe.checkouts().is_empty());
+    }
+
+    #[test]
+    fn a_remote_branch_whose_twin_is_in_another_worktree_opens_it_too() {
+        let mut twin = branch("fix", "d");
+        twin.upstream = Some("refs/remotes/origin/fix".to_owned());
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_references(
+                root(),
+                vec![branch("main", "e"), twin, remote_branch("origin/fix", "d")],
+            )
+            .with_worktrees(two_worktrees());
+        let mut session = ready(backend);
+        assert_eq!(
+            session.start_checkout(CheckoutRequest::RemoteBranch(
+                "refs/remotes/origin/fix".to_owned()
+            )),
+            CheckoutStart::OpenWorktree(PathBuf::from("work/git-bull-fix"))
+        );
+    }
+
+    #[test]
+    fn an_outdated_view_leads_to_the_worktree_dialog() {
+        let backend = backend().with_history(root(), five_lines()).with_checkout(
+            CheckoutTarget::Branch("topic".to_owned()),
+            FakeWrite::Refused(Refusal::BranchInUse {
+                branch: "topic".to_owned(),
+                folder: "work/wt-topic".to_owned(),
+            }),
+        );
+        let mut session = ready(backend);
+        assert_eq!(
+            session.start_checkout(named("topic")),
+            CheckoutStart::Started
+        );
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.dialog(),
+            Some(&ActionDialog::WorktreeInUse {
+                target: "topic".to_owned(),
+                folder: PathBuf::from("work/wt-topic"),
+            })
+        );
+        assert_eq!(session.opened().head, Head::Branch("main".to_owned()));
     }
 }

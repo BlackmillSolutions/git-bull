@@ -137,6 +137,8 @@ pub struct FakeBackend {
     checkouts: Vec<(CheckoutTarget, FakeWrite)>,
     /// Holds every checkout until it opens or is cancelled.
     checkout_gate: Option<Gate>,
+    /// Folders inside repositories whose worktrees Git fails to list.
+    failing_worktrees: Vec<PathBuf>,
     /// HEAD after checkouts, by folder; it takes the place of the HEAD given.
     moved_heads: Mutex<Vec<(PathBuf, Head)>>,
     probe: Probe,
@@ -304,6 +306,13 @@ impl FakeBackend {
     /// succeeds and moves HEAD there.
     pub fn with_checkout(mut self, target: CheckoutTarget, outcome: FakeWrite) -> FakeBackend {
         self.checkouts.push((target, outcome));
+        self
+    }
+
+    /// Listing the worktrees of the repository that contains `folder` fails as
+    /// if `git worktree list` did.
+    pub fn with_failing_worktrees(mut self, folder: impl Into<PathBuf>) -> FakeBackend {
+        self.failing_worktrees.push(folder.into());
         self
     }
 
@@ -1203,6 +1212,17 @@ impl Backend for FakeBackend {
             return Err(Error::Cancelled);
         }
         self.gone(repo)?;
+        if self
+            .failing_worktrees
+            .iter()
+            .any(|folder| repo.starts_with(folder))
+        {
+            return Err(Error::CommandFailed {
+                command: "git worktree list".to_owned(),
+                code: Some(128),
+                stderr: "fatal: scripted".to_owned(),
+            });
+        }
         let known = self
             .worktrees
             .lock()

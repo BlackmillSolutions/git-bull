@@ -210,9 +210,12 @@ true; a file without it loads as true.
 `Sidebar` gains the worktrees, read in `refresh()` and with the first read. A
 failure to read them is not a failure of the refresh: the marks are then absent
 and a checkout of such a branch falls back to Git's refusal and the dialog.
-`sidebar_tree::rows` marks a local branch whose short name is the `branch` of
-another worktree, found by comparing folders with `repositories::normalise`; the
-row carries the folder for the tooltip and the accessible name. Changes in the
+`sidebar_tree::rows` marks a local branch whose short name is the `branch` of a
+worktree, unless it is the branch checked out in this tab: a worktree whose
+branch is the one checked out here is this tab's own, because Git lets only one
+worktree have a branch checked out, so no folders are compared. The row carries
+the folder for the tooltip and the accessible description; its accessible name
+stays the plain label, so that the row is still found by it. Changes in the
 worktrees alone rebuild the sidebar rows but do not reload the history. Opening a
 worktree uses the existing open path of the workspace, which activates an open
 tab.

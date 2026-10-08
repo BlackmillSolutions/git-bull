@@ -1014,6 +1014,8 @@ impl App {
             return;
         };
         match session.preview_checkout(&request) {
+            // Another worktree has the branch: its tab opens, or is activated.
+            CheckoutStart::OpenWorktree(folder) => self.open(folder),
             CheckoutStart::NotACommit(tag) => {
                 self.notice = Some(Notice::NotACommit(tag));
             }

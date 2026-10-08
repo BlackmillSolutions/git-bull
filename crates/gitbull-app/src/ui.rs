@@ -1635,6 +1635,18 @@ fn action_dialog(
                 false,
             )
         }
+        ActionDialog::WorktreeInUse { target, folder } => {
+            let mut args = FluentArgs::new();
+            args.set("target", target.clone());
+            args.set("folder", folder.display().to_string());
+            (
+                named(Msg::CheckoutBlockedTitle, target),
+                texts.text_with(Msg::CheckoutWorktreeBody, Some(&args)),
+                String::new(),
+                texts.text(Msg::DialogCancel),
+                false,
+            )
+        }
         ActionDialog::Failed { action, message } => (
             named(Msg::CheckoutFailedTitle, &target(action)),
             texts.text(Msg::CheckoutFailedBody),
@@ -1651,6 +1663,14 @@ fn action_dialog(
         ),
     };
     let copy_label = texts.text(Msg::DialogCopyMessage);
+    // A branch that another worktree has checked out can be shown there.
+    let open_folder = match dialog {
+        ActionDialog::WorktreeInUse { folder, .. } => Some(folder.clone()),
+        _ => None,
+    };
+    let open_label = open_folder
+        .as_ref()
+        .map(|_| texts.text(Msg::CheckoutOpenWorktree));
     let outcome = components::dialog(ui.ctx(), Id::new("action-dialog"), &title, |ui| {
         ui.label(intro);
         ui.add_space(SHAPE.space[1]);
@@ -1660,22 +1680,38 @@ fn action_dialog(
             ui.label(RichText::new(line).monospace());
         }
         ui.add_space(SHAPE.space[2]);
-        let mut close = false;
+        let (mut close, mut open) = (false, false);
         ui.horizontal(|ui| {
+            // The button that shows the other worktree is the main choice;
+            // the safe one has the focus.
+            let opener = open_label.as_ref().map(|label| {
+                components::Button::new(label)
+                    .kind(components::Kind::Primary)
+                    .show(ui)
+            });
             let button = components::Button::new(&close_label)
-                .kind(components::Kind::Primary)
+                .kind(if opener.is_some() {
+                    components::Kind::Secondary
+                } else {
+                    components::Kind::Primary
+                })
                 .show(ui);
             if ui.memory(|memory| memory.focused().is_none()) {
                 button.request_focus();
             }
             close = button.clicked();
+            open = opener.is_some_and(|opener| opener.clicked());
             if copy && components::Button::new(&copy_label).show(ui).clicked() {
                 ui.ctx().copy_text(details.clone());
             }
         });
-        close
+        (close, open)
     });
-    if outcome.inner || outcome.escape {
+    let (close, open) = outcome.inner;
+    if open && let Some(folder) = open_folder {
+        actions.push(Action::Open(folder));
+    }
+    if close || open || outcome.escape {
         actions.push(Action::CloseActionDialog);
     }
 }

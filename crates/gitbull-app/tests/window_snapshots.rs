@@ -616,3 +616,34 @@ fn settings_dialog_with_the_section_behaviour() {
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "settings_behaviour", &options());
 }
+
+/// Scenario "Branch checked out elsewhere": a branch that a linked worktree has
+/// checked out carries the mark of a worktree in the sidebar.
+#[test]
+fn sidebar_with_a_branch_of_another_worktree() {
+    let fix = path(&["work", "git-bull-fix"]);
+    let linked = |folder, id: &str, branch: &str| gitbull_git::worktrees::Worktree {
+        path: folder,
+        head: Some(fake_id(id).to_string()),
+        branch: Some(branch.to_owned()),
+        bare: false,
+        detached: false,
+        prunable: false,
+    };
+    let backend = dialog_backend()
+        .with_repository(fix.clone())
+        .with_worktrees(vec![
+            linked(path(&["work", "git-bull"]), "b", "main"),
+            linked(fix, "a", "feature/graph"),
+        ]);
+    let mut harness = repository_window(
+        backend,
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "sidebar_worktree_mark", &options());
+}

@@ -376,10 +376,20 @@ fn nothing_is_read_for_the_home_tab_while_a_repository_tab_is_shown() {
     harness.event(Event::WindowFocused(true));
     settle_window(&mut harness);
 
-    // Opening the tab looked for the repository of its folder, once.
+    // Opening the tab looked for the repository of its folder, once. Every read
+    // of the sidebar lists the worktrees together with the references, so the
+    // listings beyond those are lookups of the repository.
     let calls = probe.calls(&path(&["work", "git-bull"]));
     let count = |name: &str| calls.iter().filter(|call| *call == name).count();
-    assert_eq!((count("worktrees"), count("summary")), (1, 0), "{calls:?}");
+    assert!(count("references") > 0, "the sidebar was read: {calls:?}");
+    assert_eq!(
+        (
+            count("worktrees").checked_sub(count("references")),
+            count("summary")
+        ),
+        (Some(1), 0),
+        "{calls:?}"
+    );
 }
 
 #[test]

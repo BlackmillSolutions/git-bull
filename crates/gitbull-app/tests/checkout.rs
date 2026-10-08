@@ -18,7 +18,8 @@ use gitbull_git::refusal::Refusal;
 use gitbull_git::switch::CheckoutTarget;
 use gitbull_testkit::{FakeBackend, FakeWrite, Gate, commit_line, fake_id};
 use support::{
-    Setup, build, double_click_at, path, settle_window, tab_titles, window, window_at_60_fps,
+    Setup, active_title, build, double_click_at, path, settle_window, tab_titles, window,
+    window_at_60_fps,
 };
 
 /// Two repositories open, the first active, with every checkout held by `gate`.
@@ -1024,4 +1025,127 @@ fn a_twin_without_an_upstream_is_named_as_following_nothing() {
     settle_action(&mut harness);
     harness.run();
     harness.get_by_label_contains("The local branch topic already exists and follows no branch");
+}
+
+// ---- branches of other worktrees (spec `checkout`, `repository-sidebar`)
+
+fn fix_root() -> std::path::PathBuf {
+    path(&["work", "git-bull-fix"])
+}
+
+fn worktree(folder: std::path::PathBuf, branch: &str) -> gitbull_git::worktrees::Worktree {
+    gitbull_git::worktrees::Worktree {
+        path: folder,
+        head: Some(fake_id("head").to_string()),
+        branch: Some(branch.to_owned()),
+        bare: false,
+        detached: false,
+        prunable: false,
+    }
+}
+
+/// `main` is checked out here and `hook` in `work/git-bull-fix`.
+fn with_a_linked_worktree(backend: FakeBackend) -> FakeBackend {
+    backend
+        .with_repository(fix_root())
+        .with_worktrees(vec![worktree(root(), "main"), worktree(fix_root(), "hook")])
+}
+
+#[test]
+fn the_mark_shows_the_folder_in_the_description() {
+    let harness = open(with_a_linked_worktree(backend()));
+    let description = item(&harness, "hook").accesskit_node().description();
+    assert!(
+        description
+            .as_deref()
+            .is_some_and(|text| text.contains(&fix_root().display().to_string())),
+        "{description:?}"
+    );
+    // The branch checked out here and one nobody has checked out carry no mark.
+    assert!(
+        item(&harness, "side")
+            .accesskit_node()
+            .description()
+            .is_none()
+    );
+    assert_ne!(
+        item(&harness, "main")
+            .accesskit_node()
+            .description()
+            .as_deref(),
+        Some(fix_root().display().to_string().as_str())
+    );
+}
+
+#[test]
+fn check_out_opens_the_tab_of_the_worktree() {
+    let backend = with_a_linked_worktree(backend());
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click(&mut harness, "hook");
+    wait_for(&mut harness, |h| tab_titles(h.state()).len() == 2);
+    assert_eq!(tab_titles(harness.state()), ["git-bull", "git-bull-fix"]);
+    assert_eq!(
+        active_title(harness.state()).as_deref(),
+        Some("git-bull-fix")
+    );
+    // Nothing was checked out in either worktree.
+    assert!(probe.checkouts().is_empty());
+}
+
+#[test]
+fn an_open_tab_is_activated_and_no_tab_is_added() {
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root(), fix_root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: with_a_linked_worktree(backend()),
+        ..Setup::default()
+    });
+    let mut harness = window_at_60_fps(test.app);
+    settle_window(&mut harness);
+    wait_for(&mut harness, |h| h.query_by_label("diff").is_some());
+    assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
+    double_click(&mut harness, "hook");
+    wait_for(&mut harness, |h| {
+        active_title(h.state()).as_deref() == Some("git-bull-fix")
+    });
+    assert_eq!(tab_titles(harness.state()), ["git-bull", "git-bull-fix"]);
+}
+
+#[test]
+fn the_stale_dialog_offers_open_that_worktree() {
+    let backend = with_a_linked_worktree(backend()).with_checkout(
+        CheckoutTarget::Branch("side".to_owned()),
+        FakeWrite::Refused(Refusal::BranchInUse {
+            branch: "side".to_owned(),
+            folder: fix_root().to_string_lossy().into_owned(),
+        }),
+    );
+    let mut harness = open(backend);
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    harness.run();
+    harness.get_by_role_and_label(Role::Dialog, "Cannot check out side");
+    harness.get_by_label_contains(&format!(
+        "checked out in the worktree {}",
+        fix_root().display()
+    ));
+    harness.get_by_role_and_label(Role::Button, "Cancel");
+    harness
+        .get_by_role_and_label(Role::Button, "Open that worktree")
+        .click();
+    harness.run();
+    wait_for(&mut harness, |h| tab_titles(h.state()).len() == 2);
+    assert_eq!(
+        active_title(harness.state()).as_deref(),
+        Some("git-bull-fix")
+    );
+    assert!(
+        harness
+            .query_by_label_contains("checked out in the worktree")
+            .is_none()
+    );
 }

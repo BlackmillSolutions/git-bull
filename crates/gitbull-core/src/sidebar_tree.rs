@@ -1,7 +1,7 @@
 //! The rows of the sidebar: sections, views, folders and entries, flattened
 //! so that one list shows them, however many references there are.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gitbull_git::head::Head;
 use gitbull_git::refs::{RefKind, Reference};
@@ -89,6 +89,8 @@ pub enum SidebarRow {
         depth: usize,
         /// The branch that is checked out.
         current: bool,
+        /// The folder of another worktree that has this branch checked out.
+        elsewhere: Option<String>,
     },
     Stash {
         /// The stash commit, which names the stash while newer ones are
@@ -177,6 +179,22 @@ pub fn rows(
         Head::Branch(name) => Some(name.as_str()),
         Head::Detached(_) => None,
     };
+    // The branches that other worktrees have checked out, by their folders:
+    // a worktree whose branch is the one checked out here is this one. Built
+    // once, not per row.
+    let elsewhere: HashMap<&str, String> = sidebar
+        .map(|sidebar| {
+            sidebar
+                .worktrees
+                .iter()
+                .filter_map(|worktree| {
+                    let branch = worktree.branch.as_deref()?;
+                    (Some(branch) != current)
+                        .then(|| (branch, worktree.path.to_string_lossy().into_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut rows = Vec::new();
     for section in Section::ALL {
         let collapsed = state.collapsed_sections.contains(&section);
@@ -225,6 +243,7 @@ pub fn rows(
             // While filtering, every folder with a match is open.
             filtering: !filter.is_empty(),
             current: current.filter(|_| kind == RefKind::Branch),
+            elsewhere: &elsewhere,
         };
         tree.flatten(&place, "", 0, &mut rows);
     }
@@ -245,6 +264,8 @@ struct Place<'a> {
     filtering: bool,
     /// The short name of the checked-out branch, in the Branches section.
     current: Option<&'a str>,
+    /// The folders of the other worktrees, by the branch they have checked out.
+    elsewhere: &'a HashMap<&'a str, String>,
 }
 
 impl<'a> Folder<'a> {
@@ -291,6 +312,9 @@ impl<'a> Folder<'a> {
                 label: (*label).to_owned(),
                 depth,
                 current: place.current == Some(reference.short.as_str()),
+                elsewhere: (place.section == Section::Branches)
+                    .then(|| place.elsewhere.get(reference.short.as_str()).cloned())
+                    .flatten(),
             });
         }
     }
@@ -300,6 +324,7 @@ impl<'a> Folder<'a> {
 mod tests {
     use super::*;
     use gitbull_git::stashes::{Stash, Submodule};
+    use std::path::PathBuf;
 
     fn reference(name: &str, kind: RefKind) -> Reference {
         let short = name
@@ -344,6 +369,7 @@ mod tests {
                     state: SubmoduleState::NotInitialised,
                 },
             ],
+            worktrees: Vec::new(),
         }
     }
 
@@ -725,5 +751,111 @@ mod tests {
         state.reveal(Section::Branches, "main");
         assert!(state.collapsed_sections.is_empty());
         assert!(state.collapsed_folders.is_empty());
+    }
+
+    fn worktree(path: &str, branch: Option<&str>) -> gitbull_git::worktrees::Worktree {
+        gitbull_git::worktrees::Worktree {
+            path: PathBuf::from(path),
+            head: Some("abc".to_owned()),
+            branch: branch.map(str::to_owned),
+            bare: false,
+            detached: branch.is_none(),
+            prunable: false,
+        }
+    }
+
+    fn elsewhere(rows: &[SidebarRow], name: &str) -> Option<String> {
+        rows.iter().find_map(|row| match row {
+            SidebarRow::Reference {
+                name: found,
+                elsewhere,
+                ..
+            } if found == name => elsewhere.clone(),
+            _ => None,
+        })
+    }
+
+    fn with_worktrees(worktrees: Vec<gitbull_git::worktrees::Worktree>) -> Sidebar {
+        Sidebar {
+            references: vec![
+                reference("refs/heads/main", RefKind::Branch),
+                reference("refs/heads/fix/login", RefKind::Branch),
+                reference("refs/heads/calm", RefKind::Branch),
+                reference("refs/tags/main", RefKind::Tag),
+            ],
+            worktrees,
+            ..Sidebar::default()
+        }
+    }
+
+    #[test]
+    fn a_branch_of_another_worktree_is_marked_with_its_folder() {
+        let sidebar = with_worktrees(vec![
+            worktree("/work/app", Some("main")),
+            worktree("/work/app-fix", Some("fix/login")),
+        ]);
+        let rows = rows(
+            Some(&sidebar),
+            &Head::Branch("main".into()),
+            &SidebarState::default(),
+            &[],
+        );
+        assert_eq!(
+            elsewhere(&rows, "refs/heads/fix/login").as_deref(),
+            Some("/work/app-fix")
+        );
+        assert_eq!(elsewhere(&rows, "refs/heads/calm"), None);
+    }
+
+    #[test]
+    fn the_own_branch_is_not_marked() {
+        let sidebar = with_worktrees(vec![
+            worktree("/work/app", Some("main")),
+            worktree("/work/app-fix", Some("fix/login")),
+        ]);
+        let rows = rows(
+            Some(&sidebar),
+            &Head::Branch("main".into()),
+            &SidebarState::default(),
+            &[],
+        );
+        assert_eq!(elsewhere(&rows, "refs/heads/main"), None);
+        // A linked worktree sees the main worktree's branch as the other one.
+        let rows = super::rows(
+            Some(&sidebar),
+            &Head::Branch("fix/login".into()),
+            &SidebarState::default(),
+            &[],
+        );
+        assert_eq!(elsewhere(&rows, "refs/heads/fix/login"), None);
+        assert_eq!(
+            elsewhere(&rows, "refs/heads/main").as_deref(),
+            Some("/work/app")
+        );
+    }
+
+    #[test]
+    fn no_mark_without_further_worktrees_and_none_for_tags_or_detached_worktrees() {
+        let alone = with_worktrees(vec![worktree("/work/app", Some("main"))]);
+        let marked = |sidebar: &Sidebar, head: Head| {
+            rows(Some(sidebar), &head, &SidebarState::default(), &[])
+                .iter()
+                .any(|row| {
+                    matches!(
+                        row,
+                        SidebarRow::Reference {
+                            elsewhere: Some(_),
+                            ..
+                        }
+                    )
+                })
+        };
+        assert!(!marked(&alone, Head::Branch("main".into())));
+        // A tag of the name of a branch another worktree has is no branch.
+        let tagged = with_worktrees(vec![
+            worktree("/work/app", Some("calm")),
+            worktree("/work/app-detached", None),
+        ]);
+        assert!(!marked(&tagged, Head::Branch("calm".into())));
     }
 }

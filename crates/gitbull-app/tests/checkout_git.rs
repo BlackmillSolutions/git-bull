@@ -8,15 +8,18 @@ mod support;
 use std::fs;
 use std::sync::Arc;
 
+use eframe::egui::Key;
 use eframe::egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::{App, GitStatus};
 use gitbull_core::settings::Settings;
 use gitbull_git::locate::{Os, SystemProbe, locate_git};
 use gitbull_git::{Backend, CliBackend, Git};
 use gitbull_testkit::{TestRepo, git_version};
-use support::{Setup, build, double_click_at, settle_window, window_at_60_fps};
+use support::{
+    Setup, active_title, build, double_click_at, settle_window, tab_titles, window_at_60_fps,
+};
 
 #[test]
 fn checking_out_a_branch_in_a_real_repository() {
@@ -93,6 +96,36 @@ fn checking_out_a_branch_in_a_real_repository() {
     assert_eq!(
         fs::read_to_string(repo.path().join("file.txt")).unwrap(),
         "feature\n"
+    );
+
+    // A branch that a linked worktree has checked out is marked with its
+    // folder, and checking it out opens that worktree instead.
+    let linked = root.path().join("linked");
+    repo.git(&[
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "elsewhere",
+        &linked.to_string_lossy(),
+    ]);
+    harness.key_press(Key::F5);
+    wait_for(&mut harness, |h| {
+        row(h, "elsewhere").is_some_and(|node| {
+            node.accesskit_node()
+                .description()
+                .is_some_and(|text| text.contains("linked"))
+        })
+    });
+    double_click(&mut harness, "elsewhere");
+    wait_for(&mut harness, |h| {
+        active_title(h.state()).as_deref() == Some("linked")
+    });
+    assert_eq!(tab_titles(harness.state()).len(), 2);
+    // Nothing was checked out in the first worktree.
+    assert_eq!(
+        repo.git(&["symbolic-ref", "--short", "HEAD"]).trim(),
+        "feature"
     );
 }
 

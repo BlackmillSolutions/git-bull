@@ -13,6 +13,7 @@ use gitbull_git::head::Head;
 use crate::app::{App, TabView};
 use crate::components;
 use crate::i18n::Msg;
+use crate::icons;
 use crate::theme::{Palette, Rgb};
 use crate::ui::AREA_SIDEBAR;
 use crate::virtual_list::VirtualList;
@@ -41,7 +42,14 @@ struct Texts {
     not_initialised: String,
     show_only: String,
     check_out: String,
+    /// "Checked out in", with `ELSEWHERE_FOLDER` where the folder goes; a row
+    /// is drawn many times, and the text of a language may put the folder
+    /// anywhere.
+    elsewhere: String,
 }
+
+/// Stands for the folder in the text of [`Texts`].
+const ELSEWHERE_FOLDER: &str = "\u{1}";
 
 pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<SidebarAction> {
     let texts = Texts {
@@ -60,6 +68,11 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         not_initialised: app.texts.text(Msg::SidebarNotInitialised),
         show_only: app.texts.text(Msg::SidebarShowOnlyBranch),
         check_out: app.texts.text(Msg::SidebarCheckOut),
+        elsewhere: {
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("folder", ELSEWHERE_FOLDER);
+            app.texts.text_with(Msg::SidebarElsewhere, Some(&args))
+        },
     };
     let hint = app.texts.text(Msg::SidebarFilter);
     let name = app.texts.text(Msg::Sidebar);
@@ -365,10 +378,15 @@ fn draw_row(
             label,
             depth,
             current,
+            elsewhere,
             ..
         } => {
             strong = *current;
-            let description = current.then(|| texts.current.clone());
+            let description = current.then(|| texts.current.clone()).or_else(|| {
+                elsewhere
+                    .as_ref()
+                    .map(|folder| texts.elsewhere.replace(ELSEWHERE_FOLDER, folder))
+            });
             (
                 label.clone(),
                 depth + 1,
@@ -420,7 +438,27 @@ fn draw_row(
         );
     }
 
+    // The mark of a branch that another worktree has checked out.
+    let elsewhere_text = match row {
+        SidebarRow::Reference {
+            elsewhere: Some(_), ..
+        } => description.clone(),
+        _ => None,
+    };
+    if elsewhere_text.is_some() {
+        painter.text(
+            pos2(rect.right() - 14.0, rect.center().y),
+            Align2::CENTER_CENTER,
+            icons::FOLDER,
+            icons::font(ui.ctx(), 14.0),
+            muted,
+        );
+    }
     let response = ui.interact(rect, ui.id().with("item"), Sense::hover());
+    let response = match &elsewhere_text {
+        Some(text) => response.on_hover_text(text),
+        None => response,
+    };
     // `widget_info` gives the node its position; the rest is set after it.
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
     ui.ctx().accesskit_node_builder(response.id, |node| {

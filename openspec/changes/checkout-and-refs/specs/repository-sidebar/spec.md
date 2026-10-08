@@ -55,7 +55,7 @@ tab, the entries that check out or create SHALL be unavailable.
 ### Requirement: Branches in other worktrees
 The sidebar SHALL mark each local branch that another worktree of the repository
 has checked out, the main worktree included, with a symbol, and its tooltip and
-its name for assistive technology SHALL name the folder of that worktree. The
+its description for assistive technology SHALL name the folder of that worktree. The
 branch checked out in the worktree of the tab SHALL be emphasised as before and
 SHALL NOT be marked. A refresh SHALL read the worktrees again, so that the marks
 follow worktrees that were created, moved or removed.
