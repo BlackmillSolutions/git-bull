@@ -24,7 +24,7 @@ use gitbull_git::history::{CommitLine, Revisions};
 use gitbull_git::merged::{Prediction, Unpredicted};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
-use gitbull_git::refs::Reference;
+use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
 use gitbull_git::search::{HashMatch, Location, SearchKind};
@@ -135,12 +135,18 @@ pub struct FakeBackend {
     ai_diffs: Vec<(PathBuf, AiDiff)>,
     /// What a checkout of a target does; a target without an entry succeeds.
     checkouts: Vec<(CheckoutTarget, FakeWrite)>,
-    /// Holds every checkout until it opens or is cancelled.
+    /// What creating the branch of a name does; a name without an entry
+    /// succeeds.
+    branch_creations: Vec<(String, FakeWrite)>,
+    /// Holds every write action until it opens or is cancelled.
     checkout_gate: Option<Gate>,
     /// Folders inside repositories whose worktrees Git fails to list.
     failing_worktrees: Vec<PathBuf>,
     /// HEAD after checkouts, by folder; it takes the place of the HEAD given.
     moved_heads: Mutex<Vec<(PathBuf, Head)>>,
+    /// References created by write actions, by folder; they are listed with the
+    /// others from then on.
+    created_references: Mutex<Vec<(PathBuf, Reference)>>,
     probe: Probe,
 }
 
@@ -156,6 +162,15 @@ pub enum FakeWrite {
     /// Git does it and then reports a failure, as a failing post-checkout hook
     /// makes it do.
     FailedAfterDoing { stderr: String },
+}
+
+/// A branch that was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedBranch {
+    pub name: String,
+    /// The full hash of the starting point.
+    pub start: String,
+    pub checkout: bool,
 }
 
 /// How checking a path goes wrong on purpose.
@@ -309,6 +324,13 @@ impl FakeBackend {
         self
     }
 
+    /// Lets creating the branch `name` end as `outcome`; without an entry it
+    /// succeeds, and with a checkout it moves HEAD there.
+    pub fn with_create_branch(mut self, name: &str, outcome: FakeWrite) -> FakeBackend {
+        self.branch_creations.push((name.to_owned(), outcome));
+        self
+    }
+
     /// Listing the worktrees of the repository that contains `folder` fails as
     /// if `git worktree list` did.
     pub fn with_failing_worktrees(mut self, folder: impl Into<PathBuf>) -> FakeBackend {
@@ -316,7 +338,8 @@ impl FakeBackend {
         self
     }
 
-    /// Holds every checkout until `gate` opens; cancelling the action ends it.
+    /// Holds every write action until `gate` opens; cancelling the action ends
+    /// it.
     pub fn with_checkout_gate(mut self, gate: &Gate) -> FakeBackend {
         self.checkout_gate = Some(gate.clone());
         self
@@ -793,6 +816,58 @@ impl FakeBackend {
     }
 }
 
+impl FakeBackend {
+    /// Waits for the gate of the write actions, if there is one.
+    fn hold_write(&self, cancel: &CancelToken) -> Result<(), WriteFailure> {
+        if let Some(gate) = &self.checkout_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(WriteFailure::Failed(Error::Cancelled));
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends a write action as scripted. `effect` is what the action leaves
+    /// behind when it does what it was asked to, even if Git then reports a
+    /// failure.
+    fn finish_write(
+        &self,
+        command: &str,
+        outcome: FakeWrite,
+        effect: impl FnOnce(),
+    ) -> Result<(), WriteFailure> {
+        let failed = |stderr: String| {
+            WriteFailure::Failed(Error::CommandFailed {
+                command: command.to_owned(),
+                code: Some(1),
+                stderr,
+            })
+        };
+        match outcome {
+            FakeWrite::Done => {
+                effect();
+                Ok(())
+            }
+            FakeWrite::Refused(refusal) => Err(WriteFailure::Refused(refusal)),
+            FakeWrite::Failed { stderr } => Err(failed(stderr)),
+            FakeWrite::FailedAfterDoing { stderr } => {
+                effect();
+                Err(failed(stderr))
+            }
+        }
+    }
+
+    /// HEAD of `folder` is `head` from now on.
+    fn move_head(&self, folder: PathBuf, head: Head) {
+        self.moved_heads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((folder, head));
+    }
+}
+
 impl Backend for FakeBackend {
     fn capabilities(&self) -> Capabilities {
         self.capabilities.unwrap_or(Capabilities::ALL)
@@ -879,20 +954,29 @@ impl Backend for FakeBackend {
                 .and_then(|root| held.iter().position(|(known, ..)| *known == root));
             at.map(|at| held.remove(at))
         };
-        if let Some((_, references, gate)) = first {
-            gate.wait();
-            return Ok(references);
-        }
-        if let Some(references) = self.live_of(repo).and_then(|live| live.references.clone()) {
-            return Ok(references);
-        }
         let root = self.root_of(repo);
-        Ok(self
-            .references
-            .iter()
-            .find(|(known, _)| *known == root)
-            .map(|(_, references)| references.clone())
-            .unwrap_or_default())
+        let mut listed = if let Some((_, references, gate)) = first {
+            gate.wait();
+            references
+        } else if let Some(references) = self.live_of(repo).and_then(|live| live.references.clone())
+        {
+            references
+        } else {
+            self.references
+                .iter()
+                .find(|(known, _)| *known == root)
+                .map(|(_, references)| references.clone())
+                .unwrap_or_default()
+        };
+        listed.extend(
+            self.created_references
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(known, _)| *known == root)
+                .map(|(_, reference)| reference.clone()),
+        );
+        Ok(listed)
     }
 
     fn stashes(&self, repo: &Path) -> Result<Vec<Stash>, Error> {
@@ -949,13 +1033,7 @@ impl Backend for FakeBackend {
         self.probe.record("checkout", repo);
         self.probe.record_checkout(target);
         let folder = self.root_of(repo);
-        if let Some(gate) = &self.checkout_gate {
-            let stop = gate.clone();
-            cancel.on_cancel(move || stop.cancel());
-            if !gate.wait() {
-                return Err(WriteFailure::Failed(Error::Cancelled));
-            }
-        }
+        self.hold_write(cancel)?;
         let outcome = self
             .checkouts
             .iter()
@@ -969,31 +1047,53 @@ impl Backend for FakeBackend {
                 Head::Branch(local_name_of(remote).unwrap_or_else(|| remote.clone()))
             }
         };
-        let failed = |stderr: String| {
-            WriteFailure::Failed(Error::CommandFailed {
-                command: "git switch".to_owned(),
-                code: Some(1),
-                stderr,
-            })
-        };
-        match outcome {
-            FakeWrite::Done => {
-                self.moved_heads
+        self.finish_write("git switch", outcome, || self.move_head(folder, moved))
+    }
+
+    fn create_branch(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        checkout: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        self.probe.record("create-branch", repo);
+        self.probe.record_created_branch(CreatedBranch {
+            name: name.to_owned(),
+            start: start.to_owned(),
+            checkout,
+        });
+        let folder = self.root_of(repo);
+        self.hold_write(cancel)?;
+        let outcome = self
+            .branch_creations
+            .iter()
+            .find(|(known, _)| known == name)
+            .map(|(_, outcome)| outcome.clone())
+            .unwrap_or(FakeWrite::Done);
+        self.finish_write(
+            if checkout { "git switch" } else { "git branch" },
+            outcome,
+            || {
+                self.created_references
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((folder, moved));
-                Ok(())
-            }
-            FakeWrite::Refused(refusal) => Err(WriteFailure::Refused(refusal)),
-            FakeWrite::Failed { stderr } => Err(failed(stderr)),
-            FakeWrite::FailedAfterDoing { stderr } => {
-                self.moved_heads
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((folder, moved));
-                Err(failed(stderr))
-            }
-        }
+                    .push((
+                        folder.clone(),
+                        Reference {
+                            name: format!("refs/heads/{name}"),
+                            short: name.to_owned(),
+                            kind: RefKind::Branch,
+                            commit: Some(start.to_owned()),
+                            upstream: None,
+                        },
+                    ));
+                if checkout {
+                    self.move_head(folder.clone(), Head::Branch(name.to_owned()));
+                }
+            },
+        )
     }
 
     fn write_commit_graph(
@@ -2043,6 +2143,8 @@ struct ProbeLog {
     opened: Vec<(String, String, String)>,
     /// Every checkout asked for, in order.
     checkouts: Vec<CheckoutTarget>,
+    /// Every branch creation asked for, in order.
+    created_branches: Vec<CreatedBranch>,
 }
 
 impl Probe {
@@ -2122,6 +2224,15 @@ impl Probe {
 
     fn record_checkout(&self, target: &CheckoutTarget) {
         self.lock().checkouts.push(target.clone());
+    }
+
+    fn record_created_branch(&self, created: CreatedBranch) {
+        self.lock().created_branches.push(created);
+    }
+
+    /// Every branch creation asked for, in order.
+    pub fn created_branches(&self) -> Vec<CreatedBranch> {
+        self.lock().created_branches.clone()
     }
 
     /// Every checkout asked for, in order.

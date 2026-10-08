@@ -145,6 +145,16 @@ end of a name, folders, long names, accents) to the function and to
 judge: a refusal after the check is shown in the dialog. Typing a space is
 replaced by a hyphen in the field, as Sourcetree previews names.
 
+Three rules are git-bull's own and stricter than `git check-ref-format`, and
+the test shows each to be true of the installed Git. `HEAD` is refused by `git
+branch` and by `git tag` alike. `@` is accepted by Git, which creates
+`refs/heads/@`, but `git switch --no-guess @` reads it as HEAD and fails with
+"a branch is expected", so such a branch could never be checked out; it is
+refused for tags too, where it would only be confusing. A name that starts with
+`-` would be taken for an option by `branch`, `switch` and `tag`. The check
+applies the `.lock` rule to every part of the name, as Git does, not only to
+its end.
+
 Alternative: run `git check-ref-format` on each change of the field, debounced.
 Rejected for the delay on Windows, though it would never disagree with Git.
 

@@ -25,6 +25,7 @@ use crate::head::{self, Head};
 use crate::history::{self, CommitLine, HistoryStream, Revisions};
 use crate::invoke::{ConfigOverride, Git};
 use crate::merged::MergeCache;
+use crate::new_ref;
 use crate::object_id::ObjectId;
 use crate::path::RepoPath;
 use crate::refs::{self, Reference};
@@ -116,6 +117,19 @@ pub trait Backend: Send + Sync {
         &self,
         repo: &Path,
         target: &CheckoutTarget,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure>;
+
+    /// Creates the branch `name` at the commit `start` (a full hash) without an
+    /// upstream, and checks it out when `checkout` is set; a refused checkout
+    /// creates no branch (spec `reference-creation`). `cancel` belongs to the
+    /// action alone. See [`crate::new_ref::create_branch`].
+    fn create_branch(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        checkout: bool,
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure>;
 
@@ -409,6 +423,17 @@ impl Backend for CliBackend {
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure> {
         switch::checkout(&self.git, repo, target, cancel)
+    }
+
+    fn create_branch(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        checkout: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        new_ref::create_branch(&self.git, repo, name, start, checkout, cancel)
     }
 
     fn history(

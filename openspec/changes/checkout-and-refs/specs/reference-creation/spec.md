@@ -55,19 +55,24 @@ While the user types, the dialog SHALL check the name against the rules for
 reference names of `git check-ref-format` and SHALL say what is wrong in text
 under the field. A name that is empty, contains a space, `~`, `^`, `:`, `?`,
 `*`, `[`, `\` or a control character, contains `..` or `@{`, begins with `-`,
-begins or ends with `/`, contains `//`, ends with `.` or with `.lock`, has a
-part that begins with `.`, is `@`, or is `HEAD` for a branch, SHALL be reported
-as not valid. A name SHALL also be
+begins or ends with `/`, contains `//`, ends with `.`, has a part that begins
+with `.` or ends with `.lock`, or is `@` or `HEAD`, SHALL be reported as not
+valid. A name SHALL also be
 reported when it is the name of a branch that exists (for a branch) or of a tag
 that exists (for a tag), and when it would need an existing one of the same kind
 to be a folder, as `feature/x` needs `feature`, or to be inside one, as `a` is
 for `a/b`. Typing a space SHALL put a hyphen in its place. When Git refuses a
-name that the check let through, the dialog SHALL stay open and show Git's
-message under the field.
+name that the check let through, the dialog SHALL stay open and say under the
+field that Git refused the name as taken or as not valid, in the words of the
+check; any other failure of Git SHALL be shown with Git's own message.
 
 #### Scenario: Not a valid name
 - **WHEN** the user types `a..b`
 - **THEN** the dialog says that `..` is not allowed in a name, and Create is unavailable
+
+#### Scenario: Names with a meaning of their own
+- **WHEN** the user types `HEAD` or `@`
+- **THEN** the dialog says that the name is reserved, and Create is unavailable
 
 #### Scenario: Name that is taken
 - **WHEN** the branch `main` exists and the user types `main`
@@ -95,7 +100,7 @@ message under the field.
 
 #### Scenario: Git refuses what the check allowed
 - **WHEN** another program creates the branch `topic` after the dialog opened, and the user creates a branch `topic`
-- **THEN** the dialog stays open and shows Git's message that the branch exists under the name field
+- **THEN** the dialog stays open and says under the name field that Git refused the name because a branch of this name exists
 
 ### Requirement: Creating a tag
 Creating a tag SHALL open a dialog "Create tag" with the name field, the starting

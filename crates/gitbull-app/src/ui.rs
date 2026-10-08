@@ -1575,6 +1575,11 @@ pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
             args.set("target", target.clone());
             app.texts.text_with(Msg::ActionCheckout, Some(&args))
         }
+        WriteAction::CreateBranch { name } => {
+            let mut args = FluentArgs::new();
+            args.set("name", name.clone());
+            app.texts.text_with(Msg::ActionCreateBranch, Some(&args))
+        }
     }
 }
 
@@ -1588,15 +1593,22 @@ fn action_dialog(
     ui: &mut Ui,
     actions: &mut Vec<Action>,
 ) {
-    use gitbull_core::session::ActionDialog;
+    use gitbull_core::session::{ActionDialog, NameRefusal};
     let texts = &app.texts;
     let target = |action: &WriteAction| match action {
         WriteAction::Checkout { target } => target.clone(),
+        WriteAction::CreateBranch { name } => name.clone(),
     };
     let named = |msg: Msg, name: &str| {
         let mut args = FluentArgs::new();
         args.set("target", name.to_owned());
+        args.set("name", name.to_owned());
         texts.text_with(msg, Some(&args))
+    };
+    // A failure is told in the words of what was asked for.
+    let failed_title = |action: &WriteAction| match action {
+        WriteAction::Checkout { target } => named(Msg::CheckoutFailedTitle, target),
+        WriteAction::CreateBranch { name } => named(Msg::CreateFailedTitle, name),
     };
     let (title, intro, details, close_label, copy) = match dialog {
         ActionDialog::BlockedByChanges { target, files } => (
@@ -1647,8 +1659,18 @@ fn action_dialog(
                 false,
             )
         }
+        ActionDialog::NameRefused { action, why } => (
+            failed_title(action),
+            texts.text(match why {
+                NameRefusal::Taken => Msg::CreateRefusedTaken,
+                NameRefusal::Invalid => Msg::CreateRefusedInvalid,
+            }),
+            String::new(),
+            texts.text(Msg::DialogClose),
+            false,
+        ),
         ActionDialog::Failed { action, message } => (
-            named(Msg::CheckoutFailedTitle, &target(action)),
+            failed_title(action),
             texts.text(Msg::CheckoutFailedBody),
             message.clone(),
             texts.text(Msg::DialogClose),
