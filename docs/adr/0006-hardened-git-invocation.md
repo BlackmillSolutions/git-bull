@@ -8,8 +8,10 @@ date: 2026-09-29
 Opening a downloaded repository to look at it must not run commands that the
 repository brings along, and must not contact a remote. Git offers no switch
 to ignore a repository's own configuration, so git-bull neutralises every
-known way in which that configuration makes read-only commands execute
-something.
+known way in which that configuration makes browsing commands execute
+something. Explicit user writes use the separate invocation policy in
+[ADR 0007](0007-explicit-git-write-invocation.md), without changing these
+browsing defaults.
 
 The trust boundary is the configuration scope. Configuration from the system
 and global scope belongs to the user and is honoured. Configuration from the
@@ -84,8 +86,9 @@ git-bull never bypasses Git's ownership check (`safe.directory`).
 - Changes inside the working copy of a submodule are not shown in the
   repository that contains it. The submodule can be opened in its own tab,
   where the same rules apply.
-- In partial clones, content that is not present locally is not fetched.
-  Diff and blame show a notice instead. git-bull makes no network connection.
+- During browsing in partial clones, content that is not present locally is
+  not fetched. Diff and blame show a notice instead. Browsing makes no
+  network connection.
   Git's own messages cannot drive that notice: diff reports that lazy
   fetching is disabled, but blame reports `no such path <path> in HEAD` for a
   file whose content is merely missing. git-bull detects a partial clone
@@ -93,8 +96,10 @@ git-bull never bypasses Git's ownership check (`safe.directory`).
 - Ignore files for blame that the repository names are not used, including
   a `.git-blame-ignore-revs` that the project recommends. The user can name
   it in their global configuration.
-- All invocations go through one function that applies these rules. Calling
-  Git anywhere else is a defect.
+- All invocations share construction in `invoke.rs`. Existing read methods
+  apply these rules; the borrowed writer selects ADR 0007's explicit-action
+  policy. Calling Git elsewhere is a defect. The hardened commit-graph
+  operation keeps its existing policy.
 - New Git versions can add new ways to execute commands. Integration tests
   set every known one to a marker command and fail when a marker is written.
   They run against the Git version installed in CI, and a new finding

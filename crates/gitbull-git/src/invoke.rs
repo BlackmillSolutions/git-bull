@@ -1,8 +1,8 @@
 //! The single place where git-bull starts Git.
 //!
-//! Every invocation applies the rules of ADR 0006, so that a repository
-//! cannot make Git execute commands it brings along. Starting Git anywhere
-//! else is a defect.
+//! Browsing applies the protections of ADR 0006. Explicit user writes select
+//! the ordinary Git configuration policy of ADR 0007. Both share construction
+//! and subprocess handling here; starting Git elsewhere is a defect.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -14,7 +14,14 @@ use std::time::Instant;
 use crate::cancel::CancelToken;
 use crate::error::Error;
 use crate::log::{CommandLog, Outcome};
-use crate::process::{Process, StderrWatcher};
+use crate::process::{FailurePolicy, Process, StderrWatcher};
+use crate::write::{WriteHooks, WriteInvocation};
+
+#[derive(Clone, Copy)]
+pub(crate) enum ExecutionPolicy {
+    Read,
+    Write(WriteHooks),
+}
 
 /// A configuration value passed to Git through `GIT_CONFIG_COUNT`.
 ///
@@ -26,7 +33,7 @@ pub struct ConfigOverride {
     pub value: String,
 }
 
-/// The Git executable and how to run it safely.
+/// The Git executable with protected browsing defaults and explicit writes.
 #[derive(Clone, Debug)]
 pub struct Git {
     executable: PathBuf,
@@ -51,8 +58,30 @@ impl Git {
         self
     }
 
-    /// Builds the command for `git <args>` in `repo`.
+    /// Selects ordinary Git configuration for an explicit user write.
+    ///
+    /// This borrowed value changes neither subsequent reads nor repository
+    /// configuration. The caller owns the permission boundary (ADR 0007).
+    pub fn write(&self, hooks: WriteHooks) -> WriteInvocation<'_> {
+        WriteInvocation::new(self, hooks)
+    }
+
+    /// Builds a protected browsing command for `git <args>` in `repo`.
     pub fn command<I, S>(&self, repo: &Path, overrides: &[ConfigOverride], args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.command_with_policy(repo, overrides, args, ExecutionPolicy::Read)
+    }
+
+    pub(crate) fn command_with_policy<I, S>(
+        &self,
+        repo: &Path,
+        overrides: &[ConfigOverride],
+        args: I,
+        policy: ExecutionPolicy,
+    ) -> Command
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -61,20 +90,36 @@ impl Git {
         hooks_path.push(&self.hooks_dir);
 
         let mut command = Command::new(&self.executable);
+        command.arg("--no-pager");
+        match policy {
+            ExecutionPolicy::Read => {
+                command
+                    .args(["-c", "core.fsmonitor=false"])
+                    .args(["-c", "log.showSignature=false"])
+                    .arg("-c")
+                    .arg(hooks_path)
+                    .args(["-c", "diff.autoRefreshIndex=false"])
+                    .env("GIT_OPTIONAL_LOCKS", "0")
+                    .env("GIT_NO_LAZY_FETCH", "1");
+            }
+            ExecutionPolicy::Write(hooks) => {
+                if hooks == WriteHooks::SkipCommitHooks {
+                    command
+                        .args(["-c", "core.fsmonitor=false"])
+                        .arg("-c")
+                        .arg(hooks_path);
+                }
+                command
+                    .env_remove("GIT_OPTIONAL_LOCKS")
+                    .env_remove("GIT_NO_LAZY_FETCH");
+            }
+        }
         command
-            .arg("--no-pager")
-            .args(["-c", "core.fsmonitor=false"])
-            .args(["-c", "log.showSignature=false"])
-            .arg("-c")
-            .arg(hooks_path)
-            .args(["-c", "diff.autoRefreshIndex=false"])
             .args(["-c", "color.ui=false"])
             .args(["-c", "core.quotepath=false"])
             .args(args)
             .current_dir(repo)
-            .env("GIT_OPTIONAL_LOCKS", "0")
             .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_LITERAL_PATHSPECS", "1")
             .env("LC_ALL", "C");
 
@@ -95,8 +140,7 @@ impl Git {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
+            command.creation_flags(crate::job::CREATE_NO_WINDOW);
         }
 
         command
@@ -152,29 +196,60 @@ impl Git {
         S: AsRef<OsStr>,
     {
         let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
-        let command_line = command_line(&args);
-        let started = Instant::now();
         let mut command = self.command(repo, overrides, &args);
         command.envs(env.iter().copied());
-        let child = command
+        self.spawn_prepared(command, &args, stdin, watcher, FailurePolicy::Read)
+    }
+
+    pub(crate) fn spawn_prepared(
+        &self,
+        mut command: Command,
+        args: &[OsString],
+        stdin: bool,
+        watcher: Option<StderrWatcher>,
+        failure_policy: FailurePolicy,
+    ) -> Result<Process, Error> {
+        let command_line = command_line(args);
+        let started = Instant::now();
+        // A private group owns foreground descendants, including hook/filter
+        // children, without sharing the application's process group.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        command
             .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| {
-                self.record(&command_line, started, Outcome::NotStarted);
-                Error::Io {
-                    command: command_line.clone(),
-                    source,
-                }
-            })?;
-        Ok(Process::new(
+            .stderr(Stdio::piped());
+        // On Windows a job object of its own owns the process and everything
+        // it starts, including descendants whose parent has already exited.
+        #[cfg(windows)]
+        let spawned = crate::job::spawn(&mut command);
+        #[cfg(not(windows))]
+        let spawned = command.spawn();
+        let spawned = spawned.map_err(|source| {
+            self.record(&command_line, started, Outcome::NotStarted);
+            Error::Io {
+                command: command_line.clone(),
+                source,
+            }
+        })?;
+        #[cfg(windows)]
+        let (child, job) = spawned;
+        #[cfg(not(windows))]
+        let child = spawned;
+        let process = Process::new(
             child,
             command_line,
             self.log.clone(),
             started,
             watcher,
-        ))
+            failure_policy,
+        );
+        #[cfg(windows)]
+        let process = process.with_job(job);
+        Ok(process)
     }
 
     /// Runs `git <args>` in `repo` and returns its standard output.

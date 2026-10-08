@@ -64,9 +64,19 @@ fn process_filter_of_the_repository_is_not_executed() {
     repo.config("filter.evil.process", &marker.command("process"));
     assign(&repo, "evil");
 
-    let (unprotected, protected) = unprotected_then_protected(&repo, &marker);
-    assert!(unprotected > 0, "the setup must trigger the filter");
-    assert_eq!(protected, 0);
+    // This marker exits without speaking the long-running filter protocol.
+    // Git may reject that handshake; either outcome still proves execution.
+    match status(&repo, &[]) {
+        Ok(_) => {}
+        Err(gitbull_git::Error::CommandFailed { stderr, .. })
+            if stderr.contains("the remote end hung up unexpectedly") => {}
+        other => panic!("unexpected unprotected filter result: {other:?}"),
+    }
+    let before = marker.labels();
+    assert!(!before.is_empty(), "the setup must trigger the filter");
+    let overrides = neutralised_filters(&git(), repo.path()).unwrap();
+    status(&repo, &overrides).expect("protected status succeeds");
+    assert_eq!(marker.labels(), before);
 }
 
 #[test]

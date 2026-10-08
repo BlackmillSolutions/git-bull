@@ -1500,7 +1500,9 @@ version = "0.1.0"
 dependencies = [
  "encoding_rs",
  "gitbull-testkit",
+ "libc",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
