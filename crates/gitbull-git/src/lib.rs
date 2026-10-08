@@ -26,6 +26,8 @@ pub mod flags;
 pub mod head;
 pub mod history;
 pub mod invoke;
+#[cfg(windows)]
+mod job;
 pub mod locate;
 pub mod log;
 pub mod merged;

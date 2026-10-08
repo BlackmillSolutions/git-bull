@@ -140,8 +140,7 @@ impl Git {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
+            command.creation_flags(crate::job::CREATE_NO_WINDOW);
         }
 
         command
@@ -219,26 +218,38 @@ impl Git {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let child = command
+        command
             .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| {
-                self.record(&command_line, started, Outcome::NotStarted);
-                Error::Io {
-                    command: command_line.clone(),
-                    source,
-                }
-            })?;
-        Ok(Process::new(
+            .stderr(Stdio::piped());
+        // On Windows a job object of its own owns the process and everything
+        // it starts, including descendants whose parent has already exited.
+        #[cfg(windows)]
+        let spawned = crate::job::spawn(&mut command);
+        #[cfg(not(windows))]
+        let spawned = command.spawn();
+        let spawned = spawned.map_err(|source| {
+            self.record(&command_line, started, Outcome::NotStarted);
+            Error::Io {
+                command: command_line.clone(),
+                source,
+            }
+        })?;
+        #[cfg(windows)]
+        let (child, job) = spawned;
+        #[cfg(not(windows))]
+        let child = spawned;
+        let process = Process::new(
             child,
             command_line,
             self.log.clone(),
             started,
             watcher,
             failure_policy,
-        ))
+        );
+        #[cfg(windows)]
+        let process = process.with_job(job);
+        Ok(process)
     }
 
     /// Runs `git <args>` in `repo` and returns its standard output.

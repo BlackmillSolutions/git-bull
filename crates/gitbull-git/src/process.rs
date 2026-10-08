@@ -22,8 +22,10 @@ pub(crate) enum FailurePolicy {
 /// A Git process started by [`crate::Git::spawn`] or an explicit writer.
 ///
 /// Drain stdout before waiting. Dropping it stops ordinary foreground
-/// descendants through its owned Unix group or Windows process tree. Programs
-/// deliberately detaching from that ownership are outside this guarantee.
+/// descendants through its owned Unix process group or Windows job object, also
+/// those whose parent has exited. Programs deliberately detaching from that
+/// ownership are outside this guarantee. Without a job, which only happens when
+/// Windows refuses one, a walk down the process tree is the fallback.
 pub struct Process {
     child: Arc<Mutex<ChildLifecycle>>,
     stdin: Option<ChildStdin>,
@@ -46,7 +48,8 @@ pub struct Canceller {
 
 /// The signalling target remains owned until final reaping under this lock.
 /// On Unix an exited but unreaped leader prevents reuse of its group ID while
-/// descendants still hold output pipes. Waiter and stopper share one status.
+/// descendants still hold output pipes. On Windows the job handle stays open
+/// for the same reason. Waiter and stopper share one status.
 struct ChildLifecycle {
     child: Child,
     status: Option<ExitStatus>,
@@ -55,6 +58,10 @@ struct ChildLifecycle {
     stop_error: Option<io::Error>,
     #[cfg(unix)]
     pgid: libc::pid_t,
+    /// The job that owns the process and all of its descendants. Without one
+    /// the process was started unowned and cancellation walks its tree.
+    #[cfg(windows)]
+    job: Option<crate::job::Job>,
 }
 
 impl ChildLifecycle {
@@ -62,6 +69,8 @@ impl ChildLifecycle {
         Self {
             #[cfg(unix)]
             pgid: libc::pid_t::try_from(child.id()).expect("child PID fits positive pid_t"),
+            #[cfg(windows)]
+            job: None,
             child,
             status: None,
             observed_exit: false,
@@ -102,7 +111,14 @@ impl ChildLifecycle {
         #[cfg(not(unix))]
         {
             self.status = self.child.try_wait()?;
-            if self.status.is_some() {
+            // A job keeps the exited leader's descendants reachable while
+            // they still hold the output pipes. Without one nothing is left
+            // to stop, so ownership ends here.
+            #[cfg(windows)]
+            let owns_descendants = self.job.is_some();
+            #[cfg(not(windows))]
+            let owns_descendants = false;
+            if self.status.is_some() && !owns_descendants {
                 self.active = false;
             }
             Ok(self.status.is_some())
@@ -113,6 +129,11 @@ impl ChildLifecycle {
         // Disarm before releasing the PID to the OS. Late cancellers may
         // share this state but can never signal a reused identifier.
         self.active = false;
+        // Closing the handle ends the ownership; it does not end the members.
+        #[cfg(windows)]
+        {
+            self.job = None;
+        }
         if let Some(status) = self.status {
             return Ok(status);
         }
@@ -143,9 +164,23 @@ impl ChildLifecycle {
         }
         #[cfg(not(unix))]
         {
+            // The job reaches every descendant, also those whose parent has
+            // exited. Without one, or when it fails, walk the tree from the
+            // launcher; that finds only descendants that still have a parent.
+            #[cfg(windows)]
+            let terminated = match &self.job {
+                Some(job) => match job.terminate() {
+                    Ok(()) => true,
+                    Err(error) => {
+                        self.stop_error = Some(error);
+                        false
+                    }
+                },
+                None => false,
+            };
             // Preserve Windows launcher ancestry until taskkill has found it.
             #[cfg(windows)]
-            if matches!(self.child.try_wait(), Ok(None)) {
+            if !terminated && matches!(self.child.try_wait(), Ok(None)) {
                 stop_tree(self.child.id());
             }
             let _ = self.child.kill();
@@ -198,6 +233,13 @@ impl Process {
             logged: false,
             failure_policy,
         }
+    }
+
+    /// Hands the process to the job that owns it and its descendants.
+    #[cfg(windows)]
+    pub(crate) fn with_job(self, job: Option<crate::job::Job>) -> Process {
+        self.child.lock().unwrap_or_else(|e| e.into_inner()).job = job;
+        self
     }
 
     fn record(&mut self, outcome: Outcome) {
@@ -662,6 +704,140 @@ mod tests {
             sentinel.canceller().cancel();
             assert!(matches!(sentinel.wait(), Err(Error::Cancelled)));
         }
+        let repo = repository();
+        let mut process = git().spawn(repo.path(), &[], ["version"], false).unwrap();
+        let late = process.canceller();
+        let _ = std::io::read_to_string(process.take_stdout().unwrap());
+        process.wait().unwrap();
+        assert!(!late.child.lock().unwrap().active);
+        let (sentinel, _stdin, _repo) = running();
+        late.cancel();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!sentinel.child.lock().unwrap().exited().unwrap());
+        sentinel.canceller().cancel();
+        assert!(matches!(sentinel.wait(), Err(Error::Cancelled)));
+    }
+
+    /// Forward slashes, as Git's bundled shell expects paths on Windows.
+    #[cfg(windows)]
+    fn shell_path(path: &std::path::Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    /// Releases the fixture's background child and joins the collectors, also
+    /// when an assertion fails.
+    #[cfg(windows)]
+    struct Release {
+        path: PathBuf,
+        collectors: Vec<std::thread::JoinHandle<()>>,
+    }
+
+    #[cfg(windows)]
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.path, "release");
+            for collector in self.collectors.drain(..) {
+                let _ = collector.join();
+            }
+        }
+    }
+
+    /// Runs a Git alias whose shell starts a background child and exits at
+    /// once. The child, whose parent is gone, holds the output pipes until it
+    /// is released. A walk down the process tree cannot find it, so only the
+    /// job that owns the process reaches it. Then stops the process by
+    /// cancelling it, or by dropping it when `abandon` is true.
+    #[cfg(windows)]
+    fn leave_an_orphan_and_stop_it(abandon: bool) {
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let release = dir.path().join("release");
+        let ready = dir.path().join("ready");
+        let after = dir.path().join("after");
+        let mut guard = Release {
+            path: release.clone(),
+            collectors: Vec::new(),
+        };
+        let script = format!(
+            "(touch '{}'; i=0; while test ! -f '{}' && test $i -lt 100; do sleep 0.1; i=$((i+1)); done; touch '{}') & exit 0",
+            shell_path(&ready),
+            shell_path(&release),
+            shell_path(&after)
+        );
+        let alias = format!("alias.orphan=!{script}");
+        let repo = repository();
+        let mut process = git()
+            .spawn(repo.path(), &[], ["-c", alias.as_str(), "orphan"], false)
+            .unwrap();
+        let canceller = process.canceller();
+        let mut stdout = process.take_stdout().unwrap();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        guard.collectors.push(std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout.read_to_end(&mut bytes);
+            let _ = closed_tx.send(());
+        }));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "the background child did not start");
+        // The leader must have exited while its child still holds the pipes.
+        // Ownership of the job must outlive the leader until the output is
+        // drained, or the child could no longer be stopped.
+        loop {
+            let mut child = canceller.child.lock().unwrap();
+            if child.exited().unwrap() {
+                assert!(
+                    child.active,
+                    "the exited leader's job is still owned while the pipes are open"
+                );
+                break;
+            }
+            drop(child);
+            assert!(Instant::now() < deadline, "the leader did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (result_tx, result_rx) = mpsc::channel();
+        if abandon {
+            drop(process);
+        } else {
+            guard.collectors.push(std::thread::spawn(move || {
+                let _ = result_tx.send(process.wait());
+            }));
+            canceller.cancel();
+        }
+        let closed = closed_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        let cancelled = abandon
+            || matches!(
+                result_rx.recv_timeout(Duration::from_secs(2)),
+                Ok(Err(Error::Cancelled))
+            );
+        drop(guard);
+        assert!(closed, "the orphan retained the output pipes");
+        assert!(cancelled, "wait did not report the cancellation");
+        assert!(!after.exists(), "the orphan survived the cancellation");
+        // Another tracked process owns its own job and keeps running.
+        let (sentinel, _stdin, _repo) = running();
+        canceller.cancel();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!sentinel.child.lock().unwrap().exited().unwrap());
+        sentinel.canceller().cancel();
+        assert!(matches!(sentinel.wait(), Err(Error::Cancelled)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancellation_terminates_orphaned_descendants() {
+        leave_an_orphan_and_stop_it(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancellation_and_drop_terminate_only_the_job() {
+        leave_an_orphan_and_stop_it(true);
+        // A completed handle terminates nothing, not even a running neighbour.
         let repo = repository();
         let mut process = git().spawn(repo.path(), &[], ["version"], false).unwrap();
         let late = process.canceller();

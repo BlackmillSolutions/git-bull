@@ -49,8 +49,23 @@ Every tracked Unix subprocess has its own process group. Cancellation signals
 that owned positive PGID with SIGKILL before reaping. Non-reaping `waitid`
 observation retains the exited leader while pipes are drained; the shared
 lifecycle lock disarms signalling before final reaping and caches the status.
-Late cancellation cannot target a reused PID. Windows retains `taskkill /T /F`
-before terminating the active launcher. Stop and Drop return without waiting
+Late cancellation cannot target a reused PID.
+
+Every tracked Windows subprocess is created suspended, placed in its own job
+object and then resumed, so no descendant exists before the job owns it.
+Cancellation terminates the job, which includes descendants whose parent has
+already exited. `taskkill /T /F` was not enough: it walks the tree from the
+launcher, and on the first Windows CI run it missed a hook's background child
+whose parent was gone. That child kept the stderr pipe open, to which Git
+routes hook output, so waiting never returned. The job has no kill-on-close
+limit, so a normal completion leaves detached Git helpers such as the
+fsmonitor daemon alone. The exited leader keeps its job while pipes are
+drained, as the Unix leader stays unreaped. If no job can be created or
+assigned, cancellation falls back to `taskkill /T /F` before terminating the
+active launcher; if the process cannot be resumed, it is killed and the spawn
+fails.
+
+Stop and Drop return without waiting
 on native cleanup; stderr joining holds no lifecycle lock. Ordinary foreground
 hook/filter descendants are included; deliberately escaping descendants are
 outside this process-lifecycle guarantee. Native signalling errors are retained
