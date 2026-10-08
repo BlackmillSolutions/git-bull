@@ -25,11 +25,13 @@ use gitbull_git::merged::{Prediction, Unpredicted};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
 use gitbull_git::refs::Reference;
+use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
 use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
 use gitbull_git::summary::Summary;
+use gitbull_git::switch::CheckoutTarget;
 use gitbull_git::uncommitted::Uncommitted;
 use gitbull_git::version::Capabilities;
 use gitbull_git::worktrees::Worktree;
@@ -131,7 +133,27 @@ pub struct FakeBackend {
     uncommitted: Vec<(PathBuf, Uncommitted)>,
     /// The diffs of a worktree for the AI context.
     ai_diffs: Vec<(PathBuf, AiDiff)>,
+    /// What a checkout of a target does; a target without an entry succeeds.
+    checkouts: Vec<(CheckoutTarget, FakeWrite)>,
+    /// Holds every checkout until it opens or is cancelled.
+    checkout_gate: Option<Gate>,
+    /// HEAD after checkouts, by folder; it takes the place of the HEAD given.
+    moved_heads: Mutex<Vec<(PathBuf, Head)>>,
     probe: Probe,
+}
+
+/// How a scripted write ends.
+#[derive(Clone, Debug)]
+pub enum FakeWrite {
+    /// Git does it.
+    Done,
+    /// Git refuses, and nothing changes.
+    Refused(Refusal),
+    /// Git fails with `stderr`, and nothing changes.
+    Failed { stderr: String },
+    /// Git does it and then reports a failure, as a failing post-checkout hook
+    /// makes it do.
+    FailedAfterDoing { stderr: String },
 }
 
 /// How checking a path goes wrong on purpose.
@@ -275,6 +297,19 @@ impl FakeBackend {
     /// Holds every comparison until `gate` opens.
     pub fn with_compare_gate(mut self, gate: &Gate) -> FakeBackend {
         self.compare_gate = Some(gate.clone());
+        self
+    }
+
+    /// Lets a checkout of `target` end as `outcome`; without an entry it
+    /// succeeds and moves HEAD there.
+    pub fn with_checkout(mut self, target: CheckoutTarget, outcome: FakeWrite) -> FakeBackend {
+        self.checkouts.push((target, outcome));
+        self
+    }
+
+    /// Holds every checkout until `gate` opens; cancelling the action ends it.
+    pub fn with_checkout_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.checkout_gate = Some(gate.clone());
         self
     }
 
@@ -756,6 +791,18 @@ impl Backend for FakeBackend {
 
     fn head(&self, repo: &Path) -> Result<Head, Error> {
         self.gone(repo)?;
+        let folder = self.root_of(repo);
+        if let Some(head) = self
+            .moved_heads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .rev()
+            .find(|(known, _)| *known == folder)
+            .map(|(_, head)| head.clone())
+        {
+            return Ok(head);
+        }
         if let Some(head) = self.live_of(repo).and_then(|live| live.head.clone()) {
             return Ok(head);
         }
@@ -882,6 +929,59 @@ impl Backend for FakeBackend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(&root))
+    }
+
+    fn checkout(
+        &self,
+        repo: &Path,
+        target: &CheckoutTarget,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        self.probe.record("checkout", repo);
+        self.probe.record_checkout(target);
+        let folder = self.root_of(repo);
+        if let Some(gate) = &self.checkout_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(WriteFailure::Failed(Error::Cancelled));
+            }
+        }
+        let outcome = self
+            .checkouts
+            .iter()
+            .find(|(known, _)| known == target)
+            .map(|(_, outcome)| outcome.clone())
+            .unwrap_or(FakeWrite::Done);
+        let moved = match target {
+            CheckoutTarget::Branch(name) => Head::Branch(name.clone()),
+            CheckoutTarget::Commit(id) => Head::Detached(id.clone()),
+        };
+        let failed = |stderr: String| {
+            WriteFailure::Failed(Error::CommandFailed {
+                command: "git switch".to_owned(),
+                code: Some(1),
+                stderr,
+            })
+        };
+        match outcome {
+            FakeWrite::Done => {
+                self.moved_heads
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((folder, moved));
+                Ok(())
+            }
+            FakeWrite::Refused(refusal) => Err(WriteFailure::Refused(refusal)),
+            FakeWrite::Failed { stderr } => Err(failed(stderr)),
+            FakeWrite::FailedAfterDoing { stderr } => {
+                self.moved_heads
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((folder, moved));
+                Err(failed(stderr))
+            }
+        }
     }
 
     fn write_commit_graph(
@@ -1918,6 +2018,8 @@ struct ProbeLog {
     searches: Vec<(SearchKind, String)>,
     /// File histories and blames: which, from where, and the path.
     opened: Vec<(String, String, String)>,
+    /// Every checkout asked for, in order.
+    checkouts: Vec<CheckoutTarget>,
 }
 
 impl Probe {
@@ -1993,6 +2095,15 @@ impl Probe {
 
     fn record(&self, call: &str, repo: &Path) {
         self.lock().calls.push((call.to_owned(), repo.to_owned()));
+    }
+
+    fn record_checkout(&self, target: &CheckoutTarget) {
+        self.lock().checkouts.push(target.clone());
+    }
+
+    /// Every checkout asked for, in order.
+    pub fn checkouts(&self) -> Vec<CheckoutTarget> {
+        self.lock().checkouts.clone()
     }
 
     /// Every comparison with a base asked for, in order.
@@ -2111,5 +2222,162 @@ mod tests {
             FakeBackend::default().worktrees(&path(&["nowhere"]), &CancelToken::new()),
             Err(Error::NotARepository(_))
         ));
+    }
+
+    fn backend_with_repository() -> (FakeBackend, PathBuf) {
+        let root = path(&["work", "app"]);
+        let backend = FakeBackend::default()
+            .with_repository(root.clone())
+            .with_head(root.clone(), Head::Branch("main".to_owned()));
+        (backend, root)
+    }
+
+    #[test]
+    fn a_checkout_moves_head_and_is_recorded() {
+        let (backend, root) = backend_with_repository();
+        let target = CheckoutTarget::Branch("feature".to_owned());
+        backend
+            .checkout(&root, &target, &CancelToken::new())
+            .unwrap();
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("feature".to_owned())
+        );
+        let commit = CheckoutTarget::Commit(fake_id("c1").to_string());
+        backend
+            .checkout(&root, &commit, &CancelToken::new())
+            .unwrap();
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Detached(fake_id("c1").to_string())
+        );
+        assert_eq!(backend.probe().checkouts(), [target, commit]);
+        assert_eq!(backend.probe().calls(&root), ["checkout", "checkout"]);
+    }
+
+    #[test]
+    fn scripted_outcomes_end_a_checkout_as_told() {
+        let (backend, root) = backend_with_repository();
+        let backend = backend
+            .with_checkout(
+                CheckoutTarget::Branch("blocked".to_owned()),
+                FakeWrite::Refused(Refusal::TrackedChanges(vec!["a.txt".to_owned()])),
+            )
+            .with_checkout(
+                CheckoutTarget::Branch("broken".to_owned()),
+                FakeWrite::Failed {
+                    stderr: "boom".to_owned(),
+                },
+            )
+            .with_checkout(
+                CheckoutTarget::Branch("hook".to_owned()),
+                FakeWrite::FailedAfterDoing {
+                    stderr: "hook rejected".to_owned(),
+                },
+            );
+        let cancel = CancelToken::new();
+        let go =
+            |name: &str| backend.checkout(&root, &CheckoutTarget::Branch(name.to_owned()), &cancel);
+        assert!(matches!(
+            go("blocked"),
+            Err(WriteFailure::Refused(Refusal::TrackedChanges(_)))
+        ));
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("main".to_owned())
+        );
+        assert!(matches!(
+            go("broken"),
+            Err(WriteFailure::Failed(Error::CommandFailed { .. }))
+        ));
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("main".to_owned())
+        );
+        assert!(matches!(
+            go("hook"),
+            Err(WriteFailure::Failed(Error::CommandFailed { stderr, .. })) if stderr == "hook rejected"
+        ));
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("hook".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_gated_checkout_waits_until_the_gate_opens() {
+        let (backend, root) = backend_with_repository();
+        let gate = Gate::new();
+        let backend = Arc::new(backend.with_checkout_gate(&gate));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = {
+            let backend = Arc::clone(&backend);
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let result = backend.checkout(
+                    &root,
+                    &CheckoutTarget::Branch("feature".to_owned()),
+                    &CancelToken::new(),
+                );
+                let _ = sender.send(result.is_ok());
+            })
+        };
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "the checkout ended before the gate opened"
+        );
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("main".to_owned())
+        );
+        gate.open();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        );
+        worker.join().unwrap();
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("feature".to_owned())
+        );
+    }
+
+    #[test]
+    fn cancelling_ends_a_held_checkout() {
+        let (backend, root) = backend_with_repository();
+        let gate = Gate::new();
+        let backend = Arc::new(backend.with_checkout_gate(&gate));
+        let cancel = CancelToken::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = {
+            let (backend, root, cancel) = (Arc::clone(&backend), root.clone(), cancel.clone());
+            std::thread::spawn(move || {
+                let result = backend.checkout(
+                    &root,
+                    &CheckoutTarget::Branch("feature".to_owned()),
+                    &cancel,
+                );
+                let _ = sender.send(matches!(
+                    result,
+                    Err(WriteFailure::Failed(Error::Cancelled))
+                ));
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel.cancel();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        );
+        worker.join().unwrap();
+        assert!(gate.was_cancelled());
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("main".to_owned())
+        );
     }
 }

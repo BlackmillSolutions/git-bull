@@ -28,12 +28,14 @@ use crate::merged::MergeCache;
 use crate::object_id::ObjectId;
 use crate::path::RepoPath;
 use crate::refs::{self, Reference};
+use crate::refusal::WriteFailure;
 use crate::repository::{self, RepositoryInfo};
 use crate::search::{self, HashMatch, Location, SearchKind, SearchStream};
 use crate::shallow;
 use crate::stashes::{self, Stash, Submodule};
 use crate::status::{self, Group, StatusEntry, WorkingStatus};
 use crate::summary::{self, Summary};
+use crate::switch::{self, CheckoutTarget};
 use crate::uncommitted::{self, Uncommitted};
 use crate::version::{Capabilities, GitVersion};
 use crate::working_copy;
@@ -105,6 +107,17 @@ pub trait Backend: Send + Sync {
         cancel: &CancelToken,
         progress: Box<dyn FnMut(GraphProgress) + Send>,
     ) -> Result<(), Error>;
+
+    /// Checks `target` out: a write that runs the hooks and filters of the
+    /// repository (spec `checkout`). Changes in the working copy that would be
+    /// overwritten make Git refuse, and the refusal comes back as data. `cancel`
+    /// belongs to the action alone. See [`crate::switch::checkout`].
+    fn checkout(
+        &self,
+        repo: &Path,
+        target: &CheckoutTarget,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure>;
 
     /// The structure of the history reachable from `revisions`.
     fn history(
@@ -387,6 +400,15 @@ impl Backend for CliBackend {
         progress: Box<dyn FnMut(GraphProgress) + Send>,
     ) -> Result<(), Error> {
         commit_graph::write_commit_graph(&self.git, repo, cancel, progress)
+    }
+
+    fn checkout(
+        &self,
+        repo: &Path,
+        target: &CheckoutTarget,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        switch::checkout(&self.git, repo, target, cancel)
     }
 
     fn history(
