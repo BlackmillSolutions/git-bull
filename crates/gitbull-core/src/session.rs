@@ -23,8 +23,10 @@ use gitbull_git::history::{CommitLine, Revisions};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
+use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::Group;
+use gitbull_git::switch::CheckoutTarget;
 use gitbull_git::{Backend, Error};
 
 use crate::badges::{self, Badge};
@@ -82,6 +84,73 @@ pub enum CommitGraph {
     Missing,
     /// Being written, with the latest progress Git reported.
     Generating(Option<GraphProgress>),
+}
+
+/// A write action that a session runs for its tab (ADR 0008). A tab runs one
+/// at a time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Checking out a branch, a tag or a commit, named as the user knows it:
+    /// the branch, the tag, or the short hash.
+    Checkout { target: String },
+}
+
+/// What the user asks to check out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckoutRequest {
+    /// A local branch, by its short name.
+    Branch(String),
+    /// A tag, by its full name such as `refs/tags/v1`.
+    Tag(String),
+    /// A commit.
+    Commit(ObjectId),
+}
+
+/// What [`Session::start_checkout`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckoutStart {
+    /// The checkout runs; [`Session::action`] names it.
+    Started,
+    /// Another write action runs in this tab.
+    Busy,
+    /// It is checked out already, so nothing runs.
+    AlreadyThere,
+    /// A tag, by its short name, that points to a tree or a file.
+    NotACommit(String),
+}
+
+/// What an action asks the user to see once it ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActionDialog {
+    /// Changes to tracked files would be overwritten by the checkout.
+    BlockedByChanges { target: String, files: Vec<String> },
+    /// Untracked files would be overwritten; they have to be moved or removed.
+    BlockedByUntracked { target: String, files: Vec<String> },
+    /// Git failed, with its message in full.
+    Failed { action: Action, message: String },
+    /// Git reported a failure after it had done the action, as a failing
+    /// post-checkout hook makes it do; `output` is what Git printed.
+    HookFailed { action: Action, output: String },
+}
+
+/// A write action from its start until the state was read again.
+struct RunningAction {
+    action: Action,
+    /// Where HEAD is once the action did its work.
+    expected: Head,
+    /// Only [`Session`]'s drop cancels it; ordinary read cancellation never
+    /// reaches a write (ADR 0007).
+    cancel: CancelToken,
+    /// How it ended, once Git ended; the state is read again meanwhile.
+    ended: Option<Ended>,
+}
+
+enum Ended {
+    Done,
+    Cancelled,
+    Dialog(ActionDialog),
+    /// Git failed; whether the action happened is told by HEAD.
+    Failed(String),
 }
 
 /// Which branches the graph shows.
@@ -178,6 +247,12 @@ pub struct Session {
     blame: Option<Blame>,
     /// The colours diffs and blame are highlighted with.
     theme: HighlightTheme,
+    /// The write action of the tab, from its start until the state was read
+    /// again after it.
+    action: Option<RunningAction>,
+    action_result: Option<Receiver<Result<(), WriteFailure>>>,
+    /// What the last action asks the user to see, until it is closed.
+    dialog: Option<ActionDialog>,
 }
 
 impl fmt::Debug for Session {
@@ -253,6 +328,9 @@ impl Session {
             file_history: None,
             blame: None,
             theme: HighlightTheme::Light,
+            action: None,
+            action_result: None,
+            dialog: None,
         }
     }
 
@@ -394,11 +472,16 @@ impl Session {
             }
             changed = true;
         }
+        if let Some(done) = take(&mut self.action_result) {
+            self.action_ended(done);
+            changed = true;
+        }
         if let Some(refreshed) = take(&mut self.refresh_result) {
             match refreshed {
                 Ok((head, sidebar)) => self.apply_refresh(head, sidebar),
                 Err(failure) => self.failure = Some(failure),
             }
+            self.finish_action();
             changed = true;
         }
         {
@@ -609,6 +692,11 @@ impl Session {
         if self.refresh_result.is_some() {
             return;
         }
+        self.read_state();
+    }
+
+    /// Reads HEAD, the references, the stashes and the submodules.
+    fn read_state(&mut self) {
         let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
         self.refresh_result = Some(self.in_background(move || {
             let head = backend.head(&root)?;
@@ -619,6 +707,17 @@ impl Session {
             };
             Ok((head, sidebar))
         }));
+    }
+
+    /// Reads the state again because a write action changed, or failed to
+    /// change, the repository. A read that began before the action is dropped:
+    /// it may have seen the repository as it was.
+    fn read_state_after_action(&mut self) {
+        if let Some(status) = &mut self.file_status {
+            status.refresh();
+        }
+        self.refresh_result = None;
+        self.read_state();
     }
 
     /// Takes over what a refresh found; the history loads again only when
@@ -725,6 +824,139 @@ impl Session {
     /// Why writing the commit-graph failed, if it did.
     pub fn commit_graph_failure(&self) -> Option<&Failure> {
         self.graph_failure.as_ref()
+    }
+
+    /// The write action of the tab, from its start until the state was read
+    /// again after it. Every entry that starts one is unavailable meanwhile.
+    pub fn action(&self) -> Option<&Action> {
+        self.action.as_ref().map(|running| &running.action)
+    }
+
+    /// What the last action asks the user to see; [`Session::close_dialog`]
+    /// ends it.
+    pub fn dialog(&self) -> Option<&ActionDialog> {
+        self.dialog.as_ref()
+    }
+
+    pub fn close_dialog(&mut self) {
+        self.dialog = None;
+    }
+
+    /// Checks `request` out in the background (spec `checkout`).
+    ///
+    /// A tab runs one write action at a time, and a checkout of what is
+    /// checked out already runs nothing. The action has no cancel control: only
+    /// dropping the session stops it. When it ended, whatever the outcome, HEAD,
+    /// the references and the status are read again, and only then
+    /// [`Session::action`] turns `None` and a dialog, if the outcome asks for
+    /// one, appears.
+    pub fn start_checkout(&mut self, request: CheckoutRequest) -> CheckoutStart {
+        if self.action.is_some() {
+            return CheckoutStart::Busy;
+        }
+        let (target, label, expected) = match request {
+            CheckoutRequest::Branch(name) => {
+                let expected = Head::Branch(name.clone());
+                if self.opened.head == expected {
+                    return CheckoutStart::AlreadyThere;
+                }
+                (CheckoutTarget::Branch(name.clone()), name, expected)
+            }
+            CheckoutRequest::Tag(full) => {
+                let short = full.strip_prefix("refs/tags/").unwrap_or(&full).to_owned();
+                let commit = self.reference(&full).and_then(|tag| tag.commit.clone());
+                let Some(id) = commit else {
+                    return CheckoutStart::NotACommit(short);
+                };
+                let expected = Head::Detached(id.clone());
+                if self.opened.head == expected {
+                    return CheckoutStart::AlreadyThere;
+                }
+                (CheckoutTarget::Commit(id), short, expected)
+            }
+            CheckoutRequest::Commit(id) => {
+                let id = id.to_string();
+                let expected = Head::Detached(id.clone());
+                if self.opened.head == expected {
+                    return CheckoutStart::AlreadyThere;
+                }
+                let short = id.chars().take(7).collect();
+                (CheckoutTarget::Commit(id), short, expected)
+            }
+        };
+        self.dialog = None;
+        let cancel = CancelToken::new();
+        let (backend, root, notify) = (
+            Arc::clone(&self.backend),
+            self.opened.root.clone(),
+            Arc::clone(&self.notify),
+        );
+        let token = cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = catch_write(|| backend.checkout(&root, &target, &token));
+            if sender.send(result).is_ok() {
+                notify();
+            }
+        });
+        self.action = Some(RunningAction {
+            action: Action::Checkout { target: label },
+            expected,
+            cancel,
+            ended: None,
+        });
+        self.action_result = Some(receiver);
+        CheckoutStart::Started
+    }
+
+    /// The reference of a full name such as `refs/tags/v1`.
+    fn reference(&self, full: &str) -> Option<&Reference> {
+        let sidebar = self.sidebar.as_ref()?.as_ref().ok()?;
+        sidebar.references.iter().find(|known| known.name == full)
+    }
+
+    /// Git ended: remember how, and read the state again.
+    fn action_ended(&mut self, result: Result<(), WriteFailure>) {
+        let Some(running) = &mut self.action else {
+            return;
+        };
+        let Action::Checkout { target } = running.action.clone();
+        running.ended = Some(match result {
+            Ok(()) => Ended::Done,
+            Err(WriteFailure::Refused(Refusal::TrackedChanges(files))) => {
+                Ended::Dialog(ActionDialog::BlockedByChanges { target, files })
+            }
+            Err(WriteFailure::Refused(Refusal::UntrackedFiles(files))) => {
+                Ended::Dialog(ActionDialog::BlockedByUntracked { target, files })
+            }
+            Err(WriteFailure::Refused(other)) => Ended::Failed(format!("{other:?}")),
+            Err(WriteFailure::Failed(Error::Cancelled)) => Ended::Cancelled,
+            Err(WriteFailure::Failed(error)) => Ended::Failed(failure_text(&error)),
+        });
+        self.read_state_after_action();
+    }
+
+    /// The state was read again after an action: it is over now, and a dialog
+    /// shows what the user must see. A failure that left HEAD at the target
+    /// means the action happened, and the hook is to blame.
+    fn finish_action(&mut self) {
+        let Some(running) = self.action.take_if(|running| running.ended.is_some()) else {
+            return;
+        };
+        self.dialog = match running.ended {
+            Some(Ended::Dialog(dialog)) => Some(dialog),
+            Some(Ended::Failed(message)) if self.opened.head == running.expected => {
+                Some(ActionDialog::HookFailed {
+                    action: running.action,
+                    output: message,
+                })
+            }
+            Some(Ended::Failed(message)) => Some(ActionDialog::Failed {
+                action: running.action,
+                message,
+            }),
+            Some(Ended::Done | Ended::Cancelled) | None => None,
+        };
     }
 
     /// Why the repository cannot be shown any more: its history failed to
@@ -1050,6 +1282,10 @@ impl Drop for Session {
         self.graph_cancel.cancel();
         self.load_cancel.cancel();
         self.cancel.cancel();
+        // The one thing that stops a write action (ADR 0008).
+        if let Some(running) = &self.action {
+            running.cancel.cancel();
+        }
     }
 }
 
@@ -1182,6 +1418,27 @@ fn load(
 }
 
 /// Runs `work`, turning an error or a panic into a failure.
+/// Runs the work of a write action; a panic becomes a failure with its message.
+fn catch_write(work: impl FnOnce() -> Result<(), WriteFailure>) -> Result<(), WriteFailure> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|payload| {
+        Err(WriteFailure::Failed(Error::Io {
+            command: "git".to_owned(),
+            source: std::io::Error::other(panic_message(payload.as_ref())),
+        }))
+    })
+}
+
+/// What a dialog shows of a failure: the message Git printed, in full, or the
+/// description of an error that has none.
+fn failure_text(error: &Error) -> String {
+    match error {
+        Error::CommandFailed { stderr, .. } if !stderr.trim().is_empty() => {
+            stderr.trim_end().to_owned()
+        }
+        other => other.to_string(),
+    }
+}
+
 pub(crate) fn catch<T>(work: impl FnOnce() -> Result<T, Error>) -> Result<T, Failure> {
     catch_failure(|| work().map_err(Failure::Git))
 }
@@ -2421,5 +2678,265 @@ mod tests {
         );
         // The content source may start after the files have loaded.
         wait_until(&mut session, |_| probe.requested().contains(&fake_id("s")));
+    }
+
+    // ---- write actions: checkout (spec `checkout`)
+
+    use gitbull_git::refusal::Refusal;
+    use gitbull_git::switch::CheckoutTarget;
+    use gitbull_testkit::FakeWrite;
+
+    fn named(name: &str) -> CheckoutRequest {
+        CheckoutRequest::Branch(name.to_owned())
+    }
+
+    fn count(probe: &gitbull_testkit::Probe, call: &str) -> usize {
+        probe
+            .calls(&root())
+            .iter()
+            .filter(|known| *known == call)
+            .count()
+    }
+
+    fn idle(session: &mut Session) -> bool {
+        session.action().is_none()
+    }
+
+    #[test]
+    fn a_checkout_runs_one_at_a_time() {
+        let gate = Gate::new();
+        let mut session = ready(
+            backend()
+                .with_history(root(), five_lines())
+                .with_checkout_gate(&gate),
+        );
+        assert_eq!(
+            session.start_checkout(named("feature")),
+            CheckoutStart::Started
+        );
+        assert_eq!(
+            session.action(),
+            Some(&Action::Checkout {
+                target: "feature".to_owned()
+            })
+        );
+        assert_eq!(session.start_checkout(named("other")), CheckoutStart::Busy);
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.start_checkout(named("other")),
+            CheckoutStart::Started
+        );
+        wait_until(&mut session, idle);
+    }
+
+    #[test]
+    fn a_checkout_reads_head_references_and_status_again() {
+        let (mut session, _live, probe) = live();
+        wait_until(&mut session, status_read);
+        let (references, statuses) = (count(&probe, "references"), count(&probe, "status"));
+        let generation = session.history_generation();
+        assert_eq!(
+            session.start_checkout(named("feature")),
+            CheckoutStart::Started
+        );
+        wait_until(&mut session, idle);
+        assert!(count(&probe, "references") > references);
+        assert!(count(&probe, "status") > statuses);
+        assert_eq!(session.opened().head, Head::Branch("feature".to_owned()));
+        wait_until(&mut session, |s| {
+            s.history_generation() != generation && loaded(s)
+        });
+    }
+
+    #[test]
+    fn checking_out_the_current_branch_changes_nothing() {
+        let backend = backend().with_history(root(), five_lines());
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        assert_eq!(
+            session.start_checkout(named("main")),
+            CheckoutStart::AlreadyThere
+        );
+        assert!(session.action().is_none());
+        assert!(probe.checkouts().is_empty());
+    }
+
+    #[test]
+    fn a_refused_checkout_asks_for_a_dialog_and_changes_nothing() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_checkout(
+                CheckoutTarget::Branch("feature".to_owned()),
+                FakeWrite::Refused(Refusal::TrackedChanges(vec!["a.txt".to_owned()])),
+            )
+            .with_checkout(
+                CheckoutTarget::Branch("c".to_owned()),
+                FakeWrite::Refused(Refusal::UntrackedFiles(vec!["c.txt".to_owned()])),
+            );
+        let mut session = ready(backend);
+        session.start_checkout(named("feature"));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.dialog(),
+            Some(&ActionDialog::BlockedByChanges {
+                target: "feature".to_owned(),
+                files: vec!["a.txt".to_owned()],
+            })
+        );
+        assert_eq!(session.opened().head, Head::Branch("main".to_owned()));
+        session.close_dialog();
+        assert!(session.dialog().is_none());
+        session.start_checkout(named("c"));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.dialog(),
+            Some(&ActionDialog::BlockedByUntracked {
+                target: "c".to_owned(),
+                files: vec!["c.txt".to_owned()],
+            })
+        );
+        assert_eq!(session.opened().head, Head::Branch("main".to_owned()));
+    }
+
+    #[test]
+    fn a_failing_hook_after_the_switch_is_told_from_a_failed_checkout() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_checkout(
+                CheckoutTarget::Branch("hook".to_owned()),
+                FakeWrite::FailedAfterDoing {
+                    stderr: "hook rejected".to_owned(),
+                },
+            )
+            .with_checkout(
+                CheckoutTarget::Branch("broken".to_owned()),
+                FakeWrite::Failed {
+                    stderr: "boom".to_owned(),
+                },
+            );
+        let mut session = ready(backend);
+        session.start_checkout(named("hook"));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.dialog(),
+            Some(&ActionDialog::HookFailed {
+                action: Action::Checkout {
+                    target: "hook".to_owned()
+                },
+                output: "hook rejected".to_owned(),
+            })
+        );
+        assert_eq!(session.opened().head, Head::Branch("hook".to_owned()));
+        session.close_dialog();
+        session.start_checkout(named("broken"));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.dialog(),
+            Some(&ActionDialog::Failed {
+                action: Action::Checkout {
+                    target: "broken".to_owned()
+                },
+                message: "boom".to_owned(),
+            })
+        );
+        assert_eq!(session.opened().head, Head::Branch("hook".to_owned()));
+    }
+
+    #[test]
+    fn a_refresh_started_before_the_action_does_not_replace_its_result() {
+        let (mut session, _live, _probe) = live();
+        // A refresh that began before the checkout and has not answered yet.
+        let (sender, receiver) = mpsc::channel();
+        session.refresh_result = Some(receiver);
+        session.start_checkout(named("feature"));
+        wait_until(&mut session, idle);
+        assert!(
+            sender
+                .send(Ok((Head::Branch("main".to_owned()), Sidebar::default())))
+                .is_err(),
+            "the read from before the action was not dropped"
+        );
+        assert_eq!(session.opened().head, Head::Branch("feature".to_owned()));
+    }
+
+    #[test]
+    fn dropping_the_session_stops_the_action() {
+        let gate = Gate::new();
+        let mut session = ready(
+            backend()
+                .with_history(root(), five_lines())
+                .with_checkout_gate(&gate),
+        );
+        session.start_checkout(named("feature"));
+        assert!(!gate.was_cancelled());
+        drop(session);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gate.was_cancelled() {
+            assert!(Instant::now() < deadline, "the action was not stopped");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn reading_continues_while_an_action_runs() {
+        let gate = Gate::new();
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_checkout_gate(&gate);
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        let references = count(&probe, "references");
+        session.start_checkout(named("feature"));
+        session.refresh();
+        wait_until(&mut session, |_| count(&probe, "references") > references);
+        assert!(session.action().is_some());
+        gate.open();
+        wait_until(&mut session, idle);
+    }
+
+    #[test]
+    fn a_tag_is_checked_out_as_its_commit() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_references(
+                root(),
+                vec![
+                    branch("main", "e"),
+                    Reference {
+                        name: "refs/tags/v1".to_owned(),
+                        short: "v1".to_owned(),
+                        kind: gitbull_git::refs::RefKind::Tag,
+                        commit: Some(fake_id("c").to_string()),
+                        upstream: None,
+                    },
+                    tree_tag(),
+                ],
+            );
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        assert_eq!(
+            session.start_checkout(CheckoutRequest::Tag("refs/tags/v1".to_owned())),
+            CheckoutStart::Started
+        );
+        wait_until(&mut session, idle);
+        assert_eq!(
+            probe.checkouts(),
+            [CheckoutTarget::Commit(fake_id("c").to_string())]
+        );
+        assert_eq!(
+            session.opened().head,
+            Head::Detached(fake_id("c").to_string())
+        );
+        // Already there, whichever way it is named.
+        assert_eq!(
+            session.start_checkout(CheckoutRequest::Commit(fake_id("c"))),
+            CheckoutStart::AlreadyThere
+        );
+        assert_eq!(
+            session.start_checkout(CheckoutRequest::Tag("refs/tags/tree".to_owned())),
+            CheckoutStart::NotACommit("tree".to_owned())
+        );
+        assert!(session.action().is_none());
     }
 }

@@ -75,8 +75,9 @@ Writes are not retried, rolled back or repeated without hooks. A rejecting
 post-checkout hook can leave HEAD on the selected branch with a nonzero Git
 status. A failing post-commit hook can accompany Git success and a new commit.
 Future action callers own write lifetime across view changes and refresh actual
-repository state after success, failure or cancellation. This foundation does
-not connect write lifetime to browsing's selection cancellation.
+repository state after success, failure or cancellation; [ADR 0008](0008-write-actions-belong-to-the-session.md)
+decides how. This foundation does not connect write lifetime to browsing's
+selection cancellation.
 
 ## One commit without hooks
 
