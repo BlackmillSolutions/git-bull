@@ -122,6 +122,8 @@ enum Action {
     /// Answers of the question asked before closing while an action runs.
     KeepOpen,
     CloseAnyway,
+    /// The user closed the dialog that the last write action asked for.
+    CloseActionDialog,
     NextTab,
     PreviousTab,
     /// Move the active tab this many places to the right, or to the left.
@@ -242,6 +244,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     if app.close_question.is_some() {
         close_question_dialog(app, ui, &mut actions);
+    } else if let Some(dialog) = app.action_dialog() {
+        action_dialog(app, &dialog, ui, &mut actions);
     }
     Panel::bottom("status_bar").show(ui, |ui| status_bar(app, ui));
     if let Some(notice) = &app.notice {
@@ -353,6 +357,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::AskCloseWindow => app.close_question = Some(CloseQuestion::Window),
             Action::KeepOpen => app.close_question = None,
             Action::CloseAnyway => app.close_anyway(),
+            Action::CloseActionDialog => app.close_action_dialog(),
             Action::Retry(id) => {
                 if let Some(workspace) = app.workspace_mut() {
                     workspace.retry(id);
@@ -1558,6 +1563,86 @@ pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
     }
 }
 
+/// The dialog that the last write action of the tab asks for: the changes or
+/// untracked files that block a checkout, a failure with Git's message, or a
+/// hook that failed after the action took place. The safe button has the focus
+/// first, and Escape closes the dialog.
+fn action_dialog(
+    app: &App,
+    dialog: &gitbull_core::session::ActionDialog,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+) {
+    use gitbull_core::session::ActionDialog;
+    let texts = &app.texts;
+    let target = |action: &WriteAction| match action {
+        WriteAction::Checkout { target } => target.clone(),
+    };
+    let named = |msg: Msg, name: &str| {
+        let mut args = FluentArgs::new();
+        args.set("target", name.to_owned());
+        texts.text_with(msg, Some(&args))
+    };
+    let (title, intro, details, close_label, copy) = match dialog {
+        ActionDialog::BlockedByChanges { target, files } => (
+            named(Msg::CheckoutBlockedTitle, target),
+            texts.text(Msg::CheckoutBlockedChanges),
+            files.join("\n"),
+            texts.text(Msg::DialogCancel),
+            false,
+        ),
+        ActionDialog::BlockedByUntracked { target, files } => (
+            named(Msg::CheckoutBlockedTitle, target),
+            texts.text(Msg::CheckoutBlockedUntracked),
+            files.join("\n"),
+            texts.text(Msg::DialogCancel),
+            false,
+        ),
+        ActionDialog::Failed { action, message } => (
+            named(Msg::CheckoutFailedTitle, &target(action)),
+            texts.text(Msg::CheckoutFailedBody),
+            message.clone(),
+            texts.text(Msg::DialogClose),
+            true,
+        ),
+        ActionDialog::HookFailed { action, output } => (
+            named(Msg::CheckoutHookTitle, &target(action)),
+            texts.text(Msg::CheckoutHookBody),
+            output.clone(),
+            texts.text(Msg::DialogClose),
+            true,
+        ),
+    };
+    let copy_label = texts.text(Msg::DialogCopyMessage);
+    let outcome = components::dialog(ui.ctx(), Id::new("action-dialog"), &title, |ui| {
+        ui.label(intro);
+        ui.add_space(SHAPE.space[1]);
+        // A file or a line of Git's message per label, so that each is read
+        // and found on its own.
+        for line in details.lines() {
+            ui.label(RichText::new(line).monospace());
+        }
+        ui.add_space(SHAPE.space[2]);
+        let mut close = false;
+        ui.horizontal(|ui| {
+            let button = components::Button::new(&close_label)
+                .kind(components::Kind::Primary)
+                .show(ui);
+            if ui.memory(|memory| memory.focused().is_none()) {
+                button.request_focus();
+            }
+            close = button.clicked();
+            if copy && components::Button::new(&copy_label).show(ui).clicked() {
+                ui.ctx().copy_text(details.clone());
+            }
+        });
+        close
+    });
+    if outcome.inner || outcome.escape {
+        actions.push(Action::CloseActionDialog);
+    }
+}
+
 /// The question before a tab or the window closes while a write action runs.
 /// Keep open is the default: it has the focus first, and Escape means it.
 fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -1859,6 +1944,9 @@ fn status_bar(app: &App, ui: &mut Ui) {
                 }
             });
             ui.label(commits_text(app, session));
+            if let Some(action) = session.action() {
+                ui.label(action_text(app, action));
+            }
         } else if app.home_shown() {
             let repositories = app.home.list.repositories();
             let worktrees: usize = repositories
@@ -1890,6 +1978,7 @@ fn history(app: &mut App, ui: &mut Ui) {
     let layout = app.settings().layout;
     let palette = style::active_palette(ui.ctx());
     app.poll_navigation();
+    app.poll_checkout();
     app.poll_search();
     // The search starts once its text has settled, and its matches arrive
     // meanwhile; nothing else may wake the window for them.
@@ -2030,6 +2119,7 @@ fn apply_sidebar(app: &mut App, actions: Vec<SidebarAction>) {
             SidebarAction::ShowOnly(name) => {
                 app.set_branch_filter(BranchFilter::Selected(vec![name]))
             }
+            SidebarAction::Checkout(request) => app.checkout(request),
             SidebarAction::OpenSubmodule(path) => {
                 let root = app
                     .workspace()

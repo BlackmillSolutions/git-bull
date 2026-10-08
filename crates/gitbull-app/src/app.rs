@@ -17,15 +17,19 @@ use gitbull_core::panel::Panel;
 use gitbull_core::repositories::RepositoryList;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::seen::SeenFile;
-use gitbull_core::session::{Action as WriteAction, BranchFilter, Navigation, Session};
+use gitbull_core::session::{
+    Action as WriteAction, ActionDialog, BranchFilter, CheckoutRequest, CheckoutStart, Navigation,
+    Session,
+};
 use gitbull_core::settings::{
     ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
     WindowGeometry,
 };
-use gitbull_core::sidebar_tree::{SidebarKey, SidebarRow, SidebarState};
+use gitbull_core::sidebar_tree::{Section, SidebarKey, SidebarRow, SidebarState};
 use gitbull_core::workspace::{
     CloseRequest, Event, Failure, Notify, TabAction, TabId, TabState, View, Workspace,
 };
+use gitbull_git::head::Head;
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry};
@@ -270,6 +274,9 @@ pub(crate) struct TabView {
     /// The full name of the branch or remote branch whose context menu was
     /// opened last in the sidebar.
     pub(crate) sidebar_menu: Option<String>,
+    /// The sidebar takes the keyboard focus when it is drawn next, as after a
+    /// dialog closed that the sidebar had started.
+    pub(crate) focus_sidebar: bool,
     /// The diff of the file chosen in the commit panel.
     pub(crate) commit_diff: DiffView,
     /// The diff of the file chosen in the File status view.
@@ -964,6 +971,49 @@ impl App {
             .as_ref()
             .map(Workspace::running_actions)
             .unwrap_or_default()
+    }
+
+    /// Starts a checkout in the active tab. A tag that points to a tree is
+    /// told apart by a notice; whatever else the session decides shows in the
+    /// interface through the state of the tab.
+    pub(crate) fn checkout(&mut self, request: CheckoutRequest) {
+        let Some((session, _)) = self.active_view() else {
+            return;
+        };
+        if let CheckoutStart::NotACommit(tag) = session.start_checkout(request) {
+            self.notice = Some(Notice::NotACommit(tag));
+        }
+    }
+
+    /// Shows the new state once a checkout moved HEAD: the branch is revealed
+    /// in the sidebar and selected, which goes to its commit in the list.
+    pub(crate) fn poll_checkout(&mut self) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        let Some(Head::Branch(name)) = session.take_checked_out() else {
+            return;
+        };
+        view.sidebar.reveal(Section::Branches, &name);
+        self.select_in_sidebar(SidebarKey::Reference(format!("refs/heads/{name}")));
+    }
+
+    /// What the last write action of the active tab asks the user to see.
+    pub(crate) fn action_dialog(&self) -> Option<ActionDialog> {
+        self.workspace
+            .as_ref()?
+            .active()?
+            .session()?
+            .dialog()
+            .cloned()
+    }
+
+    pub(crate) fn close_action_dialog(&mut self) {
+        if let Some((session, view)) = self.active_view() {
+            session.close_dialog();
+            // The keyboard goes on where the user was.
+            view.focus_sidebar = true;
+        }
     }
 
     /// Closes the tab, or asks first when a write action runs in it.

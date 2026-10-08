@@ -50,6 +50,12 @@ pub fn dialog<T>(
     // at a large interface size.
     let room = ctx.content_rect().size() - egui::Vec2::splat(4.0 * SHAPE.space[3]);
     let modal = Modal::new(id).show(ctx, |ui| {
+        // Assistive technology meets a dialog, named by its title, and not
+        // only its parts.
+        ctx.accesskit_node_builder(ui.id(), |node| {
+            node.set_role(egui::accesskit::Role::Dialog);
+            node.set_label(title);
+        });
         ui.set_width(room.x.min(DIALOG_WIDTH));
         // egui offers a modal the height it had in the last frame, at first
         // 400 points; the scroll area below may grow to the room.

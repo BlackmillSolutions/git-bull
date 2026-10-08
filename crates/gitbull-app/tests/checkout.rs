@@ -6,12 +6,20 @@ mod support;
 use eframe::egui::accesskit::Role;
 use eframe::egui::{Key, Modifiers};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
 use gitbull_core::session::{CheckoutRequest, CheckoutStart};
 use gitbull_core::settings::Settings;
-use gitbull_testkit::{FakeBackend, Gate};
-use support::{Setup, build, path, settle_window, tab_titles, window};
+use gitbull_git::content::CommitContent;
+use gitbull_git::head::Head;
+use gitbull_git::history::CommitLine;
+use gitbull_git::refs::{RefKind, Reference};
+use gitbull_git::refusal::Refusal;
+use gitbull_git::switch::CheckoutTarget;
+use gitbull_testkit::{FakeBackend, FakeWrite, Gate, commit_line, fake_id};
+use support::{
+    Setup, build, double_click_at, path, settle_window, tab_titles, window, window_at_60_fps,
+};
 
 /// Two repositories open, the first active, with every checkout held by `gate`.
 fn two_tabs(gate: &Gate) -> Setup {
@@ -74,7 +82,7 @@ fn closing_a_tab_during_a_checkout_asks() {
         .click();
     harness.run();
     asks(&harness);
-    harness.get_by_label_contains("Checking out feature");
+    harness.get_by_label_contains("The action \"Checking out feature\"");
     assert_eq!(tab_titles(harness.state()), ["git-bull", "linux"]);
     assert!(!gate.was_cancelled());
     gate.open();
@@ -179,4 +187,452 @@ fn closing_without_an_action_asks_nothing() {
             .is_none()
     );
     assert_eq!(tab_titles(harness.state()), ["linux"]);
+}
+
+// ---- checking out a local branch from the sidebar (spec `checkout`)
+
+fn root() -> std::path::PathBuf {
+    path(&["work", "git-bull"])
+}
+
+fn lines() -> Vec<CommitLine> {
+    vec![
+        commit_line("x", &["b"]),
+        commit_line("e", &["d"]),
+        commit_line("d", &["c"]),
+        commit_line("c", &["b"]),
+        commit_line("b", &["a"]),
+        commit_line("a", &[]),
+    ]
+}
+
+fn branch(name: &str, commit: &str) -> Reference {
+    Reference {
+        name: format!("refs/heads/{name}"),
+        short: name.to_owned(),
+        kind: RefKind::Branch,
+        commit: Some(fake_id(commit).to_string()),
+        upstream: None,
+    }
+}
+
+fn references() -> Vec<Reference> {
+    vec![
+        branch("feature/diff", "d"),
+        branch("hook", "c"),
+        branch("main", "e"),
+        branch("side", "x"),
+    ]
+}
+
+/// One repository with `main` checked out and a few branches.
+fn backend() -> FakeBackend {
+    let mut backend = FakeBackend::default()
+        .with_repository(root())
+        .with_history(root(), lines())
+        .with_references(root(), references());
+    for (name, summary) in [
+        ("x", "Side work"),
+        ("e", "Fifth"),
+        ("d", "Fourth"),
+        ("c", "Third"),
+        ("b", "Second"),
+        ("a", "First"),
+    ] {
+        backend = backend.with_content(
+            fake_id(name),
+            CommitContent {
+                message: format!("{summary}\n"),
+                ..CommitContent::default()
+            },
+        );
+    }
+    backend
+}
+
+fn open(backend: FakeBackend) -> Harness<'static, App> {
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window_at_60_fps(test.app);
+    settle_window(&mut harness);
+    wait_for(&mut harness, |h| h.query_by_label("diff").is_some());
+    harness
+}
+
+fn wait_for(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -> bool) {
+    for _ in 0..1000 {
+        if done(harness) {
+            return;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("timed out");
+}
+
+/// The row of the sidebar with `label`.
+fn item<'a>(harness: &'a Harness<'_, App>, label: &str) -> egui_kittest::Node<'a> {
+    harness
+        .get_all_by_role(Role::TreeItem)
+        .find(|node| node.accesskit_node().label().as_deref() == Some(label))
+        .unwrap_or_else(|| panic!("no sidebar row {label}"))
+}
+
+fn double_click(harness: &mut Harness<'_, App>, label: &str) {
+    // Time passes between the clicks of a user; without it egui counts a click
+    // shortly after another one, such as on a button, as part of this one.
+    for _ in 0..30 {
+        harness.step();
+    }
+    let at = item(harness, label).rect().center();
+    double_click_at(harness, at);
+    harness.run();
+}
+
+fn right_click(harness: &mut Harness<'_, App>, label: &str) {
+    let at = item(harness, label).rect().center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
+fn head(harness: &Harness<'_, App>) -> Head {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .map(|session| session.opened().head.clone())
+        .expect("an open session")
+}
+
+fn idle(harness: &Harness<'_, App>) -> bool {
+    harness
+        .state()
+        .workspace()
+        .is_some_and(|workspace| workspace.running_actions().is_empty())
+}
+
+fn settle_action(harness: &mut Harness<'_, App>) {
+    wait_for(harness, idle);
+    harness.run();
+}
+
+#[test]
+fn double_click_on_a_branch_checks_it_out() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click(&mut harness, "diff");
+    settle_action(&mut harness);
+    assert_eq!(
+        probe.checkouts(),
+        [CheckoutTarget::Branch("feature/diff".to_owned())]
+    );
+    assert_eq!(head(&harness), Head::Branch("feature/diff".to_owned()));
+}
+
+#[test]
+fn enter_on_a_branch_checks_it_out() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    item(&harness, "side").click();
+    harness.run();
+    harness.key_press(Key::Enter);
+    settle_action(&mut harness);
+    assert_eq!(
+        probe.checkouts(),
+        [CheckoutTarget::Branch("side".to_owned())]
+    );
+    assert_eq!(head(&harness), Head::Branch("side".to_owned()));
+}
+
+#[test]
+fn a_single_click_only_navigates() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    item(&harness, "side").click();
+    harness.run();
+    assert!(probe.checkouts().is_empty());
+    assert_eq!(head(&harness), Head::Branch("main".to_owned()));
+}
+
+#[test]
+fn arrow_keys_only_select() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    item(&harness, "side").click();
+    harness.run();
+    harness.key_press(Key::ArrowUp);
+    harness.run();
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    assert!(probe.checkouts().is_empty());
+}
+
+#[test]
+fn the_menu_of_a_branch_offers_check_out() {
+    let mut harness = open(backend());
+    right_click(&mut harness, "diff");
+    let entry = harness.get_by_label("Check out");
+    assert!(!entry.accesskit_node().is_disabled());
+    harness.get_by_label("Show only this branch");
+}
+
+#[test]
+fn the_menu_entry_checks_out() {
+    let mut harness = open(backend());
+    right_click(&mut harness, "side");
+    harness.get_by_label("Check out").click();
+    harness.run();
+    settle_action(&mut harness);
+    assert_eq!(head(&harness), Head::Branch("side".to_owned()));
+}
+
+#[test]
+fn check_out_is_unavailable_for_the_current_branch() {
+    let mut harness = open(backend());
+    right_click(&mut harness, "main");
+    assert!(
+        harness
+            .get_by_label("Check out")
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
+#[test]
+fn the_menu_entries_are_unavailable_while_an_action_runs() {
+    let gate = Gate::new();
+    let mut harness = open(backend().with_checkout_gate(&gate));
+    double_click(&mut harness, "side");
+    wait_for(&mut harness, |h| !idle(h));
+    right_click(&mut harness, "diff");
+    assert!(
+        harness
+            .get_by_label("Check out")
+            .accesskit_node()
+            .is_disabled()
+    );
+    gate.open();
+    settle_action(&mut harness);
+}
+
+#[test]
+fn the_status_bar_names_the_action() {
+    let gate = Gate::new();
+    let mut harness = open(backend().with_checkout_gate(&gate));
+    double_click(&mut harness, "side");
+    wait_for(&mut harness, |h| !idle(h));
+    harness.run();
+    harness.get_by_label("Checking out side");
+    gate.open();
+    settle_action(&mut harness);
+    assert!(harness.query_by_label("Checking out side").is_none());
+}
+
+fn refused(branch_name: &str, refusal: Refusal) -> FakeBackend {
+    backend().with_checkout(
+        CheckoutTarget::Branch(branch_name.to_owned()),
+        FakeWrite::Refused(refusal),
+    )
+}
+
+#[test]
+fn a_tracked_refusal_lists_the_files() {
+    let mut harness = open(refused(
+        "side",
+        Refusal::TrackedChanges(vec!["a.txt".to_owned(), "dir/b.txt".to_owned()]),
+    ));
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    harness.get_by_role_and_label(Role::Dialog, "Cannot check out side");
+    harness.get_by_label_contains("have local changes");
+    harness.get_by_label("a.txt");
+    harness.get_by_label("dir/b.txt");
+    harness.get_by_role_and_label(Role::Button, "Cancel");
+    assert_eq!(head(&harness), Head::Branch("main".to_owned()));
+}
+
+#[test]
+fn an_untracked_refusal_says_to_move_or_remove() {
+    let mut harness = open(refused(
+        "side",
+        Refusal::UntrackedFiles(vec!["c.txt".to_owned()]),
+    ));
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    harness.get_by_label_contains("untracked files would be overwritten");
+    harness.get_by_label_contains("Move or remove them");
+    harness.get_by_label("c.txt");
+    harness.get_by_role_and_label(Role::Button, "Cancel");
+}
+
+#[test]
+fn an_unreadable_refusal_shows_git_s_message() {
+    let backend = backend().with_checkout(
+        CheckoutTarget::Branch("side".to_owned()),
+        FakeWrite::Failed {
+            stderr: "fatal: something Git words differently".to_owned(),
+        },
+    );
+    let mut harness = open(backend);
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    harness.get_by_label_contains("fatal: something Git words differently");
+    harness.get_by_role_and_label(Role::Button, "Copy Git's message");
+}
+
+#[test]
+fn a_failure_shows_the_message_with_a_copy_button() {
+    let backend = backend().with_checkout(
+        CheckoutTarget::Branch("side".to_owned()),
+        FakeWrite::Failed {
+            stderr: "fatal: boom".to_owned(),
+        },
+    );
+    let mut harness = open(backend);
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    harness.get_by_role_and_label(Role::Dialog, "The checkout of side failed");
+    harness.get_by_label_contains("fatal: boom");
+    harness.get_by_role_and_label(Role::Button, "Copy Git's message");
+    harness.get_by_role_and_label(Role::Button, "Close");
+    assert_eq!(head(&harness), Head::Branch("main".to_owned()));
+}
+
+#[test]
+fn a_failed_hook_says_the_branch_was_checked_out() {
+    let backend = backend().with_checkout(
+        CheckoutTarget::Branch("hook".to_owned()),
+        FakeWrite::FailedAfterDoing {
+            stderr: "post-checkout-rejected".to_owned(),
+        },
+    );
+    let mut harness = open(backend);
+    double_click(&mut harness, "hook");
+    settle_action(&mut harness);
+    harness.get_by_role_and_label(Role::Dialog, "hook was checked out");
+    harness.get_by_label_contains("post-checkout-rejected");
+    assert_eq!(head(&harness), Head::Branch("hook".to_owned()));
+}
+
+#[test]
+fn the_dialogs_are_modal_and_escape_closes_them() {
+    let mut harness = open(refused(
+        "side",
+        Refusal::TrackedChanges(vec!["a.txt".to_owned()]),
+    ));
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    harness.get_by_label("a.txt");
+    // The window behind takes no input: a click on a row selects nothing.
+    harness
+        .get_by_role_and_label(Role::Button, "Refresh")
+        .click();
+    harness.run();
+    harness.get_by_label("a.txt");
+    harness.key_press(Key::Escape);
+    harness.run();
+    assert!(harness.query_by_label("a.txt").is_none());
+    assert_eq!(head(&harness), Head::Branch("main".to_owned()));
+}
+
+#[test]
+fn cancel_closes_the_dialog_and_a_new_checkout_can_start() {
+    let backend = refused("side", Refusal::TrackedChanges(vec!["a.txt".to_owned()]));
+    let mut harness = open(backend);
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Button, "Cancel")
+        .click();
+    harness.run();
+    assert!(harness.query_by_label("a.txt").is_none());
+    double_click(&mut harness, "diff");
+    settle_action(&mut harness);
+    assert_eq!(head(&harness), Head::Branch("feature/diff".to_owned()));
+}
+
+#[test]
+fn the_new_state_is_shown_after_a_checkout() {
+    let mut harness = open(backend());
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    // The status bar names the branch, and the sidebar still lists it.
+    assert!(harness.query_all_by_label("side").count() >= 2);
+    assert_eq!(head(&harness), Head::Branch("side".to_owned()));
+    // The commit list shows the commit of the branch selected.
+    wait_for(&mut harness, |h| {
+        h.get_all_by_role(Role::Row).any(|row| {
+            row.accesskit_node().is_selected() == Some(true)
+                && row
+                    .accesskit_node()
+                    .label()
+                    .is_some_and(|label| label.starts_with("Side work"))
+        })
+    });
+}
+
+#[test]
+fn a_dialog_is_named_for_assistive_technology() {
+    let mut harness = open(refused(
+        "side",
+        Refusal::TrackedChanges(vec!["a.txt".to_owned()]),
+    ));
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    harness.run();
+    harness.get_by_role_and_label(Role::Dialog, "Cannot check out side");
+}
+
+#[test]
+fn the_close_question_is_named_for_assistive_technology() {
+    let gate = Gate::new();
+    let mut harness = running_checkout(&gate);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::W);
+    harness.run();
+    harness.get_by_role_and_label(Role::Dialog, "Stop the running action?");
+    gate.open();
+}
+
+#[test]
+fn the_keyboard_continues_in_the_sidebar_after_a_dialog() {
+    let mut harness = open(refused(
+        "side",
+        Refusal::TrackedChanges(vec!["a.txt".to_owned()]),
+    ));
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    harness.run();
+    assert_eq!(
+        item(&harness, "side").accesskit_node().is_selected(),
+        Some(true)
+    );
+    harness.key_press(Key::Escape);
+    harness.run();
+    harness.key_press(Key::ArrowUp);
+    harness.run();
+    // Without the focus in the list, the key would have moved nothing.
+    assert_ne!(
+        item(&harness, "side").accesskit_node().is_selected(),
+        Some(true)
+    );
 }

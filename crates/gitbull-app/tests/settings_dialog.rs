@@ -578,7 +578,7 @@ fn another_git_path_is_refused_while_an_action_runs() {
     open_dialog(&mut harness);
     apply_git_path(&mut harness, "/opt/git/bin/git");
 
-    harness.get_by_label_contains("Checking out feature");
+    harness.get_by_label_contains("The action \"Checking out feature\" is running");
     harness.get_by_label_contains("Wait until it has finished");
     assert_eq!(harness.state().settings().git_path, None);
     assert!(harness.state().workspace().is_some_and(|workspace| {

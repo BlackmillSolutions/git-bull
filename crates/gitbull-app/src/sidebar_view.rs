@@ -5,8 +5,10 @@ use std::path::PathBuf;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{Align2, Color32, Id, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2, vec2};
+use gitbull_core::session::CheckoutRequest;
 use gitbull_core::sidebar_tree::{self, Section, SidebarKey, SidebarRow, SidebarState};
 use gitbull_core::workspace::View;
+use gitbull_git::head::Head;
 
 use crate::app::{App, TabView};
 use crate::components;
@@ -27,6 +29,8 @@ pub(crate) enum SidebarAction {
     OpenSubmodule(PathBuf),
     /// Restrict the graph to the branch with this full name.
     ShowOnly(String),
+    /// Check this out: a double click, Enter or the entry of a menu.
+    Checkout(CheckoutRequest),
 }
 
 /// The texts rows need, read before the tab is borrowed.
@@ -36,6 +40,7 @@ struct Texts {
     current: String,
     not_initialised: String,
     show_only: String,
+    check_out: String,
 }
 
 pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<SidebarAction> {
@@ -54,6 +59,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         current: app.texts.text(Msg::SidebarCurrentBranch),
         not_initialised: app.texts.text(Msg::SidebarNotInitialised),
         show_only: app.texts.text(Msg::SidebarShowOnlyBranch),
+        check_out: app.texts.text(Msg::SidebarCheckOut),
     };
     let hint = app.texts.text(Msg::SidebarFilter);
     let name = app.texts.text(Msg::Sidebar);
@@ -74,8 +80,17 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         sidebar_key,
         sidebar_placed,
         sidebar_menu,
+        focus_sidebar,
         ..
     } = view;
+
+    // Checking out is unavailable for the branch that is checked out, and
+    // while another write action runs in the tab.
+    let busy = session.action().is_some();
+    let checked_out = match &session.opened().head {
+        Head::Branch(name) => Some(format!("refs/heads/{name}")),
+        Head::Detached(_) => None,
+    };
 
     let width = ui.available_width();
     let filter = components::text_field(ui, &mut sidebar.filter, &hint, width);
@@ -131,6 +146,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         },
     );
 
+    if std::mem::take(focus_sidebar) {
+        output.response.request_focus();
+    }
     let mut actions = Vec::new();
     let row_at = |index: u64| rows.get(index as usize).cloned();
     // A click selects its row again, so that a branch clicked once more
@@ -173,8 +191,23 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         *sidebar_menu = None;
     }
     if let Some(name) = sidebar_menu.clone() {
+        let local = name.strip_prefix("refs/heads/").map(str::to_owned);
+        let checkable = !busy && checked_out.as_deref() != Some(name.as_str());
         output.response.context_menu(|ui| {
             components::menu(ui, |ui| {
+                if let Some(short) = &local {
+                    let entry = ui
+                        .add_enabled_ui(checkable, |ui| {
+                            components::menu_item(ui, None, &texts.check_out, None)
+                        })
+                        .inner;
+                    if entry.clicked() {
+                        actions.push(SidebarAction::Checkout(CheckoutRequest::Branch(
+                            short.clone(),
+                        )));
+                        ui.close();
+                    }
+                }
                 if components::menu_item(ui, None, &texts.show_only, None).clicked() {
                     actions.push(SidebarAction::ShowOnly(name.clone()));
                     ui.close();
@@ -201,6 +234,19 @@ fn activate(
             toggle(&mut state.collapsed_folders, (*section, path.clone()));
         }
         SidebarRow::View(view) => actions.push(SidebarAction::ShowView(*view)),
+        // A double click or Enter checks a local branch out; a single click
+        // only selects it.
+        SidebarRow::Reference {
+            section: Section::Branches,
+            name,
+            ..
+        } if open => {
+            if let Some(short) = name.strip_prefix("refs/heads/") {
+                actions.push(SidebarAction::Checkout(CheckoutRequest::Branch(
+                    short.to_owned(),
+                )));
+            }
+        }
         SidebarRow::Submodule {
             path,
             initialised: true,

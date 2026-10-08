@@ -11,13 +11,16 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::{Harness, HarnessBuilder, SnapshotOptions, image_snapshot_options};
 use gitbull_app::app::App;
 use gitbull_app::ui;
+use gitbull_core::session::CheckoutRequest;
 use gitbull_core::settings::{InterfaceSize, Settings, ThemeSetting};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
 use gitbull_git::history::CommitLine;
 use gitbull_git::refs::{RefKind, Reference};
-use gitbull_testkit::{FakeBackend, fake_id};
+use gitbull_git::refusal::Refusal;
+use gitbull_git::switch::CheckoutTarget;
+use gitbull_testkit::{FakeBackend, FakeWrite, commit_line, fake_id};
 use support::{Setup, TestApp, build, path, settle_window, wait_for_references};
 
 /// The main window of `test` at 1280 by 800, rendered with a graphics
@@ -398,4 +401,133 @@ fn cockpit_in_a_narrow_window() {
     let mut harness = cockpit(ThemeSetting::Light, (800.0, 700.0));
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "cockpit_narrow", &options());
+}
+
+/// The dialog of a checkout that local changes block, over the window of a
+/// repository, in `theme` and `interface`, in a window of `size` points. The
+/// files are many and one is long, so that the dialog has to scroll in the
+/// smallest window.
+fn blocked_checkout(
+    theme: ThemeSetting,
+    interface: InterfaceSize,
+    size: (f32, f32),
+) -> Harness<'static, App> {
+    let root = path(&["work", "git-bull"]);
+    let branch = |name: &str, commit: &str| Reference {
+        name: format!("refs/heads/{name}"),
+        short: name.to_owned(),
+        kind: RefKind::Branch,
+        commit: Some(fake_id(commit).to_string()),
+        upstream: None,
+    };
+    let files: Vec<String> = [
+        "Cargo.toml",
+        "README.md",
+        "crates/gitbull-app/src/components.rs",
+        "crates/gitbull-app/src/ui.rs",
+        "crates/gitbull-core/src/session.rs",
+        "docs/adr/0008-write-actions-belong-to-the-session.md",
+        "openspec/changes/checkout-and-refs/tasks.md",
+        "crates/gitbull-git/tests/switch.rs",
+    ]
+    .iter()
+    .map(|file| (*file).to_owned())
+    .collect();
+    let backend = FakeBackend::default()
+        .with_repository(root.clone())
+        .with_history(
+            root.clone(),
+            vec![commit_line("b", &["a"]), commit_line("a", &[])],
+        )
+        .with_references(
+            root.clone(),
+            vec![branch("main", "b"), branch("feature/graph", "a")],
+        )
+        .with_checkout(
+            CheckoutTarget::Branch("feature/graph".to_owned()),
+            FakeWrite::Refused(Refusal::TrackedChanges(files)),
+        );
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root],
+            active_tab: Some(0),
+            theme,
+            interface_size: interface,
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let harness = Harness::builder().with_size(size).wgpu().build_ui_state(
+        |ui, app: &mut App| {
+            app.logic();
+            ui::show(app, ui);
+        },
+        test.app,
+    );
+    harness.ctx.set_fonts(gitbull_app::fonts::definitions());
+    let mut harness = harness;
+    settle_window(&mut harness);
+    wait_for_references(&mut harness);
+    harness
+        .state_mut()
+        .workspace_mut()
+        .and_then(|workspace| workspace.active_mut())
+        .and_then(|tab| tab.session_mut())
+        .expect("an open session")
+        .start_checkout(CheckoutRequest::Branch("feature/graph".to_owned()));
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Dialog, "Cannot check out feature/graph")
+            .is_some()
+    });
+    // The pointer leaves the window, and the dialog has been laid out.
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+/// Scenarios "Tracked file would be overwritten" and "Several files".
+#[test]
+fn checkout_dialog_in_the_light_palette() {
+    let mut harness = blocked_checkout(
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "checkout_dialog_light", &options());
+}
+
+#[test]
+fn checkout_dialog_in_the_dark_palette() {
+    let mut harness = blocked_checkout(
+        ThemeSetting::Dark,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "checkout_dialog_dark", &options());
+}
+
+#[test]
+fn checkout_dialog_at_150_percent() {
+    let mut harness = blocked_checkout(
+        ThemeSetting::Light,
+        InterfaceSize::Percent150,
+        (1280.0 / 1.5, 800.0 / 1.5),
+    );
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "checkout_dialog_150", &options());
+}
+
+/// Scenario "Small window": the smallest window, 640 by 400 pixels, at 150 %.
+#[test]
+fn checkout_dialog_in_the_smallest_window() {
+    let mut harness = blocked_checkout(
+        ThemeSetting::Light,
+        InterfaceSize::Percent150,
+        (640.0 / 1.5, 400.0 / 1.5),
+    );
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "checkout_dialog_smallest", &options());
 }

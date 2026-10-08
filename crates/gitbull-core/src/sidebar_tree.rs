@@ -42,6 +42,28 @@ pub struct SidebarState {
     pub filter: String,
 }
 
+impl SidebarState {
+    /// Opens `section` and every folder on the way to the reference `name`,
+    /// such as `feature` and `feature/sub` for `feature/sub/leaf`, so that its
+    /// row is shown. Other folders stay as they are.
+    pub fn reveal(&mut self, section: Section, name: &str) {
+        self.collapsed_sections.remove(&section);
+        let mut path = String::new();
+        let mut parts = name.split('/').peekable();
+        while let Some(part) = parts.next() {
+            // The last part is the reference itself, not a folder.
+            if parts.peek().is_none() {
+                break;
+            }
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(part);
+            self.collapsed_folders.remove(&(section, path.clone()));
+        }
+    }
+}
+
 /// One row of the sidebar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarRow {
@@ -669,5 +691,39 @@ mod tests {
     fn the_workspace_section_offers_the_views_given() {
         let text = outline(&rows(None, &main(), &SidebarState::default(), &View::BARE));
         assert_eq!(text[..3], ["+ Workspace", "  History", "  Search"]);
+    }
+
+    #[test]
+    fn revealing_a_branch_opens_its_section_and_its_folders() {
+        let mut state = SidebarState {
+            collapsed_sections: HashSet::from([Section::Branches, Section::Tags]),
+            collapsed_folders: HashSet::from([
+                (Section::Branches, "feature".to_owned()),
+                (Section::Branches, "feature/sub".to_owned()),
+                (Section::Branches, "other".to_owned()),
+                (Section::Remotes, "feature".to_owned()),
+            ]),
+            filter: String::new(),
+        };
+        state.reveal(Section::Branches, "feature/sub/leaf");
+        assert_eq!(state.collapsed_sections, HashSet::from([Section::Tags]));
+        assert_eq!(
+            state.collapsed_folders,
+            HashSet::from([
+                (Section::Branches, "other".to_owned()),
+                (Section::Remotes, "feature".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn revealing_a_branch_without_folders_changes_only_its_section() {
+        let mut state = SidebarState {
+            collapsed_sections: HashSet::from([Section::Branches]),
+            ..SidebarState::default()
+        };
+        state.reveal(Section::Branches, "main");
+        assert!(state.collapsed_sections.is_empty());
+        assert!(state.collapsed_folders.is_empty());
     }
 }

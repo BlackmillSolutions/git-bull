@@ -253,6 +253,9 @@ pub struct Session {
     action_result: Option<Receiver<Result<(), WriteFailure>>>,
     /// What the last action asks the user to see, until it is closed.
     dialog: Option<ActionDialog>,
+    /// Where HEAD ended after an action that moved it; taken by the interface,
+    /// which shows the new state.
+    checked_out: Option<Head>,
 }
 
 impl fmt::Debug for Session {
@@ -331,6 +334,7 @@ impl Session {
             action: None,
             action_result: None,
             dialog: None,
+            checked_out: None,
         }
     }
 
@@ -842,6 +846,12 @@ impl Session {
         self.dialog = None;
     }
 
+    /// Where HEAD ended after an action that moved it, once: the interface
+    /// shows the new state then. `None` when nothing moved or it was shown.
+    pub fn take_checked_out(&mut self) -> Option<Head> {
+        self.checked_out.take()
+    }
+
     /// Checks `request` out in the background (spec `checkout`).
     ///
     /// A tab runs one write action at a time, and a checkout of what is
@@ -943,6 +953,13 @@ impl Session {
         let Some(running) = self.action.take_if(|running| running.ended.is_some()) else {
             return;
         };
+        // HEAD is where the action should have left it, whatever Git reported:
+        // the new state is worth showing even when a hook failed after it.
+        if self.opened.head == running.expected
+            && matches!(running.ended, Some(Ended::Done | Ended::Failed(_)))
+        {
+            self.checked_out = Some(self.opened.head.clone());
+        }
         self.dialog = match running.ended {
             Some(Ended::Dialog(dialog)) => Some(dialog),
             Some(Ended::Failed(message)) if self.opened.head == running.expected => {
@@ -2938,5 +2955,42 @@ mod tests {
             CheckoutStart::NotACommit("tree".to_owned())
         );
         assert!(session.action().is_none());
+    }
+
+    #[test]
+    fn a_checkout_reports_where_head_ended_once() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_checkout(
+                CheckoutTarget::Branch("hook".to_owned()),
+                FakeWrite::FailedAfterDoing {
+                    stderr: "hook rejected".to_owned(),
+                },
+            )
+            .with_checkout(
+                CheckoutTarget::Branch("blocked".to_owned()),
+                FakeWrite::Refused(Refusal::TrackedChanges(vec!["a.txt".to_owned()])),
+            );
+        let mut session = ready(backend);
+        assert_eq!(session.take_checked_out(), None);
+        session.start_checkout(named("feature"));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.take_checked_out(),
+            Some(Head::Branch("feature".to_owned()))
+        );
+        assert_eq!(session.take_checked_out(), None);
+        // The branch is checked out although a hook failed.
+        session.start_checkout(named("hook"));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.take_checked_out(),
+            Some(Head::Branch("hook".to_owned()))
+        );
+        session.close_dialog();
+        // A refusal changes nothing, so there is nothing to show.
+        session.start_checkout(named("blocked"));
+        wait_until(&mut session, idle);
+        assert_eq!(session.take_checked_out(), None);
     }
 }
