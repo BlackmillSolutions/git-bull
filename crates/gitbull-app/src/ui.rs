@@ -20,12 +20,14 @@ use gitbull_core::git_setup::GitCheck;
 use gitbull_core::overview::Request;
 use gitbull_git::head::Head;
 use gitbull_git::locate::LocateError;
+use gitbull_git::ref_name::{NameKind, NameProblem};
+use gitbull_git::refs::Reference;
 use gitbull_git::version::GitVersion;
 
 use gitbull_core::settings::{ColourVision, InterfaceSize, ThemeSetting};
 
 use crate::app::{
-    App, CloseQuestion, GitMessage, GitStatus, HunkMove, Notice, Overlay, SettingsDialog,
+    App, CloseQuestion, GitMessage, GitStatus, HunkMove, Notice, Origin, Overlay, SettingsDialog,
 };
 use crate::blame_view;
 use crate::commit_list;
@@ -46,7 +48,7 @@ use crate::style;
 use crate::theme::{Appearance, Palette, Rgb, SHAPE};
 use crate::virtual_list;
 use gitbull_core::search::{Search, SearchMode, SearchState};
-use gitbull_core::session::{BranchFilter, LoadState, Session};
+use gitbull_core::session::{BranchFilter, LoadState, NameRefusal, Session, StartAt, StartKind};
 use gitbull_git::object_id::ObjectId;
 use std::time::Duration;
 
@@ -129,6 +131,14 @@ enum Action {
     ConfirmDetach,
     CancelDetach,
     SetDetachDontShow(bool),
+    /// Open the dialog "Create branch" at this starting point.
+    BeginCreateBranch(StartAt, Origin),
+    /// The dialog "Create branch": the name was edited, the option to check
+    /// out was set, Create or Cancel was chosen.
+    SetCreateName(String),
+    SetCreateCheckout(bool),
+    SubmitCreate,
+    CancelCreate,
     NextTab,
     PreviousTab,
     /// Move the active tab this many places to the right, or to the left.
@@ -195,7 +205,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     // The window behind the settings dialog takes no keys, as it takes no
     // clicks.
-    if app.dialog.is_none() && app.close_question.is_none() && app.detach_pending.is_none() {
+    if app.dialog.is_none()
+        && app.close_question.is_none()
+        && app.detach_pending.is_none()
+        && app.create_dialog.is_none()
+    {
         actions.extend(shortcuts(ui));
     }
     // A close request of the system, such as Alt+F4 or the title bar of the
@@ -247,10 +261,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if app.dialog.is_some() {
         settings_dialog(app, ui, &mut actions);
     }
+    // Before the dialogs are drawn, so that what Git said about a name shows
+    // in the dialog that asked, and not in a dialog of its own for a frame.
+    app.poll_create();
     if app.close_question.is_some() {
         close_question_dialog(app, ui, &mut actions);
     } else if app.detach_pending.is_some() {
         detach_notice_dialog(app, ui, &mut actions);
+    } else if app.create_dialog.is_some() {
+        create_dialog(app, ui, &mut actions);
     } else if let Some(dialog) = app.action_dialog() {
         action_dialog(app, &dialog, ui, &mut actions);
     }
@@ -368,6 +387,11 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::CloseActionDialog => app.close_action_dialog(),
             Action::ConfirmDetach => app.confirm_detach(),
             Action::CancelDetach => app.detach_pending = None,
+            Action::BeginCreateBranch(at, origin) => app.begin_create_branch(at, origin),
+            Action::SetCreateName(text) => app.set_create_name(text),
+            Action::SetCreateCheckout(on) => app.set_create_checkout(on),
+            Action::SubmitCreate => app.submit_create(),
+            Action::CancelCreate => app.cancel_create(),
             Action::SetDetachDontShow(on) => {
                 if let Some(pending) = &mut app.detach_pending {
                     pending.dont_show = on;
@@ -1452,6 +1476,27 @@ fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>
         if refresh.show(ui).clicked() {
             actions.push(Action::Refresh);
         }
+        // Branch belongs to a repository tab: it starts at the commit selected
+        // in the list, at HEAD otherwise.
+        let in_repository = app
+            .workspace()
+            .and_then(|workspace| workspace.active())
+            .is_some_and(|tab| tab.session().is_some());
+        if in_repository {
+            let start = app.toolbar_start();
+            let branch = app.texts.text(Msg::ToolbarBranch);
+            let branch = ui
+                .add_enabled_ui(app.can_create_at(&start), |ui| {
+                    Button::new(&branch)
+                        .kind(Kind::Ghost)
+                        .icon(icons::BRANCH)
+                        .show(ui)
+                })
+                .inner;
+            if branch.clicked() {
+                actions.push(Action::BeginCreateBranch(start, Origin::Commits));
+            }
+        }
         let search = app
             .workspace()
             .and_then(|workspace| workspace.active())
@@ -1735,6 +1780,176 @@ fn action_dialog(
     }
     if close || open || outcome.escape {
         actions.push(Action::CloseActionDialog);
+    }
+}
+
+/// How a problem with a name is worded.
+fn name_problem_text(texts: &i18n::Translations, kind: NameKind, problem: &NameProblem) -> String {
+    let branch = kind == NameKind::Branch;
+    let with = |msg: Msg, key: &str, value: &str| {
+        let mut args = FluentArgs::new();
+        args.set(key, value.to_owned());
+        texts.text_with(msg, Some(&args))
+    };
+    match problem {
+        // An empty name needs no explanation: Create is unavailable.
+        NameProblem::Empty => String::new(),
+        NameProblem::Character(c) if c.is_ascii_control() => texts.text(Msg::NameControl),
+        NameProblem::Character(c) => with(Msg::NameCharacter, "character", &c.to_string()),
+        NameProblem::DoubleDot => texts.text(Msg::NameDoubleDot),
+        NameProblem::AtBrace => texts.text(Msg::NameAtBrace),
+        NameProblem::LeadingDash => texts.text(Msg::NameLeadingDash),
+        NameProblem::LeadingSlash => texts.text(Msg::NameLeadingSlash),
+        NameProblem::TrailingSlash => texts.text(Msg::NameTrailingSlash),
+        NameProblem::DoubleSlash => texts.text(Msg::NameDoubleSlash),
+        NameProblem::EndsWithDot => texts.text(Msg::NameEndsWithDot),
+        NameProblem::EndsWithLock => texts.text(Msg::NameEndsWithLock),
+        NameProblem::PartStartsWithDot => texts.text(Msg::NamePartStartsWithDot),
+        NameProblem::Reserved(name) => with(Msg::NameReserved, "name", name),
+        NameProblem::Taken => texts.text(if branch {
+            Msg::NameTakenBranch
+        } else {
+            Msg::NameTakenTag
+        }),
+        NameProblem::NeedsFolder(existing) => with(
+            if branch {
+                Msg::NameNeedsFolderBranch
+            } else {
+                Msg::NameNeedsFolderTag
+            },
+            "existing",
+            existing,
+        ),
+        NameProblem::IsFolderOf(existing) => with(
+            if branch {
+                Msg::NameIsFolderOfBranch
+            } else {
+                Msg::NameIsFolderOfTag
+            },
+            "existing",
+            existing,
+        ),
+    }
+}
+
+/// The dialog "Create branch": the starting point, the name with its check
+/// while the user types, and the option to check the branch out. The cursor
+/// starts in the name; Enter creates when the name is valid, and Escape
+/// cancels.
+fn create_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let Some(dialog) = &app.create_dialog else {
+        return;
+    };
+    let texts = &app.texts;
+    let references: Vec<Reference> = app
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .and_then(|session| session.sidebar())
+        .and_then(|sidebar| sidebar.as_ref().ok())
+        .map(|sidebar| sidebar.references.clone())
+        .unwrap_or_default();
+    let problem = dialog.problem(&references);
+    let available = problem.is_none() && !dialog.running;
+    // The commit as the dialog names it: the short hash and the first line of
+    // its message, once that is known.
+    let commit = {
+        let short = dialog.start.commit.short(SHORT_HASH);
+        match &dialog.description {
+            Some(description) if !description.is_empty() => format!("{short} {description}"),
+            _ => short,
+        }
+    };
+    let start = match &dialog.start.kind {
+        StartKind::Commit => commit,
+        StartKind::Reference(name) => {
+            let mut args = FluentArgs::new();
+            args.set("name", name.clone());
+            args.set("commit", commit);
+            texts.text_with(Msg::CreateStartReference, Some(&args))
+        }
+        StartKind::Head => {
+            let mut args = FluentArgs::new();
+            args.set("commit", commit);
+            texts.text_with(Msg::CreateStartHead, Some(&args))
+        }
+    };
+    let title = texts.text(Msg::CreateBranchTitle);
+    let hint = texts.text(Msg::CreateBranchName);
+    let check_out = texts.text(Msg::CreateCheckOut);
+    let create = texts.text(Msg::CreateConfirm);
+    let cancel = texts.text(Msg::DialogCancel);
+    let shown_problem = problem
+        .as_ref()
+        .map(|problem| name_problem_text(texts, NameKind::Branch, problem))
+        .filter(|text| !text.is_empty());
+    let refused = dialog.refused.as_ref().map(|why| {
+        texts.text(match why {
+            NameRefusal::Taken => Msg::CreateRefusedTaken,
+            NameRefusal::Invalid => Msg::CreateRefusedInvalid,
+        })
+    });
+    let mut name = dialog.name.clone();
+    let mut checkout = dialog.checkout;
+    let outcome = components::dialog(ui.ctx(), Id::new("create-branch"), &title, |ui| {
+        ui.label(RichText::new(texts.text(Msg::CreateStartCaption)).weak());
+        ui.label(start);
+        ui.add_space(SHAPE.space[1]);
+        let field = ui
+            .add_enabled_ui(!dialog.running, |ui| {
+                ui.add(components::text_edit(&mut name, &hint, 320.0))
+            })
+            .inner;
+        ui.ctx()
+            .accesskit_node_builder(field.id, |node| node.set_label(hint.as_str()));
+        if ui.memory(|memory| memory.focused().is_none()) && !dialog.running {
+            field.request_focus();
+        }
+        if let Some(text) = shown_problem.or(refused) {
+            components::error_text(ui, text);
+        }
+        if let Some(message) = &dialog.failure {
+            // A line of Git's message per label, so that each is found alone.
+            for line in message.lines() {
+                components::error_text(ui, line);
+            }
+        }
+        ui.add_space(SHAPE.space[1]);
+        ui.add_enabled_ui(!dialog.running, |ui| {
+            components::checkbox(ui, &mut checkout, &check_out);
+        });
+        ui.add_space(SHAPE.space[2]);
+        let (mut submit, mut cancelled) = (false, false);
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(available, |ui| {
+                submit = components::Button::new(&create)
+                    .kind(components::Kind::Primary)
+                    .show(ui)
+                    .clicked();
+            });
+            ui.add_enabled_ui(!dialog.running, |ui| {
+                cancelled = components::Button::new(&cancel).show(ui).clicked();
+            });
+        });
+        // Enter in the name does what Create does.
+        if (field.lost_focus() || field.has_focus())
+            && ui.input(|input| input.key_pressed(Key::Enter))
+        {
+            submit = true;
+        }
+        (submit, cancelled)
+    });
+    if name != dialog.name {
+        actions.push(Action::SetCreateName(name));
+    }
+    if checkout != dialog.checkout {
+        actions.push(Action::SetCreateCheckout(checkout));
+    }
+    let (submit, cancelled) = outcome.inner;
+    if submit && available {
+        actions.push(Action::SubmitCreate);
+    } else if cancelled || (outcome.escape && !dialog.running) {
+        actions.push(Action::CancelCreate);
     }
 }
 
@@ -2268,6 +2483,7 @@ fn apply_sidebar(app: &mut App, actions: Vec<SidebarAction>) {
                 app.set_branch_filter(BranchFilter::Selected(vec![name]))
             }
             SidebarAction::Checkout(request) => app.checkout(request),
+            SidebarAction::CreateBranch(at) => app.begin_create_branch(at, Origin::Sidebar),
             SidebarAction::OpenSubmodule(path) => {
                 let root = app
                     .workspace()

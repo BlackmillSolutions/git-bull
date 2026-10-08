@@ -18,8 +18,9 @@ use gitbull_core::repositories::RepositoryList;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::seen::SeenFile;
 use gitbull_core::session::{
-    Action as WriteAction, ActionDialog, BranchFilter, CheckoutRequest, CheckoutStart, Navigation,
-    Session,
+    Action as WriteAction, ActionDialog, BranchFilter, CheckoutRequest, CheckoutStart,
+    CreateBranchRequest, CreateStart, NameRefusal, Navigation, Session, StartAt, StartUnavailable,
+    StartingPoint,
 };
 use gitbull_core::settings::{
     ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
@@ -32,6 +33,8 @@ use gitbull_core::workspace::{
 use gitbull_git::head::Head;
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
+use gitbull_git::ref_name::{NameKind, NameProblem, check_name};
+use gitbull_git::refs::Reference;
 use gitbull_git::status::{Group, StatusEntry};
 use gitbull_git::version::GitVersion;
 use gitbull_git::{Backend, CliBackend};
@@ -138,6 +141,39 @@ pub struct PendingDetach {
     pub target: String,
     /// The user ticked "Don't show this again".
     pub dont_show: bool,
+}
+
+/// Where a dialog was opened from, so that the keyboard goes on there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    Sidebar,
+    /// The commit list, and the toolbar, which acts on its selection.
+    Commits,
+}
+
+/// The dialog "Create branch" while it is open (spec `reference-creation`).
+#[derive(Clone, Debug)]
+pub(crate) struct CreateDialog {
+    pub(crate) origin: Origin,
+    pub(crate) start: StartingPoint,
+    /// The first line of the message of the starting point, once it is known.
+    pub(crate) description: Option<String>,
+    pub(crate) name: String,
+    /// Whether the new branch is checked out in the same step.
+    pub(crate) checkout: bool,
+    /// The action runs, and the dialog waits for it.
+    pub(crate) running: bool,
+    /// Git refused the name although the check let it through.
+    pub(crate) refused: Option<NameRefusal>,
+    /// Git's message of a failure that no check foresaw.
+    pub(crate) failure: Option<String>,
+}
+
+impl CreateDialog {
+    /// What is wrong with the name; `Empty` while there is none.
+    pub(crate) fn problem(&self, references: &[Reference]) -> Option<NameProblem> {
+        check_name(NameKind::Branch, &self.name, references).err()
+    }
 }
 
 /// What the user is asked before something stops a write action that runs.
@@ -289,6 +325,8 @@ pub(crate) struct TabView {
     /// The sidebar takes the keyboard focus when it is drawn next, as after a
     /// dialog closed that the sidebar had started.
     pub(crate) focus_sidebar: bool,
+    /// The commit list takes the keyboard focus when it is drawn next.
+    pub(crate) focus_commits: bool,
     /// The diff of the file chosen in the commit panel.
     pub(crate) commit_diff: DiffView,
     /// The diff of the file chosen in the File status view.
@@ -404,6 +442,8 @@ pub struct App {
     pub(crate) close_confirmed: bool,
     /// A checkout that waits for the notice before detaching HEAD.
     pub(crate) detach_pending: Option<PendingDetach>,
+    /// The dialog that creates a branch.
+    pub(crate) create_dialog: Option<CreateDialog>,
     /// The window is to be told to close in this frame.
     pub(crate) send_close: bool,
     dirty: bool,
@@ -454,6 +494,7 @@ impl App {
             close_question: None,
             close_confirmed: false,
             detach_pending: None,
+            create_dialog: None,
             send_close: false,
             dirty: false,
             last_saved: Instant::now(),
@@ -1074,6 +1115,172 @@ impl App {
             }
             None => {}
         }
+    }
+
+    /// The commit selected in the list of the active tab, if there is one.
+    pub(crate) fn selected_commit(&self) -> Option<ObjectId> {
+        let id = self.workspace.as_ref()?.active()?.id();
+        self.views.get(&id)?.selected_id
+    }
+
+    /// Where the Branch button of the toolbar starts a branch: at the commit
+    /// selected in the list, and at HEAD without one or on the row of the
+    /// uncommitted changes.
+    pub(crate) fn toolbar_start(&self) -> StartAt {
+        self.selected_commit()
+            .map_or(StartAt::Head, StartAt::Commit)
+    }
+
+    /// Whether a branch can be created at `at` now: no write action runs in
+    /// the tab, and there is a commit to start at.
+    pub(crate) fn can_create_at(&self, at: &StartAt) -> bool {
+        let Some(session) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active())
+            .and_then(|tab| tab.session())
+        else {
+            return false;
+        };
+        session.action().is_none() && session.starting_point(at).is_ok()
+    }
+
+    /// Opens the dialog "Create branch" at `at`. A tag that points to a tree
+    /// is told apart by a notice; nothing opens while a write action runs or
+    /// when there is no starting point.
+    pub(crate) fn begin_create_branch(&mut self, at: StartAt, origin: Origin) {
+        let Some((session, _)) = self.active_view() else {
+            return;
+        };
+        if session.action().is_some() {
+            return;
+        }
+        match session.starting_point(&at) {
+            Ok(start) => {
+                let description = session.summary_of(&start.commit);
+                self.create_dialog = Some(CreateDialog {
+                    origin,
+                    start,
+                    description,
+                    name: String::new(),
+                    checkout: true,
+                    running: false,
+                    refused: None,
+                    failure: None,
+                });
+            }
+            Err(StartUnavailable::NotACommit(tag)) => {
+                self.notice = Some(Notice::NotACommit(tag));
+            }
+            Err(StartUnavailable::NoCommits | StartUnavailable::Gone(_)) => {}
+        }
+    }
+
+    /// The user edited the name: a space becomes a hyphen, and what Git said
+    /// about the name before no longer applies.
+    pub(crate) fn set_create_name(&mut self, text: String) {
+        if let Some(dialog) = &mut self.create_dialog {
+            let name = text.replace(' ', "-");
+            if name != dialog.name {
+                dialog.refused = None;
+                dialog.failure = None;
+            }
+            dialog.name = name;
+        }
+    }
+
+    pub(crate) fn set_create_checkout(&mut self, on: bool) {
+        if let Some(dialog) = &mut self.create_dialog {
+            dialog.checkout = on;
+        }
+    }
+
+    /// Create: starts the branch when the name is valid and nothing else
+    /// runs; the dialog stays open until Git ended.
+    pub(crate) fn submit_create(&mut self) {
+        let Some(mut dialog) = self.create_dialog.take() else {
+            return;
+        };
+        if let Some((session, _)) = self.active_view() {
+            let references = session
+                .sidebar()
+                .and_then(|sidebar| sidebar.as_ref().ok())
+                .map(|sidebar| sidebar.references.clone())
+                .unwrap_or_default();
+            if !dialog.running && dialog.problem(&references).is_none() {
+                let started = session.start_create_branch(CreateBranchRequest {
+                    name: dialog.name.clone(),
+                    start: dialog.start.commit,
+                    checkout: dialog.checkout,
+                });
+                if started == CreateStart::Started {
+                    dialog.running = true;
+                    dialog.refused = None;
+                    dialog.failure = None;
+                }
+            }
+        }
+        self.create_dialog = Some(dialog);
+    }
+
+    pub(crate) fn cancel_create(&mut self) {
+        if let Some(dialog) = self.create_dialog.take_if(|dialog| !dialog.running) {
+            self.refocus(dialog.origin);
+        }
+    }
+
+    /// Gives the keyboard back to the area a dialog was opened from.
+    fn refocus(&mut self, origin: Origin) {
+        if let Some((_, view)) = self.active_view() {
+            match origin {
+                Origin::Sidebar => view.focus_sidebar = true,
+                Origin::Commits => view.focus_commits = true,
+            }
+        }
+    }
+
+    /// Follows the dialog "Create branch" while its action runs. When Git
+    /// ended, the dialog closes if the branch was made or another dialog tells
+    /// what happened; it stays, with the name, when Git refused the name or
+    /// failed in a way the dialog is to show.
+    pub(crate) fn poll_create(&mut self) {
+        let Some(mut dialog) = self.create_dialog.take() else {
+            return;
+        };
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        if let Some(description) = session.summary_of(&dialog.start.commit) {
+            dialog.description = Some(description);
+        }
+        if dialog.running && session.action().is_none() {
+            dialog.running = false;
+            let ours = |action: &WriteAction| matches!(action, WriteAction::CreateBranch { name } if *name == dialog.name);
+            match session.dialog().cloned() {
+                None => {
+                    // The branch is there: show it.
+                    view.sidebar.reveal(Section::Branches, &dialog.name);
+                    self.refocus(dialog.origin);
+                    return;
+                }
+                Some(ActionDialog::NameRefused { action, why }) if ours(&action) => {
+                    dialog.refused = Some(why);
+                    session.close_dialog();
+                }
+                Some(ActionDialog::Failed { action, message }) if ours(&action) => {
+                    dialog.failure = Some(message);
+                    session.close_dialog();
+                }
+                // A failed hook means that the branch was made and checked out.
+                Some(ActionDialog::HookFailed { .. }) => {
+                    view.sidebar.reveal(Section::Branches, &dialog.name);
+                    return;
+                }
+                // A refused checkout has a dialog of its own.
+                Some(_) => return,
+            }
+        }
+        self.create_dialog = Some(dialog);
     }
 
     /// What the last write action of the active tab asks the user to see.

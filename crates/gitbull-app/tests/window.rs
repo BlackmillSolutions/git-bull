@@ -73,11 +73,11 @@ fn toolbar_offers_only_working_actions() {
     let mut harness = window(test.app);
     harness.run();
 
-    for label in ["Open", "Refresh", "Theme", "Settings"] {
+    for label in ["Open", "Refresh", "Branch", "Theme", "Settings"] {
         harness.get_by_role_and_label(Role::Button, label);
     }
     // Buttons only: "Commit" is also the title of a column.
-    for missing in ["Commit", "Pull", "Push", "Branch", "Stash"] {
+    for missing in ["Commit", "Pull", "Push", "Stash"] {
         assert!(
             harness
                 .query_by_role_and_label(Role::Button, missing)
@@ -88,12 +88,16 @@ fn toolbar_offers_only_working_actions() {
 }
 
 #[test]
-fn open_and_refresh_show_an_icon_and_their_label() {
+fn open_refresh_and_branch_show_an_icon_and_their_label() {
     let test = app_with_open_repository(Settings::default());
     let mut harness = window(test.app);
     harness.run();
 
-    for (label, icon) in [("Open", icons::FOLDER), ("Refresh", icons::REFRESH)] {
+    for (label, icon) in [
+        ("Open", icons::FOLDER),
+        ("Refresh", icons::REFRESH),
+        ("Branch", icons::BRANCH),
+    ] {
         let rect = harness.get_by_role_and_label(Role::Button, label).rect();
         let texts = support::texts_in(harness.output(), rect);
         assert!(texts.iter().any(|text| text == icon), "{label}: {texts:?}");

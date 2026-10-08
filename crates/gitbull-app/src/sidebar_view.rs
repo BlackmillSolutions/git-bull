@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{Align2, Color32, Id, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2, vec2};
-use gitbull_core::session::CheckoutRequest;
+use gitbull_core::session::{CheckoutRequest, StartAt};
 use gitbull_core::sidebar_tree::{self, Section, SidebarKey, SidebarRow, SidebarState};
 use gitbull_core::workspace::View;
 use gitbull_git::head::Head;
@@ -32,6 +32,8 @@ pub(crate) enum SidebarAction {
     ShowOnly(String),
     /// Check this out: a double click, Enter or the entry of a menu.
     Checkout(CheckoutRequest),
+    /// Create a branch at the commit of this reference.
+    CreateBranch(StartAt),
 }
 
 /// The texts rows need, read before the tab is borrowed.
@@ -42,6 +44,7 @@ struct Texts {
     not_initialised: String,
     show_only: String,
     check_out: String,
+    create_branch: String,
     /// "Checked out in", with `ELSEWHERE_FOLDER` where the folder goes; a row
     /// is drawn many times, and the text of a language may put the folder
     /// anywhere.
@@ -68,6 +71,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         not_initialised: app.texts.text(Msg::SidebarNotInitialised),
         show_only: app.texts.text(Msg::SidebarShowOnlyBranch),
         check_out: app.texts.text(Msg::SidebarCheckOut),
+        create_branch: app.texts.text(Msg::SidebarCreateBranch),
         elsewhere: {
             let mut args = fluent_bundle::FluentArgs::new();
             args.set("folder", ELSEWHERE_FOLDER);
@@ -206,48 +210,46 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     if let Some(name) = sidebar_menu.clone() {
         let local = name.strip_prefix("refs/heads/").map(str::to_owned);
         let tag = name.starts_with("refs/tags/");
-        let checkable = !busy && checked_out.as_deref() != Some(name.as_str());
+        // What the entry "Check out" does: a tag, a remote branch or a local
+        // branch, which is unavailable when it is the one checked out.
+        let request = if tag {
+            Some(CheckoutRequest::Tag(name.clone()))
+        } else if name.starts_with("refs/remotes/") {
+            Some(CheckoutRequest::RemoteBranch(name.clone()))
+        } else {
+            local.clone().map(CheckoutRequest::Branch)
+        };
+        let checkable = !busy && (local.is_none() || checked_out.as_deref() != Some(name.as_str()));
+        // A tag that points to a tree has no commit to start a branch at.
+        let startable = !busy
+            && session
+                .starting_point(&StartAt::Reference(name.clone()))
+                .is_ok();
         output.response.context_menu(|ui| {
             components::menu(ui, |ui| {
-                if tag {
-                    let entry = ui
-                        .add_enabled_ui(!busy, |ui| {
-                            components::menu_item(ui, None, &texts.check_out, None)
-                        })
-                        .inner;
-                    if entry.clicked() {
-                        actions.push(SidebarAction::Checkout(CheckoutRequest::Tag(name.clone())));
-                        ui.close();
-                    }
-                    return;
-                }
-                if name.starts_with("refs/remotes/") {
-                    let entry = ui
-                        .add_enabled_ui(!busy, |ui| {
-                            components::menu_item(ui, None, &texts.check_out, None)
-                        })
-                        .inner;
-                    if entry.clicked() {
-                        actions.push(SidebarAction::Checkout(CheckoutRequest::RemoteBranch(
-                            name.clone(),
-                        )));
-                        ui.close();
-                    }
-                }
-                if let Some(short) = &local {
+                if let Some(request) = request {
                     let entry = ui
                         .add_enabled_ui(checkable, |ui| {
                             components::menu_item(ui, None, &texts.check_out, None)
                         })
                         .inner;
                     if entry.clicked() {
-                        actions.push(SidebarAction::Checkout(CheckoutRequest::Branch(
-                            short.clone(),
-                        )));
+                        actions.push(SidebarAction::Checkout(request));
                         ui.close();
                     }
                 }
-                if components::menu_item(ui, None, &texts.show_only, None).clicked() {
+                let entry = ui
+                    .add_enabled_ui(startable, |ui| {
+                        components::menu_item(ui, None, &texts.create_branch, None)
+                    })
+                    .inner;
+                if entry.clicked() {
+                    actions.push(SidebarAction::CreateBranch(StartAt::Reference(
+                        name.clone(),
+                    )));
+                    ui.close();
+                }
+                if !tag && components::menu_item(ui, None, &texts.show_only, None).clicked() {
                     actions.push(SidebarAction::ShowOnly(name.clone()));
                     ui.close();
                 }

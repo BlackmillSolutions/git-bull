@@ -11,7 +11,7 @@ use eframe::egui::{
 use gitbull_core::badges::{Badge, BadgeKind};
 use gitbull_core::graph::{GraphRow, uncommitted_rows};
 use gitbull_core::session::{
-    BranchFilter, CheckoutRequest, CommitGraph, History, LoadState, Session,
+    BranchFilter, CheckoutRequest, CommitGraph, History, LoadState, Session, StartAt,
 };
 use gitbull_core::store::Row;
 use gitbull_core::workspace::{Failure, View};
@@ -20,7 +20,7 @@ use gitbull_git::object_id::ObjectId;
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 
-use crate::app::{App, TabView};
+use crate::app::{App, Origin, TabView};
 use crate::columns::{self, Column, Widths, text_cell};
 use crate::components::{self, Button, Kind, focus_ring};
 use crate::graph_view::{self, LANE_WIDTH, Shape as GraphShape};
@@ -161,6 +161,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let empty = app.texts.text(Msg::HistoryEmpty);
     let copy_label = app.texts.text(Msg::CopyFullHash);
     let check_out_label = app.texts.text(Msg::CommitCheckOut);
+    let create_branch_label = app.texts.text(Msg::CommitCreateBranch);
     let titles = [
         Msg::ColumnGraph,
         Msg::ColumnDescription,
@@ -286,6 +287,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         },
     );
 
+    if std::mem::take(&mut view.focus_commits) {
+        output.response.request_focus();
+    }
     let selected = view.commits.selected().filter(|row| *row < rows);
     let selected_commit = selected.and_then(|row| list.commit(row));
     view.selected_id = selected_commit.map(|row| session.history().store.id(row as Row));
@@ -329,6 +333,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     }
     let menu_commit = view.commit_menu;
     let mut check_out = None;
+    let mut create_branch = None;
     output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
             let entry = ui
@@ -338,6 +343,15 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
                 .inner;
             if entry.clicked() {
                 check_out = menu_commit;
+                ui.close();
+            }
+            let entry = ui
+                .add_enabled_ui(!busy && menu_commit.is_some(), |ui| {
+                    components::menu_item(ui, None, &create_branch_label, None)
+                })
+                .inner;
+            if entry.clicked() {
+                create_branch = menu_commit;
                 ui.close();
             }
             if components::menu_item(ui, None, &copy_label, None).clicked() {
@@ -356,6 +370,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     }
     if let Some(id) = activated_commit.or(check_out) {
         app.checkout(CheckoutRequest::Commit(id));
+    }
+    if let Some(id) = create_branch {
+        app.begin_create_branch(StartAt::Commit(id), Origin::Commits);
     }
 }
 

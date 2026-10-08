@@ -647,3 +647,59 @@ fn sidebar_with_a_branch_of_another_worktree() {
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "sidebar_worktree_mark", &options());
 }
+
+/// The dialog "Create branch", opened with the Branch button of the toolbar at
+/// HEAD, with `name` typed into its field.
+fn create_branch_dialog(theme: ThemeSetting, name: &str) -> Harness<'static, App> {
+    let backend = dialog_backend().with_content(
+        fake_id("b"),
+        gitbull_git::content::CommitContent {
+            message: "Draw the graph of a merge\n".to_owned(),
+            ..gitbull_git::content::CommitContent::default()
+        },
+    );
+    let mut harness = repository_window(backend, theme, InterfaceSize::Percent100, (1280.0, 800.0));
+    harness
+        .get_by_role_and_label(Role::Button, "Branch")
+        .click();
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Dialog, "Create branch")
+            .is_some()
+    });
+    harness.run();
+    if !name.is_empty() {
+        harness
+            .get_by_role_and_label(Role::TextInput, "Branch name")
+            .type_text(name);
+        harness.run();
+    }
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+/// Scenario "Dialog opens focused" of `reference-creation`; the toolbar behind
+/// it shows the Branch button.
+#[test]
+fn create_branch_dialog_when_it_opens() {
+    let mut harness = create_branch_dialog(ThemeSetting::Light, "");
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "create_branch_empty", &options());
+}
+
+/// Scenario "Name that is a folder of another branch".
+#[test]
+fn create_branch_dialog_with_a_problem() {
+    let mut harness = create_branch_dialog(ThemeSetting::Light, "main/next");
+    harness.get_by_label("main is a branch, and this name would need it to be a folder.");
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "create_branch_problem", &options());
+}
+
+/// Scenario "Valid name", in the dark palette.
+#[test]
+fn create_branch_dialog_with_a_valid_name() {
+    let mut harness = create_branch_dialog(ThemeSetting::Dark, "fix/login-2");
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "create_branch_valid_dark", &options());
+}

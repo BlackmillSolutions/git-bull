@@ -1523,6 +1523,24 @@ impl Session {
         self.cache.get(id)
     }
 
+    /// The first line of the message of a commit, once its content has
+    /// arrived. Until then it is asked for, once, so that the next call may
+    /// know it: a commit named by a reference may lie outside the rows in view.
+    pub fn summary_of(&mut self, id: &ObjectId) -> Option<String> {
+        if let Some(content) = self.cache.get(id) {
+            return Some(
+                content
+                    .message
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+        }
+        self.request_ids(vec![*id]);
+        None
+    }
+
     fn start_content(&mut self) {
         let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
         let (sender, receiver) = mpsc::channel();
@@ -3909,6 +3927,31 @@ mod tests {
                 .starting_point(&StartAt::Head)
                 .map(|point| point.commit),
             Err(StartUnavailable::NoCommits)
+        );
+    }
+
+    #[test]
+    fn a_summary_is_asked_for_and_then_known() {
+        let backend = on_main().with_content(
+            fake_id("c"),
+            CommitContent {
+                message: "Third\n\nBody\n".to_owned(),
+                ..CommitContent::default()
+            },
+        );
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        assert_eq!(session.summary_of(&fake_id("c")), None);
+        wait_until(&mut session, |s| s.summary_of(&fake_id("c")).is_some());
+        assert_eq!(session.summary_of(&fake_id("c")), Some("Third".to_owned()));
+        assert_eq!(
+            probe
+                .requested()
+                .iter()
+                .filter(|id| **id == fake_id("c"))
+                .count(),
+            1,
+            "the content was asked for once"
         );
     }
 }
