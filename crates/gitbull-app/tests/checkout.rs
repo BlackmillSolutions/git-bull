@@ -216,12 +216,24 @@ fn branch(name: &str, commit: &str) -> Reference {
     }
 }
 
+fn tag(name: &str, commit: Option<&str>) -> Reference {
+    Reference {
+        name: format!("refs/tags/{name}"),
+        short: name.to_owned(),
+        kind: RefKind::Tag,
+        commit: commit.map(|commit| fake_id(commit).to_string()),
+        upstream: None,
+    }
+}
+
 fn references() -> Vec<Reference> {
     vec![
         branch("feature/diff", "d"),
         branch("hook", "c"),
         branch("main", "e"),
         branch("side", "x"),
+        tag("v1.0", Some("c")),
+        tag("tree-tag", None),
     ]
 }
 
@@ -251,10 +263,20 @@ fn backend() -> FakeBackend {
 }
 
 fn open(backend: FakeBackend) -> Harness<'static, App> {
+    open_with(backend, true)
+}
+
+/// Like [`open`], with the notice before detaching HEAD hidden.
+fn open_without_notice(backend: FakeBackend) -> Harness<'static, App> {
+    open_with(backend, false)
+}
+
+fn open_with(backend: FakeBackend, detach_notice: bool) -> Harness<'static, App> {
     let test = build(Setup {
         settings: Settings {
             tabs: vec![root()],
             active_tab: Some(0),
+            detach_notice,
             ..Settings::default()
         },
         backend,
@@ -635,4 +657,286 @@ fn the_keyboard_continues_in_the_sidebar_after_a_dialog() {
         item(&harness, "side").accesskit_node().is_selected(),
         Some(true)
     );
+}
+
+// ---- tags and commits: detached HEAD (spec `checkout`)
+
+/// The row of the commit list whose summary starts with `summary`.
+fn commit_row<'a>(harness: &'a Harness<'_, App>, summary: &str) -> egui_kittest::Node<'a> {
+    harness
+        .get_all_by_role(Role::Row)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(summary))
+        })
+        .unwrap_or_else(|| panic!("no commit row {summary}"))
+}
+
+fn double_click_commit(harness: &mut Harness<'_, App>, summary: &str) {
+    for _ in 0..30 {
+        harness.step();
+    }
+    let at = commit_row(harness, summary).rect().center();
+    double_click_at(harness, at);
+    harness.run();
+}
+
+fn right_click_commit(harness: &mut Harness<'_, App>, summary: &str) {
+    let at = commit_row(harness, summary).rect().center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
+fn detached(commit: &str) -> Head {
+    Head::Detached(fake_id(commit).to_string())
+}
+
+fn notice_is_shown(harness: &Harness<'_, App>, target: &str) -> bool {
+    harness
+        .query_by_role_and_label(Role::Dialog, &format!("Check out {target}?"))
+        .is_some()
+}
+
+#[test]
+fn double_click_on_a_tag_asks_first_and_checks_it_out_after_confirming() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click(&mut harness, "v1.0");
+    harness.run();
+    harness.get_by_role_and_label(Role::Dialog, "Check out v1.0?");
+    harness.get_by_label_contains("HEAD will point to a commit");
+    harness.get_by_role_and_label(Role::CheckBox, "Don't show this again");
+    assert!(probe.checkouts().is_empty());
+    assert_eq!(head(&harness), Head::Branch("main".to_owned()));
+
+    harness
+        .get_by_role_and_label(Role::Button, "Check out")
+        .click();
+    harness.run();
+    settle_action(&mut harness);
+    assert_eq!(
+        probe.checkouts(),
+        [CheckoutTarget::Commit(fake_id("c").to_string())]
+    );
+    assert_eq!(head(&harness), detached("c"));
+    // No branch is emphasised any more, and the status bar names the commit.
+    harness.get_by_label_contains("Detached");
+}
+
+#[test]
+fn cancel_and_escape_leave_everything_and_keep_the_notice() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    for leave in ["cancel", "escape"] {
+        double_click(&mut harness, "v1.0");
+        harness.run();
+        assert!(notice_is_shown(&harness, "v1.0"), "{leave}");
+        harness
+            .get_by_role_and_label(Role::CheckBox, "Don't show this again")
+            .click();
+        harness.run();
+        if leave == "cancel" {
+            harness
+                .get_by_role_and_label(Role::Button, "Cancel")
+                .click();
+        } else {
+            harness.key_press(Key::Escape);
+        }
+        harness.run();
+        assert!(!notice_is_shown(&harness, "v1.0"), "{leave}");
+        assert!(probe.checkouts().is_empty(), "{leave}");
+        assert!(harness.state().settings().detach_notice, "{leave}");
+    }
+    double_click(&mut harness, "v1.0");
+    harness.run();
+    assert!(notice_is_shown(&harness, "v1.0"));
+}
+
+#[test]
+fn check_out_with_the_choice_ticked_hides_the_notice_for_good() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click(&mut harness, "v1.0");
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Don't show this again")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Check out")
+        .click();
+    harness.run();
+    settle_action(&mut harness);
+    assert!(!harness.state().settings().detach_notice);
+
+    // A commit is checked out at once from now on.
+    double_click_commit(&mut harness, "Fourth");
+    settle_action(&mut harness);
+    assert_eq!(head(&harness), detached("d"));
+    assert_eq!(probe.checkouts().len(), 2);
+}
+
+#[test]
+fn a_branch_needs_no_notice() {
+    let mut harness = open(backend());
+    double_click(&mut harness, "side");
+    settle_action(&mut harness);
+    assert!(!notice_is_shown(&harness, "side"));
+    assert_eq!(head(&harness), Head::Branch("side".to_owned()));
+}
+
+#[test]
+fn a_tag_on_a_tree_shows_the_banner_and_changes_nothing() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click(&mut harness, "tree-tag");
+    harness.run();
+    harness.get_by_label_contains("The tag tree-tag does not point to a commit");
+    assert!(!notice_is_shown(&harness, "tree-tag"));
+    assert!(probe.checkouts().is_empty());
+    assert_eq!(head(&harness), Head::Branch("main".to_owned()));
+}
+
+#[test]
+fn double_click_and_enter_on_a_commit_check_it_out() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open_without_notice(backend);
+    double_click_commit(&mut harness, "Third");
+    settle_action(&mut harness);
+    assert_eq!(head(&harness), detached("c"));
+
+    commit_row(&harness, "Fourth").click();
+    harness.run();
+    harness.key_press(Key::Enter);
+    settle_action(&mut harness);
+    assert_eq!(head(&harness), detached("d"));
+    assert_eq!(
+        probe.checkouts(),
+        [
+            CheckoutTarget::Commit(fake_id("c").to_string()),
+            CheckoutTarget::Commit(fake_id("d").to_string())
+        ]
+    );
+}
+
+#[test]
+fn the_notice_comes_before_a_commit_is_checked_out() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click_commit(&mut harness, "Third");
+    harness.run();
+    assert!(notice_is_shown(&harness, &fake_id("c").to_string()[..7]));
+    assert!(probe.checkouts().is_empty());
+}
+
+#[test]
+fn a_single_click_and_the_arrow_keys_on_commits_only_select() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open_without_notice(backend);
+    commit_row(&harness, "Third").click();
+    harness.run();
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    assert!(probe.checkouts().is_empty());
+}
+
+#[test]
+fn the_menu_of_a_commit_offers_check_out_this_commit() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open_without_notice(backend);
+    right_click_commit(&mut harness, "Third");
+    assert!(harness.query_all_by_label("Copy full hash").count() >= 1);
+    harness.get_by_label("Check out this commit").click();
+    harness.run();
+    settle_action(&mut harness);
+    assert_eq!(
+        probe.checkouts(),
+        [CheckoutTarget::Commit(fake_id("c").to_string())]
+    );
+}
+
+#[test]
+fn the_commit_menu_entry_is_unavailable_while_an_action_runs() {
+    let gate = Gate::new();
+    let mut harness = open_without_notice(backend().with_checkout_gate(&gate));
+    double_click(&mut harness, "side");
+    wait_for(&mut harness, |h| !idle(h));
+    right_click_commit(&mut harness, "Third");
+    assert!(
+        harness
+            .get_by_label("Check out this commit")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(harness.query_all_by_label("Copy full hash").count() >= 1);
+    gate.open();
+    settle_action(&mut harness);
+}
+
+#[test]
+fn the_menu_of_a_tag_offers_check_out_and_no_show_only() {
+    let mut harness = open(backend());
+    right_click(&mut harness, "v1.0");
+    harness.get_by_label("Check out");
+    assert!(harness.query_by_label("Show only this branch").is_none());
+}
+
+#[test]
+fn check_out_in_the_menu_of_a_tag_asks_first() {
+    let mut harness = open(backend());
+    right_click(&mut harness, "v1.0");
+    harness.get_by_label("Check out").click();
+    harness.run();
+    assert!(notice_is_shown(&harness, "v1.0"));
+}
+
+#[test]
+fn the_uncommitted_row_still_opens_file_status() {
+    let status = gitbull_git::status::WorkingStatus {
+        unstaged: vec![gitbull_git::status::StatusEntry {
+            kind: gitbull_git::status::StatusKind::Changed(
+                gitbull_git::changes::ChangeKind::Modified,
+            ),
+            path: gitbull_git::path::RepoPath::new("a.txt"),
+            old_path: None,
+            submodule: false,
+        }],
+        ..gitbull_git::status::WorkingStatus::default()
+    };
+    let backend = backend().with_status(root(), status);
+    let probe = backend.probe();
+    let mut harness = open_without_notice(backend);
+    wait_for(&mut harness, |h| {
+        h.get_all_by_role(Role::Row).any(|row| {
+            row.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with("Uncommitted changes"))
+        })
+    });
+    double_click_commit(&mut harness, "Uncommitted changes");
+    harness.run();
+    let view = harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .map(|tab| tab.view());
+    assert_eq!(view, Some(gitbull_core::workspace::View::FileStatus));
+    assert!(probe.checkouts().is_empty());
 }

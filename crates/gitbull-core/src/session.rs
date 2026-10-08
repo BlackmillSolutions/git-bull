@@ -852,6 +852,58 @@ impl Session {
         self.checked_out.take()
     }
 
+    /// What [`Session::start_checkout`] would do with `request` now, without
+    /// starting anything: [`CheckoutStart::Started`] means that it would run.
+    /// The interface asks before it shows the notice before detaching HEAD,
+    /// which must not appear for a checkout that cannot happen.
+    pub fn preview_checkout(&self, request: &CheckoutRequest) -> CheckoutStart {
+        match self.resolve_checkout(request) {
+            Ok(_) => CheckoutStart::Started,
+            Err(other) => other,
+        }
+    }
+
+    /// What `request` leads to: the target for Git, the name the user knows it
+    /// by, and where HEAD should be afterwards; or why nothing would run.
+    fn resolve_checkout(
+        &self,
+        request: &CheckoutRequest,
+    ) -> Result<(CheckoutTarget, String, Head), CheckoutStart> {
+        if self.action.is_some() {
+            return Err(CheckoutStart::Busy);
+        }
+        match request {
+            CheckoutRequest::Branch(name) => {
+                let expected = Head::Branch(name.clone());
+                if self.opened.head == expected {
+                    return Err(CheckoutStart::AlreadyThere);
+                }
+                Ok((CheckoutTarget::Branch(name.clone()), name.clone(), expected))
+            }
+            CheckoutRequest::Tag(full) => {
+                let short = full.strip_prefix("refs/tags/").unwrap_or(full).to_owned();
+                let commit = self.reference(full).and_then(|tag| tag.commit.clone());
+                let Some(id) = commit else {
+                    return Err(CheckoutStart::NotACommit(short));
+                };
+                let expected = Head::Detached(id.clone());
+                if self.opened.head == expected {
+                    return Err(CheckoutStart::AlreadyThere);
+                }
+                Ok((CheckoutTarget::Commit(id), short, expected))
+            }
+            CheckoutRequest::Commit(id) => {
+                let id = id.to_string();
+                let expected = Head::Detached(id.clone());
+                if self.opened.head == expected {
+                    return Err(CheckoutStart::AlreadyThere);
+                }
+                let short = id.chars().take(7).collect();
+                Ok((CheckoutTarget::Commit(id), short, expected))
+            }
+        }
+    }
+
     /// Checks `request` out in the background (spec `checkout`).
     ///
     /// A tab runs one write action at a time, and a checkout of what is
@@ -861,38 +913,9 @@ impl Session {
     /// [`Session::action`] turns `None` and a dialog, if the outcome asks for
     /// one, appears.
     pub fn start_checkout(&mut self, request: CheckoutRequest) -> CheckoutStart {
-        if self.action.is_some() {
-            return CheckoutStart::Busy;
-        }
-        let (target, label, expected) = match request {
-            CheckoutRequest::Branch(name) => {
-                let expected = Head::Branch(name.clone());
-                if self.opened.head == expected {
-                    return CheckoutStart::AlreadyThere;
-                }
-                (CheckoutTarget::Branch(name.clone()), name, expected)
-            }
-            CheckoutRequest::Tag(full) => {
-                let short = full.strip_prefix("refs/tags/").unwrap_or(&full).to_owned();
-                let commit = self.reference(&full).and_then(|tag| tag.commit.clone());
-                let Some(id) = commit else {
-                    return CheckoutStart::NotACommit(short);
-                };
-                let expected = Head::Detached(id.clone());
-                if self.opened.head == expected {
-                    return CheckoutStart::AlreadyThere;
-                }
-                (CheckoutTarget::Commit(id), short, expected)
-            }
-            CheckoutRequest::Commit(id) => {
-                let id = id.to_string();
-                let expected = Head::Detached(id.clone());
-                if self.opened.head == expected {
-                    return CheckoutStart::AlreadyThere;
-                }
-                let short = id.chars().take(7).collect();
-                (CheckoutTarget::Commit(id), short, expected)
-            }
+        let (target, label, expected) = match self.resolve_checkout(&request) {
+            Ok(resolved) => resolved,
+            Err(other) => return other,
         };
         self.dialog = None;
         let cancel = CancelToken::new();
@@ -2992,5 +3015,55 @@ mod tests {
         session.start_checkout(named("blocked"));
         wait_until(&mut session, idle);
         assert_eq!(session.take_checked_out(), None);
+    }
+
+    #[test]
+    fn previewing_a_checkout_says_what_would_happen_and_starts_nothing() {
+        let gate = Gate::new();
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_references(
+                root(),
+                vec![
+                    branch("main", "e"),
+                    Reference {
+                        name: "refs/tags/v1".to_owned(),
+                        short: "v1".to_owned(),
+                        kind: gitbull_git::refs::RefKind::Tag,
+                        commit: Some(fake_id("c").to_string()),
+                        upstream: None,
+                    },
+                    tree_tag(),
+                ],
+            )
+            .with_checkout_gate(&gate);
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        assert_eq!(
+            session.preview_checkout(&named("feature")),
+            CheckoutStart::Started
+        );
+        assert_eq!(
+            session.preview_checkout(&named("main")),
+            CheckoutStart::AlreadyThere
+        );
+        assert_eq!(
+            session.preview_checkout(&CheckoutRequest::Tag("refs/tags/v1".to_owned())),
+            CheckoutStart::Started
+        );
+        assert_eq!(
+            session.preview_checkout(&CheckoutRequest::Tag("refs/tags/tree".to_owned())),
+            CheckoutStart::NotACommit("tree".to_owned())
+        );
+        assert!(session.action().is_none());
+        assert!(probe.checkouts().is_empty());
+        // While an action runs, nothing else would start.
+        session.start_checkout(named("feature"));
+        assert_eq!(
+            session.preview_checkout(&named("side")),
+            CheckoutStart::Busy
+        );
+        gate.open();
+        wait_until(&mut session, idle);
     }
 }

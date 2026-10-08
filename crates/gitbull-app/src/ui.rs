@@ -106,6 +106,7 @@ enum Action {
     SetColourVision(ColourVision),
     SetInterfaceSize(InterfaceSize),
     SetSystemTitleBar(bool),
+    SetDetachNotice(bool),
     /// The next larger and smaller interface size.
     Larger,
     Smaller,
@@ -124,6 +125,10 @@ enum Action {
     CloseAnyway,
     /// The user closed the dialog that the last write action asked for.
     CloseActionDialog,
+    /// Answers of the notice before detaching HEAD.
+    ConfirmDetach,
+    CancelDetach,
+    SetDetachDontShow(bool),
     NextTab,
     PreviousTab,
     /// Move the active tab this many places to the right, or to the left.
@@ -190,7 +195,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     // The window behind the settings dialog takes no keys, as it takes no
     // clicks.
-    if app.dialog.is_none() && app.close_question.is_none() {
+    if app.dialog.is_none() && app.close_question.is_none() && app.detach_pending.is_none() {
         actions.extend(shortcuts(ui));
     }
     // A close request of the system, such as Alt+F4 or the title bar of the
@@ -244,6 +249,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     if app.close_question.is_some() {
         close_question_dialog(app, ui, &mut actions);
+    } else if app.detach_pending.is_some() {
+        detach_notice_dialog(app, ui, &mut actions);
     } else if let Some(dialog) = app.action_dialog() {
         action_dialog(app, &dialog, ui, &mut actions);
     }
@@ -332,6 +339,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::SetColourVision(vision) => app.set_colour_vision(vision),
             Action::SetInterfaceSize(size) => app.set_interface_size(size),
             Action::SetSystemTitleBar(system) => app.set_system_title_bar(system),
+            Action::SetDetachNotice(show) => app.set_detach_notice(show),
             Action::Larger => app.set_interface_size(app.settings().interface_size.larger()),
             Action::Smaller => app.set_interface_size(app.settings().interface_size.smaller()),
             Action::SetLanguage(language) => app.set_language(language),
@@ -358,6 +366,13 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::KeepOpen => app.close_question = None,
             Action::CloseAnyway => app.close_anyway(),
             Action::CloseActionDialog => app.close_action_dialog(),
+            Action::ConfirmDetach => app.confirm_detach(),
+            Action::CancelDetach => app.detach_pending = None,
+            Action::SetDetachDontShow(on) => {
+                if let Some(pending) = &mut app.detach_pending {
+                    pending.dont_show = on;
+                }
+            }
             Action::Retry(id) => {
                 if let Some(workspace) = app.workspace_mut() {
                     workspace.retry(id);
@@ -1643,6 +1658,52 @@ fn action_dialog(
     }
 }
 
+/// The notice before a tag or a commit is checked out and HEAD no longer
+/// points to a branch. Cancel has the focus first, and Escape means it.
+fn detach_notice_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let Some(pending) = &app.detach_pending else {
+        return;
+    };
+    let texts = &app.texts;
+    let mut args = FluentArgs::new();
+    args.set("target", pending.target.clone());
+    let title = texts.text_with(Msg::DetachTitle, Some(&args));
+    let check_out = texts.text(Msg::DetachCheckOut);
+    let cancel = texts.text(Msg::DialogCancel);
+    let dont_show = texts.text(Msg::DetachDontShow);
+    let mut ticked = pending.dont_show;
+    let outcome = components::dialog(ui.ctx(), Id::new("detach-notice"), &title, |ui| {
+        ui.label(texts.text(Msg::DetachBody));
+        ui.add_space(SHAPE.space[1]);
+        components::checkbox(ui, &mut ticked, &dont_show);
+        ui.add_space(SHAPE.space[2]);
+        let mut choice = None;
+        ui.horizontal(|ui| {
+            let go = components::Button::new(&check_out)
+                .kind(components::Kind::Primary)
+                .show(ui);
+            let stop = components::Button::new(&cancel).show(ui);
+            if ui.memory(|memory| memory.focused().is_none()) {
+                stop.request_focus();
+            }
+            if go.clicked() {
+                choice = Some(Action::ConfirmDetach);
+            } else if stop.clicked() {
+                choice = Some(Action::CancelDetach);
+            }
+        });
+        choice
+    });
+    if ticked != pending.dont_show {
+        actions.push(Action::SetDetachDontShow(ticked));
+    }
+    if let Some(choice) = outcome.inner {
+        actions.push(choice);
+    } else if outcome.escape {
+        actions.push(Action::CancelDetach);
+    }
+}
+
 /// The question before a tab or the window closes while a write action runs.
 /// Keep open is the default: it has the focus first, and Escape means it.
 fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -1838,6 +1899,13 @@ fn settings_sections(app: &App, dialog: &SettingsDialog, ui: &mut Ui, actions: &
             });
             ui.end_row();
         });
+
+    settings_section(ui, texts.text(Msg::SettingsBehaviour));
+    let mut notice = settings.detach_notice;
+    components::checkbox(ui, &mut notice, &texts.text(Msg::SettingsDetachNotice));
+    if notice != settings.detach_notice {
+        actions.push(Action::SetDetachNotice(notice));
+    }
 
     let language_title = settings_section(ui, texts.text(Msg::SettingsLanguage));
     let mut language = settings.language.clone();

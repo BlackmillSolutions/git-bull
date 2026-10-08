@@ -10,7 +10,9 @@ use eframe::egui::{
 };
 use gitbull_core::badges::{Badge, BadgeKind};
 use gitbull_core::graph::{GraphRow, uncommitted_rows};
-use gitbull_core::session::{BranchFilter, CommitGraph, History, LoadState, Session};
+use gitbull_core::session::{
+    BranchFilter, CheckoutRequest, CommitGraph, History, LoadState, Session,
+};
 use gitbull_core::store::Row;
 use gitbull_core::workspace::{Failure, View};
 use gitbull_git::commit_graph::WRITE_ARGS;
@@ -158,6 +160,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let name = app.texts.text(Msg::ViewHistory);
     let empty = app.texts.text(Msg::HistoryEmpty);
     let copy_label = app.texts.text(Msg::CopyFullHash);
+    let check_out_label = app.texts.text(Msg::CommitCheckOut);
     let titles = [
         Msg::ColumnGraph,
         Msg::ColumnDescription,
@@ -298,6 +301,15 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         .flatten()
         .any(|row| row < rows && list.commit(row).is_none());
 
+    // A double click or Enter on a commit checks it out; the row "Uncommitted
+    // changes" opens the File status view instead.
+    let activated_commit = output
+        .activated
+        .filter(|row| *row < rows)
+        .and_then(|row| list.commit(row))
+        .map(|row| session.history().store.id(row as Row));
+    let busy = session.action().is_some();
+
     let hash_of = |row: u64| {
         list.commit(row)
             .map(|row| session.history().store.id(row as Row).to_string())
@@ -316,8 +328,18 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             .map(|row| session.history().store.id(row as Row));
     }
     let menu_commit = view.commit_menu;
+    let mut check_out = None;
     output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
+            let entry = ui
+                .add_enabled_ui(!busy && menu_commit.is_some(), |ui| {
+                    components::menu_item(ui, None, &check_out_label, None)
+                })
+                .inner;
+            if entry.clicked() {
+                check_out = menu_commit;
+                ui.close();
+            }
             if components::menu_item(ui, None, &copy_label, None).clicked() {
                 if let Some(commit) = menu_commit {
                     ui.ctx().copy_text(commit.to_string());
@@ -331,6 +353,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     }
     if open_file_status {
         app.show_view(View::FileStatus);
+    }
+    if let Some(id) = activated_commit.or(check_out) {
+        app.checkout(CheckoutRequest::Commit(id));
     }
 }
 

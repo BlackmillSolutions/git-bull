@@ -34,6 +34,7 @@ fn switching_preserves_git_behaviour() {
     an_untracked_refusal(&git);
     a_failing_post_checkout_hook(&git);
     a_commit_id_detaches(&git);
+    an_annotated_tag_is_checked_out_as_its_commit(&git);
     a_branch_used_by_a_linked_worktree(&git);
     an_unknown_branch_keeps_gits_message(&git);
     arguments_that_git_could_take_as_options_never_start_git(&git);
@@ -169,6 +170,17 @@ fn a_commit_id_detaches(git: &Git) {
     let id = repo.git(&["rev-parse", "feature"]).trim().to_owned();
     go(git, &repo, CheckoutTarget::Commit(id.clone())).unwrap();
     assert_eq!(current(git, &repo), Head::Detached(id));
+}
+
+fn an_annotated_tag_is_checked_out_as_its_commit(git: &Git) {
+    let repo = repository();
+    repo.git(&["tag", "-a", "-m", "Release", "v2", "feature"]);
+    // The caller gives the commit that the references report for the tag.
+    let commit = repo.git(&["rev-parse", "v2^{commit}"]).trim().to_owned();
+    let tag_object = repo.git(&["rev-parse", "v2"]).trim().to_owned();
+    assert_ne!(commit, tag_object, "the tag is annotated");
+    go(git, &repo, CheckoutTarget::Commit(commit.clone())).unwrap();
+    assert_eq!(current(git, &repo), Head::Detached(commit));
 }
 
 fn a_branch_used_by_a_linked_worktree(git: &Git) {

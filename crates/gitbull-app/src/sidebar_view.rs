@@ -170,12 +170,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     if let Some(row) = output.activated.and_then(row_at) {
         activate(&row, sidebar, &mut actions, true);
     }
-    // Only branches and remote branches have a menu, so that other rows do
-    // not open an empty one. The menu acts on the branch it was opened
+    // Only branches, remote branches and tags have a menu, so that other rows
+    // do not open an empty one. The menu acts on the branch it was opened
     // for, and closes when a refresh removed it.
     let branch = |row: &SidebarRow| match row {
         SidebarRow::Reference {
-            section: Section::Branches | Section::Remotes,
+            section: Section::Branches | Section::Remotes | Section::Tags,
             name,
             ..
         } => Some(name.clone()),
@@ -192,9 +192,22 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     }
     if let Some(name) = sidebar_menu.clone() {
         let local = name.strip_prefix("refs/heads/").map(str::to_owned);
+        let tag = name.starts_with("refs/tags/");
         let checkable = !busy && checked_out.as_deref() != Some(name.as_str());
         output.response.context_menu(|ui| {
             components::menu(ui, |ui| {
+                if tag {
+                    let entry = ui
+                        .add_enabled_ui(!busy, |ui| {
+                            components::menu_item(ui, None, &texts.check_out, None)
+                        })
+                        .inner;
+                    if entry.clicked() {
+                        actions.push(SidebarAction::Checkout(CheckoutRequest::Tag(name.clone())));
+                        ui.close();
+                    }
+                    return;
+                }
                 if let Some(short) = &local {
                     let entry = ui
                         .add_enabled_ui(checkable, |ui| {
@@ -246,6 +259,14 @@ fn activate(
                     short.to_owned(),
                 )));
             }
+        }
+        // A tag is checked out like a branch, with the notice first.
+        SidebarRow::Reference {
+            section: Section::Tags,
+            name,
+            ..
+        } if open => {
+            actions.push(SidebarAction::Checkout(CheckoutRequest::Tag(name.clone())));
         }
         SidebarRow::Submodule {
             path,

@@ -403,53 +403,17 @@ fn cockpit_in_a_narrow_window() {
     image_snapshot_options(&image, "cockpit_narrow", &options());
 }
 
-/// The dialog of a checkout that local changes block, over the window of a
-/// repository, in `theme` and `interface`, in a window of `size` points. The
-/// files are many and one is long, so that the dialog has to scroll in the
-/// smallest window.
-fn blocked_checkout(
+/// A repository window over `backend`, in `theme` and `interface`, in a window
+/// of `size` points, settled and with the pointer outside.
+fn repository_window(
+    backend: FakeBackend,
     theme: ThemeSetting,
     interface: InterfaceSize,
     size: (f32, f32),
 ) -> Harness<'static, App> {
-    let root = path(&["work", "git-bull"]);
-    let branch = |name: &str, commit: &str| Reference {
-        name: format!("refs/heads/{name}"),
-        short: name.to_owned(),
-        kind: RefKind::Branch,
-        commit: Some(fake_id(commit).to_string()),
-        upstream: None,
-    };
-    let files: Vec<String> = [
-        "Cargo.toml",
-        "README.md",
-        "crates/gitbull-app/src/components.rs",
-        "crates/gitbull-app/src/ui.rs",
-        "crates/gitbull-core/src/session.rs",
-        "docs/adr/0008-write-actions-belong-to-the-session.md",
-        "openspec/changes/checkout-and-refs/tasks.md",
-        "crates/gitbull-git/tests/switch.rs",
-    ]
-    .iter()
-    .map(|file| (*file).to_owned())
-    .collect();
-    let backend = FakeBackend::default()
-        .with_repository(root.clone())
-        .with_history(
-            root.clone(),
-            vec![commit_line("b", &["a"]), commit_line("a", &[])],
-        )
-        .with_references(
-            root.clone(),
-            vec![branch("main", "b"), branch("feature/graph", "a")],
-        )
-        .with_checkout(
-            CheckoutTarget::Branch("feature/graph".to_owned()),
-            FakeWrite::Refused(Refusal::TrackedChanges(files)),
-        );
     let test = build(Setup {
         settings: Settings {
-            tabs: vec![root],
+            tabs: vec![path(&["work", "git-bull"])],
             active_tab: Some(0),
             theme,
             interface_size: interface,
@@ -470,6 +434,72 @@ fn blocked_checkout(
     settle_window(&mut harness);
     wait_for_references(&mut harness);
     harness
+}
+
+fn branch_reference(name: &str, commit: &str) -> Reference {
+    Reference {
+        name: format!("refs/heads/{name}"),
+        short: name.to_owned(),
+        kind: RefKind::Branch,
+        commit: Some(fake_id(commit).to_string()),
+        upstream: None,
+    }
+}
+
+/// The backend of the dialog snapshots: `main` and `feature/graph`, a tag, and
+/// a checkout of `feature/graph` that local changes block.
+fn dialog_backend() -> FakeBackend {
+    let root = path(&["work", "git-bull"]);
+    let files: Vec<String> = [
+        "Cargo.toml",
+        "README.md",
+        "crates/gitbull-app/src/components.rs",
+        "crates/gitbull-app/src/ui.rs",
+        "crates/gitbull-core/src/session.rs",
+        "docs/adr/0008-write-actions-belong-to-the-session.md",
+        "openspec/changes/checkout-and-refs/tasks.md",
+        "crates/gitbull-git/tests/switch.rs",
+    ]
+    .iter()
+    .map(|file| (*file).to_owned())
+    .collect();
+    FakeBackend::default()
+        .with_repository(root.clone())
+        .with_history(
+            root.clone(),
+            vec![commit_line("b", &["a"]), commit_line("a", &[])],
+        )
+        .with_references(
+            root,
+            vec![
+                branch_reference("main", "b"),
+                branch_reference("feature/graph", "a"),
+                Reference {
+                    name: "refs/tags/v1.0".to_owned(),
+                    short: "v1.0".to_owned(),
+                    kind: RefKind::Tag,
+                    commit: Some(fake_id("a").to_string()),
+                    upstream: None,
+                },
+            ],
+        )
+        .with_checkout(
+            CheckoutTarget::Branch("feature/graph".to_owned()),
+            FakeWrite::Refused(Refusal::TrackedChanges(files)),
+        )
+}
+
+/// The dialog of a checkout that local changes block, over the window of a
+/// repository, in `theme` and `interface`, in a window of `size` points. The
+/// files are many and one is long, so that the dialog has to scroll in the
+/// smallest window.
+fn blocked_checkout(
+    theme: ThemeSetting,
+    interface: InterfaceSize,
+    size: (f32, f32),
+) -> Harness<'static, App> {
+    let mut harness = repository_window(dialog_backend(), theme, interface, size);
+    harness
         .state_mut()
         .workspace_mut()
         .and_then(|workspace| workspace.active_mut())
@@ -481,6 +511,26 @@ fn blocked_checkout(
             .is_some()
     });
     // The pointer leaves the window, and the dialog has been laid out.
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+/// The notice before the tag `v1.0` is checked out and HEAD is detached.
+fn detach_notice(theme: ThemeSetting) -> Harness<'static, App> {
+    let mut harness = repository_window(
+        dialog_backend(),
+        theme,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    harness
+        .state_mut()
+        .checkout(CheckoutRequest::Tag("refs/tags/v1.0".to_owned()));
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Dialog, "Check out v1.0?")
+            .is_some()
+    });
     harness.event(eframe::egui::Event::PointerGone);
     harness.run();
     harness
@@ -530,4 +580,39 @@ fn checkout_dialog_in_the_smallest_window() {
     );
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "checkout_dialog_smallest", &options());
+}
+
+/// Scenarios "Notice is shown" of `checkout`.
+#[test]
+fn detach_notice_in_the_light_palette() {
+    let mut harness = detach_notice(ThemeSetting::Light);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "detach_notice_light", &options());
+}
+
+#[test]
+fn detach_notice_in_the_dark_palette() {
+    let mut harness = detach_notice(ThemeSetting::Dark);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "detach_notice_dark", &options());
+}
+
+/// Scenario "Appearance section" with the section "Behaviour" of `app-settings`.
+#[test]
+fn settings_dialog_with_the_section_behaviour() {
+    let mut harness = repository_window(
+        dialog_backend(),
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    harness
+        .get_by_role_and_label(Role::Button, "Settings")
+        .click();
+    harness.run();
+    harness.get_by_label("Behaviour");
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "settings_behaviour", &options());
 }

@@ -128,6 +128,18 @@ pub enum GitMessage {
     Busy(WriteAction),
 }
 
+/// A checkout of a tag or a commit that waits for the user's word, because
+/// HEAD will no longer point to a branch (spec `checkout`, requirement "Notice
+/// before detaching HEAD").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingDetach {
+    pub request: CheckoutRequest,
+    /// The tag, or the short hash, as the notice names it.
+    pub target: String,
+    /// The user ticked "Don't show this again".
+    pub dont_show: bool,
+}
+
 /// What the user is asked before something stops a write action that runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseQuestion {
@@ -390,6 +402,8 @@ pub struct App {
     pub(crate) close_question: Option<CloseQuestion>,
     /// The user chose to close the window although an action runs.
     pub(crate) close_confirmed: bool,
+    /// A checkout that waits for the notice before detaching HEAD.
+    pub(crate) detach_pending: Option<PendingDetach>,
     /// The window is to be told to close in this frame.
     pub(crate) send_close: bool,
     dirty: bool,
@@ -439,6 +453,7 @@ impl App {
             dialog: None,
             close_question: None,
             close_confirmed: false,
+            detach_pending: None,
             send_close: false,
             dirty: false,
             last_saved: Instant::now(),
@@ -518,6 +533,14 @@ impl App {
     pub fn set_system_title_bar(&mut self, system: bool) {
         if self.settings.system_title_bar != system {
             self.settings.system_title_bar = system;
+            self.dirty = true;
+        }
+    }
+
+    /// Sets whether a notice comes before a tag or a commit is checked out.
+    pub fn set_detach_notice(&mut self, show: bool) {
+        if self.settings.detach_notice != show {
+            self.settings.detach_notice = show;
             self.dirty = true;
         }
     }
@@ -976,12 +999,52 @@ impl App {
     /// Starts a checkout in the active tab. A tag that points to a tree is
     /// told apart by a notice; whatever else the session decides shows in the
     /// interface through the state of the tab.
-    pub(crate) fn checkout(&mut self, request: CheckoutRequest) {
+    ///
+    /// A tag or a commit detaches HEAD, so unless the user hid it, the notice
+    /// comes first, and the checkout waits for the answer. It does not come for
+    /// a checkout that cannot happen.
+    pub fn checkout(&mut self, request: CheckoutRequest) {
+        let detaching = !matches!(request, CheckoutRequest::Branch(_));
+        let show_notice = self.settings.detach_notice;
         let Some((session, _)) = self.active_view() else {
             return;
         };
-        if let CheckoutStart::NotACommit(tag) = session.start_checkout(request) {
-            self.notice = Some(Notice::NotACommit(tag));
+        match session.preview_checkout(&request) {
+            CheckoutStart::NotACommit(tag) => {
+                self.notice = Some(Notice::NotACommit(tag));
+            }
+            CheckoutStart::Busy | CheckoutStart::AlreadyThere => {}
+            CheckoutStart::Started if detaching && show_notice => {
+                let target = match &request {
+                    CheckoutRequest::Tag(full) => {
+                        full.strip_prefix("refs/tags/").unwrap_or(full).to_owned()
+                    }
+                    CheckoutRequest::Commit(id) => id.to_string().chars().take(7).collect(),
+                    CheckoutRequest::Branch(name) => name.clone(),
+                };
+                self.detach_pending = Some(PendingDetach {
+                    request,
+                    target,
+                    dont_show: false,
+                });
+            }
+            CheckoutStart::Started => {
+                session.start_checkout(request);
+            }
+        }
+    }
+
+    /// The user confirmed the notice: the checkout starts, and the notice is
+    /// hidden from then on when the user asked for it.
+    pub(crate) fn confirm_detach(&mut self) {
+        let Some(pending) = self.detach_pending.take() else {
+            return;
+        };
+        if pending.dont_show {
+            self.set_detach_notice(false);
+        }
+        if let Some((session, _)) = self.active_view() {
+            session.start_checkout(pending.request);
         }
     }
 
@@ -991,11 +1054,19 @@ impl App {
         let Some((session, view)) = self.active_view() else {
             return;
         };
-        let Some(Head::Branch(name)) = session.take_checked_out() else {
-            return;
-        };
-        view.sidebar.reveal(Section::Branches, &name);
-        self.select_in_sidebar(SidebarKey::Reference(format!("refs/heads/{name}")));
+        match session.take_checked_out() {
+            Some(Head::Branch(name)) => {
+                view.sidebar.reveal(Section::Branches, &name);
+                self.select_in_sidebar(SidebarKey::Reference(format!("refs/heads/{name}")));
+            }
+            // No branch is checked out: the list goes to the commit.
+            Some(Head::Detached(commit)) => {
+                if let Some(id) = ObjectId::from_hex(commit.as_bytes()) {
+                    self.navigate_to_commit(id);
+                }
+            }
+            None => {}
+        }
     }
 
     /// What the last write action of the active tab asks the user to see.

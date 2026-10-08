@@ -4,7 +4,7 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
-use eframe::egui::accesskit::Role;
+use eframe::egui::accesskit::{Role, Toggled};
 use eframe::egui::os::OperatingSystem;
 use eframe::egui::{Event, Key, Modifiers, MouseWheelUnit, Popup, TouchPhase, vec2};
 use egui_kittest::Harness;
@@ -611,4 +611,53 @@ fn the_path_is_applied_after_the_action() {
         harness.state().settings().git_path,
         Some(PathBuf::from("/opt/git/bin/git"))
     );
+}
+
+const DETACH_NOTICE: &str = "Show a notice before checking out a tag or a commit";
+
+#[test]
+fn the_switch_for_the_notice_is_on_by_default_in_the_section_behaviour() {
+    let test = build(Setup::default());
+    let mut harness = window(test.app);
+    harness.run();
+    open_dialog(&mut harness);
+    harness.get_by_label("Behaviour");
+    let switch = harness.get_by_role_and_label(Role::CheckBox, DETACH_NOTICE);
+    assert_eq!(switch.accesskit_node().toggled(), Some(Toggled::True));
+}
+
+#[test]
+fn turning_the_switch_off_hides_the_notice_and_survives_a_restart() {
+    let test = build(Setup::default());
+    let file = SettingsFile::new(test.dir.path().join("settings.toml"));
+    let mut harness = window(test.app);
+    harness.run();
+    open_dialog(&mut harness);
+    harness
+        .get_by_role_and_label(Role::CheckBox, DETACH_NOTICE)
+        .click();
+    harness.run();
+
+    assert!(!harness.state().settings().detach_notice);
+    harness.state_mut().save();
+    assert!(!file.load().settings.detach_notice);
+}
+
+#[test]
+fn turning_the_switch_on_brings_the_notice_back() {
+    let test = build(Setup {
+        settings: Settings {
+            detach_notice: false,
+            ..Settings::default()
+        },
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    harness.run();
+    open_dialog(&mut harness);
+    let switch = harness.get_by_role_and_label(Role::CheckBox, DETACH_NOTICE);
+    assert_eq!(switch.accesskit_node().toggled(), Some(Toggled::False));
+    switch.click();
+    harness.run();
+    assert!(harness.state().settings().detach_notice);
 }
