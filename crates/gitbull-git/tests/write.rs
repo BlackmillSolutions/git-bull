@@ -576,6 +576,7 @@ fn cancellation_stops_hooks_and_children(git: &Git) {
         wait_ready(&hook_ready);
         wait_ready(&child_ready);
         let (result_tx, result_rx) = mpsc::channel();
+        let cancelled_at = Instant::now();
         if drop_process {
             drop(process);
         } else {
@@ -585,11 +586,23 @@ fn cancellation_stops_hooks_and_children(git: &Git) {
             }));
         }
         let closed = output_rx.recv_timeout(Duration::from_secs(2)).is_ok();
-        let cancelled = drop_process
-            || matches!(
-                result_rx.recv_timeout(Duration::from_secs(2)),
-                Ok(Err(Error::Cancelled))
+        let closed_after = cancelled_at.elapsed();
+        let result = (!drop_process).then(|| result_rx.recv_timeout(Duration::from_secs(2)));
+        let cancelled = drop_process || matches!(result, Some(Ok(Err(Error::Cancelled))));
+        // Gather the evidence before the fixture is released.
+        let mut diagnosis = String::new();
+        if !cancelled {
+            diagnosis = format!(
+                "stdout closed after {closed_after:?}, first result {result:?} after {:?}; \
+                 processes left: {}",
+                cancelled_at.elapsed(),
+                surviving_processes()
             );
+            diagnosis.push_str(&format!(
+                "; result five seconds later: {:?}",
+                result_rx.recv_timeout(Duration::from_secs(5))
+            ));
+        }
         // Release and join before reporting failures: the emergency timeout
         // must never be mistaken for successful process-tree cancellation.
         drop(cleanup);
@@ -597,13 +610,35 @@ fn cancellation_stops_hooks_and_children(git: &Git) {
             closed,
             "descendants retained stdout after cancellation (drop={drop_process})"
         );
-        assert!(cancelled, "wait did not promptly report cancellation");
+        assert!(
+            cancelled,
+            "wait did not promptly report cancellation: {diagnosis}"
+        );
         assert!(!hook_after.exists(), "hook continued after cancellation");
         assert!(
             !child_after.exists(),
             "nested child continued after cancellation"
         );
     }
+}
+
+/// The fixture's shell and Git processes that are still alive, as
+/// `pid <- parent name command line`. Only gathered for a failure report.
+#[cfg(windows)]
+fn surviving_processes() -> String {
+    let script = r#"Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(git|sh|bash|sleep|touch|cat)(\.exe)?$' } | ForEach-Object { "$($_.ProcessId) <- $($_.ParentProcessId) $($_.Name) $($_.CommandLine)" }"#;
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_or_else(
+            |error| format!("unavailable: {error}"),
+            |output| String::from_utf8_lossy(&output.stdout).replace('\n', " | "),
+        )
+}
+
+#[cfg(not(windows))]
+fn surviving_processes() -> String {
+    String::from("not gathered on this system")
 }
 
 fn scripted_hook(repo: &TestRepo, marker: &Marker, name: &str, body: &str) {
