@@ -76,9 +76,9 @@ guards are marked as such and are expected to pass at once.
 
 ## 6. Remote branches
 
-- [ ] 6.1 Extend `switch.rs` tests with `a_remote_branch_without_a_local_twin_creates_a_tracking_branch`, `a_twin_that_follows_it_is_checked_out_and_not_moved` (behind and ahead), `a_twin_with_another_upstream_is_refused`, `a_twin_without_an_upstream_is_refused`, `folders_in_the_remote_name_are_kept` and `the_decision_uses_the_references_on_disk`; and `checkout.rs` with `double_click_on_a_remote_branch_checks_out_a_tracking_branch`, `a_name_taken_dialog_names_the_branch_and_its_upstream_and_offers_close` and `origin_head_offers_no_checkout`. Verify they fail with E0599 for `CheckoutTarget::RemoteBranch` and for the missing dialog.
-- [ ] 6.2 Implement `CheckoutTarget::RemoteBranch` with the fresh read of the references and the three outcomes of design decision 2, `Refusal` for a taken name, the dialog result in the session, the dialog with the single button Close, and the sidebar activation and menu entries of remote branches; find out how `origin/HEAD` is listed today (the format reads `%(symref)`) and make it offer no checkout. Verify the tests of 6.1 pass.
-- [ ] 6.3 Review the diff and commit as `feat(app): check out remote branches`; verify clippy for the host and the Windows target.
+- [x] 6.1 Extend `switch.rs` tests with `a_remote_branch_without_a_local_twin_creates_a_tracking_branch`, `a_twin_that_follows_it_is_checked_out_and_not_moved` (behind and ahead), `a_twin_with_another_upstream_is_refused`, `a_twin_without_an_upstream_is_refused`, `folders_in_the_remote_name_are_kept` and `the_decision_uses_the_references_on_disk`; and `checkout.rs` with `double_click_on_a_remote_branch_checks_out_a_tracking_branch`, `a_name_taken_dialog_names_the_branch_and_its_upstream_and_offers_close` and `origin_head_offers_no_checkout`. Verify they fail with E0599 for `CheckoutTarget::RemoteBranch` and for the missing dialog.
+- [x] 6.2 Implement `CheckoutTarget::RemoteBranch` with the fresh read of the references and the three outcomes of design decision 2, `Refusal` for a taken name, the dialog result in the session, the dialog with the single button Close, and the sidebar activation and menu entries of remote branches; find out how `origin/HEAD` is listed today (the format reads `%(symref)`) and make it offer no checkout. Verify the tests of 6.1 pass.
+- [x] 6.3 Review the diff and commit as `feat(app): check out remote branches`; verify clippy for the host and the Windows target.
 
 ## 7. Branches in other worktrees
 

@@ -12,7 +12,8 @@ use std::path::Path;
 use crate::cancel::CancelToken;
 use crate::error::Error;
 use crate::invoke::Git;
-use crate::refusal::WriteFailure;
+use crate::refs;
+use crate::refusal::{Refusal, WriteFailure};
 use crate::write::WriteHooks;
 
 /// What to check out.
@@ -23,6 +24,19 @@ pub enum CheckoutTarget {
     /// A commit by its full hash; HEAD is detached there. A tag is checked out
     /// as the commit it leads to.
     Commit(String),
+    /// A remote-tracking branch by its full name such as
+    /// `refs/remotes/origin/release/0.1`: it is checked out as a local branch
+    /// of the same name without the remote's, `release/0.1`.
+    RemoteBranch(String),
+}
+
+/// The name of the local branch that checking out the remote-tracking branch
+/// `remote_ref` leads to: `refs/remotes/origin/release/0.1` gives
+/// `release/0.1`. `None` for a name that is no remote-tracking branch.
+pub fn local_name_of(remote_ref: &str) -> Option<String> {
+    let rest = remote_ref.strip_prefix("refs/remotes/")?;
+    let (_remote, name) = rest.split_once('/')?;
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// Checks `target` out in the working tree at `repo`.
@@ -51,10 +65,62 @@ pub fn checkout(
             check_hash(id)?;
             vec!["switch", "--detach", id.as_str()]
         }
+        CheckoutTarget::RemoteBranch(remote) => return checkout_remote(git, repo, remote, cancel),
     };
     git.write(WriteHooks::Run)
         .run(repo, &args, None, cancel)
         .map_err(WriteFailure::from_error)
+}
+
+/// Checks a remote-tracking branch out as a local branch (spec `checkout`,
+/// requirement "Checking out a remote branch"). The references are read afresh,
+/// so that the decision is made on what is on disk now: with no local branch of
+/// that name, one is created with the remote branch as its upstream; one that
+/// follows the remote branch is switched to and not moved; any other is left
+/// as it is and reported.
+fn checkout_remote(
+    git: &Git,
+    repo: &Path,
+    remote_ref: &str,
+    cancel: &CancelToken,
+) -> Result<(), WriteFailure> {
+    let local = local_name_of(remote_ref)
+        .ok_or_else(|| invalid("git switch", "this is not a remote branch"))?;
+    check_name(&local)?;
+    let listed = refs::references(git, repo)?;
+    if !listed.iter().any(|reference| reference.name == remote_ref) {
+        return Err(WriteFailure::Failed(Error::Io {
+            command: "git switch".to_owned(),
+            source: io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{remote_ref} is not a remote branch any more"),
+            ),
+        }));
+    }
+    let full_local = format!("refs/heads/{local}");
+    let args: Vec<&str> = match listed.iter().find(|reference| reference.name == full_local) {
+        None => vec!["switch", "-c", local.as_str(), "--track", remote_ref],
+        Some(twin) if twin.upstream.as_deref() == Some(remote_ref) => {
+            vec!["switch", "--no-guess", local.as_str()]
+        }
+        Some(twin) => {
+            return Err(WriteFailure::Refused(Refusal::LocalBranchFollowsOther {
+                local,
+                upstream: twin.upstream.as_deref().map(short_ref),
+            }));
+        }
+    };
+    git.write(WriteHooks::Run)
+        .run(repo, &args, None, cancel)
+        .map_err(WriteFailure::from_error)
+}
+
+/// `origin/main` for `refs/remotes/origin/main`, `main` for `refs/heads/main`.
+fn short_ref(full: &str) -> String {
+    full.strip_prefix("refs/remotes/")
+        .or_else(|| full.strip_prefix("refs/heads/"))
+        .unwrap_or(full)
+        .to_owned()
 }
 
 fn invalid(command: &str, message: &str) -> WriteFailure {

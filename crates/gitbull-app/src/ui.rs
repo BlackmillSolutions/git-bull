@@ -1613,6 +1613,28 @@ fn action_dialog(
             texts.text(Msg::DialogCancel),
             false,
         ),
+        ActionDialog::LocalBranchFollowsOther {
+            target,
+            local,
+            upstream,
+        } => {
+            let mut args = FluentArgs::new();
+            args.set("local", local.clone());
+            let body = match upstream {
+                Some(upstream) => {
+                    args.set("upstream", upstream.clone());
+                    texts.text_with(Msg::CheckoutTwinFollows, Some(&args))
+                }
+                None => texts.text_with(Msg::CheckoutTwinFollowsNone, Some(&args)),
+            };
+            (
+                named(Msg::CheckoutBlockedTitle, target),
+                body,
+                String::new(),
+                texts.text(Msg::DialogClose),
+                false,
+            )
+        }
         ActionDialog::Failed { action, message } => (
             named(Msg::CheckoutFailedTitle, &target(action)),
             texts.text(Msg::CheckoutFailedBody),

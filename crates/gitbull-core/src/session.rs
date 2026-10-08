@@ -26,7 +26,7 @@ use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::Group;
-use gitbull_git::switch::CheckoutTarget;
+use gitbull_git::switch::{CheckoutTarget, local_name_of};
 use gitbull_git::{Backend, Error};
 
 use crate::badges::{self, Badge};
@@ -104,6 +104,10 @@ pub enum CheckoutRequest {
     Tag(String),
     /// A commit.
     Commit(ObjectId),
+    /// A remote branch, by its full name such as `refs/remotes/origin/feature`;
+    /// it is checked out as a local branch of the same name without the
+    /// remote's.
+    RemoteBranch(String),
 }
 
 /// What [`Session::start_checkout`] did.
@@ -126,6 +130,14 @@ pub enum ActionDialog {
     BlockedByChanges { target: String, files: Vec<String> },
     /// Untracked files would be overwritten; they have to be moved or removed.
     BlockedByUntracked { target: String, files: Vec<String> },
+    /// A local branch of the name of the remote branch exists and follows
+    /// another branch, or none; it was left as it is.
+    LocalBranchFollowsOther {
+        target: String,
+        local: String,
+        /// What it follows, such as `origin/other`.
+        upstream: Option<String>,
+    },
     /// Git failed, with its message in full.
     Failed { action: Action, message: String },
     /// Git reported a failure after it had done the action, as a failing
@@ -901,6 +913,21 @@ impl Session {
                 let short = id.chars().take(7).collect();
                 Ok((CheckoutTarget::Commit(id), short, expected))
             }
+            CheckoutRequest::RemoteBranch(full) => {
+                // Not a remote branch: nothing to check out.
+                let Some(local) = local_name_of(full) else {
+                    return Err(CheckoutStart::AlreadyThere);
+                };
+                let expected = Head::Branch(local.clone());
+                // Checked out already, and following this remote branch.
+                let follows = self
+                    .reference(&format!("refs/heads/{local}"))
+                    .is_some_and(|twin| twin.upstream.as_deref() == Some(full.as_str()));
+                if self.opened.head == expected && follows {
+                    return Err(CheckoutStart::AlreadyThere);
+                }
+                Ok((CheckoutTarget::RemoteBranch(full.clone()), local, expected))
+            }
         }
     }
 
@@ -961,6 +988,13 @@ impl Session {
             }
             Err(WriteFailure::Refused(Refusal::UntrackedFiles(files))) => {
                 Ended::Dialog(ActionDialog::BlockedByUntracked { target, files })
+            }
+            Err(WriteFailure::Refused(Refusal::LocalBranchFollowsOther { local, upstream })) => {
+                Ended::Dialog(ActionDialog::LocalBranchFollowsOther {
+                    target,
+                    local,
+                    upstream,
+                })
             }
             Err(WriteFailure::Refused(other)) => Ended::Failed(format!("{other:?}")),
             Err(WriteFailure::Failed(Error::Cancelled)) => Ended::Cancelled,
@@ -3065,5 +3099,131 @@ mod tests {
         );
         gate.open();
         wait_until(&mut session, idle);
+    }
+
+    fn remote_branch(short: &str, commit: &str) -> Reference {
+        Reference {
+            name: format!("refs/remotes/{short}"),
+            short: short.to_owned(),
+            kind: gitbull_git::refs::RefKind::RemoteBranch,
+            commit: Some(fake_id(commit).to_string()),
+            upstream: None,
+        }
+    }
+
+    #[test]
+    fn a_remote_branch_is_checked_out_as_its_local_branch() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_references(
+                root(),
+                vec![
+                    branch("main", "e"),
+                    remote_branch("origin/feature", "d"),
+                    remote_branch("origin/release/0.1", "b"),
+                ],
+            );
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        let request = CheckoutRequest::RemoteBranch("refs/remotes/origin/feature".to_owned());
+        assert_eq!(session.start_checkout(request), CheckoutStart::Started);
+        assert_eq!(
+            session.action(),
+            Some(&Action::Checkout {
+                target: "feature".to_owned()
+            })
+        );
+        wait_until(&mut session, idle);
+        assert_eq!(
+            probe.checkouts(),
+            [CheckoutTarget::RemoteBranch(
+                "refs/remotes/origin/feature".to_owned()
+            )]
+        );
+        assert_eq!(session.opened().head, Head::Branch("feature".to_owned()));
+
+        // The folders of the remote branch's name are kept.
+        let nested = CheckoutRequest::RemoteBranch("refs/remotes/origin/release/0.1".to_owned());
+        assert_eq!(session.start_checkout(nested), CheckoutStart::Started);
+        assert_eq!(
+            session.action(),
+            Some(&Action::Checkout {
+                target: "release/0.1".to_owned()
+            })
+        );
+        wait_until(&mut session, idle);
+    }
+
+    #[test]
+    fn a_remote_branch_whose_twin_is_checked_out_and_follows_it_changes_nothing() {
+        let mut twin = branch("feature", "d");
+        twin.upstream = Some("refs/remotes/origin/feature".to_owned());
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_references(
+                root(),
+                vec![
+                    branch("main", "e"),
+                    twin,
+                    remote_branch("origin/feature", "d"),
+                ],
+            )
+            .with_head(root(), Head::Branch("feature".to_owned()));
+        let mut session = ready(backend);
+        // The session learns where HEAD is by reading it.
+        session.refresh();
+        wait_until(&mut session, |s| {
+            s.opened().head == Head::Branch("feature".to_owned())
+        });
+        let request = CheckoutRequest::RemoteBranch("refs/remotes/origin/feature".to_owned());
+        assert_eq!(session.start_checkout(request), CheckoutStart::AlreadyThere);
+    }
+
+    #[test]
+    fn a_twin_that_follows_something_else_asks_for_a_dialog() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_references(root(), vec![branch("main", "e")])
+            .with_checkout(
+                CheckoutTarget::RemoteBranch("refs/remotes/origin/feature".to_owned()),
+                FakeWrite::Refused(Refusal::LocalBranchFollowsOther {
+                    local: "feature".to_owned(),
+                    upstream: Some("origin/other".to_owned()),
+                }),
+            )
+            .with_checkout(
+                CheckoutTarget::RemoteBranch("refs/remotes/origin/lone".to_owned()),
+                FakeWrite::Refused(Refusal::LocalBranchFollowsOther {
+                    local: "lone".to_owned(),
+                    upstream: None,
+                }),
+            );
+        let mut session = ready(backend);
+        session.start_checkout(CheckoutRequest::RemoteBranch(
+            "refs/remotes/origin/feature".to_owned(),
+        ));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.dialog(),
+            Some(&ActionDialog::LocalBranchFollowsOther {
+                target: "feature".to_owned(),
+                local: "feature".to_owned(),
+                upstream: Some("origin/other".to_owned()),
+            })
+        );
+        assert_eq!(session.opened().head, Head::Branch("main".to_owned()));
+        session.close_dialog();
+        session.start_checkout(CheckoutRequest::RemoteBranch(
+            "refs/remotes/origin/lone".to_owned(),
+        ));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.dialog(),
+            Some(&ActionDialog::LocalBranchFollowsOther {
+                target: "lone".to_owned(),
+                local: "lone".to_owned(),
+                upstream: None,
+            })
+        );
     }
 }

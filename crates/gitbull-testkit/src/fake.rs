@@ -31,7 +31,7 @@ use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
 use gitbull_git::summary::Summary;
-use gitbull_git::switch::CheckoutTarget;
+use gitbull_git::switch::{CheckoutTarget, local_name_of};
 use gitbull_git::uncommitted::Uncommitted;
 use gitbull_git::version::Capabilities;
 use gitbull_git::worktrees::Worktree;
@@ -956,6 +956,9 @@ impl Backend for FakeBackend {
         let moved = match target {
             CheckoutTarget::Branch(name) => Head::Branch(name.clone()),
             CheckoutTarget::Commit(id) => Head::Detached(id.clone()),
+            CheckoutTarget::RemoteBranch(remote) => {
+                Head::Branch(local_name_of(remote).unwrap_or_else(|| remote.clone()))
+            }
         };
         let failed = |stderr: String| {
             WriteFailure::Failed(Error::CommandFailed {

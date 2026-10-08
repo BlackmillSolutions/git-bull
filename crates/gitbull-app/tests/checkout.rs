@@ -232,9 +232,21 @@ fn references() -> Vec<Reference> {
         branch("hook", "c"),
         branch("main", "e"),
         branch("side", "x"),
+        remote("origin/release/0.1", "b"),
+        remote("origin/topic", "d"),
         tag("v1.0", Some("c")),
         tag("tree-tag", None),
     ]
+}
+
+fn remote(short: &str, commit: &str) -> Reference {
+    Reference {
+        name: format!("refs/remotes/{short}"),
+        short: short.to_owned(),
+        kind: RefKind::RemoteBranch,
+        commit: Some(fake_id(commit).to_string()),
+        upstream: None,
+    }
 }
 
 /// One repository with `main` checked out and a few branches.
@@ -939,4 +951,77 @@ fn the_uncommitted_row_still_opens_file_status() {
         .map(|tab| tab.view());
     assert_eq!(view, Some(gitbull_core::workspace::View::FileStatus));
     assert!(probe.checkouts().is_empty());
+}
+
+// ---- remote branches (spec `checkout`)
+
+#[test]
+fn double_click_on_a_remote_branch_checks_out_a_tracking_branch() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click(&mut harness, "0.1");
+    settle_action(&mut harness);
+    assert_eq!(
+        probe.checkouts(),
+        [CheckoutTarget::RemoteBranch(
+            "refs/remotes/origin/release/0.1".to_owned()
+        )]
+    );
+    assert_eq!(head(&harness), Head::Branch("release/0.1".to_owned()));
+}
+
+#[test]
+fn the_menu_of_a_remote_branch_offers_check_out_and_show_only() {
+    let mut harness = open(backend());
+    right_click(&mut harness, "0.1");
+    assert!(
+        !harness
+            .get_by_label("Check out")
+            .accesskit_node()
+            .is_disabled()
+    );
+    harness.get_by_label("Show only this branch");
+}
+
+#[test]
+fn a_name_taken_dialog_names_the_branch_and_its_upstream_and_offers_close() {
+    let backend = backend().with_checkout(
+        CheckoutTarget::RemoteBranch("refs/remotes/origin/topic".to_owned()),
+        FakeWrite::Refused(Refusal::LocalBranchFollowsOther {
+            local: "topic".to_owned(),
+            upstream: Some("origin/other".to_owned()),
+        }),
+    );
+    let mut harness = open(backend);
+    double_click(&mut harness, "topic");
+    settle_action(&mut harness);
+    harness.run();
+    harness.get_by_role_and_label(Role::Dialog, "Cannot check out topic");
+    harness.get_by_label_contains("The local branch topic already exists and follows origin/other");
+    harness.get_by_role_and_label(Role::Button, "Close");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Cancel")
+            .is_none()
+    );
+    assert_eq!(head(&harness), Head::Branch("main".to_owned()));
+}
+
+#[test]
+fn a_twin_without_an_upstream_is_named_as_following_nothing() {
+    let backend = backend().with_checkout(
+        CheckoutTarget::RemoteBranch("refs/remotes/origin/topic".to_owned()),
+        FakeWrite::Refused(Refusal::LocalBranchFollowsOther {
+            local: "topic".to_owned(),
+            upstream: None,
+        }),
+    );
+    let mut harness = open(backend);
+    right_click(&mut harness, "topic");
+    harness.get_by_label("Check out").click();
+    harness.run();
+    settle_action(&mut harness);
+    harness.run();
+    harness.get_by_label_contains("The local branch topic already exists and follows no branch");
 }

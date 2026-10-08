@@ -208,6 +208,19 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
                     }
                     return;
                 }
+                if name.starts_with("refs/remotes/") {
+                    let entry = ui
+                        .add_enabled_ui(!busy, |ui| {
+                            components::menu_item(ui, None, &texts.check_out, None)
+                        })
+                        .inner;
+                    if entry.clicked() {
+                        actions.push(SidebarAction::Checkout(CheckoutRequest::RemoteBranch(
+                            name.clone(),
+                        )));
+                        ui.close();
+                    }
+                }
                 if let Some(short) = &local {
                     let entry = ui
                         .add_enabled_ui(checkable, |ui| {
@@ -267,6 +280,16 @@ fn activate(
             ..
         } if open => {
             actions.push(SidebarAction::Checkout(CheckoutRequest::Tag(name.clone())));
+        }
+        // A remote branch is checked out as a local branch of its name.
+        SidebarRow::Reference {
+            section: Section::Remotes,
+            name,
+            ..
+        } if open => {
+            actions.push(SidebarAction::Checkout(CheckoutRequest::RemoteBranch(
+                name.clone(),
+            )));
         }
         SidebarRow::Submodule {
             path,

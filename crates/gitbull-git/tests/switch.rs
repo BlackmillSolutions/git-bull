@@ -7,6 +7,7 @@ use std::io::Read;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::head::{Head, head};
 use gitbull_git::locate::{Os, SystemProbe, locate_git};
+use gitbull_git::refs::references;
 use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::switch::{CheckoutTarget, checkout};
 use gitbull_git::{Error, Git, WriteHooks};
@@ -39,6 +40,14 @@ fn switching_preserves_git_behaviour() {
     an_unknown_branch_keeps_gits_message(&git);
     arguments_that_git_could_take_as_options_never_start_git(&git);
     switch_c_at_a_conflicting_commit_leaves_no_branch(&git);
+    a_remote_branch_without_a_local_twin_creates_a_tracking_branch(&git);
+    folders_in_the_remote_name_are_kept(&git);
+    a_twin_that_follows_it_is_checked_out_and_not_moved(&git);
+    a_twin_with_another_upstream_is_refused(&git);
+    a_twin_without_an_upstream_is_refused(&git);
+    the_decision_uses_the_references_on_disk(&git);
+    a_remote_branch_that_is_gone_fails_with_a_message(&git);
+    origin_head_is_not_listed(&git);
 }
 
 /// `main` has `file.txt` and `notes.txt`. `feature` changes `file.txt` and adds
@@ -275,4 +284,168 @@ fn switch_c_at_a_conflicting_commit_leaves_no_branch(git: &Git) {
     }
     assert_eq!(repo.git(&["branch", "--list", "newbranch"]).trim(), "");
     assert_eq!(read(&repo, "file.txt"), "mine\n");
+}
+
+/// A repository that follows `source`: `main` is checked out and tracks
+/// `origin/main`; `origin/feature`, `origin/calm` and `origin/release/0.1` are
+/// remote branches without local twins.
+fn follower() -> (TestRepo, TestRepo) {
+    let source = repository();
+    source.git(&["branch", "release/0.1", "calm"]);
+    let work = TestRepo::new();
+    work.config("user.name", "Switch Test");
+    work.config("user.email", "switch@example.com");
+    work.config("commit.gpgsign", "false");
+    work.config("maintenance.auto", "false");
+    work.config("gc.auto", "0");
+    work.git(&["remote", "add", "origin", &source.path().to_string_lossy()]);
+    work.git(&["fetch", "--quiet", "origin"]);
+    work.git(&[
+        "checkout",
+        "--quiet",
+        "-b",
+        "main",
+        "--track",
+        "origin/main",
+    ]);
+    (source, work)
+}
+
+fn remote(name: &str) -> CheckoutTarget {
+    CheckoutTarget::RemoteBranch(format!("refs/remotes/origin/{name}"))
+}
+
+fn upstream_of(repo: &TestRepo, branch: &str) -> String {
+    repo.git(&["config", "--get", &format!("branch.{branch}.merge")])
+        .trim()
+        .to_owned()
+}
+
+fn a_remote_branch_without_a_local_twin_creates_a_tracking_branch(git: &Git) {
+    let (_source, work) = follower();
+    go(git, &work, remote("feature")).unwrap();
+    assert_eq!(current(git, &work), Head::Branch("feature".to_owned()));
+    assert_eq!(
+        work.git(&["rev-parse", "feature"]),
+        work.git(&["rev-parse", "origin/feature"])
+    );
+    assert_eq!(upstream_of(&work, "feature"), "refs/heads/feature");
+    assert_eq!(
+        work.git(&["config", "--get", "branch.feature.remote"])
+            .trim(),
+        "origin"
+    );
+    assert_eq!(read(&work, "file.txt"), "feature\n");
+}
+
+fn folders_in_the_remote_name_are_kept(git: &Git) {
+    let (_source, work) = follower();
+    go(git, &work, remote("release/0.1")).unwrap();
+    assert_eq!(current(git, &work), Head::Branch("release/0.1".to_owned()));
+    assert_eq!(upstream_of(&work, "release/0.1"), "refs/heads/release/0.1");
+}
+
+fn a_twin_that_follows_it_is_checked_out_and_not_moved(git: &Git) {
+    // Behind: the twin points to an older commit than the remote branch.
+    let (_source, work) = follower();
+    let older = work
+        .git(&["rev-parse", "origin/feature~1"])
+        .trim()
+        .to_owned();
+    work.git(&["branch", "--track", "feature", "origin/feature"]);
+    work.git(&["update-ref", "refs/heads/feature", &older]);
+    go(git, &work, remote("feature")).unwrap();
+    assert_eq!(current(git, &work), Head::Branch("feature".to_owned()));
+    assert_eq!(work.git(&["rev-parse", "feature"]).trim(), older);
+
+    // Ahead: the twin has a commit of its own.
+    let (_source, mut work) = follower();
+    work.git(&["branch", "--track", "feature", "origin/feature"]);
+    work.git(&["switch", "--quiet", "feature"]);
+    work.write("own.txt", "own\n");
+    let own = work.commit("Own");
+    work.git(&["switch", "--quiet", "main"]);
+    go(git, &work, remote("feature")).unwrap();
+    assert_eq!(current(git, &work), Head::Branch("feature".to_owned()));
+    assert_eq!(work.git(&["rev-parse", "feature"]).trim(), own);
+}
+
+fn a_twin_with_another_upstream_is_refused(git: &Git) {
+    let (_source, work) = follower();
+    work.git(&["branch", "--track", "feature", "origin/calm"]);
+    match go(git, &work, remote("feature")) {
+        Err(WriteFailure::Refused(Refusal::LocalBranchFollowsOther { local, upstream })) => {
+            assert_eq!(local, "feature");
+            assert_eq!(upstream.as_deref(), Some("origin/calm"));
+        }
+        other => panic!("expected a refusal for the twin, got {other:?}"),
+    }
+    assert_eq!(current(git, &work), Head::Branch("main".to_owned()));
+    assert_eq!(
+        work.git(&["rev-parse", "feature"]),
+        work.git(&["rev-parse", "origin/calm"])
+    );
+}
+
+fn a_twin_without_an_upstream_is_refused(git: &Git) {
+    let (_source, work) = follower();
+    work.git(&["branch", "--no-track", "feature", "origin/feature"]);
+    match go(git, &work, remote("feature")) {
+        Err(WriteFailure::Refused(Refusal::LocalBranchFollowsOther { local, upstream })) => {
+            assert_eq!(local, "feature");
+            assert_eq!(upstream, None);
+        }
+        other => panic!("expected a refusal for the twin, got {other:?}"),
+    }
+    assert_eq!(current(git, &work), Head::Branch("main".to_owned()));
+}
+
+/// The caller may have listed the references before the twin appeared; the
+/// decision is made on what is on disk when the checkout runs.
+fn the_decision_uses_the_references_on_disk(git: &Git) {
+    let (_source, work) = follower();
+    let listed = references(git, work.path()).unwrap();
+    assert!(listed.iter().all(|reference| reference.short != "feature"));
+    work.git(&["branch", "--track", "feature", "origin/calm"]);
+    assert!(matches!(
+        go(git, &work, remote("feature")),
+        Err(WriteFailure::Refused(
+            Refusal::LocalBranchFollowsOther { .. }
+        ))
+    ));
+}
+
+fn a_remote_branch_that_is_gone_fails_with_a_message(git: &Git) {
+    let (_source, work) = follower();
+    let result = go(git, &work, remote("gone"));
+    assert!(
+        matches!(
+            &result,
+            Err(WriteFailure::Failed(Error::Io { source, .. }))
+                if source.kind() == std::io::ErrorKind::NotFound
+        ),
+        "{result:?}"
+    );
+    assert_eq!(current(git, &work), Head::Branch("main".to_owned()));
+}
+
+fn origin_head_is_not_listed(git: &Git) {
+    let (_source, work) = follower();
+    work.git(&["remote", "set-head", "origin", "main"]);
+    assert!(
+        work.git(&["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .contains("origin/main")
+    );
+    let listed = references(git, work.path()).unwrap();
+    assert!(
+        listed
+            .iter()
+            .all(|reference| reference.name != "refs/remotes/origin/HEAD"),
+        "{listed:?}"
+    );
+    assert!(
+        listed
+            .iter()
+            .any(|reference| reference.name == "refs/remotes/origin/main")
+    );
 }

@@ -1004,7 +1004,11 @@ impl App {
     /// comes first, and the checkout waits for the answer. It does not come for
     /// a checkout that cannot happen.
     pub fn checkout(&mut self, request: CheckoutRequest) {
-        let detaching = !matches!(request, CheckoutRequest::Branch(_));
+        // Only a tag or a commit leaves HEAD without a branch.
+        let detaching = matches!(
+            request,
+            CheckoutRequest::Tag(_) | CheckoutRequest::Commit(_)
+        );
         let show_notice = self.settings.detach_notice;
         let Some((session, _)) = self.active_view() else {
             return;
@@ -1021,6 +1025,7 @@ impl App {
                     }
                     CheckoutRequest::Commit(id) => id.to_string().chars().take(7).collect(),
                     CheckoutRequest::Branch(name) => name.clone(),
+                    CheckoutRequest::RemoteBranch(full) => full.clone(),
                 };
                 self.detach_pending = Some(PendingDetach {
                     request,

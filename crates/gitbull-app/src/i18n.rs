@@ -211,6 +211,8 @@ messages! {
     CheckoutFailedBody => "checkout-failed-body",
     CheckoutHookTitle => "checkout-hook-title",
     CheckoutHookBody => "checkout-hook-body",
+    CheckoutTwinFollows => "checkout-twin-follows",
+    CheckoutTwinFollowsNone => "checkout-twin-follows-none",
     GraphCancel => "graph-cancel",
     GraphGenerating => "graph-generating",
     GraphFailed => "graph-failed",
