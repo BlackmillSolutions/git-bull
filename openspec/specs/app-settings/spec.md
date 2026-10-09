@@ -12,8 +12,8 @@ interface.
 git-bull SHALL persist the following in one file in the operating system's
 configuration directory for applications: theme, colour vision, interface
 size, whether to use the system title bar, whether the diff shows invisible
-characters, whether file lists show a tree of folders, language, the path
-to the Git executable, recently opened and pinned repositories with the
+characters, whether file lists show a tree of folders, whether to show the notice before
+checking out a tag or a commit, language, the path to the Git executable, recently opened and pinned repositories with the
 worktrees last found in them and the base branch the user set for a
 repository, open tabs in their order and the active tab,
 which may be the home tab, window size and position, divider positions and
@@ -76,6 +76,10 @@ saved settings; the other settings SHALL still be saved.
 #### Scenario: Base set through another path of the repository
 - **WHEN** the recently opened repositories name a repository by a path written as Git writes it, the user pinned it under its path as the file system writes it, and set its base in the home tab
 - **THEN** the base applies to the repository whichever of its paths lists it, and is kept once in the settings
+
+#### Scenario: Settings file without the setting for the notice
+- **WHEN** git-bull starts with a settings file that does not say whether to show the notice before checking out a tag or a commit
+- **THEN** the notice is shown, and every other setting from the file is kept
 
 ### Requirement: Recently opened repositories
 git-bull SHALL remember the 20 most recently opened repositories, most
@@ -278,3 +282,43 @@ settings dialog.
 #### Scenario: Largest size
 - **WHEN** the interface size is 150 % and the user presses Ctrl+Plus
 - **THEN** the interface size stays 150 %
+
+### Requirement: Notice before detaching HEAD
+The setting "Show a notice before checking out a tag or a commit" SHALL decide
+whether git-bull shows the notice of requirement "Notice before detaching HEAD" of
+`checkout`. It SHALL be on by default, and the settings dialog SHALL offer it as a
+switch in a section "Behaviour". The choice not to show the notice again, made in
+the notice itself, SHALL turn the switch off, and turning the switch on again
+SHALL bring the notice back. The setting SHALL be saved without user action.
+
+#### Scenario: On by default
+- **WHEN** git-bull starts without a settings file
+- **THEN** the switch in the section "Behaviour" of the settings dialog is on
+
+#### Scenario: Hidden in the notice
+- **WHEN** the user ticks "Don't show this again" in the notice and chooses Check out
+- **THEN** the switch in the settings dialog is off, and it stays off after a restart
+
+#### Scenario: Brought back in the dialog
+- **WHEN** the switch is off and the user turns it on in the settings dialog
+- **THEN** the next checkout of a tag or a commit shows the notice
+
+#### Scenario: Turned off in the dialog
+- **WHEN** the user turns the switch off in the settings dialog
+- **THEN** the next checkout of a tag or a commit happens without the notice
+
+### Requirement: Git path while a write action runs
+While a write action runs in any tab (checking out, creating a branch or a tag),
+the settings dialog SHALL NOT apply another Git executable, because applying it
+opens every tab again and would stop the action. It SHALL keep the previous value
+and show a message that names the action and asks the user to wait for it. When no
+write action runs, a valid path SHALL be applied as before.
+
+#### Scenario: Another path during a checkout
+- **WHEN** a checkout runs in a tab and the user enters the path of another valid Git executable in the settings dialog
+- **THEN** the dialog shows a message that a checkout is running and the path is not applied
+- **AND** the checkout runs on
+
+#### Scenario: Path applied after the action
+- **WHEN** the action has ended and the user applies the same path again
+- **THEN** git-bull uses that executable from then on
