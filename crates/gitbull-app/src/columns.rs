@@ -1,7 +1,6 @@
-//! The columns of a list with headers: a leading column at the left, the
-//! Description, which takes the rest, and trailing columns at the right.
-//! The edge of each column towards the Description can be dragged in the
-//! header (spec `application-shell`, requirement "Main window areas").
+//! Shared ordered columns for Commit and File history. Description fills
+//! spare room, while dragging a boundary transfers width between its two
+//! neighbouring visible columns (spec `application-shell`).
 
 use eframe::egui::{
     Align, CursorIcon, Id, Label, Layout, Rangef, Rect, Response, RichText, Sense, Ui, UiBuilder,
@@ -14,8 +13,10 @@ use crate::virtual_list::{self, SCROLLBAR_WIDTH};
 pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 /// The part of the edge between two headers that can be dragged.
 const HANDLE_WIDTH: f32 = 8.0;
-/// The width a drag leaves the Description at least.
+/// Base Description width; History adds title padding and reference space.
 pub(crate) const MIN_DESCRIPTION: f32 = 120.0;
+pub(crate) const HORIZONTAL_SCROLLBAR_HEIGHT: f32 = 10.0;
+const MIN_HORIZONTAL_THUMB: f32 = 24.0;
 
 /// A column's identity is independent of its current position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -67,8 +68,7 @@ impl ColumnSpec {
     }
 }
 
-/// The small, ordered set of columns in one table. The old `Widths` API is
-/// kept until both list views have migrated to this layout.
+/// The small, ordered set of columns in one table.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct OrderedColumns<const N: usize> {
     pub(crate) columns: [ColumnSpec; N],
@@ -81,6 +81,21 @@ pub(crate) struct ColumnGeometry {
     pub(crate) offset: f32,
 }
 
+pub(crate) struct OrderedHeader {
+    pub(crate) geometry: ColumnGeometry,
+    pub(crate) viewport_width: f32,
+    pub(crate) horizontal: bool,
+    pub(crate) dragging: bool,
+    pub(crate) finished: bool,
+    pub(crate) menu_action: Option<HeaderMenuAction>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HeaderMenuAction {
+    Toggle(ColumnId),
+    Reset,
+}
+
 impl ColumnGeometry {
     pub(crate) fn span(&self, id: ColumnId) -> Option<Rangef> {
         self.spans[id.index()]
@@ -89,6 +104,121 @@ impl ColumnGeometry {
     pub(crate) fn cell(&self, id: ColumnId, row: Rect) -> Option<Rect> {
         self.span(id)
             .map(|span| Rect::from_x_y_ranges(span.min..=span.max, row.y_range()))
+    }
+}
+
+/// Per-tab horizontal position, independent of the virtual list's f64
+/// vertical position. Both header and rows resolve their cells from it.
+#[derive(Default)]
+pub(crate) struct HorizontalScroll {
+    pub(crate) offset: f32,
+    grab: Option<f32>,
+}
+
+impl HorizontalScroll {
+    pub(crate) fn clamp(&mut self, content_width: f32, viewport_width: f32) -> bool {
+        let before = self.offset;
+        self.offset = self
+            .offset
+            .clamp(0.0, (content_width - viewport_width).max(0.0));
+        self.offset != before
+    }
+
+    pub(crate) fn scroll_by(
+        &mut self,
+        delta: f32,
+        content_width: f32,
+        viewport_width: f32,
+    ) -> bool {
+        let before = self.offset;
+        self.offset = (self.offset + delta).clamp(0.0, (content_width - viewport_width).max(0.0));
+        self.offset != before
+    }
+
+    pub(crate) fn wheel(&mut self, ui: &Ui, area: Rect, content_width: f32, viewport_width: f32) {
+        if !ui
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|pointer| area.contains(pointer))
+        {
+            return;
+        }
+        let delta = ui.input(|input| {
+            if input.modifiers.command {
+                return 0.0;
+            }
+            let scroll = input.smooth_scroll_delta;
+            if scroll.x != 0.0 {
+                scroll.x
+            } else if input.modifiers.shift {
+                scroll.y
+            } else {
+                0.0
+            }
+        });
+        if self.scroll_by(-delta, content_width, viewport_width) {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    pub(crate) fn bar(&mut self, ui: &mut Ui, id: Id, content_width: f32, viewport_width: f32) {
+        self.clamp(content_width, viewport_width);
+        let (full, _) = ui.allocate_exact_size(
+            vec2(ui.available_width(), HORIZONTAL_SCROLLBAR_HEIGHT),
+            Sense::hover(),
+        );
+        let track = Rect::from_min_size(
+            full.min,
+            vec2(viewport_width.min(full.width()), full.height()),
+        );
+        let end = (content_width - viewport_width).max(0.0);
+        if end == 0.0 || track.width() <= 0.0 {
+            return;
+        }
+        let thumb_width = (viewport_width / content_width * track.width()).clamp(
+            MIN_HORIZONTAL_THUMB.min(track.width() * 0.8),
+            track.width() * 0.95,
+        );
+        let travel = track.width() - thumb_width;
+        let thumb = Rect::from_min_size(
+            pos2(track.left() + self.offset / end * travel, track.top()),
+            vec2(thumb_width, track.height()),
+        );
+        let track_response = ui.interact(track, id.with("track"), Sense::click());
+        let thumb_response = ui.interact(thumb, id.with("thumb"), Sense::drag());
+        if thumb_response.drag_started() {
+            self.grab = ui
+                .input(|input| input.pointer.press_origin())
+                .map(|origin| origin.x - thumb.left());
+        }
+        if thumb_response.dragged()
+            && let Some(pointer) = thumb_response.interact_pointer_pos()
+        {
+            let grab = self.grab.unwrap_or(pointer.x - thumb.left());
+            self.offset = ((pointer.x - grab - track.left()) / travel).clamp(0.0, 1.0) * end;
+        }
+        if thumb_response.drag_stopped() {
+            self.grab = None;
+        }
+        if track_response.clicked()
+            && let Some(pointer) = track_response.interact_pointer_pos()
+            && !thumb.contains(pointer)
+        {
+            self.offset =
+                ((pointer.x - track.left() - thumb_width / 2.0) / travel).clamp(0.0, 1.0) * end;
+        }
+        let visuals = ui.visuals();
+        ui.painter()
+            .rect_filled(track, 3.0, visuals.widgets.noninteractive.bg_fill);
+        ui.painter().rect_filled(
+            thumb,
+            3.0,
+            if thumb_response.hovered() || thumb_response.dragged() {
+                visuals.widgets.hovered.bg_fill
+            } else {
+                visuals.widgets.inactive.bg_fill
+            },
+        );
     }
 }
 
@@ -120,6 +250,45 @@ impl<const N: usize> OrderedColumns<N> {
         }
     }
 
+    /// Moves a column to the insertion slot marked by the pointer.
+    pub(crate) fn move_to_x(&mut self, id: ColumnId, x: f32, geometry: &ColumnGeometry) -> bool {
+        let before = self
+            .columns
+            .iter()
+            .filter(|column| column.visible && column.id != id)
+            .find(|column| {
+                geometry
+                    .span(column.id)
+                    .is_some_and(|span| x < (span.min + span.max) / 2.0)
+            })
+            .map(|column| column.id);
+        let old = *self;
+        if let Some(before) = before {
+            self.move_before(id, before);
+        } else if let Some(from) = self.columns.iter().position(|column| column.id == id)
+            && let Some(last) = self.columns.iter().rposition(|column| column.visible)
+            && from < last
+        {
+            self.columns[from..=last].rotate_left(1);
+        }
+        *self != old
+    }
+
+    /// The width needed after Description has given up all its flexible room.
+    pub(crate) fn minimum_content_width(&self, description_min: f32) -> f32 {
+        self.columns
+            .iter()
+            .filter(|column| column.visible)
+            .map(|column| {
+                if column.id == ColumnId::Description {
+                    column.width.max(column.minimum(description_min))
+                } else {
+                    column.width.clamp(column.range.min, column.range.max)
+                }
+            })
+            .sum()
+    }
+
     /// Computes all x positions once; rows only substitute their own y range.
     pub(crate) fn geometry(
         &self,
@@ -145,6 +314,7 @@ impl<const N: usize> OrderedColumns<N> {
         if let Some(index) = description {
             let column = self.columns[index];
             widths[index] = (viewport.width() - others)
+                .max(column.width)
                 .max(column.minimum(description_min))
                 .min(column.range.max);
         }
@@ -207,6 +377,211 @@ impl<const N: usize> OrderedColumns<N> {
     }
 }
 
+/// Header and row viewport size after reserving the vertical scrollbar and,
+/// where needed, a horizontal bar. The two decisions converge in two steps.
+fn list_viewport(rows: u64, height: f32, width: f32, required_width: f32) -> (f32, bool) {
+    let vertical = virtual_list::scrolls(rows, height);
+    let first_width = width - if vertical { SCROLLBAR_WIDTH } else { 0.0 };
+    let horizontal = required_width > first_width;
+    let vertical = vertical
+        || (horizontal && virtual_list::scrolls(rows, height - HORIZONTAL_SCROLLBAR_HEIGHT));
+    let viewport_width = width - if vertical { SCROLLBAR_WIDTH } else { 0.0 };
+    (viewport_width.max(0.0), horizontal)
+}
+
+/// A header for columns addressed by identity. Its rectangles are returned
+/// for the rows, so neither side repeats the x layout calculation.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one header's layout and interactions"
+)]
+pub(crate) fn ordered_header<const N: usize>(
+    ui: &mut Ui,
+    id: Id,
+    rows: u64,
+    titles: &[(ColumnId, String); N],
+    columns: &mut OrderedColumns<N>,
+    scroll: &mut HorizontalScroll,
+    description_min: f32,
+    reorder: bool,
+    reset_label: Option<&str>,
+) -> OrderedHeader {
+    let below = ui.available_height() - HEADER_HEIGHT - ui.spacing().item_spacing.y;
+    let required_width = columns.minimum_content_width(description_min);
+    let (viewport_width, horizontal) = list_viewport(
+        rows,
+        below - ui.spacing().item_spacing.y,
+        ui.available_width(),
+        required_width,
+    );
+    let (full, _) =
+        ui.allocate_exact_size(vec2(ui.available_width(), HEADER_HEIGHT), Sense::hover());
+    let viewport = Rect::from_min_size(full.min, vec2(viewport_width, full.height()));
+    scroll.wheel(
+        ui,
+        ui.available_rect_before_wrap(),
+        required_width,
+        viewport_width,
+    );
+    let geometry = columns.geometry(viewport, scroll.offset, description_min);
+    scroll.offset = geometry.offset;
+    ui.scope_builder(UiBuilder::new().max_rect(viewport), |ui| {
+        ui.set_clip_rect(viewport.intersect(ui.clip_rect()));
+        for column in columns.columns.iter().filter(|column| column.visible) {
+            let Some(cell) = geometry.cell(column.id, viewport) else {
+                continue;
+            };
+            if !cell.intersects(viewport) {
+                continue;
+            }
+            if let Some((_, title)) = titles.iter().find(|(id, _)| *id == column.id) {
+                text_cell(ui, cell, RichText::new(title).strong());
+            }
+        }
+    });
+
+    let mut dragging = false;
+    let mut finished = false;
+    let mut menu_action = None;
+    if reorder {
+        for column in columns.columns {
+            if !column.visible {
+                continue;
+            }
+            let Some(cell) = geometry.cell(column.id, viewport) else {
+                continue;
+            };
+            let body = cell
+                .shrink2(vec2(HANDLE_WIDTH / 2.0, 0.0))
+                .intersect(viewport);
+            if body.width() <= 0.0 {
+                continue;
+            }
+            let response = ui.interact(body, id.with(("body", column.id)), Sense::click_and_drag());
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+            }
+            if response.dragged() {
+                dragging = true;
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    let insertion = columns
+                        .columns
+                        .iter()
+                        .filter(|target| target.visible && target.id != column.id)
+                        .find(|target| {
+                            geometry
+                                .span(target.id)
+                                .is_some_and(|span| pointer.x < (span.min + span.max) / 2.0)
+                        })
+                        .and_then(|target| geometry.span(target.id).map(|span| span.min))
+                        .unwrap_or_else(|| viewport.right());
+                    ui.painter().vline(
+                        insertion.clamp(viewport.left(), viewport.right()),
+                        viewport.y_range(),
+                        ui.visuals().widgets.active.fg_stroke,
+                    );
+                }
+            }
+            if response.drag_stopped()
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                finished |= columns.move_to_x(column.id, pointer.x, &geometry);
+            }
+            if let Some(reset) = reset_label {
+                response.context_menu(|ui| {
+                    for (id, title) in titles {
+                        if *id == ColumnId::Description {
+                            continue;
+                        }
+                        let mut visible = columns
+                            .columns
+                            .iter()
+                            .any(|column| column.id == *id && column.visible);
+                        if ui.checkbox(&mut visible, title).clicked() {
+                            menu_action = Some(HeaderMenuAction::Toggle(*id));
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button(reset).clicked() {
+                        menu_action = Some(HeaderMenuAction::Reset);
+                        ui.close();
+                    }
+                });
+            }
+        }
+    }
+    let mut previous = None;
+    for column in columns.columns {
+        if !column.visible {
+            continue;
+        }
+        if let Some(left) = previous
+            && let Some(span) = geometry.span(left)
+        {
+            let x = span.max;
+            if x >= viewport.left() - HANDLE_WIDTH && x <= viewport.right() + HANDLE_WIDTH {
+                let edge_id = id.with((left, column.id));
+                let handle = Rect::from_center_size(
+                    pos2(x, viewport.center().y),
+                    vec2(HANDLE_WIDTH, viewport.height()),
+                )
+                .intersect(viewport);
+                let response = ui.interact(handle, edge_id, Sense::drag());
+                if response.drag_started() {
+                    let taken = ui
+                        .input(|input| input.pointer.press_origin())
+                        .map_or(x, |origin| origin.x);
+                    ui.data_mut(|data| data.insert_temp(edge_id, taken - x));
+                }
+                if response.dragged()
+                    && let Some(pointer) = response.interact_pointer_pos()
+                {
+                    let grab: f32 = ui.data(|data| data.get_temp(edge_id).unwrap_or(0.0));
+                    let delta = pointer.x - grab - x;
+                    columns.resize_pair(&geometry, left, column.id, delta, description_min);
+                    dragging = true;
+                }
+                dragging |= response.drag_started();
+                finished |= response.drag_stopped();
+                paint_edge(ui, x, viewport, &response);
+            }
+        }
+        previous = Some(column.id);
+    }
+    OrderedHeader {
+        geometry: columns.geometry(viewport, scroll.offset, description_min),
+        viewport_width,
+        horizontal,
+        dragging,
+        finished,
+        menu_action,
+    }
+}
+
+/// Reserves a horizontal bar below a virtual list while leaving its own
+/// vertical coordinates and row virtualization untouched.
+pub(crate) fn with_horizontal_list<R>(
+    ui: &mut Ui,
+    id: Id,
+    header: &OrderedHeader,
+    scroll: &mut HorizontalScroll,
+    show: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    if !header.horizontal {
+        return show(ui);
+    }
+    let height =
+        (ui.available_height() - HORIZONTAL_SCROLLBAR_HEIGHT - ui.spacing().item_spacing.y)
+            .max(0.0);
+    let result = ui
+        .allocate_ui(vec2(ui.available_width(), height), show)
+        .inner;
+    scroll.bar(ui, id, header.geometry.content_width, header.viewport_width);
+    result
+}
+
 /// A column whose width the user can change.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Column {
@@ -234,164 +609,6 @@ pub(crate) fn shared(layout: &SavedLayout) -> [Column; 3] {
         Column::new(layout.author_column, 160.0, Rangef::new(60.0, 400.0)),
         Column::new(layout.hash_column, 80.0, Rangef::new(40.0, 240.0)),
     ]
-}
-
-/// Records the widths of the Date, Author and Commit columns.
-pub(crate) fn record_shared(layout: &mut SavedLayout, [date, author, commit]: [Column; 3]) {
-    layout.date_column = Some(date.width);
-    layout.author_column = Some(author.width);
-    layout.hash_column = Some(commit.width);
-}
-
-/// The columns of a list: an optional one at the left, then the
-/// Description, then `N` at the right, from left to right.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Widths<const N: usize> {
-    pub(crate) leading: Option<Column>,
-    pub(crate) trailing: [Column; N],
-}
-
-/// The cells of a row or of the header.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Cells<const N: usize> {
-    /// Without a leading column, an empty cell at the left edge.
-    pub(crate) leading: Rect,
-    pub(crate) description: Rect,
-    pub(crate) trailing: [Rect; N],
-}
-
-impl<const N: usize> Widths<N> {
-    /// The leading cell from the left edge of `rect`, the trailing cells
-    /// from its right edge, and the Description between them, at least zero
-    /// wide.
-    pub(crate) fn cells(&self, rect: Rect) -> Cells<N> {
-        let y = rect.y_range();
-        let leading_width = self.leading.map_or(0.0, |column| column.width);
-        let leading = Rect::from_x_y_ranges(rect.left()..=(rect.left() + leading_width), y);
-        let mut right = rect.right();
-        let mut trailing = [Rect::NOTHING; N];
-        for (cell, column) in trailing.iter_mut().zip(&self.trailing).rev() {
-            *cell = Rect::from_x_y_ranges((right - column.width)..=right, y);
-            right -= column.width;
-        }
-        let description = Rect::from_x_y_ranges(leading.right()..=right.max(leading.right()), y);
-        Cells {
-            leading,
-            description,
-            trailing,
-        }
-    }
-
-    /// Moves `edge` of the columns laid out in `rect` to `x`, where the
-    /// pointer holds it, as far as its column and the Description allow.
-    fn drag(&mut self, edge: Edge, x: f32, rect: Rect) {
-        let description = self.cells(rect).description.width();
-        match edge {
-            Edge::Leading => {
-                if let Some(column) = &mut self.leading {
-                    column.width = dragged_width(*column, x - rect.left(), description);
-                }
-            }
-            Edge::Trailing(index) => {
-                // The columns right of it fix its right side.
-                let fixed: f32 = self.trailing[index + 1..]
-                    .iter()
-                    .map(|column| column.width)
-                    .sum();
-                let column = &mut self.trailing[index];
-                column.width = dragged_width(*column, rect.right() - fixed - x, description);
-            }
-        }
-    }
-}
-
-/// The width of a column whose edge is dragged: `reach` is the distance
-/// from the fixed side of the column to where the pointer holds the edge.
-/// The column keeps to its range, and takes room from the Description,
-/// `description` wide, only while that keeps `MIN_DESCRIPTION`; a
-/// Description already narrower lets it only shrink.
-pub(crate) fn dragged_width(column: Column, reach: f32, description: f32) -> f32 {
-    let room = (description - MIN_DESCRIPTION).max(0.0);
-    let most = (column.width + room)
-        .min(column.range.max)
-        .max(column.range.min);
-    reach.clamp(column.range.min, most)
-}
-
-/// One edge of the header that can be dragged.
-#[derive(Clone, Copy, Debug)]
-enum Edge {
-    Leading,
-    Trailing(usize),
-}
-
-/// Draws the header of a list of `rows` with `titles`: the leading
-/// column's first if there is one, then the Description, then the trailing
-/// columns. It is as wide as the rows, which leave room for the scrollbar
-/// of a list that scrolls. Lets the edge of each column towards the
-/// Description be dragged; returns whether a width changed.
-pub(crate) fn header<const N: usize>(
-    ui: &mut Ui,
-    id: Id,
-    rows: u64,
-    titles: &[String],
-    widths: &mut Widths<N>,
-) -> bool {
-    let below = ui.available_height() - HEADER_HEIGHT - ui.spacing().item_spacing.y;
-    let (full, _) =
-        ui.allocate_exact_size(vec2(ui.available_width(), HEADER_HEIGHT), Sense::hover());
-    let rect = match virtual_list::scrolls(rows, below) {
-        true => full.with_max_x(full.right() - SCROLLBAR_WIDTH),
-        false => full,
-    };
-    let before = *widths;
-    let cells = widths.cells(rect);
-    let leading = widths.leading.map(|_| cells.leading);
-    let shown = leading
-        .into_iter()
-        .chain([cells.description])
-        .chain(cells.trailing);
-    for (cell, title) in shown.zip(titles) {
-        text_cell(ui, cell, RichText::new(title).strong());
-    }
-
-    let edges = widths
-        .leading
-        .map(|_| (Edge::Leading, cells.leading.right()))
-        .into_iter()
-        .chain(
-            cells
-                .trailing
-                .iter()
-                .enumerate()
-                .map(|(index, cell)| (Edge::Trailing(index), cell.left())),
-        );
-    for (edge, x) in edges.collect::<Vec<_>>() {
-        let edge_id = id.with(match edge {
-            Edge::Leading => usize::MAX,
-            Edge::Trailing(index) => index,
-        });
-        let handle =
-            Rect::from_center_size(pos2(x, rect.center().y), vec2(HANDLE_WIDTH, rect.height()));
-        let response = ui.interact(handle, edge_id, Sense::drag());
-        // The pointer holds the edge as far from it as where it took it, so
-        // that the edge does not jump to the pointer, nor drift from it
-        // after reaching a limit.
-        if response.drag_started() {
-            let taken = ui
-                .input(|input| input.pointer.press_origin())
-                .map_or(x, |origin| origin.x);
-            ui.data_mut(|data| data.insert_temp(edge_id, taken - x));
-        }
-        if response.dragged()
-            && let Some(pointer) = response.interact_pointer_pos()
-        {
-            let grab: f32 = ui.data(|data| data.get_temp(edge_id).unwrap_or(0.0));
-            widths.drag(edge, pointer.x - grab, rect);
-        }
-        paint_edge(ui, x, rect, &response);
-    }
-    *widths != before
 }
 
 /// The line at an edge, drawn as egui draws the line of a panel that can be
@@ -500,50 +717,43 @@ mod tests {
         );
     }
 
-    fn column(width: f32) -> Column {
-        Column::new(Some(width), 0.0, Rangef::new(40.0, 400.0))
-    }
-
-    fn row() -> Rect {
-        Rect::from_min_max(pos2(10.0, 0.0), pos2(810.0, 24.0))
+    #[test]
+    fn horizontal_offset_keeps_header_and_row_cells_aligned() {
+        let columns = ordered_history();
+        let header = Rect::from_min_size(pos2(0.0, 0.0), vec2(500.0, 22.0));
+        let row = Rect::from_min_size(pos2(0.0, 22.0), vec2(500.0, 24.0));
+        let mut scroll = HorizontalScroll::default();
+        let content_width = columns.minimum_content_width(120.0);
+        assert_eq!(content_width, 602.0);
+        assert!(scroll.scroll_by(500.0, content_width, header.width()));
+        assert_eq!(scroll.offset, 102.0);
+        let geometry = columns.geometry(header, scroll.offset, 120.0);
+        assert_eq!(geometry.offset, 102.0);
+        assert_eq!(geometry.span(ColumnId::Commit).unwrap().max, 500.0);
+        for id in [
+            ColumnId::Graph,
+            ColumnId::Description,
+            ColumnId::Date,
+            ColumnId::Author,
+            ColumnId::Commit,
+        ] {
+            let header_cell = geometry.cell(id, header).unwrap();
+            let row_cell = geometry.cell(id, row).unwrap();
+            assert_eq!(header_cell.x_range(), row_cell.x_range());
+        }
+        scroll.clamp(content_width, 700.0);
+        assert_eq!(scroll.offset, 0.0);
     }
 
     #[test]
-    fn cells_lay_out_the_leading_column_from_the_left_and_the_trailing_from_the_right() {
-        let widths = Widths {
-            leading: Some(column(64.0)),
-            trailing: [column(130.0), column(160.0), column(80.0)],
-        };
-        let cells = widths.cells(row());
-        assert_eq!(cells.leading.x_range(), Rangef::new(10.0, 74.0));
-        assert_eq!(cells.description.x_range(), Rangef::new(74.0, 440.0));
-        let [date, author, commit] = cells.trailing;
-        assert_eq!(date.x_range(), Rangef::new(440.0, 570.0));
-        assert_eq!(author.x_range(), Rangef::new(570.0, 730.0));
-        assert_eq!(commit.x_range(), Rangef::new(730.0, 810.0));
-        assert_eq!(cells.description.y_range(), row().y_range());
-    }
-
-    #[test]
-    fn without_a_leading_column_the_description_starts_at_the_left_edge() {
-        let widths = Widths {
-            leading: None,
-            trailing: [column(180.0)],
-        };
-        let cells = widths.cells(row());
-        assert_eq!(cells.leading.width(), 0.0);
-        assert_eq!(cells.description.x_range(), Rangef::new(10.0, 630.0));
-    }
-
-    #[test]
-    fn in_a_narrow_row_the_description_is_zero_wide() {
-        let widths = Widths {
-            leading: Some(column(300.0)),
-            trailing: [column(300.0), column(300.0)],
-        };
-        let cells = widths.cells(row());
-        assert_eq!(cells.description.width(), 0.0);
-        assert_eq!(cells.description.left(), cells.leading.right());
+    fn a_saved_description_width_can_overflow_a_narrower_viewport() {
+        let mut columns = ordered_history();
+        columns.columns[1].width = 300.0;
+        let viewport = Rect::from_min_size(pos2(0.0, 0.0), vec2(650.0, 22.0));
+        assert_eq!(columns.minimum_content_width(120.0), 782.0);
+        let geometry = columns.geometry(viewport, 0.0, 120.0);
+        assert_eq!(geometry.span(ColumnId::Description).unwrap().span(), 300.0);
+        assert_eq!(geometry.content_width, 782.0);
     }
 
     #[test]
@@ -552,71 +762,5 @@ mod tests {
         assert_eq!(Column::new(Some(500.0), 130.0, range).width, 400.0);
         assert_eq!(Column::new(Some(10.0), 130.0, range).width, 60.0);
         assert_eq!(Column::new(None, 130.0, range).width, 130.0);
-    }
-
-    #[test]
-    fn a_dragged_width_follows_the_pointer_within_its_range() {
-        assert_eq!(dragged_width(column(130.0), 170.0, 500.0), 170.0);
-        assert_eq!(dragged_width(column(130.0), 10.0, 500.0), 40.0);
-        assert_eq!(dragged_width(column(130.0), 450.0, 2000.0), 400.0);
-    }
-
-    #[test]
-    fn a_dragged_width_leaves_the_description_its_minimum() {
-        // 200 points of Description give up to 80 to the column.
-        assert_eq!(dragged_width(column(130.0), 300.0, 200.0), 210.0);
-        assert_eq!(dragged_width(column(130.0), 200.0, 200.0), 200.0);
-    }
-
-    #[test]
-    fn a_description_already_narrower_lets_the_column_only_shrink() {
-        assert_eq!(dragged_width(column(130.0), 160.0, 50.0), 130.0);
-        assert_eq!(dragged_width(column(130.0), 100.0, 50.0), 100.0);
-    }
-
-    fn commit_list() -> Widths<3> {
-        Widths {
-            leading: Some(column(64.0)),
-            trailing: [column(130.0), column(160.0), column(80.0)],
-        }
-    }
-
-    #[test]
-    fn dragging_an_edge_changes_only_the_column_on_its_side_away_from_the_description() {
-        // The edge between Author and Commit, at 730, to 690.
-        let mut widths = commit_list();
-        widths.drag(Edge::Trailing(2), 690.0, row());
-        assert_eq!(
-            widths.trailing.map(|column| column.width),
-            [130.0, 160.0, 120.0]
-        );
-        assert_eq!(widths.cells(row()).trailing[2].left(), 690.0);
-
-        // The edge between Date and Author, at 570, to 600.
-        let mut widths = commit_list();
-        widths.drag(Edge::Trailing(1), 600.0, row());
-        assert_eq!(
-            widths.trailing.map(|column| column.width),
-            [130.0, 130.0, 80.0]
-        );
-
-        // The edge of the Graph, at 74, to 100.
-        let mut widths = commit_list();
-        widths.drag(Edge::Leading, 100.0, row());
-        assert_eq!(widths.leading.map(|column| column.width), Some(90.0));
-        assert_eq!(widths.trailing, commit_list().trailing);
-    }
-
-    #[test]
-    fn dragging_an_edge_far_towards_the_description_stops_at_its_minimum() {
-        // The Description is 366 wide, from 74 to 440.
-        let mut widths = commit_list();
-        widths.drag(Edge::Trailing(0), 20.0, row());
-        assert_eq!(widths.trailing[0].width, 130.0 + 366.0 - MIN_DESCRIPTION);
-        assert_eq!(widths.cells(row()).description.width(), MIN_DESCRIPTION);
-
-        let mut widths = commit_list();
-        widths.drag(Edge::Leading, 800.0, row());
-        assert_eq!(widths.cells(row()).description.width(), MIN_DESCRIPTION);
     }
 }

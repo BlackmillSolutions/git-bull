@@ -1,15 +1,20 @@
 //! The file history: the commits that changed one file, shown inside the
 //! tab, with the diff of the one chosen (spec `file-history`).
 
+use std::path::Path;
+
 use eframe::egui::accesskit::Role;
 use eframe::egui::{Id, Label, Panel, Rangef, RichText, Sense, Ui, WidgetInfo, WidgetType};
 use fluent_bundle::FluentArgs;
 use gitbull_core::file_history::HistoryState;
+use gitbull_core::settings::{HistoryColumns, Layout};
 use gitbull_core::workspace::Failure;
 use gitbull_git::object_id::ObjectId;
 
 use crate::app::App;
-use crate::columns::{self, Column, Widths, text_cell};
+use crate::columns::{
+    self, Column, ColumnGeometry, ColumnId, ColumnSpec, OrderedColumns, text_cell,
+};
 use crate::commit_list::{SHORT_HASH, color, local_date};
 use crate::components;
 use crate::diff_view::{self, Pane};
@@ -28,6 +33,28 @@ const PATH_RANGE: Rangef = Rangef {
     min: 60.0,
     max: 800.0,
 };
+
+fn file_columns(saved: &HistoryColumns, layout: Layout) -> OrderedColumns<5> {
+    let shared_layout = Layout {
+        date_column: saved.widths.date,
+        author_column: saved.widths.author,
+        hash_column: saved.widths.commit,
+        ..layout
+    };
+    let [date, author, commit] = columns::shared(&shared_layout);
+    let path = Column::new(layout.path_column, PATH_WIDTH, PATH_RANGE);
+    OrderedColumns::new([
+        ColumnSpec::new(
+            ColumnId::Description,
+            columns::MIN_DESCRIPTION,
+            Rangef::new(columns::MIN_DESCRIPTION, 10_000.0),
+        ),
+        ColumnSpec::new(ColumnId::Path, path.width, path.range),
+        ColumnSpec::new(ColumnId::Date, date.width, date.range),
+        ColumnSpec::new(ColumnId::Author, author.width, author.range),
+        ColumnSpec::new(ColumnId::Commit, commit.width, commit.range),
+    ])
+}
 
 /// What a row shows.
 struct Entry {
@@ -87,24 +114,23 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         (title, failed)
     };
     let titles = [
-        Msg::ColumnDescription,
-        Msg::ColumnPath,
-        Msg::ColumnDate,
-        Msg::ColumnAuthor,
-        Msg::ColumnCommit,
-    ]
-    .map(|column| app.texts.text(column));
-    let layout = app.settings().layout;
-    let [date, author, commit] = columns::shared(&layout);
-    let mut widths = Widths {
-        leading: None,
-        trailing: [
-            Column::new(layout.path_column, PATH_WIDTH, PATH_RANGE),
-            date,
-            author,
-            commit,
-        ],
+        (ColumnId::Description, text(Msg::ColumnDescription)),
+        (ColumnId::Path, text(Msg::ColumnPath)),
+        (ColumnId::Date, text(Msg::ColumnDate)),
+        (ColumnId::Author, text(Msg::ColumnAuthor)),
+        (ColumnId::Commit, text(Msg::ColumnCommit)),
+    ];
+    let Some(repository) = app
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .map(|session| session.opened().repository.clone())
+    else {
+        return;
     };
+    let layout = app.settings().layout;
+    let saved = app.settings().history_columns_for(&repository);
+    let initial_columns = file_columns(&saved, layout);
     let zone = app.time_zone.clone();
     if header(ui, &back, &title) {
         app.close_overlay();
@@ -133,13 +159,24 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         components::error_text(ui, failed);
     }
     let count = history.commits().len() as u64;
-    let resized = columns::header(
+    let mut shown_columns = view.file_column_drag.unwrap_or(initial_columns);
+    let header = columns::ordered_header(
         ui,
         Id::new("file-history-columns"),
         count,
         &titles,
-        &mut widths,
+        &mut shown_columns,
+        &mut view.file_horizontal,
+        columns::MIN_DESCRIPTION,
+        false,
+        None,
     );
+    if header.dragging {
+        view.file_column_drag = Some(shown_columns);
+    }
+    if header.finished {
+        view.file_column_drag = None;
+    }
     if count == 0 {
         match history.state() {
             HistoryState::Loading => {
@@ -151,8 +188,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             HistoryState::Failed(_) => {}
         }
         focus_area(ui, FILE_HISTORY_LIST, &title);
-        if resized {
-            record(app, widths);
+        if header.finished {
+            record(app, &repository, shown_columns);
         }
         return;
     }
@@ -160,9 +197,16 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     if view.file_commits.selected().is_none() {
         view.file_commits.select(Some(0));
     }
+    let list_height = (ui.available_height()
+        - if header.horizontal {
+            columns::HORIZONTAL_SCROLLBAR_HEIGHT + ui.spacing().item_spacing.y
+        } else {
+            0.0
+        })
+    .max(0.0);
     let visible = view
         .file_commits
-        .visible_rows(count, f64::from(ui.available_height()));
+        .visible_rows(count, f64::from(list_height));
     let shown: Vec<(ObjectId, String)> = history.commits()
         [visible.start as usize..visible.end as usize]
         .iter()
@@ -186,35 +230,53 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             }
         })
         .collect();
-    VirtualList::new(Id::new(FILE_HISTORY_LIST), Role::List, title, count).show(
+    columns::with_horizontal_list(
         ui,
-        &mut view.file_commits,
-        |ui, row, selected| {
-            if let Some(entry) = row
-                .checked_sub(visible.start)
-                .and_then(|index| rows.get(index as usize))
-            {
-                entry_row(ui, entry, selected, palette, &widths);
-            }
+        Id::new("file-history-horizontal"),
+        &header,
+        &mut view.file_horizontal,
+        |ui| {
+            VirtualList::new(Id::new(FILE_HISTORY_LIST), Role::List, title, count).show(
+                ui,
+                &mut view.file_commits,
+                |ui, row, selected| {
+                    if let Some(entry) = row
+                        .checked_sub(visible.start)
+                        .and_then(|index| rows.get(index as usize))
+                    {
+                        entry_row(ui, entry, selected, palette, &header.geometry);
+                    }
+                },
+            )
         },
     );
     let chosen = view.file_commits.selected().map(|row| row as usize);
     session.choose_file_history_commit(chosen);
-    if resized {
-        record(app, widths);
+    if header.finished {
+        record(app, &repository, shown_columns);
     }
 }
 
 /// Records the widths of the columns after a drag.
-fn record(app: &mut App, widths: Widths<4>) {
-    let [path, date, author, commit] = widths.trailing;
+fn record(app: &mut App, repository: &Path, columns: OrderedColumns<5>) {
+    let [_, path, date, author, commit] = columns.columns;
     app.update_layout(|layout| {
         layout.path_column = Some(path.width);
-        columns::record_shared(layout, [date, author, commit]);
     });
+    let mut saved = app.settings().history_columns_for(repository);
+    saved.widths.date = Some(date.width);
+    saved.widths.author = Some(author.width);
+    saved.widths.commit = Some(commit.width);
+    app.update_history_columns(saved);
 }
 
-fn entry_row(ui: &mut Ui, entry: &Entry, selected: bool, palette: &Palette, widths: &Widths<4>) {
+fn entry_row(
+    ui: &mut Ui,
+    entry: &Entry,
+    selected: bool,
+    palette: &Palette,
+    geometry: &ColumnGeometry,
+) {
     let rect = ui.max_rect();
     if selected {
         ui.painter()
@@ -230,16 +292,18 @@ fn entry_row(ui: &mut Ui, entry: &Entry, selected: bool, palette: &Palette, widt
         node.set_role(Role::ListItem);
         node.set_selected(selected);
     });
-    let cells = widths.cells(rect);
-    let [path, date, author, commit] = cells.trailing;
     let shown = [
-        (cells.description, RichText::new(&entry.summary)),
-        (path, RichText::new(&entry.path).weak()),
-        (date, RichText::new(&entry.date)),
-        (author, RichText::new(&entry.author)),
-        (commit, RichText::new(&entry.short).monospace()),
+        (ColumnId::Description, RichText::new(&entry.summary)),
+        (ColumnId::Path, RichText::new(&entry.path).weak()),
+        (ColumnId::Date, RichText::new(&entry.date)),
+        (ColumnId::Author, RichText::new(&entry.author)),
+        (ColumnId::Commit, RichText::new(&entry.short).monospace()),
     ];
-    for (cell, text) in shown {
-        text_cell(ui, cell, text);
+    for (id, text) in shown {
+        if let Some(cell) = geometry.cell(id, rect)
+            && cell.intersects(ui.clip_rect())
+        {
+            text_cell(ui, cell, text);
+        }
     }
 }

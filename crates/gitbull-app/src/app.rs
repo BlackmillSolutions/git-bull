@@ -19,8 +19,8 @@ use gitbull_core::search::HashOutcome;
 use gitbull_core::seen::SeenFile;
 use gitbull_core::session::{BranchFilter, Navigation, Session};
 use gitbull_core::settings::{
-    ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
-    WindowGeometry,
+    ColourVision, HistoryColumns, InterfaceSize, Layout, Loaded, Settings, SettingsFile,
+    ThemeSetting, WindowGeometry,
 };
 use gitbull_core::sidebar_tree::{SidebarKey, SidebarRow, SidebarState};
 use gitbull_core::workspace::{Event, Failure, Notify, TabId, TabState, View, Workspace};
@@ -31,6 +31,7 @@ use gitbull_git::version::GitVersion;
 use gitbull_git::{Backend, CliBackend};
 use jiff::tz::TimeZone;
 
+use crate::columns::{HorizontalScroll, OrderedColumns};
 use crate::commit_list::{SHORT_HASH, list_row};
 use crate::commit_panel::MessagePart;
 use crate::desktop::Desktop;
@@ -205,6 +206,9 @@ impl Home {
 #[derive(Default)]
 pub(crate) struct TabView {
     pub(crate) commits: ListState,
+    pub(crate) commit_horizontal: HorizontalScroll,
+    pub(crate) commit_column_drag: Option<OrderedColumns<5>>,
+    pub(crate) badge_metrics: crate::commit_list::BadgeMetricsCache,
     pub(crate) sidebar: SidebarState,
     pub(crate) sidebar_list: ListState,
     /// The rows laid out for `sidebar_key`, kept until it changes.
@@ -243,6 +247,8 @@ pub(crate) struct TabView {
     pub(crate) hunk_move: Option<HunkMove>,
     /// The commits of the file history.
     pub(crate) file_commits: ListState,
+    pub(crate) file_horizontal: HorizontalScroll,
+    pub(crate) file_column_drag: Option<OrderedColumns<5>>,
     /// The diff of the commit chosen in the file history.
     pub(crate) history_diff: DiffView,
     /// The files of the File status view.
@@ -1190,6 +1196,12 @@ impl App {
         change(&mut layout);
         if layout != self.settings.layout {
             self.settings.layout = layout;
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn update_history_columns(&mut self, columns: HistoryColumns) {
+        if self.settings.set_history_columns(columns) {
             self.dirty = true;
         }
     }

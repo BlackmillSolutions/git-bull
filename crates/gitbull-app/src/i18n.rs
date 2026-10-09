@@ -149,6 +149,7 @@ messages! {
     ColumnAuthor => "column-author",
     ColumnCommit => "column-commit",
     ColumnPath => "column-path",
+    HistoryColumnsReset => "history-columns-reset",
     NoticeHiddenByFilter => "notice-hidden-by-filter",
     NoticeShowAllBranches => "notice-show-all-branches",
     NoticeNotACommit => "notice-not-a-commit",

@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use gitbull_git::backend::ContentSource;
@@ -147,7 +147,7 @@ pub struct Session {
     target: Option<ObjectId>,
     navigation: Option<Navigation>,
     sidebar: Option<Result<Sidebar, Failure>>,
-    badges: HashMap<ObjectId, Vec<Badge>>,
+    badges: HashMap<ObjectId, Arc<[Badge]>>,
     /// Counts the times the sidebar was loaded, so that the UI knows when
     /// to lay it out again.
     sidebar_version: u64,
@@ -510,7 +510,26 @@ impl Session {
 
     /// The badges before the description of a commit.
     pub fn badges(&self, id: &ObjectId) -> &[Badge] {
-        self.badges.get(id).map(Vec::as_slice).unwrap_or_default()
+        self.badges.get(id).map(Arc::as_ref).unwrap_or_default()
+    }
+
+    /// A cheap shared handle for a visible History row.
+    pub fn shared_badges(&self, id: &ObjectId) -> Arc<[Badge]> {
+        static EMPTY: OnceLock<Arc<[Badge]>> = OnceLock::new();
+        self.badges
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(EMPTY.get_or_init(|| Arc::from([]))))
+    }
+
+    pub fn badge_reference_count(&self) -> usize {
+        self.sidebar()
+            .and_then(|sidebar| sidebar.as_ref().ok())
+            .map_or(0, |sidebar| sidebar.references.len())
+    }
+
+    pub fn has_head_badge(&self) -> bool {
+        self.head_commit.is_some()
     }
 
     /// Whether the history of a shallow clone ends at this commit.
