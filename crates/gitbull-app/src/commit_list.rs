@@ -291,6 +291,11 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     if std::mem::take(&mut view.focus_commits) {
         output.response.request_focus();
     }
+    // What the user selects stands: a navigation that still waits for its
+    // commit to load, as after a checkout, does not replace it later.
+    if output.clicked.is_some() || output.selection_changed {
+        session.cancel_navigation();
+    }
     let selected = view.commits.selected().filter(|row| *row < rows);
     let selected_commit = selected.and_then(|row| list.commit(row));
     view.selected_id = selected_commit.map(|row| session.history().store.id(row as Row));

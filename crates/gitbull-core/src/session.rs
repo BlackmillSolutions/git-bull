@@ -769,6 +769,14 @@ impl Session {
         }
     }
 
+    /// Gives up a navigation that still waits for its commit to load. The
+    /// user selected something else meanwhile, and a selection that arrives
+    /// late must not replace theirs.
+    pub fn cancel_navigation(&mut self) {
+        self.target = None;
+        self.navigation = None;
+    }
+
     /// The outcome of a navigation that waited for its commit to load.
     pub fn take_navigation(&mut self) -> Option<Navigation> {
         self.navigation.take()
@@ -4108,5 +4116,27 @@ mod tests {
         );
         gate.open();
         wait_until(&mut session, idle);
+    }
+
+    #[test]
+    fn a_navigation_that_waits_is_given_up_when_the_user_selects_something() {
+        let feed = HistoryFeed::new();
+        let backend = backend()
+            .with_history_feed(root(), &feed)
+            .with_references(root(), vec![branch("old", "b")]);
+        let mut session = session(backend);
+        session.show();
+        wait_until(&mut session, |s| s.sidebar().is_some());
+        feed.send(five_lines().into_iter().take(2));
+        wait_until(&mut session, |s| rows(s) == 2);
+        assert_eq!(session.navigate("refs/heads/old"), Navigation::Waiting);
+
+        // The user selects a commit before the one navigated to has loaded.
+        session.cancel_navigation();
+        feed.send(five_lines().into_iter().skip(2));
+        feed.finish();
+        wait_until(&mut session, loaded);
+        session.poll();
+        assert_eq!(session.take_navigation(), None);
     }
 }
