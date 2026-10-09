@@ -51,3 +51,42 @@ pub fn create_branch(
         .run(repo, &args, None, cancel)
         .map_err(WriteFailure::from_error)
 }
+
+/// Creates the tag `name` at the commit `start`.
+///
+/// Without a message, or with one that is blank, the tag is lightweight.
+/// Otherwise it is annotated with that message, and signed when the
+/// configuration of the repository asks for it. The message goes through
+/// standard input, so that its length, its line breaks and its encoding do
+/// not depend on the command line, and it is kept as written apart from
+/// blank lines at its ends: a line that starts with `#` is not a comment.
+///
+/// Nothing but the tag changes: HEAD, the index and the working copy stay as
+/// they are. A name that starts with `-` or is empty, and a start that is not
+/// a hexadecimal hash, fail with [`std::io::ErrorKind::InvalidInput`] before
+/// any command runs. An annotated tag needs an identity; without one Git
+/// fails with its message and creates nothing.
+pub fn create_tag(
+    git: &Git,
+    repo: &Path,
+    name: &str,
+    start: &str,
+    message: Option<&str>,
+    cancel: &CancelToken,
+) -> Result<(), WriteFailure> {
+    check_name(name)?;
+    check_hash(start)?;
+    let message = message.filter(|message| !message.trim().is_empty());
+    let result = match message {
+        None => git
+            .write(WriteHooks::Run)
+            .run(repo, ["tag", name, start], None, cancel),
+        Some(message) => git.write(WriteHooks::Run).run(
+            repo,
+            ["tag", "-a", "--cleanup=whitespace", "-F", "-", name, start],
+            Some(message.as_bytes()),
+            cancel,
+        ),
+    };
+    result.map_err(WriteFailure::from_error)
+}

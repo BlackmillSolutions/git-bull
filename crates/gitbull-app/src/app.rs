@@ -19,8 +19,8 @@ use gitbull_core::search::HashOutcome;
 use gitbull_core::seen::SeenFile;
 use gitbull_core::session::{
     Action as WriteAction, ActionDialog, BranchFilter, CheckoutRequest, CheckoutStart,
-    CreateBranchRequest, CreateStart, NameRefusal, Navigation, Session, StartAt, StartUnavailable,
-    StartingPoint,
+    CreateBranchRequest, CreateStart, CreateTagRequest, NameRefusal, Navigation, Session, StartAt,
+    StartUnavailable, StartingPoint,
 };
 use gitbull_core::settings::{
     ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
@@ -151,9 +151,12 @@ pub(crate) enum Origin {
     Commits,
 }
 
-/// The dialog "Create branch" while it is open (spec `reference-creation`).
+/// The dialog "Create branch" or "Create tag" while it is open (spec
+/// `reference-creation`).
 #[derive(Clone, Debug)]
 pub(crate) struct CreateDialog {
+    /// What is created.
+    pub(crate) kind: NameKind,
     pub(crate) origin: Origin,
     pub(crate) start: StartingPoint,
     /// The first line of the message of the starting point, once it is known.
@@ -161,6 +164,8 @@ pub(crate) struct CreateDialog {
     pub(crate) name: String,
     /// Whether the new branch is checked out in the same step.
     pub(crate) checkout: bool,
+    /// The message of a tag; a blank one makes the tag lightweight.
+    pub(crate) message: String,
     /// The action runs, and the dialog waits for it.
     pub(crate) running: bool,
     /// Git refused the name although the check let it through.
@@ -172,7 +177,7 @@ pub(crate) struct CreateDialog {
 impl CreateDialog {
     /// What is wrong with the name; `Empty` while there is none.
     pub(crate) fn problem(&self, references: &[Reference]) -> Option<NameProblem> {
-        check_name(NameKind::Branch, &self.name, references).err()
+        check_name(self.kind, &self.name, references).err()
     }
 }
 
@@ -1149,6 +1154,16 @@ impl App {
     /// is told apart by a notice; nothing opens while a write action runs or
     /// when there is no starting point.
     pub(crate) fn begin_create_branch(&mut self, at: StartAt, origin: Origin) {
+        self.begin_create(NameKind::Branch, at, origin);
+    }
+
+    /// Opens the dialog "Create tag" at `at`, as
+    /// [`App::begin_create_branch`] opens the one for a branch.
+    pub(crate) fn begin_create_tag(&mut self, at: StartAt, origin: Origin) {
+        self.begin_create(NameKind::Tag, at, origin);
+    }
+
+    fn begin_create(&mut self, kind: NameKind, at: StartAt, origin: Origin) {
         let Some((session, _)) = self.active_view() else {
             return;
         };
@@ -1159,11 +1174,13 @@ impl App {
             Ok(start) => {
                 let description = session.summary_of(&start.commit);
                 self.create_dialog = Some(CreateDialog {
+                    kind,
                     origin,
                     start,
                     description,
                     name: String::new(),
                     checkout: true,
+                    message: String::new(),
                     running: false,
                     refused: None,
                     failure: None,
@@ -1189,6 +1206,15 @@ impl App {
         }
     }
 
+    pub(crate) fn set_create_message(&mut self, text: String) {
+        if let Some(dialog) = &mut self.create_dialog {
+            if text != dialog.message {
+                dialog.failure = None;
+            }
+            dialog.message = text;
+        }
+    }
+
     pub(crate) fn set_create_checkout(&mut self, on: bool) {
         if let Some(dialog) = &mut self.create_dialog {
             dialog.checkout = on;
@@ -1208,11 +1234,18 @@ impl App {
                 .map(|sidebar| sidebar.references.clone())
                 .unwrap_or_default();
             if !dialog.running && dialog.problem(&references).is_none() {
-                let started = session.start_create_branch(CreateBranchRequest {
-                    name: dialog.name.clone(),
-                    start: dialog.start.commit,
-                    checkout: dialog.checkout,
-                });
+                let started = match dialog.kind {
+                    NameKind::Branch => session.start_create_branch(CreateBranchRequest {
+                        name: dialog.name.clone(),
+                        start: dialog.start.commit,
+                        checkout: dialog.checkout,
+                    }),
+                    NameKind::Tag => session.start_create_tag(CreateTagRequest {
+                        name: dialog.name.clone(),
+                        start: dialog.start.commit,
+                        message: dialog.message.clone(),
+                    }),
+                };
                 if started == CreateStart::Started {
                     dialog.running = true;
                     dialog.refused = None;
@@ -1255,11 +1288,19 @@ impl App {
         }
         if dialog.running && session.action().is_none() {
             dialog.running = false;
-            let ours = |action: &WriteAction| matches!(action, WriteAction::CreateBranch { name } if *name == dialog.name);
+            let ours = |action: &WriteAction| match (dialog.kind, action) {
+                (NameKind::Branch, WriteAction::CreateBranch { name })
+                | (NameKind::Tag, WriteAction::CreateTag { name }) => *name == dialog.name,
+                _ => false,
+            };
+            let section = match dialog.kind {
+                NameKind::Branch => Section::Branches,
+                NameKind::Tag => Section::Tags,
+            };
             match session.dialog().cloned() {
                 None => {
                     // The branch is there: show it.
-                    view.sidebar.reveal(Section::Branches, &dialog.name);
+                    view.sidebar.reveal(section, &dialog.name);
                     self.refocus(dialog.origin);
                     return;
                 }
@@ -1273,7 +1314,7 @@ impl App {
                 }
                 // A failed hook means that the branch was made and checked out.
                 Some(ActionDialog::HookFailed { .. }) => {
-                    view.sidebar.reveal(Section::Branches, &dialog.name);
+                    view.sidebar.reveal(section, &dialog.name);
                     return;
                 }
                 // A refused checkout has a dialog of its own.

@@ -10,7 +10,8 @@ mod fake;
 pub mod generator;
 
 pub use fake::{
-    CreatedBranch, FakeBackend, FakeWrite, Gate, HistoryFeed, LiveRepo, Probe, commit_line, fake_id,
+    CreatedBranch, CreatedTag, FakeBackend, FakeWrite, Gate, HistoryFeed, LiveRepo, Probe,
+    commit_line, fake_id,
 };
 
 use std::path::{Path, PathBuf};

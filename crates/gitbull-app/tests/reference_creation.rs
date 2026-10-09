@@ -16,7 +16,9 @@ use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::refusal::Refusal;
-use gitbull_testkit::{CreatedBranch, FakeBackend, FakeWrite, Gate, commit_line, fake_id};
+use gitbull_testkit::{
+    CreatedBranch, CreatedTag, FakeBackend, FakeWrite, Gate, commit_line, fake_id,
+};
 use support::{Setup, build, path, settle_window, window_at_60_fps};
 
 const NAME: &str = "Branch name";
@@ -711,4 +713,259 @@ fn after_cancel_the_keyboard_continues_in_the_sidebar() {
         item(&harness, "side").accesskit_node().is_selected(),
         Some(true)
     );
+}
+
+// ---- tags
+
+const TAG_NAME: &str = "Tag name";
+const MESSAGE: &str = "Message (optional)";
+
+fn tag_dialog_is_open(harness: &Harness<'_, App>) -> bool {
+    harness
+        .query_by_role_and_label(Role::Dialog, "Create tag")
+        .is_some()
+}
+
+fn open_tag_dialog(harness: &mut Harness<'_, App>, summary: &str) {
+    right_click_commit(harness, summary);
+    harness.get_by_label("Create tag here…").click();
+    harness.run();
+    harness.run();
+    assert!(tag_dialog_is_open(harness), "the dialog did not open");
+}
+
+/// The role of a field: the message has several lines.
+fn role_of(field: &str) -> Role {
+    if field == MESSAGE {
+        Role::MultilineTextInput
+    } else {
+        Role::TextInput
+    }
+}
+
+fn type_into(harness: &mut Harness<'_, App>, field: &str, text: &str) {
+    // Typing goes to the field that has the focus.
+    harness.get_by_role_and_label(role_of(field), field).focus();
+    harness.run();
+    harness
+        .get_by_role_and_label(role_of(field), field)
+        .type_text(text);
+    harness.run();
+}
+
+#[test]
+fn the_menu_of_a_commit_offers_create_tag_here() {
+    let mut harness = open(backend());
+    right_click_commit(&mut harness, "Third");
+    assert!(harness.query_all_by_label("Copy full hash").count() >= 1);
+    harness.get_by_label("Check out this commit");
+    harness.get_by_label("Create branch here…");
+    let entry = harness.get_by_label("Create tag here…");
+    assert!(!entry.accesskit_node().is_disabled());
+}
+
+#[test]
+fn the_tag_entry_is_unavailable_while_an_action_runs() {
+    let gate = Gate::new();
+    let mut harness = open(backend().with_checkout_gate(&gate));
+    right_click(&mut harness, "side");
+    harness.get_by_label("Check out").click();
+    harness.run();
+    wait_for(&mut harness, |h| !idle(h));
+    right_click_commit(&mut harness, "Third");
+    assert!(
+        harness
+            .get_by_label("Create tag here…")
+            .accesskit_node()
+            .is_disabled()
+    );
+    gate.open();
+    settle_action(&mut harness);
+}
+
+#[test]
+fn the_tag_dialog_has_an_optional_message() {
+    let mut harness = open(backend());
+    open_tag_dialog(&mut harness, "Third");
+    assert!(
+        harness
+            .get_by_role_and_label(Role::TextInput, TAG_NAME)
+            .is_focused()
+    );
+    harness.get_by_label(&format!("{} Third", short("c")));
+    harness.get_by_role_and_label(role_of(MESSAGE), MESSAGE);
+    // A tag is never checked out by creating it.
+    assert!(
+        harness
+            .query_by_role_and_label(Role::CheckBox, "Check out the new branch")
+            .is_none()
+    );
+    assert!(create_button(&harness).accesskit_node().is_disabled());
+    harness.get_by_role_and_label(Role::Button, "Cancel");
+}
+
+#[test]
+fn an_empty_message_makes_a_lightweight_tag() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    open_tag_dialog(&mut harness, "Third");
+    type_into(&mut harness, TAG_NAME, "v1.2");
+    harness.key_press(Key::Enter);
+    harness.run();
+    settle_action(&mut harness);
+    assert!(!tag_dialog_is_open(&harness));
+    assert_eq!(
+        probe.created_tags(),
+        [CreatedTag {
+            name: "v1.2".to_owned(),
+            start: fake_id("c").to_string(),
+            message: None,
+        }]
+    );
+    assert_eq!(head(&harness), Head::Branch("main".to_owned()));
+}
+
+#[test]
+fn a_message_makes_an_annotated_tag() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    open_tag_dialog(&mut harness, "Third");
+    type_into(&mut harness, TAG_NAME, "v1.3");
+    type_into(&mut harness, MESSAGE, "Release 1.3");
+    // Enter in the message is a line break, not Create.
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert!(probe.created_tags().is_empty());
+    assert!(tag_dialog_is_open(&harness));
+    type_into(&mut harness, MESSAGE, "Notes");
+    create_button(&harness).click();
+    harness.run();
+    settle_action(&mut harness);
+    assert!(!tag_dialog_is_open(&harness));
+    assert_eq!(
+        probe.created_tags(),
+        [CreatedTag {
+            name: "v1.3".to_owned(),
+            start: fake_id("c").to_string(),
+            message: Some("Release 1.3\nNotes".to_owned()),
+        }]
+    );
+}
+
+#[test]
+fn a_new_tag_appears_in_the_sidebar_and_as_a_badge() {
+    let mut harness = open(backend());
+    open_tag_dialog(&mut harness, "Second");
+    type_into(&mut harness, TAG_NAME, "v0.9");
+    harness.key_press(Key::Enter);
+    harness.run();
+    settle_action(&mut harness);
+    item(&harness, "v0.9");
+    let row = commit_row(&harness, "Second").rect();
+    let drawn = support::texts_in(harness.output(), row);
+    assert!(
+        drawn.iter().any(|text| text.contains("v0.9")),
+        "no badge at the starting point: {drawn:?}"
+    );
+}
+
+#[test]
+fn the_name_of_a_tag_is_checked_against_tags() {
+    let mut harness = open(backend());
+    open_tag_dialog(&mut harness, "Third");
+    // A branch of the name is no obstacle to a tag.
+    type_into(&mut harness, TAG_NAME, "main");
+    assert!(!create_button(&harness).accesskit_node().is_disabled());
+    for (name, message) in [
+        ("v1.0", "A tag with this name exists."),
+        (
+            "v1.0/rc",
+            "v1.0 is a tag, and this name would need it to be a folder.",
+        ),
+        ("a..b", "A name cannot contain \"..\"."),
+    ] {
+        let field = harness.get_by_role_and_label(Role::TextInput, TAG_NAME);
+        field.focus();
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run();
+        harness.key_press(Key::Delete);
+        harness.run();
+        type_into(&mut harness, TAG_NAME, name);
+        harness.get_by_label(message);
+        assert!(create_button(&harness).accesskit_node().is_disabled());
+    }
+}
+
+#[test]
+fn no_identity_stays_in_the_dialog() {
+    let backend = backend().with_create_tag(
+        "v2.0",
+        FakeWrite::Failed {
+            stderr: "fatal: unable to auto-detect email address".to_owned(),
+        },
+    );
+    let mut harness = open(backend);
+    open_tag_dialog(&mut harness, "Third");
+    type_into(&mut harness, TAG_NAME, "v2.0");
+    type_into(&mut harness, MESSAGE, "Release 2");
+    create_button(&harness).click();
+    harness.run();
+    settle_action(&mut harness);
+    harness.run();
+    assert!(tag_dialog_is_open(&harness));
+    harness.get_by_label("fatal: unable to auto-detect email address");
+    assert_eq!(
+        harness
+            .get_by_role_and_label(Role::TextInput, TAG_NAME)
+            .accesskit_node()
+            .value()
+            .unwrap_or_default(),
+        "v2.0"
+    );
+    // No tag was created.
+    assert!(
+        !harness.get_all_by_role(Role::TreeItem).any(|node| node
+            .accesskit_node()
+            .label()
+            .as_deref()
+            == Some("v2.0"))
+    );
+}
+
+#[test]
+fn a_tag_name_git_refused_is_said_in_the_dialog() {
+    let backend = backend().with_create_tag(
+        "raced",
+        FakeWrite::Refused(Refusal::NameTaken("raced".to_owned())),
+    );
+    let mut harness = open(backend);
+    open_tag_dialog(&mut harness, "Third");
+    type_into(&mut harness, TAG_NAME, "raced");
+    harness.key_press(Key::Enter);
+    harness.run();
+    settle_action(&mut harness);
+    harness.run();
+    assert!(tag_dialog_is_open(&harness));
+    harness.get_by_label_contains("Git refused the name: a tag of this name exists");
+}
+
+#[test]
+fn the_status_bar_names_the_creation() {
+    let gate = Gate::new();
+    let mut harness = open(backend().with_checkout_gate(&gate));
+    open_tag_dialog(&mut harness, "Third");
+    type_into(&mut harness, TAG_NAME, "v3");
+    harness.key_press(Key::Enter);
+    harness.run();
+    wait_for(&mut harness, |h| !idle(h));
+    harness.get_by_label("Creating tag v3");
+    // The dialog waits for Git: nothing can be changed or cancelled.
+    assert!(tag_dialog_is_open(&harness));
+    assert!(create_button(&harness).accesskit_node().is_disabled());
+    gate.open();
+    settle_action(&mut harness);
+    assert!(!tag_dialog_is_open(&harness));
 }

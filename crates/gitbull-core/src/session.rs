@@ -97,6 +97,8 @@ pub enum Action {
     Checkout { target: String },
     /// Creating a branch, by its name.
     CreateBranch { name: String },
+    /// Creating a tag, by its name.
+    CreateTag { name: String },
 }
 
 /// Where a new branch or tag starts, as the user chose it.
@@ -147,10 +149,21 @@ pub struct CreateBranchRequest {
     pub checkout: bool,
 }
 
-/// What [`Session::start_create_branch`] did.
+/// What the user asks to create: a tag at a commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateTagRequest {
+    pub name: String,
+    pub start: ObjectId,
+    /// The message of an annotated tag; a blank one makes the tag
+    /// lightweight.
+    pub message: String,
+}
+
+/// What [`Session::start_create_branch`] and [`Session::start_create_tag`]
+/// did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CreateStart {
-    /// The branch is being created; [`Session::action`] names it.
+    /// The reference is being created; [`Session::action`] names it.
     Started,
     /// Another write action runs in this tab.
     Busy,
@@ -1102,6 +1115,44 @@ impl Session {
     /// the outcome, HEAD, the references and the status are read again before
     /// [`Session::action`] turns `None`.
     pub fn start_create_branch(&mut self, request: CreateBranchRequest) -> CreateStart {
+        let CreateBranchRequest {
+            name,
+            start,
+            checkout,
+        } = request;
+        let action = Action::CreateBranch { name: name.clone() };
+        let expected = checkout.then(|| Head::Branch(name.clone()));
+        self.start_creation(action, expected, move |backend, root, token| {
+            backend.create_branch(root, &name, &start.to_string(), checkout, token)
+        })
+    }
+
+    /// Creates a tag in the background (spec `reference-creation`):
+    /// lightweight when the message is blank, annotated otherwise. HEAD stays
+    /// where it is, and the state is read again afterwards as for every write
+    /// action.
+    pub fn start_create_tag(&mut self, request: CreateTagRequest) -> CreateStart {
+        let CreateTagRequest {
+            name,
+            start,
+            message,
+        } = request;
+        let action = Action::CreateTag { name: name.clone() };
+        self.start_creation(action, None, move |backend, root, token| {
+            let message = (!message.trim().is_empty()).then_some(message.as_str());
+            backend.create_tag(root, &name, &start.to_string(), message, token)
+        })
+    }
+
+    /// Runs `job` as the write action of the tab, unless one runs already.
+    /// `expected` is where HEAD is once the action did its work, when it
+    /// moves HEAD.
+    fn start_creation(
+        &mut self,
+        action: Action,
+        expected: Option<Head>,
+        job: impl FnOnce(&dyn Backend, &Path, &CancelToken) -> Result<(), WriteFailure> + Send + 'static,
+    ) -> CreateStart {
         if self.action.is_some() {
             return CreateStart::Busy;
         }
@@ -1114,25 +1165,15 @@ impl Session {
         );
         let token = cancel.clone();
         let (sender, receiver) = mpsc::channel();
-        let CreateBranchRequest {
-            name,
-            start,
-            checkout,
-        } = request;
-        let label = name.clone();
         std::thread::spawn(move || {
-            let result = catch_write(|| {
-                backend.create_branch(&root, &name, &start.to_string(), checkout, &token)
-            });
+            let result = catch_write(|| job(backend.as_ref(), &root, &token));
             if sender.send(result).is_ok() {
                 notify();
             }
         });
         self.action = Some(RunningAction {
-            action: Action::CreateBranch {
-                name: label.clone(),
-            },
-            expected: checkout.then_some(Head::Branch(label)),
+            action,
+            expected,
             cancel,
             ended: None,
         });
@@ -1167,7 +1208,7 @@ impl Session {
         // that was to be checked out, existing or new.
         let target = match &action {
             Action::Checkout { target } => target.clone(),
-            Action::CreateBranch { name } => name.clone(),
+            Action::CreateBranch { name } | Action::CreateTag { name } => name.clone(),
         };
         running.ended = Some(match result {
             Ok(()) => Ended::Done,
@@ -3953,5 +3994,119 @@ mod tests {
             1,
             "the content was asked for once"
         );
+    }
+
+    // ---- write actions: creating a tag (spec `reference-creation`)
+
+    use gitbull_testkit::CreatedTag;
+
+    fn tag_request(name: &str, message: &str) -> CreateTagRequest {
+        CreateTagRequest {
+            name: name.to_owned(),
+            start: fake_id("c"),
+            message: message.to_owned(),
+        }
+    }
+
+    #[test]
+    fn creating_a_tag_keeps_head_and_reads_the_state() {
+        let backend = on_main();
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        let references = count(&probe, "references");
+        assert_eq!(
+            session.start_create_tag(tag_request("v1.2", "")),
+            CreateStart::Started
+        );
+        assert_eq!(
+            session.action(),
+            Some(&Action::CreateTag {
+                name: "v1.2".to_owned()
+            })
+        );
+        wait_until(&mut session, idle);
+        assert_eq!(
+            probe.created_tags(),
+            [CreatedTag {
+                name: "v1.2".to_owned(),
+                start: fake_id("c").to_string(),
+                message: None,
+            }]
+        );
+        assert!(count(&probe, "references") > references);
+        assert_eq!(session.opened().head, Head::Branch("main".to_owned()));
+        assert!(listed(&session, "refs/tags/v1.2"));
+        assert!(session.dialog().is_none());
+        assert_eq!(session.take_checked_out(), None);
+    }
+
+    #[test]
+    fn a_message_makes_an_annotated_tag_and_a_blank_one_does_not() {
+        let backend = on_main();
+        let probe = backend.probe();
+        let mut session = ready(backend);
+        session.start_create_tag(tag_request("v1.3", "Release 1.3\n\nNotes"));
+        wait_until(&mut session, idle);
+        session.start_create_tag(tag_request("v1.4", "  \n"));
+        wait_until(&mut session, idle);
+        let messages: Vec<Option<String>> = probe
+            .created_tags()
+            .into_iter()
+            .map(|tag| tag.message)
+            .collect();
+        assert_eq!(messages, [Some("Release 1.3\n\nNotes".to_owned()), None]);
+    }
+
+    #[test]
+    fn a_tag_that_git_refuses_stays_with_the_dialog() {
+        let backend = on_main()
+            .with_create_tag(
+                "taken",
+                FakeWrite::Refused(Refusal::NameTaken("taken".to_owned())),
+            )
+            .with_create_tag(
+                "nobody",
+                FakeWrite::Failed {
+                    stderr: "fatal: unable to auto-detect email address".to_owned(),
+                },
+            );
+        let mut session = ready(backend);
+        session.start_create_tag(tag_request("taken", ""));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.dialog(),
+            Some(&ActionDialog::NameRefused {
+                action: Action::CreateTag {
+                    name: "taken".to_owned()
+                },
+                why: NameRefusal::Taken,
+            })
+        );
+        session.close_dialog();
+        session.start_create_tag(tag_request("nobody", "Release"));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.dialog(),
+            Some(&ActionDialog::Failed {
+                action: Action::CreateTag {
+                    name: "nobody".to_owned()
+                },
+                message: "fatal: unable to auto-detect email address".to_owned(),
+            })
+        );
+        assert!(!listed(&session, "refs/tags/nobody"));
+    }
+
+    #[test]
+    fn a_tag_waits_for_a_running_action() {
+        let gate = Gate::new();
+        let mut session = ready(on_main().with_checkout_gate(&gate));
+        session.start_create_branch(topic("one", false));
+        assert_eq!(
+            session.start_create_tag(tag_request("v1", "")),
+            CreateStart::Busy
+        );
+        gate.open();
+        wait_until(&mut session, idle);
     }
 }

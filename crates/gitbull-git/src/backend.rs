@@ -133,6 +133,19 @@ pub trait Backend: Send + Sync {
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure>;
 
+    /// Creates the tag `name` at the commit `start` (a full hash): lightweight
+    /// without a message, annotated with one (spec `reference-creation`).
+    /// HEAD, the index and the working copy stay as they are. See
+    /// [`crate::new_ref::create_tag`].
+    fn create_tag(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        message: Option<&str>,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure>;
+
     /// The structure of the history reachable from `revisions`.
     fn history(
         &self,
@@ -434,6 +447,17 @@ impl Backend for CliBackend {
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure> {
         new_ref::create_branch(&self.git, repo, name, start, checkout, cancel)
+    }
+
+    fn create_tag(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        message: Option<&str>,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        new_ref::create_tag(&self.git, repo, name, start, message, cancel)
     }
 
     fn history(

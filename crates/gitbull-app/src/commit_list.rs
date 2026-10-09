@@ -162,6 +162,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let copy_label = app.texts.text(Msg::CopyFullHash);
     let check_out_label = app.texts.text(Msg::CommitCheckOut);
     let create_branch_label = app.texts.text(Msg::CommitCreateBranch);
+    let create_tag_label = app.texts.text(Msg::CommitCreateTag);
     let titles = [
         Msg::ColumnGraph,
         Msg::ColumnDescription,
@@ -334,6 +335,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let menu_commit = view.commit_menu;
     let mut check_out = None;
     let mut create_branch = None;
+    let mut create_tag = None;
     output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
             let entry = ui
@@ -352,6 +354,15 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
                 .inner;
             if entry.clicked() {
                 create_branch = menu_commit;
+                ui.close();
+            }
+            let entry = ui
+                .add_enabled_ui(!busy && menu_commit.is_some(), |ui| {
+                    components::menu_item(ui, None, &create_tag_label, None)
+                })
+                .inner;
+            if entry.clicked() {
+                create_tag = menu_commit;
                 ui.close();
             }
             if components::menu_item(ui, None, &copy_label, None).clicked() {
@@ -373,6 +384,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     }
     if let Some(id) = create_branch {
         app.begin_create_branch(StartAt::Commit(id), Origin::Commits);
+    }
+    if let Some(id) = create_tag {
+        app.begin_create_tag(StartAt::Commit(id), Origin::Commits);
     }
 }
 

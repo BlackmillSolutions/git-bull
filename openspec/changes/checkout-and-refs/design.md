@@ -103,7 +103,7 @@ not in the interface.
 | New branch and check out | `switch -c <name> --no-track <start id>` |
 | New branch only | `branch --no-track <name> <start id>` |
 | Lightweight tag | `tag <name> <start id>` |
-| Annotated tag | `tag -a -F - <name> <start id>`, message on standard input |
+| Annotated tag | `tag -a --cleanup=whitespace -F - <name> <start id>`, message on standard input |
 
 Each form was run against Git 2.53.0 and behaves as the row says. The commit id of a tag or a commit comes from the references already loaded
 (`Reference.commit`), so a tag and a branch of one name cannot be confused, and
@@ -112,7 +112,9 @@ reads the references afresh and decides between the first two rows, so that the
 decision uses what is on disk now. `--no-track` makes "without an upstream"
 true whatever `branch.autoSetupMerge` says. The message goes through standard
 input so that its length, line breaks and encoding do not depend on the command
-line. No row uses `--force`, `--discard-changes`, `--merge`, `--ignore-other-worktrees`
+line. `--cleanup=whitespace` keeps a line that starts with `#`: by default Git
+strips such lines from a tag message as comments, also when the message does
+not come from an editor, which a test shows. No row uses `--force`, `--discard-changes`, `--merge`, `--ignore-other-worktrees`
 or `--recurse-submodules`. A name that starts with `-` is refused before any
 command runs, because Git cannot take it as an argument.
 

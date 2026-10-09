@@ -6,7 +6,7 @@ use std::fs;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::head::{Head, head};
 use gitbull_git::locate::{Os, SystemProbe, locate_git};
-use gitbull_git::new_ref::create_branch;
+use gitbull_git::new_ref::{create_branch, create_tag};
 use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::{Error, Git};
 use gitbull_testkit::{Marker, TestRepo};
@@ -36,6 +36,16 @@ fn creating_references_preserves_git_behaviour() {
     an_invalid_name_is_a_refusal(&git);
     arguments_that_git_could_take_as_options_never_start_git(&git);
     a_failing_post_checkout_hook_still_leaves_the_branch_checked_out(&git);
+
+    a_lightweight_tag(&git);
+    an_annotated_tag_keeps_its_whole_message(&git);
+    a_blank_message_makes_a_lightweight_tag(&git);
+    a_tag_leaves_head_index_and_files(&git);
+    a_tag_name_taken_is_a_refusal(&git);
+    an_invalid_tag_name_is_a_refusal(&git);
+    a_tag_may_have_the_name_of_a_branch(&git);
+    tag_arguments_that_git_could_take_as_options_never_start_git(&git);
+    an_annotated_tag_without_an_identity_fails_and_creates_nothing(&git);
 }
 
 /// `main` has `file.txt` and `notes.txt`; `feature` changes `file.txt` and adds
@@ -276,4 +286,153 @@ fn a_failing_post_checkout_hook_still_leaves_the_branch_checked_out(git: &Git) {
     assert_eq!(current(git, &repo), Head::Branch("topic".to_owned()));
     assert_eq!(tip(&repo, "topic"), feature);
     assert_eq!(marker.labels(), ["post-checkout"]);
+}
+
+// ---- tags
+
+fn tag(
+    git: &Git,
+    repo: &TestRepo,
+    name: &str,
+    start: &str,
+    message: Option<&str>,
+) -> Result<(), WriteFailure> {
+    create_tag(git, repo.path(), name, start, message, &CancelToken::new())
+}
+
+/// `commit` for a lightweight tag, `tag` for an annotated one.
+fn object_type(repo: &TestRepo, tag: &str) -> String {
+    repo.git(&["cat-file", "-t", &format!("refs/tags/{tag}")])
+        .trim()
+        .to_owned()
+}
+
+fn tagged_commit(repo: &TestRepo, tag: &str) -> String {
+    repo.git(&["rev-parse", &format!("refs/tags/{tag}^{{commit}}")])
+        .trim()
+        .to_owned()
+}
+
+fn tag_exists(repo: &TestRepo, tag: &str) -> bool {
+    !repo.git(&["tag", "--list", tag]).trim().is_empty()
+}
+
+fn a_lightweight_tag(git: &Git) {
+    let (repo, feature) = repository();
+    tag(git, &repo, "v1.2", &feature, None).unwrap();
+    assert_eq!(object_type(&repo, "v1.2"), "commit");
+    assert_eq!(tagged_commit(&repo, "v1.2"), feature);
+}
+
+fn an_annotated_tag_keeps_its_whole_message(git: &Git) {
+    let (repo, feature) = repository();
+    let message = "Release 1.3\n\n# not a comment\n  indented\n\nLast line";
+    tag(git, &repo, "v1.3", &feature, Some(message)).unwrap();
+    assert_eq!(object_type(&repo, "v1.3"), "tag");
+    assert_eq!(tagged_commit(&repo, "v1.3"), feature);
+    let read = repo.git(&["for-each-ref", "--format=%(contents)", "refs/tags/v1.3"]);
+    assert_eq!(read.trim_end(), message);
+}
+
+fn a_blank_message_makes_a_lightweight_tag(git: &Git) {
+    let (repo, feature) = repository();
+    tag(git, &repo, "empty", &feature, Some("")).unwrap();
+    tag(git, &repo, "blank", &feature, Some("  \n\n")).unwrap();
+    assert_eq!(object_type(&repo, "empty"), "commit");
+    assert_eq!(object_type(&repo, "blank"), "commit");
+}
+
+fn a_tag_leaves_head_index_and_files(git: &Git) {
+    let (repo, feature) = repository();
+    repo.write("file.txt", "mine\n");
+    repo.write("staged.txt", "staged\n");
+    repo.git(&["add", "staged.txt"]);
+    let index = fs::read(repo.path().join(".git/index")).unwrap();
+    let status = repo.git(&["status", "--porcelain"]);
+    tag(git, &repo, "light", &feature, None).unwrap();
+    tag(git, &repo, "noted", &feature, Some("Noted")).unwrap();
+    assert_eq!(current(git, &repo), Head::Branch("main".to_owned()));
+    assert_eq!(read(&repo, "file.txt"), "mine\n");
+    assert_eq!(fs::read(repo.path().join(".git/index")).unwrap(), index);
+    assert_eq!(repo.git(&["status", "--porcelain"]), status);
+}
+
+fn a_tag_name_taken_is_a_refusal(git: &Git) {
+    let (repo, feature) = repository();
+    let main = tip(&repo, "main");
+    repo.git(&["tag", "v1", &main]);
+    repo.git(&["tag", "group/x", &main]);
+    for message in [None, Some("Again")] {
+        for name in ["v1", "v1/x", "group"] {
+            match tag(git, &repo, name, &feature, message) {
+                Err(WriteFailure::Refused(Refusal::NameTaken(taken))) => assert_eq!(taken, name),
+                other => panic!("expected a refusal for {name:?}, got {other:?}"),
+            }
+        }
+    }
+    // The existing tag was not moved.
+    assert_eq!(tagged_commit(&repo, "v1"), main);
+}
+
+fn an_invalid_tag_name_is_a_refusal(git: &Git) {
+    let (repo, feature) = repository();
+    for message in [None, Some("Note")] {
+        for name in ["a..b", "x y", "a.lock", "HEAD"] {
+            match tag(git, &repo, name, &feature, message) {
+                Err(WriteFailure::Refused(Refusal::NameInvalid(refused))) => {
+                    assert_eq!(refused, name);
+                }
+                other => panic!("expected a refusal for {name:?}, got {other:?}"),
+            }
+            assert!(!tag_exists(&repo, name));
+        }
+    }
+}
+
+fn a_tag_may_have_the_name_of_a_branch(git: &Git) {
+    let (repo, feature) = repository();
+    tag(git, &repo, "feature", &feature, None).unwrap();
+    assert_eq!(tagged_commit(&repo, "feature"), feature);
+    assert_eq!(tip(&repo, "feature"), feature);
+}
+
+fn tag_arguments_that_git_could_take_as_options_never_start_git(git: &Git) {
+    let (repo, feature) = repository();
+    for (name, start) in [
+        ("", feature.as_str()),
+        ("-d", feature.as_str()),
+        ("v9", ""),
+        ("v9", "--force"),
+        ("v9", "main"),
+    ] {
+        for message in [None, Some("Note")] {
+            match tag(git, &repo, name, start, message) {
+                Err(WriteFailure::Failed(Error::Io { source, .. })) => {
+                    assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+                }
+                other => panic!("expected InvalidInput for {name:?} at {start:?}, got {other:?}"),
+            }
+        }
+    }
+    assert_eq!(repo.git(&["tag", "--list"]).trim(), "");
+}
+
+fn an_annotated_tag_without_an_identity_fails_and_creates_nothing(git: &Git) {
+    let (repo, feature) = repository();
+    repo.git(&["config", "--unset", "user.name"]);
+    repo.git(&["config", "--unset", "user.email"]);
+    // Git must not make an identity up from the account and the host.
+    repo.config("user.useConfigOnly", "true");
+    let result = tag(git, &repo, "v2", &feature, Some("Release 2"));
+    assert!(
+        matches!(
+            &result,
+            Err(WriteFailure::Failed(Error::CommandFailed { stderr, .. }))
+                if stderr.contains("user.useConfigOnly") || stderr.contains("tell me who you are")
+        ),
+        "{result:?}"
+    );
+    assert!(!tag_exists(&repo, "v2"));
+    // A lightweight tag needs no identity.
+    tag(git, &repo, "v2-light", &feature, None).unwrap();
 }

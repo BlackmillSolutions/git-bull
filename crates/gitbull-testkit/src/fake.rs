@@ -138,6 +138,8 @@ pub struct FakeBackend {
     /// What creating the branch of a name does; a name without an entry
     /// succeeds.
     branch_creations: Vec<(String, FakeWrite)>,
+    /// What creating the tag of a name does; a name without an entry succeeds.
+    tag_creations: Vec<(String, FakeWrite)>,
     /// Holds every write action until it opens or is cancelled.
     checkout_gate: Option<Gate>,
     /// Folders inside repositories whose worktrees Git fails to list.
@@ -171,6 +173,16 @@ pub struct CreatedBranch {
     /// The full hash of the starting point.
     pub start: String,
     pub checkout: bool,
+}
+
+/// A tag that was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedTag {
+    pub name: String,
+    /// The full hash of the starting point.
+    pub start: String,
+    /// The message of an annotated tag; `None` for a lightweight one.
+    pub message: Option<String>,
 }
 
 /// How checking a path goes wrong on purpose.
@@ -328,6 +340,13 @@ impl FakeBackend {
     /// succeeds, and with a checkout it moves HEAD there.
     pub fn with_create_branch(mut self, name: &str, outcome: FakeWrite) -> FakeBackend {
         self.branch_creations.push((name.to_owned(), outcome));
+        self
+    }
+
+    /// Lets creating the tag `name` end as `outcome`; without an entry it
+    /// succeeds.
+    pub fn with_create_tag(mut self, name: &str, outcome: FakeWrite) -> FakeBackend {
+        self.tag_creations.push((name.to_owned(), outcome));
         self
     }
 
@@ -1094,6 +1113,45 @@ impl Backend for FakeBackend {
                 }
             },
         )
+    }
+
+    fn create_tag(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        message: Option<&str>,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        self.probe.record("create-tag", repo);
+        self.probe.record_created_tag(CreatedTag {
+            name: name.to_owned(),
+            start: start.to_owned(),
+            message: message.map(str::to_owned),
+        });
+        let folder = self.root_of(repo);
+        self.hold_write(cancel)?;
+        let outcome = self
+            .tag_creations
+            .iter()
+            .find(|(known, _)| known == name)
+            .map(|(_, outcome)| outcome.clone())
+            .unwrap_or(FakeWrite::Done);
+        self.finish_write("git tag", outcome, || {
+            self.created_references
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((
+                    folder.clone(),
+                    Reference {
+                        name: format!("refs/tags/{name}"),
+                        short: name.to_owned(),
+                        kind: RefKind::Tag,
+                        commit: Some(start.to_owned()),
+                        upstream: None,
+                    },
+                ));
+        })
     }
 
     fn write_commit_graph(
@@ -2145,6 +2203,8 @@ struct ProbeLog {
     checkouts: Vec<CheckoutTarget>,
     /// Every branch creation asked for, in order.
     created_branches: Vec<CreatedBranch>,
+    /// Every tag creation asked for, in order.
+    created_tags: Vec<CreatedTag>,
 }
 
 impl Probe {
@@ -2228,6 +2288,15 @@ impl Probe {
 
     fn record_created_branch(&self, created: CreatedBranch) {
         self.lock().created_branches.push(created);
+    }
+
+    fn record_created_tag(&self, created: CreatedTag) {
+        self.lock().created_tags.push(created);
+    }
+
+    /// Every tag creation asked for, in order.
+    pub fn created_tags(&self) -> Vec<CreatedTag> {
+        self.lock().created_tags.clone()
     }
 
     /// Every branch creation asked for, in order.

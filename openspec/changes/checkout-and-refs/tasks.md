@@ -101,11 +101,11 @@ guards are marked as such and are expected to pass at once.
 
 ## 9. Creating tags
 
-- [ ] 9.1 Add to `new_ref.rs` tests a lightweight tag, an annotated tag with a multi-line message that contains `#` and is read back whole, a tag without a message being lightweight, tags leaving HEAD, index and files, a taken name, and an annotated tag without a Git identity failing with Git's message and creating no tag; then implement `create_tag` with the message on standard input, `Backend::create_tag` and the fake. Verify the tests fail with E0599 first and then pass.
-- [ ] 9.2 Add the session part (`start_create_tag`) with tests, and extend `reference_creation.rs` with `the_tag_dialog_has_an_optional_message`, `an_empty_message_makes_a_lightweight_tag`, `a_message_makes_an_annotated_tag`, `the_menu_of_a_commit_offers_create_tag_here`, `a_new_tag_appears_in_the_sidebar_and_as_a_badge` and `no_identity_stays_in_the_dialog`. Verify they fail first.
-- [ ] 9.3 Implement the dialog "Create tag", the entry in the menu of a commit and the texts. Verify the tests of 9.2 pass.
-- [ ] 9.4 Add a snapshot (Windows only) of the dialog, approved by the user as in 4.4; verify the approval is recorded here.
-- [ ] 9.5 Review the diff and commit as `feat(app): create tags`; verify clippy for the host and the Windows target.
+- [x] 9.1 Add to `new_ref.rs` tests a lightweight tag, an annotated tag with a multi-line message that contains `#` and is read back whole, a blank message being lightweight, tags leaving HEAD, index and files, a taken name and folder conflicts, invalid names, a tag with the name of a branch, arguments that could be taken for options, and an annotated tag without a Git identity failing with Git's message and creating no tag; then implement `create_tag` with the message on standard input, `Backend::create_tag` and the fake. Verified: the tests failed to compile first (E0432) and then passed; without `--cleanup=whitespace` the `#` line is lost and the test fails.
+- [x] 9.2 Add the session part (`start_create_tag`) with tests, and extend `reference_creation.rs` with `the_tag_dialog_has_an_optional_message`, `an_empty_message_makes_a_lightweight_tag`, `a_message_makes_an_annotated_tag`, `the_menu_of_a_commit_offers_create_tag_here`, `a_new_tag_appears_in_the_sidebar_and_as_a_badge`, `no_identity_stays_in_the_dialog`, the check of a tag name against tags, a name Git refused, the entry while an action runs and the status bar. Verified: they failed first.
+- [x] 9.3 Implement the dialog "Create tag", the entry in the menu of a commit and the texts. Verified: the 35 tests of `reference_creation.rs` pass.
+- [ ] 9.4 Add a snapshot (Windows only) of the dialog, approved by the user as in 4.4; verify the approval is recorded here. The test `create_tag_dialog_with_a_message` exists and type-checks for the Windows target. Open: the image `create_tag_message` must be generated on Windows and approved.
+- [x] 9.5 Review the diff and commit as `feat(app): create tags`. Verified: fmt, clippy for the host and the Windows target, and 1829 tests pass.
 
 ## 10. Final verification
 

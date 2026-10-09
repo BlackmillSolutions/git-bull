@@ -703,3 +703,59 @@ fn create_branch_dialog_with_a_valid_name() {
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "create_branch_valid_dark", &options());
 }
+
+/// Scenario "Annotated tag" of `reference-creation`: the dialog "Create tag"
+/// with a name and a message of two lines.
+#[test]
+fn create_tag_dialog_with_a_message() {
+    let backend = dialog_backend().with_content(
+        fake_id("b"),
+        gitbull_git::content::CommitContent {
+            message: "Draw the graph of a merge\n".to_owned(),
+            ..gitbull_git::content::CommitContent::default()
+        },
+    );
+    let mut harness = repository_window(
+        backend,
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    let row = harness
+        .get_all_by_role(Role::Row)
+        .next()
+        .expect("a commit row")
+        .rect()
+        .center();
+    harness.hover_at(row);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: row,
+            button: eframe::egui::PointerButton::Secondary,
+            pressed,
+            modifiers: eframe::egui::Modifiers::NONE,
+        });
+    }
+    harness.run();
+    harness.get_by_label("Create tag here…").click();
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Dialog, "Create tag")
+            .is_some()
+    });
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, "Tag name")
+        .type_text("v1.3");
+    harness.run();
+    let message = harness.get_by_role_and_label(Role::MultilineTextInput, "Message (optional)");
+    message.focus();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::MultilineTextInput, "Message (optional)")
+        .type_text("Release 1.3\nThe graph of merges");
+    harness.run();
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "create_tag_message", &options());
+}

@@ -136,6 +136,7 @@ enum Action {
     /// The dialog "Create branch": the name was edited, the option to check
     /// out was set, Create or Cancel was chosen.
     SetCreateName(String),
+    SetCreateMessage(String),
     SetCreateCheckout(bool),
     SubmitCreate,
     CancelCreate,
@@ -389,6 +390,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::CancelDetach => app.detach_pending = None,
             Action::BeginCreateBranch(at, origin) => app.begin_create_branch(at, origin),
             Action::SetCreateName(text) => app.set_create_name(text),
+            Action::SetCreateMessage(text) => app.set_create_message(text),
             Action::SetCreateCheckout(on) => app.set_create_checkout(on),
             Action::SubmitCreate => app.submit_create(),
             Action::CancelCreate => app.cancel_create(),
@@ -1625,6 +1627,11 @@ pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
             args.set("name", name.clone());
             app.texts.text_with(Msg::ActionCreateBranch, Some(&args))
         }
+        WriteAction::CreateTag { name } => {
+            let mut args = FluentArgs::new();
+            args.set("name", name.clone());
+            app.texts.text_with(Msg::ActionCreateTag, Some(&args))
+        }
     }
 }
 
@@ -1638,11 +1645,11 @@ fn action_dialog(
     ui: &mut Ui,
     actions: &mut Vec<Action>,
 ) {
-    use gitbull_core::session::{ActionDialog, NameRefusal};
+    use gitbull_core::session::ActionDialog;
     let texts = &app.texts;
     let target = |action: &WriteAction| match action {
         WriteAction::Checkout { target } => target.clone(),
-        WriteAction::CreateBranch { name } => name.clone(),
+        WriteAction::CreateBranch { name } | WriteAction::CreateTag { name } => name.clone(),
     };
     let named = |msg: Msg, name: &str| {
         let mut args = FluentArgs::new();
@@ -1654,6 +1661,7 @@ fn action_dialog(
     let failed_title = |action: &WriteAction| match action {
         WriteAction::Checkout { target } => named(Msg::CheckoutFailedTitle, target),
         WriteAction::CreateBranch { name } => named(Msg::CreateFailedTitle, name),
+        WriteAction::CreateTag { name } => named(Msg::CreateTagFailedTitle, name),
     };
     let (title, intro, details, close_label, copy) = match dialog {
         ActionDialog::BlockedByChanges { target, files } => (
@@ -1706,10 +1714,14 @@ fn action_dialog(
         }
         ActionDialog::NameRefused { action, why } => (
             failed_title(action),
-            texts.text(match why {
-                NameRefusal::Taken => Msg::CreateRefusedTaken,
-                NameRefusal::Invalid => Msg::CreateRefusedInvalid,
-            }),
+            texts.text(refused_name_msg(
+                if matches!(action, WriteAction::CreateTag { .. }) {
+                    NameKind::Tag
+                } else {
+                    NameKind::Branch
+                },
+                why,
+            )),
             String::new(),
             texts.text(Msg::DialogClose),
             false,
@@ -1783,6 +1795,16 @@ fn action_dialog(
     }
 }
 
+/// What says that Git refused a name which the check of the dialog let through.
+fn refused_name_msg(kind: NameKind, why: &NameRefusal) -> Msg {
+    match (kind, why) {
+        (NameKind::Branch, NameRefusal::Taken) => Msg::CreateRefusedTaken,
+        (NameKind::Branch, NameRefusal::Invalid) => Msg::CreateRefusedInvalid,
+        (NameKind::Tag, NameRefusal::Taken) => Msg::CreateTagRefusedTaken,
+        (NameKind::Tag, NameRefusal::Invalid) => Msg::CreateTagRefusedInvalid,
+    }
+}
+
 /// How a problem with a name is worded.
 fn name_problem_text(texts: &i18n::Translations, kind: NameKind, problem: &NameProblem) -> String {
     let branch = kind == NameKind::Branch;
@@ -1832,10 +1854,10 @@ fn name_problem_text(texts: &i18n::Translations, kind: NameKind, problem: &NameP
     }
 }
 
-/// The dialog "Create branch": the starting point, the name with its check
-/// while the user types, and the option to check the branch out. The cursor
-/// starts in the name; Enter creates when the name is valid, and Escape
-/// cancels.
+/// The dialog "Create branch" or "Create tag": the starting point, the name
+/// with its check while the user types, and for a branch the option to check
+/// it out, for a tag a message, which is optional. The cursor starts in the
+/// name; Enter there creates when the name is valid, and Escape cancels.
 fn create_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let Some(dialog) = &app.create_dialog else {
         return;
@@ -1874,24 +1896,33 @@ fn create_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
             texts.text_with(Msg::CreateStartHead, Some(&args))
         }
     };
-    let title = texts.text(Msg::CreateBranchTitle);
-    let hint = texts.text(Msg::CreateBranchName);
+    let tag = dialog.kind == NameKind::Tag;
+    let title = texts.text(if tag {
+        Msg::CreateTagTitle
+    } else {
+        Msg::CreateBranchTitle
+    });
+    let hint = texts.text(if tag {
+        Msg::CreateTagName
+    } else {
+        Msg::CreateBranchName
+    });
+    let message_hint = texts.text(Msg::CreateTagMessage);
     let check_out = texts.text(Msg::CreateCheckOut);
     let create = texts.text(Msg::CreateConfirm);
     let cancel = texts.text(Msg::DialogCancel);
     let shown_problem = problem
         .as_ref()
-        .map(|problem| name_problem_text(texts, NameKind::Branch, problem))
+        .map(|problem| name_problem_text(texts, dialog.kind, problem))
         .filter(|text| !text.is_empty());
-    let refused = dialog.refused.as_ref().map(|why| {
-        texts.text(match why {
-            NameRefusal::Taken => Msg::CreateRefusedTaken,
-            NameRefusal::Invalid => Msg::CreateRefusedInvalid,
-        })
-    });
+    let refused = dialog
+        .refused
+        .as_ref()
+        .map(|why| texts.text(refused_name_msg(dialog.kind, why)));
     let mut name = dialog.name.clone();
+    let mut message = dialog.message.clone();
     let mut checkout = dialog.checkout;
-    let outcome = components::dialog(ui.ctx(), Id::new("create-branch"), &title, |ui| {
+    let outcome = components::dialog(ui.ctx(), Id::new("create-reference"), &title, |ui| {
         ui.label(RichText::new(texts.text(Msg::CreateStartCaption)).weak());
         ui.label(start);
         ui.add_space(SHAPE.space[1]);
@@ -1908,16 +1939,29 @@ fn create_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
         if let Some(text) = shown_problem.or(refused) {
             components::error_text(ui, text);
         }
-        if let Some(message) = &dialog.failure {
+        ui.add_space(SHAPE.space[1]);
+        ui.add_enabled_ui(!dialog.running, |ui| {
+            if tag {
+                // Several lines: Enter is a line break here.
+                let field = ui.add(
+                    egui::TextEdit::multiline(&mut message)
+                        .hint_text(message_hint.as_str())
+                        .desired_rows(4)
+                        .desired_width(320.0),
+                );
+                ui.ctx().accesskit_node_builder(field.id, |node| {
+                    node.set_label(message_hint.as_str());
+                });
+            } else {
+                components::checkbox(ui, &mut checkout, &check_out);
+            }
+        });
+        if let Some(failure) = &dialog.failure {
             // A line of Git's message per label, so that each is found alone.
-            for line in message.lines() {
+            for line in failure.lines() {
                 components::error_text(ui, line);
             }
         }
-        ui.add_space(SHAPE.space[1]);
-        ui.add_enabled_ui(!dialog.running, |ui| {
-            components::checkbox(ui, &mut checkout, &check_out);
-        });
         ui.add_space(SHAPE.space[2]);
         let (mut submit, mut cancelled) = (false, false);
         ui.horizontal(|ui| {
@@ -1941,6 +1985,9 @@ fn create_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     });
     if name != dialog.name {
         actions.push(Action::SetCreateName(name));
+    }
+    if message != dialog.message {
+        actions.push(Action::SetCreateMessage(message));
     }
     if checkout != dialog.checkout {
         actions.push(Action::SetCreateCheckout(checkout));
