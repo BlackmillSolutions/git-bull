@@ -243,9 +243,16 @@ title bar and edges still move, resize, minimize, maximize and close the window.
 A dialog SHALL take Enter as its default choice where one is safe and Escape as
 Cancel or Close, and SHALL be reachable and announced by assistive technology
 with its title and message. It SHALL fit the window at every interface size;
-what does not fit SHALL scroll, while the buttons of the dialog SHALL stay in
-view below what scrolls. A dialog SHALL stay below the title bar, so that the
-buttons of the window, which remain usable, do not cover it.
+what does not fit SHALL scroll, while the title and the buttons of the dialog
+SHALL stay in view around what scrolls. A dialog SHALL stay below the title
+bar, so that the buttons of the window, which remain usable, do not cover it.
+
+A window that is too small to show the title and the buttons of a dialog
+together with some of its message is not a size git-bull is made to work at:
+the smallest window at the largest interface size is one. There the title and
+the buttons SHALL still be in view and usable and SHALL NOT be covered, and the
+message and the list of a dialog MAY be out of reach. git-bull is not required
+to be usable beyond that in such a window.
 
 #### Scenario: Main window takes no input
 - **WHEN** a dialog is open and the user clicks Refresh in the toolbar
@@ -255,7 +262,11 @@ buttons of the window, which remain usable, do not cover it.
 - **WHEN** a dialog of a refused checkout is open and the user presses Escape
 - **THEN** the dialog closes and nothing changes
 
-#### Scenario: Small window
+#### Scenario: Window too small for the list
+- **WHEN** the interface size is 150 % in a window of 1280 by 800 pixels and a dialog with a long list of files is open
+- **THEN** the list scrolls, the buttons of the dialog are in view without scrolling, and its title is not covered by the buttons of the window
+
+#### Scenario: Window too small for a dialog
 - **WHEN** the window has its smallest size, the interface size is 150 % and a dialog with a long list of files is open
-- **THEN** every control of the dialog can be reached, by scrolling where the dialog does not fit
-- **AND** the buttons of the dialog are in view without scrolling, and its title is not covered by the buttons of the window
+- **THEN** the title and the buttons of the dialog are in view and usable, and the buttons of the window do not cover the title
+- **AND** the message and the list need not be reachable

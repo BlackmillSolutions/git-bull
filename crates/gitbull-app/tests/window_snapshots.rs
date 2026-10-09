@@ -608,6 +608,7 @@ fn checkout_dialog_in_the_dark_palette() {
     image_snapshot_options(&image, "checkout_dialog_dark", &options());
 }
 
+/// Scenario "Window too small for the list".
 #[test]
 fn checkout_dialog_at_150_percent() {
     let mut harness = blocked_checkout(
@@ -619,7 +620,9 @@ fn checkout_dialog_at_150_percent() {
     image_snapshot_options(&image, "checkout_dialog_150", &options());
 }
 
-/// Scenario "Small window": the smallest window, 640 by 400 pixels, at 150 %.
+/// Scenario "Window too small for a dialog": the smallest window, 640 by 400
+/// pixels, at 150 %. The title and the buttons are in view; the message and
+/// the list need not be.
 #[test]
 fn checkout_dialog_in_the_smallest_window() {
     let mut harness = blocked_checkout(
