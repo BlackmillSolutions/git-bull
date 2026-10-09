@@ -362,7 +362,16 @@ fn double_click(harness: &mut Harness<'_, App>, label: &str) {
     }
     let at = item(harness, label).rect().center();
     double_click_at(harness, at);
-    harness.run();
+    settle_frames(harness);
+}
+
+/// A few frames after an input. Not `run`: a tab that opens or an action that
+/// runs shows a spinner, which keeps the window repainting, so `run` would
+/// never see it still. The callers wait for what they expect.
+fn settle_frames(harness: &mut Harness<'_, App>) {
+    for _ in 0..3 {
+        harness.step();
+    }
 }
 
 fn right_click(harness: &mut Harness<'_, App>, label: &str) {
@@ -730,7 +739,7 @@ fn double_click_commit(harness: &mut Harness<'_, App>, summary: &str) {
     }
     let at = commit_row(harness, summary).rect().center();
     double_click_at(harness, at);
-    harness.run();
+    settle_frames(harness);
 }
 
 fn right_click_commit(harness: &mut Harness<'_, App>, summary: &str) {
@@ -1147,8 +1156,11 @@ fn an_open_tab_is_activated_and_no_tab_is_added() {
     wait_for(&mut harness, |h| h.query_by_label("diff").is_some());
     assert_eq!(active_title(harness.state()).as_deref(), Some("git-bull"));
     double_click(&mut harness, "hook");
+    // The folder opens in a tab of its own first, which is joined with the
+    // open one once it is known to be the same worktree.
     wait_for(&mut harness, |h| {
         active_title(h.state()).as_deref() == Some("git-bull-fix")
+            && tab_titles(h.state()).len() == 2
     });
     assert_eq!(tab_titles(harness.state()), ["git-bull", "git-bull-fix"]);
 }
