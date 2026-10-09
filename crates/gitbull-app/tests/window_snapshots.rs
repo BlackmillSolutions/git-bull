@@ -7,7 +7,7 @@ mod support;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder, SnapshotOptions, image_snapshot_options};
 use gitbull_app::app::App;
 use gitbull_app::ui;
@@ -433,8 +433,40 @@ fn repository_window(
     let mut harness = harness;
     settle_window(&mut harness);
     wait_for_references(&mut harness);
+    // The commit list and the descriptions of its commits load apart from the
+    // sidebar; an image taken before they came would differ from run to run.
+    wait_for(&mut harness, |h| {
+        h.state()
+            .workspace()
+            .and_then(|workspace| workspace.active())
+            .and_then(|tab| tab.session())
+            .is_some_and(|session| {
+                matches!(
+                    session.history().state,
+                    gitbull_core::session::LoadState::Loaded
+                )
+            })
+    });
+    // The descriptions follow. A window too small to show a row of the list
+    // has none to wait for, so this gives up after a while.
+    for _ in 0..500 {
+        let described = harness.query_all_by_role(Role::Row).any(|row| {
+            row.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(OLDEST_COMMIT))
+        });
+        if described {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    harness.run();
     harness
 }
+
+/// The description of the oldest commit of [`dialog_backend`].
+const OLDEST_COMMIT: &str = "Read the history of a repository";
 
 fn branch_reference(name: &str, commit: &str) -> Reference {
     Reference {
@@ -488,7 +520,7 @@ fn dialog_backend() -> FakeBackend {
             FakeWrite::Refused(Refusal::TrackedChanges(files)),
         )
         .with_content(fake_id("b"), described("Draw the graph of a merge"))
-        .with_content(fake_id("a"), described("Read the history of a repository"))
+        .with_content(fake_id("a"), described(OLDEST_COMMIT))
 }
 
 /// The content of a commit with this description, by Ada Lovelace.
