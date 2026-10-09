@@ -7,32 +7,74 @@ of **M3: Local write operations** come next, ahead of further interface
 polish. Milestone numbers group the work; they do not require the remaining
 M2 improvements to finish before M3 starts.
 
-The read-only viewer, the interface improvements delivered so far and the
-worktree cockpit provide the starting point. This roadmap schedules new
-work; the current application still does not offer checkout, staging or
-commit creation.
+The read-only viewer, the interface improvements delivered so far, the
+worktree cockpit and the trust model for write operations provide the
+starting point, and checkout and the creation of branches and tags are
+delivered. This roadmap schedules new work; the current application still
+does not offer staging or commit creation.
+
+## Delivered: the foundation for local Git operations
+
+On 2026-10-08, [pull request #33](https://github.com/BlackmillSolutions/git-bull/pull/33)
+decided the trust model for hooks and filters and delivered the invocation
+boundary for write operations. It was planned as the OpenSpec change
+`write-operation-trust`; the decision is recorded in
+[ADR 0007](adr/0007-explicit-git-write-invocation.md).
+
+- An action the user requests runs through an explicit write invocation with
+  Git's ordinary hooks, filters and signing. There is no trust dialog and no
+  trust list, and Git's ownership check stays in force.
+- Browsing and background reads keep their protections, also while a write
+  runs.
+- A single commit can skip all hooks, the fsmonitor hook included. The commit
+  interface will offer it as "Commit without hooks".
+- Cancelling a write stops Git and the hooks and filters it started, on
+  Linux, macOS and Windows.
+
+This was the foundation in `gitbull-git` only, without an action, a `Backend`
+method or an interface; those come with the changes below. The behaviour is specified
+in the [Git integration spec](../openspec/specs/git-integration/spec.md).
+
+## Delivered: checkout, branches and tags
+
+The OpenSpec change `checkout-and-refs` delivered the first write actions of
+the interface. How a write action runs is recorded in
+[ADR 0008](adr/0008-write-actions-belong-to-the-session.md).
+
+- A double click, Enter or the context menu checks out a branch, a remote
+  branch, a tag or a commit. A remote branch is checked out as a local branch
+  that follows it. A notice comes before HEAD is detached, and can be hidden.
+- Local changes that would be overwritten are never discarded: the checkout is
+  refused and a dialog lists the files. There is no force, no discard and no
+  automatic stash.
+- A branch that another worktree has checked out is marked in the sidebar, and
+  checking it out opens that worktree.
+- A branch is created from a commit, a branch, a remote branch, a tag or the
+  Branch button of the toolbar, and a tag from a commit, lightweight or
+  annotated. The name is checked while the user types.
+- A tab runs one write action at a time. Closing the tab or the window while
+  one runs asks first, and the state is read again after every outcome.
+
+The stash that the dialog of a refused checkout could offer comes with the
+stash change.
 
 ## Next: the local Git workflow
 
 | Order | Priority | Work |
 |---|---|---|
-| 1 | High | Decide the trust model for hooks and filters before adding write operations. |
-| 2 | High | Check out branches and commits, and create branches and tags. |
-| 3 | High | Stage and unstage files and hunks from the File status view. |
-| 4 | High | Write a commit message, commit the staged changes and amend the last commit. |
+| 1 | High | Stage and unstage files and hunks from the File status view. |
+| 2 | High | Write a commit message, commit the staged changes and amend the last commit. |
 
-The first delivery should make the basic checkout, file staging and commit
-workflow usable. Hunk staging, tags and amend remain part of the planned
-local operations and follow their corresponding basic actions. The detailed
-OpenSpec changes will define their behaviour and implementation steps.
+The next delivery should make file staging and the commit workflow usable.
+Hunk staging and amend remain part of the planned local operations and follow
+their corresponding basic actions. The detailed OpenSpec changes will define
+their behaviour and implementation steps.
 
-The trust decision is already an item on the GitHub roadmap. The current
-[Git integration spec](../openspec/specs/git-integration/spec.md) and
+Each item starts with its own Explore and Propose and builds on the write
+invocation and on the write actions of the session. The
 [working-copy status spec](../openspec/specs/working-copy-status/spec.md)
-describe a read-only client. The write-operation changes must explicitly
-revise those contracts while keeping browsing read-only. They must resolve
-how hooks and filters, including Git LFS, work for an operation the user
-requests.
+still requires that the File status view offers no action that changes the
+index, so the staging change must revise it.
 
 ## After the basic actions
 

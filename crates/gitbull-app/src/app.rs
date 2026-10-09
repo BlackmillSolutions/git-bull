@@ -17,15 +17,24 @@ use gitbull_core::panel::Panel;
 use gitbull_core::repositories::RepositoryList;
 use gitbull_core::search::HashOutcome;
 use gitbull_core::seen::SeenFile;
-use gitbull_core::session::{BranchFilter, Navigation, Session};
+use gitbull_core::session::{
+    Action as WriteAction, ActionDialog, BranchFilter, CheckoutRequest, CheckoutStart,
+    CommitActivation, CreateBranchRequest, CreateStart, CreateTagRequest, NameRefusal, Navigation,
+    Session, StartAt, StartUnavailable, StartingPoint,
+};
 use gitbull_core::settings::{
     ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
     WindowGeometry,
 };
-use gitbull_core::sidebar_tree::{SidebarKey, SidebarRow, SidebarState};
-use gitbull_core::workspace::{Event, Failure, Notify, TabId, TabState, View, Workspace};
+use gitbull_core::sidebar_tree::{Section, SidebarKey, SidebarRow, SidebarState};
+use gitbull_core::workspace::{
+    CloseRequest, Event, Failure, Notify, TabAction, TabId, TabState, View, Workspace,
+};
+use gitbull_git::head::Head;
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
+use gitbull_git::ref_name::{NameKind, NameProblem, check_name};
+use gitbull_git::refs::Reference;
 use gitbull_git::status::{Group, StatusEntry};
 use gitbull_git::version::GitVersion;
 use gitbull_git::{Backend, CliBackend};
@@ -117,6 +126,68 @@ pub struct SettingsDialog {
 pub enum GitMessage {
     Applied,
     Problem(GitCheck),
+    /// Another Git is not applied while this write action runs: applying it
+    /// opens every tab again and would stop the action.
+    Busy(WriteAction),
+}
+
+/// A checkout of a tag or a commit that waits for the user's word, because
+/// HEAD will no longer point to a branch (spec `checkout`, requirement "Notice
+/// before detaching HEAD").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingDetach {
+    pub request: CheckoutRequest,
+    /// The tag, or the short hash, as the notice names it.
+    pub target: String,
+    /// The user ticked "Don't show this again".
+    pub dont_show: bool,
+}
+
+/// Where a dialog was opened from, so that the keyboard goes on there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    Sidebar,
+    /// The commit list, and the toolbar, which acts on its selection.
+    Commits,
+}
+
+/// The dialog "Create branch" or "Create tag" while it is open (spec
+/// `reference-creation`).
+#[derive(Clone, Debug)]
+pub(crate) struct CreateDialog {
+    /// What is created.
+    pub(crate) kind: NameKind,
+    pub(crate) origin: Origin,
+    pub(crate) start: StartingPoint,
+    /// The first line of the message of the starting point, once it is known.
+    pub(crate) description: Option<String>,
+    pub(crate) name: String,
+    /// Whether the new branch is checked out in the same step.
+    pub(crate) checkout: bool,
+    /// The message of a tag; a blank one makes the tag lightweight.
+    pub(crate) message: String,
+    /// The action runs, and the dialog waits for it.
+    pub(crate) running: bool,
+    /// Git refused the name although the check let it through.
+    pub(crate) refused: Option<NameRefusal>,
+    /// Git's message of a failure that no check foresaw.
+    pub(crate) failure: Option<String>,
+}
+
+impl CreateDialog {
+    /// What is wrong with the name; `Empty` while there is none.
+    pub(crate) fn problem(&self, references: &[Reference]) -> Option<NameProblem> {
+        check_name(self.kind, &self.name, references).err()
+    }
+}
+
+/// What the user is asked before something stops a write action that runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseQuestion {
+    /// Closing this tab.
+    Tab(TabId),
+    /// Closing the window.
+    Window,
 }
 
 /// What the application is built from.
@@ -256,6 +327,11 @@ pub(crate) struct TabView {
     /// The full name of the branch or remote branch whose context menu was
     /// opened last in the sidebar.
     pub(crate) sidebar_menu: Option<String>,
+    /// The sidebar takes the keyboard focus when it is drawn next, as after a
+    /// dialog closed that the sidebar had started.
+    pub(crate) focus_sidebar: bool,
+    /// The commit list takes the keyboard focus when it is drawn next.
+    pub(crate) focus_commits: bool,
     /// The diff of the file chosen in the commit panel.
     pub(crate) commit_diff: DiffView,
     /// The diff of the file chosen in the File status view.
@@ -365,6 +441,18 @@ pub struct App {
     pub(crate) home: Home,
     pub(crate) notice: Option<Notice>,
     pub(crate) dialog: Option<SettingsDialog>,
+    /// Asked while a write action runs and the user closes a tab or the window.
+    pub(crate) close_question: Option<CloseQuestion>,
+    /// The user chose to close the window although an action runs.
+    pub(crate) close_confirmed: bool,
+    /// A checkout that waits for the notice before detaching HEAD.
+    pub(crate) detach_pending: Option<PendingDetach>,
+    /// The dialog that creates a branch.
+    pub(crate) create_dialog: Option<CreateDialog>,
+    /// The branches at a commit the user activated, while they choose one.
+    pub(crate) branch_choice: Option<Vec<CheckoutRequest>>,
+    /// The window is to be told to close in this frame.
+    pub(crate) send_close: bool,
     dirty: bool,
     last_saved: Instant,
     pub(crate) time_zone: TimeZone,
@@ -410,6 +498,12 @@ impl App {
             home,
             notice: None,
             dialog: None,
+            close_question: None,
+            close_confirmed: false,
+            detach_pending: None,
+            create_dialog: None,
+            branch_choice: None,
+            send_close: false,
             dirty: false,
             last_saved: Instant::now(),
             time_zone,
@@ -492,6 +586,14 @@ impl App {
         }
     }
 
+    /// Sets whether a notice comes before a tag or a commit is checked out.
+    pub fn set_detach_notice(&mut self, show: bool) {
+        if self.settings.detach_notice != show {
+            self.settings.detach_notice = show;
+            self.dirty = true;
+        }
+    }
+
     /// Sets whether the diff shows spaces, tabs and line endings.
     pub fn set_show_invisibles(&mut self, show: bool) {
         if self.settings.show_invisibles != show {
@@ -554,6 +656,12 @@ impl App {
         let Some(input) = self.dialog.as_ref().map(|d| d.git_input.trim().to_owned()) else {
             return;
         };
+        if let Some(running) = self.running_actions().into_iter().next() {
+            if let Some(dialog) = &mut self.dialog {
+                dialog.git_message = Some(GitMessage::Busy(running.action));
+            }
+            return;
+        }
         let result = if input.is_empty() {
             match (self.checker)(None) {
                 (GitStatus::Problem(problem), _) => Err(problem),
@@ -927,6 +1035,374 @@ impl App {
     /// Whether the window has the system's title bar, as it was built.
     pub fn system_title_bar(&self) -> bool {
         self.system_title_bar
+    }
+
+    /// The write actions that run now, one per tab at most.
+    pub fn running_actions(&self) -> Vec<TabAction> {
+        self.workspace
+            .as_ref()
+            .map(Workspace::running_actions)
+            .unwrap_or_default()
+    }
+
+    /// Starts a checkout in the active tab. A tag that points to a tree is
+    /// told apart by a notice; whatever else the session decides shows in the
+    /// interface through the state of the tab.
+    ///
+    /// A tag or a commit detaches HEAD, so unless the user hid it, the notice
+    /// comes first, and the checkout waits for the answer. It does not come for
+    /// a checkout that cannot happen.
+    pub fn checkout(&mut self, request: CheckoutRequest) {
+        // Only a tag or a commit leaves HEAD without a branch.
+        let detaching = matches!(
+            request,
+            CheckoutRequest::Tag(_) | CheckoutRequest::Commit(_)
+        );
+        let show_notice = self.settings.detach_notice;
+        let Some((session, _)) = self.active_view() else {
+            return;
+        };
+        match session.preview_checkout(&request) {
+            // Another worktree has the branch: its tab opens, or is activated.
+            CheckoutStart::OpenWorktree(folder) => self.open(folder),
+            CheckoutStart::NotACommit(tag) => {
+                self.notice = Some(Notice::NotACommit(tag));
+            }
+            CheckoutStart::Busy | CheckoutStart::AlreadyThere => {}
+            CheckoutStart::Started if detaching && show_notice => {
+                let target = match &request {
+                    CheckoutRequest::Tag(full) => {
+                        full.strip_prefix("refs/tags/").unwrap_or(full).to_owned()
+                    }
+                    CheckoutRequest::Commit(id) => id.to_string().chars().take(7).collect(),
+                    CheckoutRequest::Branch(name) => name.clone(),
+                    CheckoutRequest::RemoteBranch(full) => full.clone(),
+                };
+                self.detach_pending = Some(PendingDetach {
+                    request,
+                    target,
+                    dont_show: false,
+                });
+            }
+            CheckoutStart::Started => {
+                session.start_checkout(request);
+            }
+        }
+    }
+
+    /// A double click or Enter on a commit of the list. A branch at the commit
+    /// is what is checked out, so that HEAD stays on a branch; several are
+    /// offered to choose from, and a commit without one is checked out itself.
+    pub(crate) fn activate_commit(&mut self, id: ObjectId) {
+        let Some((session, _)) = self.active_view() else {
+            return;
+        };
+        if session.action().is_some() {
+            return;
+        }
+        match session.commit_activation(&id) {
+            CommitActivation::Nothing => {}
+            CommitActivation::Checkout(request) => self.checkout(request),
+            CommitActivation::Choose(branches) => self.branch_choice = Some(branches),
+        }
+    }
+
+    /// The user chose the branch at `index` of the ones offered.
+    pub(crate) fn choose_branch(&mut self, index: usize) {
+        let Some(branches) = self.branch_choice.take() else {
+            return;
+        };
+        self.refocus(Origin::Commits);
+        if let Some(request) = branches.into_iter().nth(index) {
+            self.checkout(request);
+        }
+    }
+
+    pub(crate) fn cancel_branch_choice(&mut self) {
+        if self.branch_choice.take().is_some() {
+            self.refocus(Origin::Commits);
+        }
+    }
+
+    /// The user confirmed the notice: the checkout starts, and the notice is
+    /// hidden from then on when the user asked for it.
+    pub(crate) fn confirm_detach(&mut self) {
+        let Some(pending) = self.detach_pending.take() else {
+            return;
+        };
+        if pending.dont_show {
+            self.set_detach_notice(false);
+        }
+        if let Some((session, _)) = self.active_view() {
+            session.start_checkout(pending.request);
+        }
+    }
+
+    /// Shows the new state once a checkout moved HEAD: the branch is revealed
+    /// in the sidebar and selected, which goes to its commit in the list.
+    pub(crate) fn poll_checkout(&mut self) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        match session.take_checked_out() {
+            Some(Head::Branch(name)) => {
+                view.sidebar.reveal(Section::Branches, &name);
+                self.select_in_sidebar(SidebarKey::Reference(format!("refs/heads/{name}")));
+            }
+            // No branch is checked out: the list goes to the commit.
+            Some(Head::Detached(commit)) => {
+                if let Some(id) = ObjectId::from_hex(commit.as_bytes()) {
+                    self.navigate_to_commit(id);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// The commit selected in the list of the active tab, if there is one.
+    pub(crate) fn selected_commit(&self) -> Option<ObjectId> {
+        let id = self.workspace.as_ref()?.active()?.id();
+        self.views.get(&id)?.selected_id
+    }
+
+    /// Where the Branch button of the toolbar starts a branch: at the commit
+    /// selected in the list, and at HEAD without one or on the row of the
+    /// uncommitted changes.
+    pub(crate) fn toolbar_start(&self) -> StartAt {
+        self.selected_commit()
+            .map_or(StartAt::Head, StartAt::Commit)
+    }
+
+    /// Whether a branch can be created at `at` now: no write action runs in
+    /// the tab, and there is a commit to start at.
+    pub(crate) fn can_create_at(&self, at: &StartAt) -> bool {
+        let Some(session) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active())
+            .and_then(|tab| tab.session())
+        else {
+            return false;
+        };
+        session.action().is_none() && session.starting_point(at).is_ok()
+    }
+
+    /// Opens the dialog "Create branch" at `at`. A tag that points to a tree
+    /// is told apart by a notice; nothing opens while a write action runs or
+    /// when there is no starting point.
+    pub(crate) fn begin_create_branch(&mut self, at: StartAt, origin: Origin) {
+        self.begin_create(NameKind::Branch, at, origin);
+    }
+
+    /// Opens the dialog "Create tag" at `at`, as
+    /// [`App::begin_create_branch`] opens the one for a branch.
+    pub(crate) fn begin_create_tag(&mut self, at: StartAt, origin: Origin) {
+        self.begin_create(NameKind::Tag, at, origin);
+    }
+
+    fn begin_create(&mut self, kind: NameKind, at: StartAt, origin: Origin) {
+        let Some((session, _)) = self.active_view() else {
+            return;
+        };
+        if session.action().is_some() {
+            return;
+        }
+        match session.starting_point(&at) {
+            Ok(start) => {
+                let description = session.summary_of(&start.commit);
+                self.create_dialog = Some(CreateDialog {
+                    kind,
+                    origin,
+                    start,
+                    description,
+                    name: String::new(),
+                    checkout: true,
+                    message: String::new(),
+                    running: false,
+                    refused: None,
+                    failure: None,
+                });
+            }
+            Err(StartUnavailable::NotACommit(tag)) => {
+                self.notice = Some(Notice::NotACommit(tag));
+            }
+            Err(StartUnavailable::NoCommits | StartUnavailable::Gone(_)) => {}
+        }
+    }
+
+    /// The user edited the name: a space becomes a hyphen, and what Git said
+    /// about the name before no longer applies.
+    pub(crate) fn set_create_name(&mut self, text: String) {
+        if let Some(dialog) = &mut self.create_dialog {
+            let name = text.replace(' ', "-");
+            if name != dialog.name {
+                dialog.refused = None;
+                dialog.failure = None;
+            }
+            dialog.name = name;
+        }
+    }
+
+    pub(crate) fn set_create_message(&mut self, text: String) {
+        if let Some(dialog) = &mut self.create_dialog {
+            if text != dialog.message {
+                dialog.failure = None;
+            }
+            dialog.message = text;
+        }
+    }
+
+    pub(crate) fn set_create_checkout(&mut self, on: bool) {
+        if let Some(dialog) = &mut self.create_dialog {
+            dialog.checkout = on;
+        }
+    }
+
+    /// Create: starts the branch when the name is valid and nothing else
+    /// runs; the dialog stays open until Git ended.
+    pub(crate) fn submit_create(&mut self) {
+        let Some(mut dialog) = self.create_dialog.take() else {
+            return;
+        };
+        if let Some((session, _)) = self.active_view() {
+            let references = session
+                .sidebar()
+                .and_then(|sidebar| sidebar.as_ref().ok())
+                .map(|sidebar| sidebar.references.clone())
+                .unwrap_or_default();
+            if !dialog.running && dialog.problem(&references).is_none() {
+                let started = match dialog.kind {
+                    NameKind::Branch => session.start_create_branch(CreateBranchRequest {
+                        name: dialog.name.clone(),
+                        start: dialog.start.commit,
+                        checkout: dialog.checkout,
+                    }),
+                    NameKind::Tag => session.start_create_tag(CreateTagRequest {
+                        name: dialog.name.clone(),
+                        start: dialog.start.commit,
+                        message: dialog.message.clone(),
+                    }),
+                };
+                if started == CreateStart::Started {
+                    dialog.running = true;
+                    dialog.refused = None;
+                    dialog.failure = None;
+                }
+            }
+        }
+        self.create_dialog = Some(dialog);
+    }
+
+    pub(crate) fn cancel_create(&mut self) {
+        if let Some(dialog) = self.create_dialog.take_if(|dialog| !dialog.running) {
+            self.refocus(dialog.origin);
+        }
+    }
+
+    /// Gives the keyboard back to the area a dialog was opened from.
+    fn refocus(&mut self, origin: Origin) {
+        if let Some((_, view)) = self.active_view() {
+            match origin {
+                Origin::Sidebar => view.focus_sidebar = true,
+                Origin::Commits => view.focus_commits = true,
+            }
+        }
+    }
+
+    /// Follows the dialog "Create branch" while its action runs. When Git
+    /// ended, the dialog closes if the branch was made or another dialog tells
+    /// what happened; it stays, with the name, when Git refused the name or
+    /// failed in a way the dialog is to show.
+    pub(crate) fn poll_create(&mut self) {
+        let Some(mut dialog) = self.create_dialog.take() else {
+            return;
+        };
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        if let Some(description) = session.summary_of(&dialog.start.commit) {
+            dialog.description = Some(description);
+        }
+        if dialog.running && session.action().is_none() {
+            dialog.running = false;
+            let ours = |action: &WriteAction| match (dialog.kind, action) {
+                (NameKind::Branch, WriteAction::CreateBranch { name })
+                | (NameKind::Tag, WriteAction::CreateTag { name }) => *name == dialog.name,
+                _ => false,
+            };
+            let section = match dialog.kind {
+                NameKind::Branch => Section::Branches,
+                NameKind::Tag => Section::Tags,
+            };
+            match session.dialog().cloned() {
+                None => {
+                    // The branch is there: show it.
+                    view.sidebar.reveal(section, &dialog.name);
+                    self.refocus(dialog.origin);
+                    return;
+                }
+                Some(ActionDialog::NameRefused { action, why }) if ours(&action) => {
+                    dialog.refused = Some(why);
+                    session.close_dialog();
+                }
+                Some(ActionDialog::Failed { action, message }) if ours(&action) => {
+                    dialog.failure = Some(message);
+                    session.close_dialog();
+                }
+                // A failed hook means that the branch was made and checked out.
+                Some(ActionDialog::HookFailed { .. }) => {
+                    view.sidebar.reveal(section, &dialog.name);
+                    return;
+                }
+                // A refused checkout has a dialog of its own.
+                Some(_) => return,
+            }
+        }
+        self.create_dialog = Some(dialog);
+    }
+
+    /// What the last write action of the active tab asks the user to see.
+    pub(crate) fn action_dialog(&self) -> Option<ActionDialog> {
+        self.workspace
+            .as_ref()?
+            .active()?
+            .session()?
+            .dialog()
+            .cloned()
+    }
+
+    pub(crate) fn close_action_dialog(&mut self) {
+        if let Some((session, view)) = self.active_view() {
+            session.close_dialog();
+            // The keyboard goes on where the user was.
+            view.focus_sidebar = true;
+        }
+    }
+
+    /// Closes the tab, or asks first when a write action runs in it.
+    pub(crate) fn request_close_tab(&mut self, id: TabId) {
+        let Some(workspace) = self.workspace.as_mut() else {
+            return;
+        };
+        if let CloseRequest::Ask(_) = workspace.close_request(id) {
+            self.close_question = Some(CloseQuestion::Tab(id));
+        }
+    }
+
+    /// The user decided to close what the question names, stopping the action.
+    pub(crate) fn close_anyway(&mut self) {
+        match self.close_question.take() {
+            Some(CloseQuestion::Tab(id)) => {
+                if let Some(workspace) = self.workspace.as_mut() {
+                    workspace.close(id);
+                }
+            }
+            Some(CloseQuestion::Window) => {
+                self.close_confirmed = true;
+                self.send_close = true;
+            }
+            None => {}
+        }
     }
 
     pub fn workspace(&self) -> Option<&Workspace> {

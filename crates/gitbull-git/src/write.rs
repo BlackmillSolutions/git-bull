@@ -1,10 +1,11 @@
 //! Explicit user actions honour ordinary Git hooks, filters and signing.
 
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
+use crate::cancel::CancelToken;
 use crate::invoke::{ExecutionPolicy, command_line};
 use crate::process::{FailurePolicy, StderrWatcher};
 use crate::{Error, Git, Process};
@@ -96,5 +97,40 @@ impl<'a> WriteInvocation<'a> {
         let command = self.command(repo, &args)?;
         self.git
             .spawn_prepared(command, &args, stdin, watcher, FailurePolicy::Write)
+    }
+
+    /// Runs `git <args>` to its end for an action that shows no live output,
+    /// such as switching a branch: writes `input` to its standard input when
+    /// there is some, discards its standard output, and waits.
+    ///
+    /// `cancel` is the token of the action, not of a view: cancelling it stops
+    /// Git and the hooks and filters it started (ADR 0008). A failed write
+    /// keeps Git's exit status and message in [`Error::CommandFailed`].
+    pub(crate) fn run<I, S>(
+        &self,
+        repo: &Path,
+        args: I,
+        input: Option<&[u8]>,
+        cancel: &CancelToken,
+    ) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut process = self.spawn(repo, args, input.is_some(), None)?;
+        let canceller = process.canceller();
+        let registration = cancel.on_cancel(move || canceller.cancel());
+        if let (Some(bytes), Some(mut stdin)) = (input, process.take_stdin()) {
+            // A Git that has failed already has closed the pipe; its message
+            // says more than a broken pipe does, and `wait` returns it.
+            let _ = stdin.write_all(bytes);
+        }
+        // Drained before waiting, so that a chatty hook cannot fill the pipe.
+        if let Some(mut stdout) = process.take_stdout() {
+            let _ = io::copy(&mut stdout, &mut io::sink());
+        }
+        let result = process.wait();
+        cancel.forget(registration);
+        result
     }
 }

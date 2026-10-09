@@ -4,17 +4,18 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
-use eframe::egui::accesskit::Role;
+use eframe::egui::accesskit::{Role, Toggled};
 use eframe::egui::os::OperatingSystem;
 use eframe::egui::{Event, Key, Modifiers, MouseWheelUnit, Popup, TouchPhase, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
+use gitbull_core::session::{CheckoutRequest, CheckoutStart};
 use gitbull_core::settings::{ColourVision, InterfaceSize, Settings, SettingsFile, ThemeSetting};
 use gitbull_core::workspace::View;
-use gitbull_testkit::FakeBackend;
+use gitbull_testkit::{FakeBackend, Gate};
 use support::{
-    Answer, Scripted, Setup, build, commit_list_scroll, find_row, long_history, path,
+    Answer, Scripted, Setup, build, build_shared, commit_list_scroll, find_row, long_history, path,
     settle_window, sized_window, turn_wheel, wait_for_row, window, window_at_60_fps, window_on,
 };
 
@@ -529,4 +530,159 @@ fn the_wheel_does_not_scroll_the_commit_list_behind_the_dialog() {
 
     assert!(harness.query_by_label("Appearance").is_some(), "the dialog");
     assert_eq!(commit_list_scroll(&harness), start);
+}
+
+/// One repository open, with every checkout held by `gate`.
+fn busy_with_a_checkout(gate: &Gate) -> Harness<'static, App> {
+    let repository = path(&["work", "git-bull"]);
+    let (test, _backend) = build_shared(Setup {
+        settings: Settings {
+            tabs: vec![repository.clone()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: FakeBackend::default()
+            .with_repository(repository)
+            .with_checkout_gate(gate),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    let started = harness
+        .state_mut()
+        .workspace_mut()
+        .and_then(|workspace| workspace.active_mut())
+        .and_then(|tab| tab.session_mut())
+        .map(|session| session.start_checkout(CheckoutRequest::Branch("feature".to_owned())));
+    assert_eq!(started, Some(CheckoutStart::Started));
+    harness.run();
+    harness
+}
+
+fn apply_git_path(harness: &mut Harness<'_, App>, path: &str) {
+    // With a repository open there are more text fields than in the home tab.
+    let field = harness.get_by_role_and_label(Role::TextInput, "Git executable");
+    field.focus();
+    field.type_text(path);
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Use this Git")
+        .click();
+    // Not `run`: applying a Git opens every tab again, and a tab that opens
+    // shows a spinner, which keeps the window repainting.
+    for _ in 0..3 {
+        harness.step();
+    }
+}
+
+#[test]
+fn another_git_path_is_refused_while_an_action_runs() {
+    let gate = Gate::new();
+    let mut harness = busy_with_a_checkout(&gate);
+    open_dialog(&mut harness);
+    apply_git_path(&mut harness, "/opt/git/bin/git");
+
+    harness.get_by_label_contains("The action \"Checking out feature\" is running");
+    harness.get_by_label_contains("Wait until it has finished");
+    assert_eq!(harness.state().settings().git_path, None);
+    assert!(harness.state().workspace().is_some_and(|workspace| {
+        workspace.tabs().len() == 1 && !workspace.running_actions().is_empty()
+    }));
+    gate.open();
+}
+
+#[test]
+fn the_path_is_applied_after_the_action() {
+    let gate = Gate::new();
+    let mut harness = busy_with_a_checkout(&gate);
+    gate.open();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while harness
+        .state()
+        .workspace()
+        .is_some_and(|workspace| !workspace.running_actions().is_empty())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the action did not end"
+        );
+        // Not `run`: what the action changed loads again with a spinner.
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // The history has loaded again before the window can be still.
+    while harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| {
+            !matches!(
+                session.history().state,
+                gitbull_core::session::LoadState::Loaded
+            )
+        })
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the history did not load"
+        );
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    open_dialog(&mut harness);
+    apply_git_path(&mut harness, "/opt/git/bin/git");
+    assert_eq!(
+        harness.state().settings().git_path,
+        Some(PathBuf::from("/opt/git/bin/git"))
+    );
+}
+
+const DETACH_NOTICE: &str = "Show a notice before checking out a tag or a commit";
+
+#[test]
+fn the_switch_for_the_notice_is_on_by_default_in_the_section_behaviour() {
+    let test = build(Setup::default());
+    let mut harness = window(test.app);
+    harness.run();
+    open_dialog(&mut harness);
+    harness.get_by_label("Behaviour");
+    let switch = harness.get_by_role_and_label(Role::CheckBox, DETACH_NOTICE);
+    assert_eq!(switch.accesskit_node().toggled(), Some(Toggled::True));
+}
+
+#[test]
+fn turning_the_switch_off_hides_the_notice_and_survives_a_restart() {
+    let test = build(Setup::default());
+    let file = SettingsFile::new(test.dir.path().join("settings.toml"));
+    let mut harness = window(test.app);
+    harness.run();
+    open_dialog(&mut harness);
+    harness
+        .get_by_role_and_label(Role::CheckBox, DETACH_NOTICE)
+        .click();
+    harness.run();
+
+    assert!(!harness.state().settings().detach_notice);
+    harness.state_mut().save();
+    assert!(!file.load().settings.detach_notice);
+}
+
+#[test]
+fn turning_the_switch_on_brings_the_notice_back() {
+    let test = build(Setup {
+        settings: Settings {
+            detach_notice: false,
+            ..Settings::default()
+        },
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    harness.run();
+    open_dialog(&mut harness);
+    let switch = harness.get_by_role_and_label(Role::CheckBox, DETACH_NOTICE);
+    assert_eq!(switch.accesskit_node().toggled(), Some(Toggled::False));
+    switch.click();
+    harness.run();
+    assert!(harness.state().settings().detach_notice);
 }
