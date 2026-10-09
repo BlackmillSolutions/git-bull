@@ -2,12 +2,12 @@
 
 ## 1. Repository layout model and migration
 
-- [ ] 1.1 Add typed History column identities and a serde-defaulted per-repository layout to `gitbull-core/src/settings.rs`; normalize duplicate/missing identities, visibility and invalid widths. Verify focused settings tests load old and malformed files with the default arrangement.
-- [ ] 1.2 Key repository layouts by the canonical repository path, seed unsaved entries from existing global widths, and filter non-UTF-8 entries on save while keeping global fallback widths. Verify settings tests cover two repositories, linked worktrees, restart and non-UTF-8 paths.
+- [x] 1.1 Add typed History column identities and a serde-defaulted per-repository layout to `gitbull-core/src/settings.rs`; normalize duplicate/missing identities, visibility and invalid widths. Verify focused settings tests load old and malformed files with the default arrangement.
+- [x] 1.2 Key repository layouts by the canonical repository path, seed unsaved entries from existing global widths, and filter non-UTF-8 entries on save while keeping global fallback widths. Verify settings tests cover two repositories, restart and non-UTF-8 paths, and the existing opening test confirms that linked worktrees use the same canonical key.
 
 ## 2. Shared column geometry and resize
 
-- [ ] 2.1 Replace right-anchored `Widths` geometry in `gitbull-app/src/columns.rs` with ordered visible-column rectangles, a flexible Description minimum and a clamped adjacent-pair resize. Verify focused geometry tests cover Author/Commit, Description/Date, reordering, hidden columns and the fixed outer edges.
+- [x] 2.1 Introduce ordered visible-column geometry in `gitbull-app/src/columns.rs` with a flexible Description minimum and a clamped adjacent-pair resize, retaining the old callers until tasks 2.3 and 3.1 migrate them. Verify focused geometry tests cover Author/Commit, Description/Date, reordering, hidden columns and the fixed outer edges.
 - [ ] 2.2 Add one horizontal offset and scrollbar for header and virtualized rows without changing `VirtualList` vertical coordinates; clip cells and keep the offset in range after viewport changes. Verify a focused narrow-viewport UI test shows aligned header/rows without overlap and that existing virtual-list tests still pass.
 - [ ] 2.3 Use the shared resize primitive in File history, retain its fixed column order and Path width, and route Date/Author/Commit widths to the active repository layout. Verify focused File history and settings tests cover resizing the last pair, shared widths and Path persistence.
 
