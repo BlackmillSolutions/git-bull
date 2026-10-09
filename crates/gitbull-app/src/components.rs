@@ -39,16 +39,19 @@ pub struct DialogOutcome<T> {
 /// does not close it, and what does not fit the window scrolls. It has a title
 /// in the style of titles, which assistive technology reads with the contents.
 ///
+/// The buttons of a dialog are its `footer`, which stays in view below the
+/// `body` however much of the body has to scroll; the footer gets what the body
+/// returned.
+///
 /// Escape is reported, not acted on: the caller decides what it means.
-pub fn dialog<T>(
+pub fn dialog<B, F>(
     ctx: &Context,
     id: Id,
     title: &str,
-    add_contents: impl FnOnce(&mut Ui) -> T,
-) -> DialogOutcome<T> {
-    // The dialog keeps a margin to the edges of the window, which may be small
-    // at a large interface size.
-    let room = ctx.content_rect().size() - egui::Vec2::splat(4.0 * SHAPE.space[3]);
+    body: impl FnOnce(&mut Ui) -> B,
+    footer: impl FnOnce(&mut Ui, B) -> F,
+) -> DialogOutcome<F> {
+    let room = dialog_room(ctx);
     let modal = Modal::new(id).show(ctx, |ui| {
         // Assistive technology meets a dialog, named by its title, and not
         // only its parts.
@@ -62,18 +65,49 @@ pub fn dialog<T>(
         ui.set_max_height(room.y);
         ui.label(RichText::new(title).text_style(TextStyle::Name(crate::style::TITLE.into())));
         ui.add_space(SHAPE.space[1]);
-        ScrollArea::vertical()
+        // The room of the footer: a row of buttons and the space above it.
+        let footer_height =
+            SHAPE.control_height.max(SHAPE.target) + SHAPE.space[2] + ui.spacing().item_spacing.y;
+        let shown = ScrollArea::vertical()
             .id_salt(id.with("scroll"))
-            .max_height(room.y - ui.min_rect().height())
+            .max_height((room.y - ui.min_rect().height() - footer_height).max(0.0))
             .auto_shrink([false, true])
-            .show(ui, add_contents)
-            .inner
+            .show(ui, body)
+            .inner;
+        ui.add_space(SHAPE.space[2]);
+        footer(ui, shown)
     });
     let escape = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
     DialogOutcome {
         inner: modal.inner,
         escape,
     }
+}
+
+/// Where the title bar of the window ends, told by the window each frame.
+const TITLE_BAR_BOTTOM: &str = "title-bar-bottom";
+
+/// Tells dialogs where the title bar ends, so that they stay below it.
+pub fn set_title_bar_bottom(ctx: &Context, bottom: f32) {
+    ctx.data_mut(|data| data.insert_temp(Id::new(TITLE_BAR_BOTTOM), bottom));
+}
+
+/// The room a dialog may take in the window. It keeps a margin to the edges,
+/// which may be small at a large interface size, and stays below the title
+/// bar: the buttons of the window lie above a dialog, so that the window can
+/// still be moved, minimised and closed, and must not cover it. A dialog is
+/// centred, so the room is taken from the top and the bottom alike.
+pub fn dialog_room(ctx: &Context) -> egui::Vec2 {
+    let window = ctx.content_rect();
+    let margin = 2.0 * SHAPE.space[3];
+    let title_bar: f32 = ctx
+        .data(|data| data.get_temp(Id::new(TITLE_BAR_BOTTOM)))
+        .unwrap_or(0.0);
+    let above = margin.max(title_bar - window.top() + SHAPE.space[1]);
+    vec2(
+        (window.width() - 2.0 * margin).max(0.0),
+        (window.height() - 2.0 * above).max(0.0),
+    )
 }
 
 /// How a button looks.

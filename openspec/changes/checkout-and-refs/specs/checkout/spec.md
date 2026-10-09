@@ -243,7 +243,9 @@ title bar and edges still move, resize, minimize, maximize and close the window.
 A dialog SHALL take Enter as its default choice where one is safe and Escape as
 Cancel or Close, and SHALL be reachable and announced by assistive technology
 with its title and message. It SHALL fit the window at every interface size;
-what does not fit SHALL scroll.
+what does not fit SHALL scroll, while the buttons of the dialog SHALL stay in
+view below what scrolls. A dialog SHALL stay below the title bar, so that the
+buttons of the window, which remain usable, do not cover it.
 
 #### Scenario: Main window takes no input
 - **WHEN** a dialog is open and the user clicks Refresh in the toolbar
@@ -256,3 +258,4 @@ what does not fit SHALL scroll.
 #### Scenario: Small window
 - **WHEN** the window has its smallest size, the interface size is 150 % and a dialog with a long list of files is open
 - **THEN** every control of the dialog can be reached, by scrolling where the dialog does not fit
+- **AND** the buttons of the dialog are in view without scrolling, and its title is not covered by the buttons of the window

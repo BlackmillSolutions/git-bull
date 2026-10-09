@@ -487,6 +487,23 @@ fn dialog_backend() -> FakeBackend {
             CheckoutTarget::Branch("feature/graph".to_owned()),
             FakeWrite::Refused(Refusal::TrackedChanges(files)),
         )
+        .with_content(fake_id("b"), described("Draw the graph of a merge"))
+        .with_content(fake_id("a"), described("Read the history of a repository"))
+}
+
+/// The content of a commit with this description, by Ada Lovelace.
+fn described(summary: &str) -> gitbull_git::content::CommitContent {
+    let person = Signature {
+        name: "Ada Lovelace".to_owned(),
+        email: "ada@example.com".to_owned(),
+        time: 1_767_268_800,
+        offset_minutes: 0,
+    };
+    gitbull_git::content::CommitContent {
+        author: person.clone(),
+        committer: person,
+        message: format!("{summary}\n"),
+    }
 }
 
 /// The dialog of a checkout that local changes block, over the window of a
@@ -651,13 +668,7 @@ fn sidebar_with_a_branch_of_another_worktree() {
 /// The dialog "Create branch", opened with the Branch button of the toolbar at
 /// HEAD, with `name` typed into its field.
 fn create_branch_dialog(theme: ThemeSetting, name: &str) -> Harness<'static, App> {
-    let backend = dialog_backend().with_content(
-        fake_id("b"),
-        gitbull_git::content::CommitContent {
-            message: "Draw the graph of a merge\n".to_owned(),
-            ..gitbull_git::content::CommitContent::default()
-        },
-    );
+    let backend = dialog_backend();
     let mut harness = repository_window(backend, theme, InterfaceSize::Percent100, (1280.0, 800.0));
     harness
         .get_by_role_and_label(Role::Button, "Branch")
@@ -708,13 +719,7 @@ fn create_branch_dialog_with_a_valid_name() {
 /// with a name and a message of two lines.
 #[test]
 fn create_tag_dialog_with_a_message() {
-    let backend = dialog_backend().with_content(
-        fake_id("b"),
-        gitbull_git::content::CommitContent {
-            message: "Draw the graph of a merge\n".to_owned(),
-            ..gitbull_git::content::CommitContent::default()
-        },
-    );
+    let backend = dialog_backend();
     let mut harness = repository_window(
         backend,
         ThemeSetting::Light,

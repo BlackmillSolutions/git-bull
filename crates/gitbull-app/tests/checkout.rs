@@ -18,8 +18,8 @@ use gitbull_git::refusal::Refusal;
 use gitbull_git::switch::CheckoutTarget;
 use gitbull_testkit::{FakeBackend, FakeWrite, Gate, commit_line, fake_id};
 use support::{
-    Setup, active_title, build, double_click_at, path, settle_window, tab_titles, window,
-    window_at_60_fps, window_on,
+    Setup, active_title, build, double_click_at, path, settle_window, sized_window_on, tab_titles,
+    window, window_at_60_fps, window_on,
 };
 
 /// Two repositories open, the first active, with every checkout held by `gate`.
@@ -1221,5 +1221,84 @@ fn the_stale_dialog_offers_open_that_worktree() {
         harness
             .query_by_label_contains("checked out in the worktree")
             .is_none()
+    );
+}
+
+// ---- dialogs in a small window (spec `checkout`, requirement "Dialogs of
+// write actions")
+
+/// The dialog of a checkout that eight files block, in the smallest window at
+/// the largest interface size, with git-bull's own title bar.
+fn blocked_in_a_small_window() -> Harness<'static, App> {
+    let files: Vec<String> = (1..=8).map(|n| format!("src/file-{n}.rs")).collect();
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: refused("side", Refusal::TrackedChanges(files)),
+        ..Setup::default()
+    });
+    let mut harness = sized_window_on(
+        eframe::egui::os::OperatingSystem::Windows,
+        (640.0 / 1.5, 400.0 / 1.5),
+        test.app,
+    );
+    settle_window(&mut harness);
+    start_checkout(&mut harness, "side");
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Dialog, "Cannot check out side")
+            .is_some()
+    });
+    // The dialog is laid out once it has been drawn.
+    for _ in 0..3 {
+        harness.step();
+    }
+    harness
+}
+
+#[test]
+fn a_dialog_stays_below_the_buttons_of_the_window() {
+    let harness = blocked_in_a_small_window();
+    let buttons = harness
+        .get_by_role_and_label(Role::Button, "Close window")
+        .rect();
+    let title = harness
+        .get_by_role_and_label(Role::Label, "Cannot check out side")
+        .rect();
+    assert!(
+        title.top() >= buttons.bottom(),
+        "the title {title:?} lies under the window buttons {buttons:?}"
+    );
+}
+
+#[test]
+fn the_button_of_a_dialog_stays_in_view_when_its_files_scroll() {
+    let mut harness = blocked_in_a_small_window();
+    let cancel = harness.get_by_role_and_label(Role::Button, "Cancel").rect();
+    let window = harness.ctx.content_rect();
+    assert!(
+        window.contains_rect(cancel),
+        "Cancel {cancel:?} is outside the window {window:?}"
+    );
+    // A press where the button is: one that is scrolled out of view would not
+    // take it.
+    let at = cancel.center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Dialog, "Cannot check out side")
+            .is_none(),
+        "the press at {at:?} did not reach Cancel"
     );
 }

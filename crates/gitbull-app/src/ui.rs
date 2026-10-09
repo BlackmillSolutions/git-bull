@@ -921,11 +921,12 @@ const WINDOW_BUTTON: f32 = 46.0;
 fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let kind = title_bar_of(app, ui.ctx());
     if kind == TitleBar::System && app.workspace().is_none() {
+        components::set_title_bar_bottom(ui.ctx(), 0.0);
         return;
     }
     let own = kind != TitleBar::System;
     let frame = egui::Frame::side_top_panel(ui.style());
-    Panel::top("title_bar").frame(frame).show(ui, |ui| {
+    let bar = Panel::top("title_bar").frame(frame).show(ui, |ui| {
         if own {
             // First, so that the tabs and buttons on it take their own
             // clicks; with the margin of the panel, to its edges. Without
@@ -984,6 +985,7 @@ fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
             window_buttons(app, ui.ctx(), bar, actions);
         }
     });
+    components::set_title_bar_bottom(ui.ctx(), bar.response.rect.bottom());
 }
 
 /// Minimize, Maximize or Restore, and Close window at the right end of
@@ -1750,42 +1752,48 @@ fn action_dialog(
     let open_label = open_folder
         .as_ref()
         .map(|_| texts.text(Msg::CheckoutOpenWorktree));
-    let outcome = components::dialog(ui.ctx(), Id::new("action-dialog"), &title, |ui| {
-        ui.label(intro);
-        ui.add_space(SHAPE.space[1]);
-        // A file or a line of Git's message per label, so that each is read
-        // and found on its own.
-        for line in details.lines() {
-            ui.label(RichText::new(line).monospace());
-        }
-        ui.add_space(SHAPE.space[2]);
-        let (mut close, mut open) = (false, false);
-        ui.horizontal(|ui| {
-            // The button that shows the other worktree is the main choice;
-            // the safe one has the focus.
-            let opener = open_label.as_ref().map(|label| {
-                components::Button::new(label)
-                    .kind(components::Kind::Primary)
-                    .show(ui)
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("action-dialog"),
+        &title,
+        |ui| {
+            ui.label(intro);
+            ui.add_space(SHAPE.space[1]);
+            // A file or a line of Git's message per label, so that each is read
+            // and found on its own.
+            for line in details.lines() {
+                ui.label(RichText::new(line).monospace());
+            }
+        },
+        |ui, ()| {
+            let (mut close, mut open) = (false, false);
+            ui.horizontal(|ui| {
+                // The button that shows the other worktree is the main choice;
+                // the safe one has the focus.
+                let opener = open_label.as_ref().map(|label| {
+                    components::Button::new(label)
+                        .kind(components::Kind::Primary)
+                        .show(ui)
+                });
+                let button = components::Button::new(&close_label)
+                    .kind(if opener.is_some() {
+                        components::Kind::Secondary
+                    } else {
+                        components::Kind::Primary
+                    })
+                    .show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    button.request_focus();
+                }
+                close = button.clicked();
+                open = opener.is_some_and(|opener| opener.clicked());
+                if copy && components::Button::new(&copy_label).show(ui).clicked() {
+                    ui.ctx().copy_text(details.clone());
+                }
             });
-            let button = components::Button::new(&close_label)
-                .kind(if opener.is_some() {
-                    components::Kind::Secondary
-                } else {
-                    components::Kind::Primary
-                })
-                .show(ui);
-            if ui.memory(|memory| memory.focused().is_none()) {
-                button.request_focus();
-            }
-            close = button.clicked();
-            open = opener.is_some_and(|opener| opener.clicked());
-            if copy && components::Button::new(&copy_label).show(ui).clicked() {
-                ui.ctx().copy_text(details.clone());
-            }
-        });
-        (close, open)
-    });
+            (close, open)
+        },
+    );
     let (close, open) = outcome.inner;
     if open && let Some(folder) = open_folder {
         actions.push(Action::Open(folder));
@@ -1922,67 +1930,74 @@ fn create_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let mut name = dialog.name.clone();
     let mut message = dialog.message.clone();
     let mut checkout = dialog.checkout;
-    let outcome = components::dialog(ui.ctx(), Id::new("create-reference"), &title, |ui| {
-        ui.label(RichText::new(texts.text(Msg::CreateStartCaption)).weak());
-        ui.label(start);
-        ui.add_space(SHAPE.space[1]);
-        let field = ui
-            .add_enabled_ui(!dialog.running, |ui| {
-                ui.add(components::text_edit(&mut name, &hint, 320.0))
-            })
-            .inner;
-        ui.ctx()
-            .accesskit_node_builder(field.id, |node| node.set_label(hint.as_str()));
-        if ui.memory(|memory| memory.focused().is_none()) && !dialog.running {
-            field.request_focus();
-        }
-        if let Some(text) = shown_problem.or(refused) {
-            components::error_text(ui, text);
-        }
-        ui.add_space(SHAPE.space[1]);
-        ui.add_enabled_ui(!dialog.running, |ui| {
-            if tag {
-                // Several lines: Enter is a line break here.
-                let field = ui.add(
-                    egui::TextEdit::multiline(&mut message)
-                        .hint_text(message_hint.as_str())
-                        .desired_rows(4)
-                        .desired_width(320.0),
-                );
-                ui.ctx().accesskit_node_builder(field.id, |node| {
-                    node.set_label(message_hint.as_str());
-                });
-            } else {
-                components::checkbox(ui, &mut checkout, &check_out);
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("create-reference"),
+        &title,
+        |ui| {
+            ui.label(RichText::new(texts.text(Msg::CreateStartCaption)).weak());
+            ui.label(start);
+            ui.add_space(SHAPE.space[1]);
+            let field = ui
+                .add_enabled_ui(!dialog.running, |ui| {
+                    ui.add(components::text_edit(&mut name, &hint, 320.0))
+                })
+                .inner;
+            ui.ctx()
+                .accesskit_node_builder(field.id, |node| node.set_label(hint.as_str()));
+            if ui.memory(|memory| memory.focused().is_none()) && !dialog.running {
+                field.request_focus();
             }
-        });
-        if let Some(failure) = &dialog.failure {
-            // A line of Git's message per label, so that each is found alone.
-            for line in failure.lines() {
-                components::error_text(ui, line);
+            if let Some(text) = shown_problem.or(refused) {
+                components::error_text(ui, text);
             }
-        }
-        ui.add_space(SHAPE.space[2]);
-        let (mut submit, mut cancelled) = (false, false);
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(available, |ui| {
-                submit = components::Button::new(&create)
-                    .kind(components::Kind::Primary)
-                    .show(ui)
-                    .clicked();
-            });
+            ui.add_space(SHAPE.space[1]);
             ui.add_enabled_ui(!dialog.running, |ui| {
-                cancelled = components::Button::new(&cancel).show(ui).clicked();
+                if tag {
+                    // Several lines: Enter is a line break here.
+                    let field = ui.add(
+                        egui::TextEdit::multiline(&mut message)
+                            .hint_text(message_hint.as_str())
+                            .desired_rows(4)
+                            .desired_width(320.0),
+                    );
+                    ui.ctx().accesskit_node_builder(field.id, |node| {
+                        node.set_label(message_hint.as_str());
+                    });
+                } else {
+                    components::checkbox(ui, &mut checkout, &check_out);
+                }
             });
-        });
-        // Enter in the name does what Create does.
-        if (field.lost_focus() || field.has_focus())
-            && ui.input(|input| input.key_pressed(Key::Enter))
-        {
-            submit = true;
-        }
-        (submit, cancelled)
-    });
+            if let Some(failure) = &dialog.failure {
+                // A line of Git's message per label, so that each is found alone.
+                for line in failure.lines() {
+                    components::error_text(ui, line);
+                }
+            }
+            field
+        },
+        |ui, field| {
+            let (mut submit, mut cancelled) = (false, false);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(available, |ui| {
+                    submit = components::Button::new(&create)
+                        .kind(components::Kind::Primary)
+                        .show(ui)
+                        .clicked();
+                });
+                ui.add_enabled_ui(!dialog.running, |ui| {
+                    cancelled = components::Button::new(&cancel).show(ui).clicked();
+                });
+            });
+            // Enter in the name does what Create does.
+            if (field.lost_focus() || field.has_focus())
+                && ui.input(|input| input.key_pressed(Key::Enter))
+            {
+                submit = true;
+            }
+            (submit, cancelled)
+        },
+    );
     if name != dialog.name {
         actions.push(Action::SetCreateName(name));
     }
@@ -2014,28 +2029,34 @@ fn detach_notice_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let cancel = texts.text(Msg::DialogCancel);
     let dont_show = texts.text(Msg::DetachDontShow);
     let mut ticked = pending.dont_show;
-    let outcome = components::dialog(ui.ctx(), Id::new("detach-notice"), &title, |ui| {
-        ui.label(texts.text(Msg::DetachBody));
-        ui.add_space(SHAPE.space[1]);
-        components::checkbox(ui, &mut ticked, &dont_show);
-        ui.add_space(SHAPE.space[2]);
-        let mut choice = None;
-        ui.horizontal(|ui| {
-            let go = components::Button::new(&check_out)
-                .kind(components::Kind::Primary)
-                .show(ui);
-            let stop = components::Button::new(&cancel).show(ui);
-            if ui.memory(|memory| memory.focused().is_none()) {
-                stop.request_focus();
-            }
-            if go.clicked() {
-                choice = Some(Action::ConfirmDetach);
-            } else if stop.clicked() {
-                choice = Some(Action::CancelDetach);
-            }
-        });
-        choice
-    });
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("detach-notice"),
+        &title,
+        |ui| {
+            ui.label(texts.text(Msg::DetachBody));
+            ui.add_space(SHAPE.space[1]);
+            components::checkbox(ui, &mut ticked, &dont_show);
+        },
+        |ui, ()| {
+            let mut choice = None;
+            ui.horizontal(|ui| {
+                let go = components::Button::new(&check_out)
+                    .kind(components::Kind::Primary)
+                    .show(ui);
+                let stop = components::Button::new(&cancel).show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    stop.request_focus();
+                }
+                if go.clicked() {
+                    choice = Some(Action::ConfirmDetach);
+                } else if stop.clicked() {
+                    choice = Some(Action::CancelDetach);
+                }
+            });
+            choice
+        },
+    );
     if ticked != pending.dont_show {
         actions.push(Action::SetDetachDontShow(ticked));
     }
@@ -2085,7 +2106,8 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
         &texts.text(Msg::CloseQuestionTitle),
         |ui| {
             ui.label(body);
-            ui.add_space(SHAPE.space[2]);
+        },
+        |ui, _| {
             let mut choice = None;
             ui.horizontal(|ui| {
                 let keep = components::Button::new(&keep)
@@ -2121,7 +2143,7 @@ fn settings_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let list_open = egui::Popup::is_any_open(ui.ctx());
     // The dialog keeps a margin to the edges of the window, which may be
     // small at a large interface size; what does not fit scrolls.
-    let room = ui.ctx().content_rect().size() - egui::Vec2::splat(4.0 * SHAPE.space[3]);
+    let room = components::dialog_room(ui.ctx());
     // Modal: the window behind takes no input. A click beside the dialog
     // does not close it either; Escape and the close button do.
     let modal = egui::Modal::new(Id::new("settings")).show(ui.ctx(), |ui| {
