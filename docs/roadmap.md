@@ -65,13 +65,12 @@ stash change. A refresh that is asked for while git-bull reads the state is
 not read twice yet
 ([issue #36](https://github.com/BlackmillSolutions/git-bull/issues/36)).
 
-## In review: History columns and reference badges
+## Delivered: History columns and reference badges
 
-[Pull request #37](https://github.com/BlackmillSolutions/git-bull/pull/37)
-implements the OpenSpec change `history-table-customization`
-([issue #34](https://github.com/BlackmillSolutions/git-bull/issues/34)). It is
-interface polish that was already in progress and does not change the order
-above.
+On 2026-10-09, [pull request #37](https://github.com/BlackmillSolutions/git-bull/pull/37)
+delivered the OpenSpec change `history-table-customization`
+([issue #34](https://github.com/BlackmillSolutions/git-bull/issues/34)). It
+was interface polish that did not change the order above.
 
 - The History columns can be reordered by dragging their headers, and every
   column except Description can be hidden or restored from a header menu. Order,
