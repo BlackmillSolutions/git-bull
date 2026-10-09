@@ -2146,28 +2146,30 @@ fn settings_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let room = components::dialog_room(ui.ctx());
     // Modal: the window behind takes no input. A click beside the dialog
     // does not close it either; Escape and the close button do.
-    let modal = egui::Modal::new(Id::new("settings")).show(ui.ctx(), |ui| {
-        ui.set_width(room.x.min(540.0));
-        // egui offers a modal the height it had in the last frame, at first
-        // 400 points; the scroll area below may grow to the room.
-        ui.set_max_height(room.y);
-        let mut close = false;
-        ui.horizontal(|ui| {
-            let title = RichText::new(texts.text(Msg::SettingsTitle))
-                .text_style(egui::TextStyle::Name(style::TITLE.into()));
-            ui.label(title);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let name = texts.text(Msg::SettingsClose);
-                close = components::icon_button(ui, icons::CLOSE, &name, None).clicked();
+    let modal = egui::Modal::new(Id::new("settings"))
+        .area(components::dialog_area(ui.ctx(), Id::new("settings")))
+        .show(ui.ctx(), |ui| {
+            ui.set_width(room.x.min(540.0));
+            // egui offers a modal the height it had in the last frame, at first
+            // 400 points; the scroll area below may grow to the room.
+            ui.set_max_height(room.y);
+            let mut close = false;
+            ui.horizontal(|ui| {
+                let title = RichText::new(texts.text(Msg::SettingsTitle))
+                    .text_style(egui::TextStyle::Name(style::TITLE.into()));
+                ui.label(title);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let name = texts.text(Msg::SettingsClose);
+                    close = components::icon_button(ui, icons::CLOSE, &name, None).clicked();
+                });
             });
+            egui::ScrollArea::vertical()
+                .id_salt("settings")
+                .max_height(room.y - ui.min_rect().height())
+                .auto_shrink([false, true])
+                .show(ui, |ui| settings_sections(app, dialog, ui, actions));
+            close
         });
-        egui::ScrollArea::vertical()
-            .id_salt("settings")
-            .max_height(room.y - ui.min_rect().height())
-            .auto_shrink([false, true])
-            .show(ui, |ui| settings_sections(app, dialog, ui, actions));
-        close
-    });
     let escape = !list_open
         && ui
             .ctx()

@@ -52,7 +52,7 @@ pub fn dialog<B, F>(
     footer: impl FnOnce(&mut Ui, B) -> F,
 ) -> DialogOutcome<F> {
     let room = dialog_room(ctx);
-    let modal = Modal::new(id).show(ctx, |ui| {
+    let modal = Modal::new(id).area(dialog_area(ctx, id)).show(ctx, |ui| {
         // Assistive technology meets a dialog, named by its title, and not
         // only its parts.
         ctx.accesskit_node_builder(ui.id(), |node| {
@@ -71,6 +71,9 @@ pub fn dialog<B, F>(
         let shown = ScrollArea::vertical()
             .id_salt(id.with("scroll"))
             .max_height((room.y - ui.min_rect().height() - footer_height).max(0.0))
+            // In a window too small for it, the body gives way to the title
+            // and the buttons.
+            .min_scrolled_height(0.0)
             .auto_shrink([false, true])
             .show(ui, body)
             .inner;
@@ -92,22 +95,35 @@ pub fn set_title_bar_bottom(ctx: &Context, bottom: f32) {
     ctx.data_mut(|data| data.insert_temp(Id::new(TITLE_BAR_BOTTOM), bottom));
 }
 
-/// The room a dialog may take in the window. It keeps a margin to the edges,
-/// which may be small at a large interface size, and stays below the title
-/// bar: the buttons of the window lie above a dialog, so that the window can
-/// still be moved, minimised and closed, and must not cover it. A dialog is
-/// centred, so the room is taken from the top and the bottom alike.
-pub fn dialog_room(ctx: &Context) -> egui::Vec2 {
+/// The part of the window a dialog may lie in: below the title bar, with a
+/// margin to the edges. The buttons of the window lie above a dialog, so that
+/// the window can still be moved, minimised and closed, and must not cover it.
+/// The margin gives way in a window too small for it.
+fn dialog_region(ctx: &Context) -> Rect {
     let window = ctx.content_rect();
-    let margin = 2.0 * SHAPE.space[3];
     let title_bar: f32 = ctx
         .data(|data| data.get_temp(Id::new(TITLE_BAR_BOTTOM)))
-        .unwrap_or(0.0);
-    let above = margin.max(title_bar - window.top() + SHAPE.space[1]);
-    vec2(
-        (window.width() - 2.0 * margin).max(0.0),
-        (window.height() - 2.0 * above).max(0.0),
+        .unwrap_or(window.top());
+    let margin = (2.0 * SHAPE.space[3]).min(window.height() / 12.0);
+    let top = (title_bar + SHAPE.space[0]).max(window.top() + margin);
+    Rect::from_min_max(
+        egui::pos2(window.left() + margin, top.min(window.bottom())),
+        egui::pos2(window.right() - margin, (window.bottom() - margin).max(top)),
     )
+}
+
+/// The room the contents of a dialog may take in the window, without the frame
+/// of the dialog; what does not fit scrolls.
+pub fn dialog_room(ctx: &Context) -> egui::Vec2 {
+    let frame = egui::Frame::popup(&ctx.global_style()).total_margin().sum();
+    (dialog_region(ctx).size() - frame).max(egui::Vec2::ZERO)
+}
+
+/// Where a dialog lies: in the middle of the part of the window below the
+/// title bar, not of the whole window.
+pub fn dialog_area(ctx: &Context, id: Id) -> egui::Area {
+    let offset = dialog_region(ctx).center() - ctx.content_rect().center();
+    Modal::default_area(id).anchor(egui::Align2::CENTER_CENTER, offset)
 }
 
 /// How a button looks.

@@ -1235,6 +1235,7 @@ fn blocked_in_a_small_window() -> Harness<'static, App> {
         settings: Settings {
             tabs: vec![root()],
             active_tab: Some(0),
+            interface_size: gitbull_core::settings::InterfaceSize::Percent150,
             ..Settings::default()
         },
         backend: refused("side", Refusal::TrackedChanges(files)),
