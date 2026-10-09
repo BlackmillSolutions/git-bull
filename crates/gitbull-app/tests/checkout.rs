@@ -328,7 +328,10 @@ fn open_with(backend: FakeBackend, detach_notice: bool) -> Harness<'static, App>
     });
     let mut harness = window_at_60_fps(test.app);
     settle_window(&mut harness);
-    wait_for(&mut harness, |h| h.query_by_label("diff").is_some());
+    // The sidebar and the commit list load apart from each other.
+    wait_for(&mut harness, |h| {
+        h.query_by_label("diff").is_some() && h.query_all_by_role(Role::Row).next().is_some()
+    });
     harness
 }
 
@@ -393,7 +396,11 @@ fn idle(harness: &Harness<'_, App>) -> bool {
         .is_some_and(|workspace| workspace.running_actions().is_empty())
 }
 
+/// Waits until the write action that the last input started has ended. The
+/// input is handled first: without that frame, "no action runs" would be true
+/// of the moment before it began.
 fn settle_action(harness: &mut Harness<'_, App>) {
+    harness.step();
     wait_for(harness, idle);
     harness.run();
 }

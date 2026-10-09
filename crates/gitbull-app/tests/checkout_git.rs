@@ -97,6 +97,14 @@ fn checking_out_a_branch_in_a_real_repository() {
         fs::read_to_string(repo.path().join("file.txt")).unwrap(),
         "feature\n"
     );
+    // The action is over once git-bull has read the state again. A refresh
+    // asked for while that read runs is not read twice, so a change made from
+    // outside in that moment would be missed.
+    wait_for(&mut harness, |h| {
+        h.state()
+            .workspace()
+            .is_some_and(|workspace| workspace.running_actions().is_empty())
+    });
 
     // A branch that a linked worktree has checked out is marked with its
     // folder, and checking it out opens that worktree instead.
@@ -136,6 +144,7 @@ fn row<'a>(harness: &'a Harness<'_, App>, label: &str) -> Option<egui_kittest::N
     })
 }
 
+#[track_caller]
 fn wait_for(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -> bool) {
     for _ in 0..2000 {
         if done(harness) {
@@ -154,5 +163,9 @@ fn double_click(harness: &mut Harness<'_, App>, label: &str) {
     }
     let at = row(harness, label).expect("a sidebar row").rect().center();
     double_click_at(harness, at);
-    harness.run();
+    // Not `run`: while Git works, a spinner keeps the window repainting, and
+    // the callers wait for what they expect.
+    for _ in 0..3 {
+        harness.step();
+    }
 }
