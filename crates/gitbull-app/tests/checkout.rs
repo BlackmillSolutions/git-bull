@@ -19,7 +19,7 @@ use gitbull_git::switch::CheckoutTarget;
 use gitbull_testkit::{FakeBackend, FakeWrite, Gate, commit_line, fake_id};
 use support::{
     Setup, active_title, build, double_click_at, path, settle_window, tab_titles, window,
-    window_at_60_fps,
+    window_at_60_fps, window_on,
 };
 
 /// Two repositories open, the first active, with every checkout held by `gate`.
@@ -157,10 +157,17 @@ fn escape_keeps_the_tab_open() {
     gate.open();
 }
 
+/// The buttons of the window are git-bull's own on Windows and Linux; macOS
+/// draws its own, which the next test stands for.
 #[test]
 fn closing_the_window_during_a_checkout_asks() {
     let gate = Gate::new();
-    let mut harness = running_checkout(&gate);
+    let mut harness = window_on(
+        eframe::egui::os::OperatingSystem::Windows,
+        build(two_tabs(&gate)).app,
+    );
+    settle_window(&mut harness);
+    start_checkout(&mut harness, "feature");
     harness
         .get_by_role_and_label(Role::Button, "Close window")
         .click();
@@ -168,6 +175,30 @@ fn closing_the_window_during_a_checkout_asks() {
     harness.get_by_label_contains("is still running in the tab git-bull");
     harness.get_by_role_and_label(Role::Button, "Keep open");
     harness.get_by_role_and_label(Role::Button, "Close anyway");
+    assert_eq!(tab_titles(harness.state()), ["git-bull", "linux"]);
+    assert!(!gate.was_cancelled());
+    gate.open();
+}
+
+/// A close request of the system, such as the title bar of macOS or Alt+F4.
+#[test]
+fn a_close_request_of_the_system_during_a_checkout_asks() {
+    let gate = Gate::new();
+    let mut harness = window_on(
+        eframe::egui::os::OperatingSystem::Mac,
+        build(two_tabs(&gate)).app,
+    );
+    settle_window(&mut harness);
+    start_checkout(&mut harness, "feature");
+    harness
+        .input_mut()
+        .viewports
+        .entry(eframe::egui::ViewportId::ROOT)
+        .or_default()
+        .events
+        .push(eframe::egui::ViewportEvent::Close);
+    harness.run();
+    asks(&harness);
     assert_eq!(tab_titles(harness.state()), ["git-bull", "linux"]);
     assert!(!gate.was_cancelled());
     gate.open();
