@@ -27,10 +27,12 @@ divider in the commit panel between the details of the commit and the list
 of changed files, and every column width SHALL be adjustable. The divider
 in the commit panel SHALL stay where the user left it, whatever the length
 of the message, and SHALL keep room for a few rows of changed files. In a
-list whose columns have headers, the edge between two headers SHALL be
-draggable: dragging it SHALL change the width of the column on its side
-away from the Description column, which SHALL take the remaining width; a
-drag MUST NOT make the Description column narrower than a minimum width.
+list whose columns have headers, the edge between two visible headers SHALL
+be draggable: dragging it SHALL exchange width between those two adjacent
+columns while other column widths and the outer edges of the table stay in
+place. A drag MUST NOT make either column narrower than its minimum width.
+When the columns at their minimum widths do not fit the available area, the
+header and rows SHALL scroll horizontally together without overlapping cells.
 Over a divider or such an edge, the pointer SHALL show that it can be
 dragged.
 
@@ -61,15 +63,20 @@ dragged.
 
 #### Scenario: Column is resized
 - **WHEN** the user drags the edge of a column header in the commit list
-- **THEN** the column changes its width
+- **THEN** the two columns beside the edge change their widths and the other columns stay in place
 
 #### Scenario: Column right of the Description is resized
-- **WHEN** the user drags the edge between the headers Author and Commit of the commit list 40 points to the left
-- **THEN** the Commit column is 40 points wider, the Date and Author columns keep their widths, and the Description column is 40 points narrower
+- **WHEN** the user drags the edge between the headers Author and Commit of the commit list 40 points to the left and both columns have room within their limits
+- **THEN** the Commit column is 40 points wider and the Author column is 40 points narrower
+- **AND** Graph, Description, Date and the table's outer edges stay in place
 
 #### Scenario: Description keeps a minimum width
 - **WHEN** the user drags the edge between the headers Description and Date of the commit list as far left as it goes
 - **THEN** the Date column grows only until the Description column has its minimum width
+
+#### Scenario: Columns exceed the available width
+- **WHEN** the main area becomes narrower than the sum of the visible columns at their minimum widths
+- **THEN** the header and rows can be scrolled horizontally together and no column overlaps another
 
 #### Scenario: Pointer over an edge
 - **WHEN** the user moves the pointer over the edge between two column headers or over the divider in the commit panel

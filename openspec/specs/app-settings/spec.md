@@ -13,16 +13,34 @@ git-bull SHALL persist the following in one file in the operating system's
 configuration directory for applications: theme, colour vision, interface
 size, whether to use the system title bar, whether the diff shows invisible
 characters, whether file lists show a tree of folders, whether to show the notice before
-checking out a tag or a commit, language, the path to the Git executable, recently opened and pinned repositories with the
+checking out a tag or a commit, language, the path
+to the Git executable, recently opened and pinned repositories with the
 worktrees last found in them and the base branch the user set for a
 repository, open tabs in their order and the active tab,
-which may be the home tab, window size and position, divider positions and
-column widths. A path that is not valid UTF-8 SHALL be left out of the
-saved settings; the other settings SHALL still be saved.
+which may be the home tab, window size and position, divider positions,
+and the History column order, visibility and widths for each repository.
+Date, Author and Commit widths SHALL be shared with File history in that
+repository. Existing global column widths SHALL provide the initial widths
+for a repository without saved History columns, and SHALL continue to be
+saved as fallback widths when its path cannot be saved. A path that is not
+valid UTF-8 SHALL be left out of the saved settings; the other settings
+SHALL still be saved.
 
 #### Scenario: Layout survives a restart
 - **WHEN** the user changes a divider position and a column width, closes git-bull and starts it again
 - **THEN** the divider position and the column width are as the user left them
+
+#### Scenario: History arrangement survives a restart
+- **WHEN** the user reorders History columns, hides Author, changes the width of Commit, closes git-bull and starts it again
+- **THEN** that repository shows the chosen order, visibility and width
+
+#### Scenario: Different repositories have different arrangements
+- **WHEN** the user arranges History columns differently in two repositories and switches between their tabs
+- **THEN** each tab uses its repository's arrangement
+
+#### Scenario: Earlier global widths seed a repository
+- **WHEN** git-bull starts with settings containing global column widths but no repository-specific History arrangement
+- **THEN** the History and File history columns initially use those saved widths and the default History order and visibility
 
 #### Scenario: Window geometry survives a restart
 - **WHEN** the user resizes and moves the window on Windows, on macOS or on Linux under X11, closes git-bull and starts it again
@@ -38,7 +56,7 @@ saved settings; the other settings SHALL still be saved.
 
 #### Scenario: Repository path that is not valid UTF-8
 - **WHEN** the user has opened a repository whose path is not valid UTF-8, changes a column width, closes git-bull and starts it again
-- **THEN** the column width is as the user left it
+- **THEN** the column width is as the user left it through the global fallback
 - **AND** that repository is neither restored as a tab nor listed among the recently opened repositories, and the tab that was active is active again
 
 #### Scenario: Settings file of an earlier version
@@ -56,6 +74,10 @@ saved settings; the other settings SHALL still be saved.
 #### Scenario: Settings file without the setting for trees
 - **WHEN** git-bull starts with a settings file that does not say whether file lists show a tree
 - **THEN** file lists are flat, and every other setting from the file is kept
+
+#### Scenario: Settings file without the setting for the notice
+- **WHEN** git-bull starts with a settings file that does not say whether to show the notice before checking out a tag or a commit
+- **THEN** the notice is shown, and every other setting from the file is kept
 
 #### Scenario: Window geometry right after a change of the interface size
 - **WHEN** the user changes the interface size with Ctrl+Plus and closes git-bull in the next moment
@@ -76,10 +98,6 @@ saved settings; the other settings SHALL still be saved.
 #### Scenario: Base set through another path of the repository
 - **WHEN** the recently opened repositories name a repository by a path written as Git writes it, the user pinned it under its path as the file system writes it, and set its base in the home tab
 - **THEN** the base applies to the repository whichever of its paths lists it, and is kept once in the settings
-
-#### Scenario: Settings file without the setting for the notice
-- **WHEN** git-bull starts with a settings file that does not say whether to show the notice before checking out a tag or a commit
-- **THEN** the notice is shown, and every other setting from the file is kept
 
 ### Requirement: Recently opened repositories
 git-bull SHALL remember the 20 most recently opened repositories, most
