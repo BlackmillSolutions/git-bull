@@ -38,13 +38,17 @@ in the [Git integration spec](../openspec/specs/git-integration/spec.md).
 ## Delivered: checkout, branches and tags
 
 On 2026-10-09, [pull request #35](https://github.com/BlackmillSolutions/git-bull/pull/35)
-delivered the OpenSpec change `checkout-and-refs`, the first write actions of
-the interface. How a write action runs is recorded in
-[ADR 0008](adr/0008-write-actions-belong-to-the-session.md).
+delivered the first write actions of the interface. It was planned as the
+OpenSpec change `checkout-and-refs`; how a write action runs is recorded in
+[ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and the behaviour
+is specified in the [checkout spec](../openspec/specs/checkout/spec.md) and the
+[reference creation spec](../openspec/specs/reference-creation/spec.md).
 
 - A double click, Enter or the context menu checks out a branch, a remote
   branch, a tag or a commit. A remote branch is checked out as a local branch
   that follows it. A notice comes before HEAD is detached, and can be hidden.
+- A double click on a commit that a branch points to checks the branch out,
+  so that HEAD stays on a branch; several branches are offered to choose from.
 - Local changes that would be overwritten are never discarded: the checkout is
   refused and a dialog lists the files. There is no force, no discard and no
   automatic stash.
@@ -57,7 +61,9 @@ the interface. How a write action runs is recorded in
   one runs asks first, and the state is read again after every outcome.
 
 The stash that the dialog of a refused checkout could offer comes with the
-stash change.
+stash change. A refresh that is asked for while git-bull reads the state is
+not read twice yet
+([issue #36](https://github.com/BlackmillSolutions/git-bull/issues/36)).
 
 ## In review: History columns and reference badges
 
