@@ -5,12 +5,15 @@ use std::path::PathBuf;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{Align2, Color32, Id, Sense, TextStyle, Ui, WidgetInfo, WidgetType, pos2, vec2};
+use gitbull_core::session::{CheckoutRequest, StartAt};
 use gitbull_core::sidebar_tree::{self, Section, SidebarKey, SidebarRow, SidebarState};
 use gitbull_core::workspace::View;
+use gitbull_git::head::Head;
 
 use crate::app::{App, TabView};
 use crate::components;
 use crate::i18n::Msg;
+use crate::icons;
 use crate::theme::{Palette, Rgb};
 use crate::ui::AREA_SIDEBAR;
 use crate::virtual_list::VirtualList;
@@ -27,6 +30,10 @@ pub(crate) enum SidebarAction {
     OpenSubmodule(PathBuf),
     /// Restrict the graph to the branch with this full name.
     ShowOnly(String),
+    /// Check this out: a double click, Enter or the entry of a menu.
+    Checkout(CheckoutRequest),
+    /// Create a branch at the commit of this reference.
+    CreateBranch(StartAt),
 }
 
 /// The texts rows need, read before the tab is borrowed.
@@ -36,7 +43,16 @@ struct Texts {
     current: String,
     not_initialised: String,
     show_only: String,
+    check_out: String,
+    create_branch: String,
+    /// "Checked out in", with `ELSEWHERE_FOLDER` where the folder goes; a row
+    /// is drawn many times, and the text of a language may put the folder
+    /// anywhere.
+    elsewhere: String,
 }
+
+/// Stands for the folder in the text of [`Texts`].
+const ELSEWHERE_FOLDER: &str = "\u{1}";
 
 pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<SidebarAction> {
     let texts = Texts {
@@ -54,6 +70,13 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         current: app.texts.text(Msg::SidebarCurrentBranch),
         not_initialised: app.texts.text(Msg::SidebarNotInitialised),
         show_only: app.texts.text(Msg::SidebarShowOnlyBranch),
+        check_out: app.texts.text(Msg::SidebarCheckOut),
+        create_branch: app.texts.text(Msg::SidebarCreateBranch),
+        elsewhere: {
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("folder", ELSEWHERE_FOLDER);
+            app.texts.text_with(Msg::SidebarElsewhere, Some(&args))
+        },
     };
     let hint = app.texts.text(Msg::SidebarFilter);
     let name = app.texts.text(Msg::Sidebar);
@@ -74,8 +97,17 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         sidebar_key,
         sidebar_placed,
         sidebar_menu,
+        focus_sidebar,
         ..
     } = view;
+
+    // Checking out is unavailable for the branch that is checked out, and
+    // while another write action runs in the tab.
+    let busy = session.action().is_some();
+    let checked_out = match &session.opened().head {
+        Head::Branch(name) => Some(format!("refs/heads/{name}")),
+        Head::Detached(_) => None,
+    };
 
     let width = ui.available_width();
     let filter = components::text_field(ui, &mut sidebar.filter, &hint, width);
@@ -131,6 +163,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         },
     );
 
+    if std::mem::take(focus_sidebar) {
+        output.response.request_focus();
+    }
     let mut actions = Vec::new();
     let row_at = |index: u64| rows.get(index as usize).cloned();
     // A click selects its row again, so that a branch clicked once more
@@ -152,12 +187,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
     if let Some(row) = output.activated.and_then(row_at) {
         activate(&row, sidebar, &mut actions, true);
     }
-    // Only branches and remote branches have a menu, so that other rows do
-    // not open an empty one. The menu acts on the branch it was opened
+    // Only branches, remote branches and tags have a menu, so that other rows
+    // do not open an empty one. The menu acts on the branch it was opened
     // for, and closes when a refresh removed it.
     let branch = |row: &SidebarRow| match row {
         SidebarRow::Reference {
-            section: Section::Branches | Section::Remotes,
+            section: Section::Branches | Section::Remotes | Section::Tags,
             name,
             ..
         } => Some(name.clone()),
@@ -173,9 +208,48 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> Vec<Sidebar
         *sidebar_menu = None;
     }
     if let Some(name) = sidebar_menu.clone() {
+        let local = name.strip_prefix("refs/heads/").map(str::to_owned);
+        let tag = name.starts_with("refs/tags/");
+        // What the entry "Check out" does: a tag, a remote branch or a local
+        // branch, which is unavailable when it is the one checked out.
+        let request = if tag {
+            Some(CheckoutRequest::Tag(name.clone()))
+        } else if name.starts_with("refs/remotes/") {
+            Some(CheckoutRequest::RemoteBranch(name.clone()))
+        } else {
+            local.clone().map(CheckoutRequest::Branch)
+        };
+        let checkable = !busy && (local.is_none() || checked_out.as_deref() != Some(name.as_str()));
+        // A tag that points to a tree has no commit to start a branch at.
+        let startable = !busy
+            && session
+                .starting_point(&StartAt::Reference(name.clone()))
+                .is_ok();
         output.response.context_menu(|ui| {
             components::menu(ui, |ui| {
-                if components::menu_item(ui, None, &texts.show_only, None).clicked() {
+                if let Some(request) = request {
+                    let entry = ui
+                        .add_enabled_ui(checkable, |ui| {
+                            components::menu_item(ui, None, &texts.check_out, None)
+                        })
+                        .inner;
+                    if entry.clicked() {
+                        actions.push(SidebarAction::Checkout(request));
+                        ui.close();
+                    }
+                }
+                let entry = ui
+                    .add_enabled_ui(startable, |ui| {
+                        components::menu_item(ui, None, &texts.create_branch, None)
+                    })
+                    .inner;
+                if entry.clicked() {
+                    actions.push(SidebarAction::CreateBranch(StartAt::Reference(
+                        name.clone(),
+                    )));
+                    ui.close();
+                }
+                if !tag && components::menu_item(ui, None, &texts.show_only, None).clicked() {
                     actions.push(SidebarAction::ShowOnly(name.clone()));
                     ui.close();
                 }
@@ -201,6 +275,37 @@ fn activate(
             toggle(&mut state.collapsed_folders, (*section, path.clone()));
         }
         SidebarRow::View(view) => actions.push(SidebarAction::ShowView(*view)),
+        // A double click or Enter checks a local branch out; a single click
+        // only selects it.
+        SidebarRow::Reference {
+            section: Section::Branches,
+            name,
+            ..
+        } if open => {
+            if let Some(short) = name.strip_prefix("refs/heads/") {
+                actions.push(SidebarAction::Checkout(CheckoutRequest::Branch(
+                    short.to_owned(),
+                )));
+            }
+        }
+        // A tag is checked out like a branch, with the notice first.
+        SidebarRow::Reference {
+            section: Section::Tags,
+            name,
+            ..
+        } if open => {
+            actions.push(SidebarAction::Checkout(CheckoutRequest::Tag(name.clone())));
+        }
+        // A remote branch is checked out as a local branch of its name.
+        SidebarRow::Reference {
+            section: Section::Remotes,
+            name,
+            ..
+        } if open => {
+            actions.push(SidebarAction::Checkout(CheckoutRequest::RemoteBranch(
+                name.clone(),
+            )));
+        }
         SidebarRow::Submodule {
             path,
             initialised: true,
@@ -275,10 +380,15 @@ fn draw_row(
             label,
             depth,
             current,
+            elsewhere,
             ..
         } => {
             strong = *current;
-            let description = current.then(|| texts.current.clone());
+            let description = current.then(|| texts.current.clone()).or_else(|| {
+                elsewhere
+                    .as_ref()
+                    .map(|folder| texts.elsewhere.replace(ELSEWHERE_FOLDER, folder))
+            });
             (
                 label.clone(),
                 depth + 1,
@@ -330,7 +440,27 @@ fn draw_row(
         );
     }
 
+    // The mark of a branch that another worktree has checked out.
+    let elsewhere_text = match row {
+        SidebarRow::Reference {
+            elsewhere: Some(_), ..
+        } => description.clone(),
+        _ => None,
+    };
+    if elsewhere_text.is_some() {
+        painter.text(
+            pos2(rect.right() - 14.0, rect.center().y),
+            Align2::CENTER_CENTER,
+            icons::FOLDER,
+            icons::font(ui.ctx(), 14.0),
+            muted,
+        );
+    }
     let response = ui.interact(rect, ui.id().with("item"), Sense::hover());
+    let response = match &elsewhere_text {
+        Some(text) => response.on_hover_text(text),
+        None => response,
+    };
     // `widget_info` gives the node its position; the rest is set after it.
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &label));
     ui.ctx().accesskit_node_builder(response.id, |node| {

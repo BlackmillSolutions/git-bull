@@ -73,11 +73,11 @@ fn toolbar_offers_only_working_actions() {
     let mut harness = window(test.app);
     harness.run();
 
-    for label in ["Open", "Refresh", "Theme", "Settings"] {
+    for label in ["Open", "Refresh", "Branch", "Theme", "Settings"] {
         harness.get_by_role_and_label(Role::Button, label);
     }
     // Buttons only: "Commit" is also the title of a column.
-    for missing in ["Commit", "Pull", "Push", "Branch", "Stash"] {
+    for missing in ["Commit", "Pull", "Push", "Stash"] {
         assert!(
             harness
                 .query_by_role_and_label(Role::Button, missing)
@@ -88,12 +88,16 @@ fn toolbar_offers_only_working_actions() {
 }
 
 #[test]
-fn open_and_refresh_show_an_icon_and_their_label() {
+fn open_refresh_and_branch_show_an_icon_and_their_label() {
     let test = app_with_open_repository(Settings::default());
     let mut harness = window(test.app);
     harness.run();
 
-    for (label, icon) in [("Open", icons::FOLDER), ("Refresh", icons::REFRESH)] {
+    for (label, icon) in [
+        ("Open", icons::FOLDER),
+        ("Refresh", icons::REFRESH),
+        ("Branch", icons::BRANCH),
+    ] {
         let rect = harness.get_by_role_and_label(Role::Button, label).rect();
         let texts = support::texts_in(harness.output(), rect);
         assert!(texts.iter().any(|text| text == icon), "{label}: {texts:?}");
@@ -826,4 +830,87 @@ fn tab_reaches_the_commit_list_of_a_repository_without_commits() {
         }
     }
     panic!("Tab never reached the commit list");
+}
+
+/// The toolbar of a repository tab at 150 % in a window `width` pixels wide,
+/// after the frames it takes to find its room.
+fn toolbar_at_150_percent(width: f32) -> Harness<'static, App> {
+    let settings = Settings {
+        interface_size: gitbull_core::settings::InterfaceSize::Percent150,
+        ..Settings::default()
+    };
+    let test = app_with_open_repository(settings);
+    let mut harness = support::sized_window((width, 800.0), test.app);
+    for _ in 0..5 {
+        harness.run();
+    }
+    harness
+}
+
+/// No part of the toolbar lies over the next one.
+fn parts_do_not_overlap(harness: &Harness<'_, App>) {
+    let rect = |label: &str| harness.get_by_role_and_label(Role::Button, label).rect();
+    let order = [
+        "Open", "Refresh", "Branch", "Previous", "Next", "Theme", "Settings",
+    ];
+    for pair in order.windows(2) {
+        let (left, right) = (rect(pair[0]), rect(pair[1]));
+        assert!(
+            left.right() <= right.left(),
+            "{} {left:?} lies over {} {right:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+    let field = harness
+        .get_by_role_and_label(Role::TextInput, "Search commits…")
+        .rect();
+    assert!(field.width() >= 80.0, "the search field is {field:?}");
+    assert!(field.right() <= rect("Previous").left());
+}
+
+/// At the largest interface size in a window of 1280 by 800 pixels the toolbar
+/// has less room than its parts ask for; the search field gives way.
+#[test]
+fn the_search_field_gives_way_in_a_toolbar_without_room() {
+    let harness = toolbar_at_150_percent(1280.0);
+    parts_do_not_overlap(&harness);
+    let field = harness
+        .get_by_role_and_label(Role::TextInput, "Search commits…")
+        .rect();
+    assert!(field.width() < 260.0, "the field kept its width: {field:?}");
+    // Previous and Next keep their labels while the field can give way.
+    let previous = harness
+        .get_by_role_and_label(Role::Button, "Previous")
+        .rect();
+    let texts = support::texts_in(harness.output(), previous);
+    assert!(texts.iter().any(|text| text == "Previous"), "{texts:?}");
+}
+
+/// In a narrower window the narrowest field is not enough, and Previous and
+/// Next show as icons that keep their names.
+#[test]
+fn previous_and_next_become_icons_in_a_narrower_toolbar() {
+    let harness = toolbar_at_150_percent(1040.0);
+    parts_do_not_overlap(&harness);
+    let previous = harness
+        .get_by_role_and_label(Role::Button, "Previous")
+        .rect();
+    let texts = support::texts_in(harness.output(), previous);
+    assert!(!texts.iter().any(|text| text == "Previous"), "{texts:?}");
+}
+
+/// With room, the toolbar is as before.
+#[test]
+fn the_search_field_keeps_its_width_with_room() {
+    let test = app_with_open_repository(Settings::default());
+    let mut harness = window(test.app);
+    for _ in 0..5 {
+        harness.run();
+    }
+    parts_do_not_overlap(&harness);
+    let field = harness
+        .get_by_role_and_label(Role::TextInput, "Search commits…")
+        .rect();
+    assert!((field.width() - 260.0).abs() < 1.0, "{field:?}");
 }

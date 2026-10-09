@@ -296,6 +296,10 @@ pub struct Settings {
     /// Whether file lists show a tree of folders instead of full paths.
     #[serde(deserialize_with = "or_default")]
     pub file_tree: bool,
+    /// Whether to show a notice before a tag or a commit is checked out and
+    /// HEAD no longer points to a branch. On unless the user turned it off.
+    #[serde(deserialize_with = "or_true")]
+    pub detach_notice: bool,
     /// A language tag such as `en-US`.
     pub language: String,
     /// The Git executable chosen by the user, if any.
@@ -462,6 +466,7 @@ impl Default for Settings {
             system_title_bar: false,
             show_invisibles: false,
             file_tree: false,
+            detach_notice: true,
             language: "en-US".to_owned(),
             git_path: None,
             recent: Vec::new(),
@@ -629,6 +634,16 @@ where
     Ok(value.try_into().unwrap_or_default())
 }
 
+/// Like [`or_default`] for a switch that is on unless the user turned it off:
+/// a value of the wrong type leaves it on.
+fn or_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(value.try_into().unwrap_or(true))
+}
+
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
@@ -651,6 +666,7 @@ mod tests {
             system_title_bar: false,
             show_invisibles: false,
             file_tree: false,
+            detach_notice: true,
             language: "de-DE".to_owned(),
             git_path: Some(PathBuf::from("/opt/git/bin/git")),
             recent: vec![
@@ -1038,6 +1054,52 @@ mod tests {
         assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
         assert!(loaded.settings.show_invisibles);
         assert_eq!(loaded.settings.tabs, [PathBuf::from("/work/git-bull")]);
+    }
+
+    #[test]
+    fn detach_notice_defaults_to_on() {
+        assert!(Settings::default().detach_notice);
+    }
+
+    #[test]
+    fn a_file_without_the_setting_loads_as_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(&file, "theme = \"dark\"\nfile_tree = true\n");
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert!(loaded.settings.detach_notice);
+        assert!(loaded.settings.file_tree);
+    }
+
+    #[test]
+    fn a_value_of_the_wrong_type_loads_as_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(&file, "detach_notice = \"maybe\"\ntheme = \"dark\"\n");
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert!(loaded.settings.detach_notice);
+        assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
+    }
+
+    #[test]
+    fn the_setting_for_the_notice_survives_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            detach_notice: false,
+            ..example()
+        };
+        file.save(&settings).unwrap();
+
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.contains("detach_notice = false"), "{text}");
+        assert_eq!(file.load().settings, settings);
     }
 
     #[test]

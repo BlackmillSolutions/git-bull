@@ -13,7 +13,9 @@ use eframe::egui::{
 };
 use gitbull_core::badges::{Badge, BadgeKind};
 use gitbull_core::graph::{GraphRow, uncommitted_rows};
-use gitbull_core::session::{BranchFilter, CommitGraph, History, LoadState, Session};
+use gitbull_core::session::{
+    BranchFilter, CheckoutRequest, CommitGraph, History, LoadState, Session, StartAt,
+};
 use gitbull_core::settings::{HistoryColumn, HistoryColumns, Layout};
 use gitbull_core::store::Row;
 use gitbull_core::workspace::{Failure, View};
@@ -22,7 +24,7 @@ use gitbull_git::object_id::ObjectId;
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 
-use crate::app::{App, TabView};
+use crate::app::{App, Origin, TabView};
 use crate::columns::{
     self, Column, ColumnGeometry, ColumnId, ColumnSpec, HeaderMenuAction, OrderedColumns, text_cell,
 };
@@ -333,6 +335,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let empty = app.texts.text(Msg::HistoryEmpty);
     let copy_label = app.texts.text(Msg::CopyFullHash);
     let reset_columns = app.texts.text(Msg::HistoryColumnsReset);
+    let check_out_label = app.texts.text(Msg::CommitCheckOut);
+    let create_branch_label = app.texts.text(Msg::CommitCreateBranch);
+    let create_tag_label = app.texts.text(Msg::CommitCreateTag);
     let titles = [
         (ColumnId::Graph, app.texts.text(Msg::ColumnGraph)),
         (
@@ -523,6 +528,14 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         },
     );
 
+    if std::mem::take(&mut view.focus_commits) {
+        output.response.request_focus();
+    }
+    // What the user selects stands: a navigation that still waits for its
+    // commit to load, as after a checkout, does not replace it later.
+    if output.clicked.is_some() || output.selection_changed {
+        session.cancel_navigation();
+    }
     let selected = view.commits.selected().filter(|row| *row < rows);
     let selected_commit = selected.and_then(|row| list.commit(row));
     view.selected_id = selected_commit.map(|row| session.history().store.id(row as Row));
@@ -537,6 +550,15 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         .into_iter()
         .flatten()
         .any(|row| row < rows && list.commit(row).is_none());
+
+    // A double click or Enter on a commit checks it out; the row "Uncommitted
+    // changes" opens the File status view instead.
+    let activated_commit = output
+        .activated
+        .filter(|row| *row < rows)
+        .and_then(|row| list.commit(row))
+        .map(|row| session.history().store.id(row as Row));
+    let busy = session.action().is_some();
 
     let hash_of = |row: u64| {
         list.commit(row)
@@ -556,8 +578,38 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             .map(|row| session.history().store.id(row as Row));
     }
     let menu_commit = view.commit_menu;
+    let mut check_out = None;
+    let mut create_branch = None;
+    let mut create_tag = None;
     output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
+            let entry = ui
+                .add_enabled_ui(!busy && menu_commit.is_some(), |ui| {
+                    components::menu_item(ui, None, &check_out_label, None)
+                })
+                .inner;
+            if entry.clicked() {
+                check_out = menu_commit;
+                ui.close();
+            }
+            let entry = ui
+                .add_enabled_ui(!busy && menu_commit.is_some(), |ui| {
+                    components::menu_item(ui, None, &create_branch_label, None)
+                })
+                .inner;
+            if entry.clicked() {
+                create_branch = menu_commit;
+                ui.close();
+            }
+            let entry = ui
+                .add_enabled_ui(!busy && menu_commit.is_some(), |ui| {
+                    components::menu_item(ui, None, &create_tag_label, None)
+                })
+                .inner;
+            if entry.clicked() {
+                create_tag = menu_commit;
+                ui.close();
+            }
             if components::menu_item(ui, None, &copy_label, None).clicked() {
                 if let Some(commit) = menu_commit {
                     ui.ctx().copy_text(commit.to_string());
@@ -575,6 +627,19 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     );
     if open_file_status {
         app.show_view(View::FileStatus);
+    }
+    // A double click or Enter takes the branch at the commit, if there is
+    // one; the entry of the menu means the commit itself.
+    if let Some(id) = activated_commit {
+        app.activate_commit(id);
+    } else if let Some(id) = check_out {
+        app.checkout(CheckoutRequest::Commit(id));
+    }
+    if let Some(id) = create_branch {
+        app.begin_create_branch(StartAt::Commit(id), Origin::Commits);
+    }
+    if let Some(id) = create_tag {
+        app.begin_create_tag(StartAt::Commit(id), Origin::Commits);
     }
 }
 

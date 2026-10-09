@@ -8,8 +8,9 @@ commits.
 
 git-bull is in early development. The first release, 0.1.0, holds the
 read-only viewer and the interface improvements done so far; it is on the
-releases page. The next development priority is local Git operations:
-checkout, branch creation, staging and committing. The commit graph's
+releases page. Since then git-bull checks out branches, tags and commits and
+creates branches and tags. The next development priority is the rest of the
+local Git operations: staging and committing. The commit graph's
 visual redesign is deferred with low priority. What git-bull does is
 specified in [`openspec/specs`](openspec/specs), the changes being planned
 or built are in [`openspec/changes`](openspec/changes), the architecture

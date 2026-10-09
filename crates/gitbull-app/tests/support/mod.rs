@@ -483,7 +483,7 @@ pub fn sized_window(size: (f32, f32), app: App) -> Harness<'static, App> {
     )
 }
 
-fn sized_window_on(
+pub fn sized_window_on(
     os: eframe::egui::os::OperatingSystem,
     size: (f32, f32),
     app: App,
