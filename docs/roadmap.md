@@ -65,6 +65,26 @@ stash change. A refresh that is asked for while git-bull reads the state is
 not read twice yet
 ([issue #36](https://github.com/BlackmillSolutions/git-bull/issues/36)).
 
+## In review: History columns and reference badges
+
+[Pull request #37](https://github.com/BlackmillSolutions/git-bull/pull/37)
+implements the OpenSpec change `history-table-customization`
+([issue #34](https://github.com/BlackmillSolutions/git-bull/issues/34)). It is
+interface polish that was already in progress and does not change the order
+above.
+
+- The History columns can be reordered by dragging their headers, and every
+  column except Description can be hidden or restored from a header menu. Order,
+  visibility and widths are saved per repository; File history shares the Date,
+  Author and Commit widths.
+- Dragging a boundary moves width only between the two columns beside it. When
+  the minimum widths exceed the window, the table scrolls horizontally, and
+  header and rows stay aligned.
+- A local branch and the remote branches of the same name at one commit share a
+  single badge. Badges give way to the commit title only below 120 points, the
+  widest branches first, then tags, behind a `+N` count that lists every hidden
+  reference on hover.
+
 ## Next: the local Git workflow
 
 | Order | Priority | Work |

@@ -475,7 +475,7 @@ fn a_commit_with_many_references_shows_the_first_and_counts_the_rest() {
 }
 
 #[test]
-fn each_kind_of_reference_shows_its_icon_in_its_badge() {
+fn reference_badges_show_tag_and_both_local_and_remote_branch_icons() {
     let reference = |name: &str, short: &str, kind| Reference {
         name: name.to_owned(),
         short: short.to_owned(),
@@ -501,11 +501,10 @@ fn each_kind_of_reference_shows_its_icon_in_its_badge() {
     let mut harness = open_with(backend().with_references(root(), references), tall);
     select(&mut harness, "Fix the parser");
     let field = harness.get_by_label("References").rect();
-    for (name, icon) in [
-        ("HEAD", icons::HEAD),
-        ("main", icons::BRANCH),
-        ("origin/main", icons::REMOTE_BRANCH),
-        ("v1.0", icons::TAG),
+    for (name, icons) in [
+        ("HEAD", &[icons::HEAD][..]),
+        ("main", &[icons::BRANCH, icons::REMOTE_BRANCH][..]),
+        ("v1.0", &[icons::TAG][..]),
     ] {
         // The badge in the field of the panel; the list and the status bar
         // name the branch too.
@@ -516,11 +515,13 @@ fn each_kind_of_reference_shows_its_icon_in_its_badge() {
             .unwrap_or_else(|| panic!("no badge {name} in the panel"));
         // The icon stands left of the name inside the badge.
         let badge = eframe::egui::Rect::from_min_max(
-            label.left_top() - eframe::egui::vec2(24.0, 4.0),
+            label.left_top() - eframe::egui::vec2(40.0, 4.0),
             label.right_bottom() + eframe::egui::vec2(0.0, 4.0),
         );
         let texts = support::texts_in(harness.output(), badge);
-        assert!(texts.iter().any(|text| text == icon), "{name}: {texts:?}");
+        for icon in icons {
+            assert!(texts.iter().any(|text| text == icon), "{name}: {texts:?}");
+        }
     }
 }
 

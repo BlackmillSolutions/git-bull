@@ -1,6 +1,7 @@
 //! The reference badges shown before the description of a commit.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use gitbull_git::head::Head;
 use gitbull_git::object_id::ObjectId;
@@ -10,16 +11,21 @@ use gitbull_git::refs::{RefKind, Reference};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BadgeKind {
     Head,
-    Branch,
-    RemoteBranch,
     Tag,
+    Branch,
+    CombinedBranch,
+    RemoteBranch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Badge {
     pub kind: BadgeKind,
-    /// As shown: `HEAD`, `main`, `origin/main` or `v1.0`.
+    /// As shown: `HEAD`, `main`, `main · 2`, `origin/main` or `v1.0`.
     pub name: String,
+    /// Full names represented by this chip, including every paired remote.
+    pub references: Vec<String>,
+    pub remote_count: usize,
+    pub tooltip: String,
 }
 
 /// The commit HEAD points to; `None` on a branch without commits.
@@ -34,14 +40,16 @@ pub fn head_commit(references: &[Reference], head: &Head) -> Option<ObjectId> {
     hex.and_then(|hex| ObjectId::from_hex(hex.as_bytes()))
 }
 
-/// The badges of every commit that has any, HEAD first, then branches,
-/// remote branches and tags, each in the order of their names.
-pub fn badges(references: &[Reference], head: &Head) -> HashMap<ObjectId, Vec<Badge>> {
+/// Groups refs once per refresh, in display order: HEAD, tags, branches.
+pub fn badges(references: &[Reference], head: &Head) -> HashMap<ObjectId, Arc<[Badge]>> {
     let mut all: HashMap<ObjectId, Vec<Badge>> = HashMap::new();
     if let Some(id) = head_commit(references, head) {
         all.entry(id).or_default().push(Badge {
             kind: BadgeKind::Head,
             name: "HEAD".to_owned(),
+            references: vec!["HEAD".to_owned()],
+            remote_count: 0,
+            tooltip: "HEAD".to_owned(),
         });
     }
     for reference in references {
@@ -60,12 +68,47 @@ pub fn badges(references: &[Reference], head: &Head) -> HashMap<ObjectId, Vec<Ba
         all.entry(id).or_default().push(Badge {
             kind,
             name: reference.short.clone(),
+            references: vec![reference.name.clone()],
+            remote_count: 0,
+            tooltip: reference.name.clone(),
         });
     }
-    for list in all.values_mut() {
-        list.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
-    }
-    all
+    all.into_iter()
+        .map(|(id, list)| {
+            let mut remotes: HashMap<String, Vec<Badge>> = HashMap::new();
+            let mut shown = Vec::with_capacity(list.len());
+            for badge in list {
+                if badge.kind == BadgeKind::RemoteBranch
+                    && let Some((_, suffix)) = badge.name.split_once('/')
+                {
+                    remotes.entry(suffix.to_owned()).or_default().push(badge);
+                } else {
+                    shown.push(badge);
+                }
+            }
+            for badge in &mut shown {
+                if badge.kind == BadgeKind::Branch
+                    && let Some(paired) = remotes.remove(&badge.name)
+                {
+                    badge.kind = BadgeKind::CombinedBranch;
+                    badge.remote_count = paired.len();
+                    badge
+                        .references
+                        .extend(paired.into_iter().flat_map(|remote| remote.references));
+                    badge.references[1..].sort();
+                    if badge.remote_count > 1 {
+                        badge.name = format!("{} · {}", badge.name, badge.remote_count);
+                    }
+                }
+            }
+            shown.extend(remotes.into_values().flatten());
+            shown.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+            for badge in &mut shown {
+                badge.tooltip = badge.references.join("\n");
+            }
+            (id, Arc::from(shown))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -99,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn head_branch_and_remote_branch_on_one_commit_are_three_badges() {
+    fn head_branch_and_remote_branch_on_one_commit_share_one_branch_badge() {
         let references = [
             reference("refs/heads/main", RefKind::Branch, Some(C1)),
             reference("refs/remotes/origin/main", RefKind::RemoteBranch, Some(C1)),
@@ -109,10 +152,14 @@ mod tests {
             names(&all[&id(C1)]),
             [
                 (BadgeKind::Head, "HEAD"),
-                (BadgeKind::Branch, "main"),
-                (BadgeKind::RemoteBranch, "origin/main"),
+                (BadgeKind::CombinedBranch, "main"),
             ]
         );
+        assert_eq!(
+            all[&id(C1)][1].references,
+            ["refs/heads/main", "refs/remotes/origin/main"]
+        );
+        assert_eq!(all[&id(C1)][1].remote_count, 1);
     }
 
     #[test]
@@ -124,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn kinds_are_ordered_head_branches_remote_branches_tags() {
+    fn kinds_are_ordered_head_tags_then_branches() {
         let references = [
             reference("refs/tags/v1.0", RefKind::Tag, Some(C1)),
             reference("refs/remotes/origin/main", RefKind::RemoteBranch, Some(C1)),
@@ -136,12 +183,30 @@ mod tests {
             names(&all[&id(C1)]),
             [
                 (BadgeKind::Head, "HEAD"),
-                (BadgeKind::Branch, "feature"),
-                (BadgeKind::Branch, "main"),
-                (BadgeKind::RemoteBranch, "origin/main"),
                 (BadgeKind::Tag, "v1.0"),
+                (BadgeKind::Branch, "feature"),
+                (BadgeKind::CombinedBranch, "main"),
             ]
         );
+    }
+
+    #[test]
+    fn different_commit_ids_do_not_combine_and_multiple_remotes_do() {
+        let references = [
+            reference("refs/heads/main", RefKind::Branch, Some(C1)),
+            reference("refs/remotes/origin/main", RefKind::RemoteBranch, Some(C2)),
+            reference(
+                "refs/remotes/upstream/main",
+                RefKind::RemoteBranch,
+                Some(C1),
+            ),
+            reference("refs/remotes/fork/main", RefKind::RemoteBranch, Some(C1)),
+        ];
+        let all = badges(&references, &Head::Branch("main".into()));
+        assert_eq!(all[&id(C1)][1].kind, BadgeKind::CombinedBranch);
+        assert_eq!(all[&id(C1)][1].remote_count, 2);
+        assert_eq!(all[&id(C1)][1].references.len(), 3);
+        assert_eq!(all[&id(C2)][0].kind, BadgeKind::RemoteBranch);
     }
 
     #[test]

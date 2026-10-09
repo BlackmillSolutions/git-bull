@@ -308,6 +308,34 @@ fn dragging_the_edge_left_of_the_path_widens_it_and_keeps_its_width() {
 }
 
 #[test]
+fn dragging_the_last_edge_changes_only_author_and_commit() {
+    let mut harness = open_with(backend());
+    open_history_of_c(&mut harness);
+    let before = TITLES.map(|title| column_header(&harness, title).left());
+
+    let edge = edge_left_of(&harness, "Commit");
+    drag_by(&mut harness, edge, vec2(-40.0, 0.0));
+
+    let after = TITLES.map(|title| column_header(&harness, title).left());
+    for index in 0..4 {
+        assert!(
+            (after[index] - before[index]).abs() < 1.0,
+            "{before:?} -> {after:?}"
+        );
+    }
+    assert!((after[4] - before[4] + 40.0).abs() < 1.0);
+    assert_eq!(
+        harness
+            .state()
+            .settings()
+            .history_columns_for(&root())
+            .widths
+            .commit,
+        Some(120.0)
+    );
+}
+
+#[test]
 fn date_author_and_commit_are_as_wide_as_in_the_commit_list() {
     let mut harness = open_with(backend());
     // The Author column of the commit list made 50 points wider.
@@ -317,15 +345,25 @@ fn date_author_and_commit_are_as_wide_as_in_the_commit_list() {
     let [.., author] = widths(&harness);
     assert!((author - 210.0).abs() < 1.0, "{author}");
 
-    // The Date column of the file history made 30 points narrower.
+    // The shared Date column had supplied 50 points to Author. Giving
+    // another 30 to Path stops at Date's 60-point minimum.
     let edge = edge_left_of(&harness, "Date");
     drag_by(&mut harness, edge, vec2(30.0, 0.0));
+    assert_eq!(
+        harness
+            .state()
+            .settings()
+            .history_columns_for(&root())
+            .widths
+            .date,
+        Some(60.0)
+    );
     harness.get_by_label("Back").click();
     harness.step();
     wait_until(&mut harness, |h| row(h, "Add a").is_some());
     let date = column_header(&harness, "Date").left();
     let author = column_header(&harness, "Author").left();
-    assert!((author - date - 100.0).abs() < 1.0, "{}", author - date);
+    assert!((author - date - 60.0).abs() < 1.0, "{}", author - date);
 }
 
 #[test]

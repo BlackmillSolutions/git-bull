@@ -190,6 +190,7 @@ column-date = Date
 column-author = Author
 column-commit = Commit
 column-path = Path
+history-columns-reset = Restore default columns
 row-loading = Loading…
 history-empty = This repository has no commits yet.
 history-uncommitted = Uncommitted changes

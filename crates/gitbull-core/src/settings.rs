@@ -123,6 +123,139 @@ pub struct Layout {
     pub path_column: Option<f32>,
 }
 
+/// A stable identity for a column in the commit History list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryColumn {
+    Graph,
+    Description,
+    Date,
+    Author,
+    Commit,
+}
+
+impl HistoryColumn {
+    pub const ALL: [Self; 5] = [
+        Self::Graph,
+        Self::Description,
+        Self::Date,
+        Self::Author,
+        Self::Commit,
+    ];
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Graph => 0,
+            Self::Description => 1,
+            Self::Date => 2,
+            Self::Author => 3,
+            Self::Commit => 4,
+        }
+    }
+
+    /// Width limits in logical points. Description may need a larger
+    /// effective minimum to reserve space for HEAD and the hidden-ref count.
+    pub const fn width_limits(self) -> (f32, f32) {
+        match self {
+            Self::Graph => (24.0, 600.0),
+            Self::Description => (120.0, 10_000.0),
+            Self::Date | Self::Author => (60.0, 400.0),
+            Self::Commit => (40.0, 240.0),
+        }
+    }
+}
+
+/// Widths are indexed by column identity, not by the current display order.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryColumnWidths {
+    pub graph: Option<f32>,
+    pub description: Option<f32>,
+    pub date: Option<f32>,
+    pub author: Option<f32>,
+    pub commit: Option<f32>,
+}
+
+impl HistoryColumnWidths {
+    pub fn get(&self, column: HistoryColumn) -> Option<f32> {
+        match column {
+            HistoryColumn::Graph => self.graph,
+            HistoryColumn::Description => self.description,
+            HistoryColumn::Date => self.date,
+            HistoryColumn::Author => self.author,
+            HistoryColumn::Commit => self.commit,
+        }
+    }
+
+    pub fn set(&mut self, column: HistoryColumn, width: Option<f32>) {
+        *match column {
+            HistoryColumn::Graph => &mut self.graph,
+            HistoryColumn::Description => &mut self.description,
+            HistoryColumn::Date => &mut self.date,
+            HistoryColumn::Author => &mut self.author,
+            HistoryColumn::Commit => &mut self.commit,
+        } = width;
+    }
+}
+
+/// A repository's saved History arrangement. File History consumes the
+/// Date, Author and Commit widths from the same entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryColumns {
+    pub repository: PathBuf,
+    pub order: Vec<HistoryColumn>,
+    pub hidden: Vec<HistoryColumn>,
+    pub widths: HistoryColumnWidths,
+}
+
+impl Default for HistoryColumns {
+    fn default() -> Self {
+        Self {
+            repository: PathBuf::new(),
+            order: HistoryColumn::ALL.to_vec(),
+            hidden: Vec::new(),
+            widths: HistoryColumnWidths::default(),
+        }
+    }
+}
+
+impl HistoryColumns {
+    /// Repairs an entry read from an older or malformed settings file.
+    pub fn normalize(&mut self) {
+        let mut seen = [false; 5];
+        self.order.retain(|column| {
+            let index = column.index();
+            let first = !seen[index];
+            seen[index] = true;
+            first
+        });
+        for column in HistoryColumn::ALL {
+            if !seen[column.index()] {
+                self.order.push(column);
+            }
+        }
+
+        seen = [false; 5];
+        self.hidden.retain(|column| {
+            let index = column.index();
+            let allowed = *column != HistoryColumn::Description && !seen[index];
+            seen[index] = true;
+            allowed
+        });
+        for column in HistoryColumn::ALL {
+            let (min, max) = column.width_limits();
+            self.widths.set(
+                column,
+                self.widths
+                    .get(column)
+                    .filter(|width| width.is_finite())
+                    .map(|width| width.clamp(min, max)),
+            );
+        }
+    }
+}
+
 /// The worktrees the home tab last found in a repository, so that it shows
 /// them before it has read them again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +316,9 @@ pub struct Settings {
     pub active_tab: Option<usize>,
     pub window: Option<WindowGeometry>,
     pub layout: Layout,
+    /// One History arrangement per canonical repository path.
+    #[serde(deserialize_with = "or_default", skip_serializing_if = "Vec::is_empty")]
+    pub history_columns: Vec<HistoryColumns>,
     /// The worktrees last found in the pinned and recent repositories.
     #[serde(deserialize_with = "or_default")]
     pub worktrees: Vec<KnownWorktrees>,
@@ -222,6 +358,53 @@ impl Settings {
         self.worktrees
             .retain(|known| !paths.contains(&known.repository));
         self.bases.retain(|base| !paths.contains(&base.repository));
+        self.history_columns
+            .retain(|columns| !paths.contains(&columns.repository));
+    }
+
+    /// Returns the saved arrangement for the main repository, or the
+    /// default order and visibility with widths from the older global layout.
+    pub fn history_columns_for(&self, repository: &Path) -> HistoryColumns {
+        self.history_columns
+            .iter()
+            .find(|columns| columns.repository == repository)
+            .cloned()
+            .unwrap_or_else(|| HistoryColumns {
+                repository: repository.to_owned(),
+                widths: HistoryColumnWidths {
+                    graph: self.layout.graph_column,
+                    date: self.layout.date_column,
+                    author: self.layout.author_column,
+                    commit: self.layout.hash_column,
+                    ..HistoryColumnWidths::default()
+                },
+                ..HistoryColumns::default()
+            })
+    }
+
+    /// Saves a repository's arrangement. For a non-UTF-8 path, widths also
+    /// update the old global fields, which survive when the entry cannot.
+    pub fn set_history_columns(&mut self, mut columns: HistoryColumns) -> bool {
+        columns.normalize();
+        if self.history_columns_for(&columns.repository) == columns {
+            return false;
+        }
+        if columns.repository.to_str().is_none() {
+            self.layout.graph_column = columns.widths.graph;
+            self.layout.date_column = columns.widths.date;
+            self.layout.author_column = columns.widths.author;
+            self.layout.hash_column = columns.widths.commit;
+        }
+        if let Some(saved) = self
+            .history_columns
+            .iter_mut()
+            .find(|saved| saved.repository == columns.repository)
+        {
+            *saved = columns;
+        } else {
+            self.history_columns.push(columns);
+        }
+        true
     }
 
     /// The base the user set for the repository whose canonical path is
@@ -292,6 +475,7 @@ impl Default for Settings {
             active_tab: None,
             window: None,
             layout: Layout::default(),
+            history_columns: Vec::new(),
             worktrees: Vec::new(),
             bases: Vec::new(),
         }
@@ -333,11 +517,16 @@ impl SettingsFile {
             }
             Err(_) => return self.reset(),
         };
-        match toml::from_str(&text) {
-            Ok(settings) => Loaded {
-                settings,
-                reset: false,
-            },
+        match toml::from_str::<Settings>(&text) {
+            Ok(mut settings) => {
+                for columns in &mut settings.history_columns {
+                    columns.normalize();
+                }
+                Loaded {
+                    settings,
+                    reset: false,
+                }
+            }
             Err(_) => self.reset(),
         }
     }
@@ -414,12 +603,19 @@ fn storable(settings: &Settings) -> Settings {
         .filter(|base| valid(&base.repository))
         .cloned()
         .collect();
+    let history_columns = settings
+        .history_columns
+        .iter()
+        .filter(|columns| valid(&columns.repository))
+        .cloned()
+        .collect();
     Settings {
         git_path: settings.git_path.clone().filter(|path| valid(path)),
         recent: kept(&settings.recent),
         pinned: kept(&settings.pinned),
         worktrees,
         bases,
+        history_columns,
         active_tab: active_tab.filter(|_| !tabs.is_empty()),
         tabs,
         ..settings.clone()
@@ -490,6 +686,7 @@ mod tests {
                 details_height: Some(300.0),
                 ..Layout::default()
             },
+            history_columns: Vec::new(),
             worktrees: Vec::new(),
             bases: Vec::new(),
         }
@@ -551,6 +748,109 @@ mod tests {
                 settings: example(),
                 reset: false
             }
+        );
+    }
+
+    #[test]
+    fn history_columns_are_normalized_when_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(
+            &file,
+            "[[history_columns]]\n\
+             repository = \"/work/git-bull\"\n\
+             order = [\"commit\", \"commit\", \"graph\"]\n\
+             hidden = [\"description\", \"author\"]\n\
+             [history_columns.widths]\n\
+             date = -4.0\n",
+        );
+
+        let loaded = file.load();
+        assert!(!loaded.reset);
+        file.save(&loaded.settings).unwrap();
+        let saved: toml::Table =
+            toml::from_str(&std::fs::read_to_string(file.path()).unwrap()).unwrap();
+        let columns = &saved["history_columns"][0];
+        assert_eq!(
+            columns["order"].as_array().unwrap(),
+            &["commit", "graph", "description", "date", "author"]
+                .map(|name| toml::Value::String(name.to_owned()))
+        );
+        assert_eq!(
+            columns["hidden"].as_array().unwrap(),
+            &[toml::Value::String("author".to_owned())]
+        );
+        assert_eq!(columns["widths"]["date"].as_float(), Some(60.0));
+    }
+
+    #[test]
+    fn history_columns_start_from_old_widths_and_remain_per_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let mut settings = Settings::default();
+        settings.layout.author_column = Some(170.0);
+        let first = Path::new("/work/first");
+        let second = Path::new("/work/second");
+        assert_eq!(
+            settings.history_columns_for(first).widths.author,
+            Some(170.0)
+        );
+
+        let mut changed = settings.history_columns_for(first);
+        changed.widths.author = Some(220.0);
+        changed.order.swap(0, 1);
+        changed.hidden.push(HistoryColumn::Date);
+        settings.set_history_columns(changed);
+
+        assert_eq!(
+            settings.history_columns_for(first).widths.author,
+            Some(220.0)
+        );
+        assert_eq!(
+            settings.history_columns_for(second).widths.author,
+            Some(170.0)
+        );
+        assert_eq!(settings.layout.author_column, Some(170.0));
+        file.save(&settings).unwrap();
+        let loaded = file.load().settings;
+        assert_eq!(
+            loaded.history_columns_for(first).order[0],
+            HistoryColumn::Description
+        );
+        assert!(
+            loaded
+                .history_columns_for(first)
+                .hidden
+                .contains(&HistoryColumn::Date)
+        );
+        assert_eq!(
+            loaded.history_columns_for(second).widths.author,
+            Some(170.0)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_repository_widths_use_the_global_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let invalid = not_utf8("history");
+        let mut settings = Settings::default();
+        let mut changed = settings.history_columns_for(&invalid);
+        changed.widths.commit = Some(124.0);
+        settings.set_history_columns(changed);
+        assert_eq!(
+            settings.history_columns_for(&invalid).widths.commit,
+            Some(124.0)
+        );
+        file.save(&settings).unwrap();
+
+        let loaded = file.load().settings;
+        assert!(loaded.history_columns.is_empty());
+        assert_eq!(loaded.layout.hash_column, Some(124.0));
+        assert_eq!(
+            loaded.history_columns_for(&invalid).widths.commit,
+            Some(124.0)
         );
     }
 
