@@ -328,9 +328,15 @@ fn open_with(backend: FakeBackend, detach_notice: bool) -> Harness<'static, App>
     });
     let mut harness = window_at_60_fps(test.app);
     settle_window(&mut harness);
-    // The sidebar and the commit list load apart from each other.
+    // The sidebar, the commit list and the descriptions of its commits load
+    // apart from each other; "First" is the oldest commit.
     wait_for(&mut harness, |h| {
-        h.query_by_label("diff").is_some() && h.query_all_by_role(Role::Row).next().is_some()
+        h.query_by_label("diff").is_some()
+            && h.query_all_by_role(Role::Row).any(|row| {
+                row.accesskit_node()
+                    .label()
+                    .is_some_and(|label| label.starts_with("First"))
+            })
     });
     harness
 }
