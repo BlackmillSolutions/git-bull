@@ -1464,6 +1464,8 @@ fn tab_button(
 fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>) {
     let appearance = appearance(app, ui);
     ui.horizontal(|ui| {
+        // The right edge of the toolbar, before its parts can push it out.
+        let edge = ui.max_rect().right();
         let open = app.texts.text(Msg::ToolbarOpen);
         let open = Button::new(&open)
             .kind(Kind::Ghost)
@@ -1506,11 +1508,15 @@ fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>
             .and_then(|workspace| workspace.active())
             .and_then(|tab| tab.session())
             .map(|session| session.search());
+        let searching = search.is_some();
         if let Some(search) = search {
             ui.separator();
             search_bar(app, ui, search, focus_search, actions);
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Where the parts on the left end; the ones on the right start at the
+        // other edge.
+        let left_end = ui.min_rect().right();
+        let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let settings = app.texts.text(Msg::ToolbarSettings);
             if components::icon_button(ui, icons::GEAR, &settings, None).clicked() {
                 actions.push(Action::OpenSettings);
@@ -1523,8 +1529,58 @@ fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>
             let theme = app.texts.text(Msg::ToolbarTheme);
             let theme = components::icon_button(ui, icon, &theme, None);
             egui::Popup::menu(&theme).show(|ui| theme_choice(app, ui, actions));
+            ui.min_rect().width()
         });
+        // The search gives way when the toolbar has less room than its parts
+        // ask for, as at a large interface size, and takes the room back when
+        // there is some again. What is found here holds for the next frame.
+        if searching {
+            let slack = edge - right.inner - left_end - ui.spacing().item_spacing.x;
+            let before = search_room(ui.ctx());
+            let mut room = before;
+            let toolbar = edge;
+            let fitting = (room.field + slack).clamp(SEARCH_FIELD_MIN, SEARCH_FIELD_WIDTH);
+            if room.compact_below.is_none()
+                && fitting <= SEARCH_FIELD_MIN
+                && room.field + slack < SEARCH_FIELD_MIN
+            {
+                // Even the narrowest field does not fit: Previous and Next
+                // become icons, until the toolbar is wide enough for their
+                // labels again.
+                room.compact_below = Some(toolbar + (SEARCH_FIELD_MIN - (room.field + slack)));
+            } else if room.compact_below.is_some_and(|needed| toolbar >= needed) {
+                room.compact_below = None;
+            }
+            room.field = fitting;
+            if room != before {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(Id::new(SEARCH_ROOM), room));
+                ui.ctx().request_repaint();
+            }
+        }
     });
+}
+
+/// The width the search field asks for, and the least it shrinks to.
+const SEARCH_FIELD_WIDTH: f32 = 260.0;
+const SEARCH_FIELD_MIN: f32 = 80.0;
+const SEARCH_ROOM: &str = "search-room";
+
+/// How the search fits the toolbar in this frame.
+#[derive(Clone, Copy, PartialEq)]
+struct SearchRoom {
+    /// The width of the field.
+    field: f32,
+    /// Previous and Next are icons while the toolbar is narrower than this.
+    compact_below: Option<f32>,
+}
+
+fn search_room(ctx: &egui::Context) -> SearchRoom {
+    ctx.data(|data| data.get_temp(Id::new(SEARCH_ROOM)))
+        .unwrap_or(SearchRoom {
+            field: SEARCH_FIELD_WIDTH,
+            compact_below: None,
+        })
 }
 
 /// The search field with its mode, Previous and Next, and the number of
@@ -1557,7 +1613,9 @@ fn search_bar(app: &App, ui: &mut Ui, search: &Search, focus: bool, actions: &mu
         .accesskit_node_builder(combo.response.id, |node| node.set_label(mode_name));
     let mut text = search.text().to_owned();
     let hint = app.texts.text(Msg::SearchHint);
-    let field = ui.add(components::text_edit(&mut text, &hint, 260.0).id(Id::new(SEARCH_FIELD)));
+    let room = search_room(ui.ctx());
+    let field =
+        ui.add(components::text_edit(&mut text, &hint, room.field).id(Id::new(SEARCH_FIELD)));
     ui.ctx()
         .accesskit_node_builder(field.id, |node| node.set_label(hint.as_str()));
     if focus {
@@ -1572,16 +1630,24 @@ fn search_bar(app: &App, ui: &mut Ui, search: &Search, focus: bool, actions: &mu
     }
     let found = !search.matches().is_empty();
     ui.add_enabled_ui(found, |ui| {
-        if Button::new(&app.texts.text(Msg::SearchPrevious))
-            .show(ui)
-            .clicked()
-        {
+        let (previous, next) = (
+            app.texts.text(Msg::SearchPrevious),
+            app.texts.text(Msg::SearchNext),
+        );
+        // In a toolbar without room for their labels they are icons, named
+        // by a tooltip and for assistive technology as before.
+        let (previous, next) = if room.compact_below.is_some() {
+            (
+                components::icon_button(ui, icons::PREVIOUS_HUNK, &previous, None),
+                components::icon_button(ui, icons::NEXT_HUNK, &next, None),
+            )
+        } else {
+            (Button::new(&previous).show(ui), Button::new(&next).show(ui))
+        };
+        if previous.clicked() {
             actions.push(Action::PreviousMatch);
         }
-        if Button::new(&app.texts.text(Msg::SearchNext))
-            .show(ui)
-            .clicked()
-        {
+        if next.clicked() {
             actions.push(Action::NextMatch);
         }
     });

@@ -11,7 +11,11 @@ of requirement "Starting points" of `reference-creation`, and SHALL be
 unavailable while a write action runs in the tab and in a repository without a
 commit. It MUST NOT show actions that the application cannot perform. Open,
 Refresh and Branch SHALL show an icon and their label; the theme switch and
-Settings SHALL show an icon, with a tooltip that names them.
+Settings SHALL show an icon, with a tooltip that names them. No part of the
+toolbar SHALL lie over another: where the toolbar has less room than its parts
+ask for, as at a large interface size, the search field SHALL become narrower
+first, and Previous and Next SHALL then show as icons with a tooltip that names
+them.
 
 #### Scenario: Toolbar content
 - **WHEN** a repository tab is shown
@@ -21,6 +25,10 @@ Settings SHALL show an icon, with a tooltip that names them.
 #### Scenario: Icons and labels
 - **WHEN** the main window is shown
 - **THEN** Open, Refresh and Branch show an icon and their label, and the theme switch and Settings show an icon that names them in a tooltip
+
+#### Scenario: Toolbar without room
+- **WHEN** the interface size is 150 % in a window of 1280 by 800 pixels and a repository tab is shown
+- **THEN** the search field is narrower than usual and no part of the toolbar lies over another
 
 #### Scenario: Toolbar of the home tab
 - **WHEN** the home tab is shown
