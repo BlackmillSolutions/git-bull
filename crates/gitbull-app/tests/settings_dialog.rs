@@ -568,7 +568,11 @@ fn apply_git_path(harness: &mut Harness<'_, App>, path: &str) {
     harness
         .get_by_role_and_label(Role::Button, "Use this Git")
         .click();
-    harness.run();
+    // Not `run`: applying a Git opens every tab again, and a tab that opens
+    // shows a spinner, which keeps the window repainting.
+    for _ in 0..3 {
+        harness.step();
+    }
 }
 
 #[test]
@@ -602,7 +606,28 @@ fn the_path_is_applied_after_the_action() {
             std::time::Instant::now() < deadline,
             "the action did not end"
         );
-        harness.run();
+        // Not `run`: what the action changed loads again with a spinner.
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // The history has loaded again before the window can be still.
+    while harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_some_and(|session| {
+            !matches!(
+                session.history().state,
+                gitbull_core::session::LoadState::Loaded
+            )
+        })
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the history did not load"
+        );
+        harness.step();
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     open_dialog(&mut harness);

@@ -417,7 +417,25 @@ fn idle(harness: &Harness<'_, App>) -> bool {
 fn settle_action(harness: &mut Harness<'_, App>) {
     harness.step();
     wait_for(harness, idle);
+    // What the action changed loads again and shows a spinner meanwhile, which
+    // keeps the window repainting: wait for the history, then let it settle.
+    wait_for(harness, history_loaded);
     harness.run();
+}
+
+/// Whether the history of the active tab has loaded.
+fn history_loaded(harness: &Harness<'_, App>) -> bool {
+    harness
+        .state()
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .is_none_or(|session| {
+            matches!(
+                session.history().state,
+                gitbull_core::session::LoadState::Loaded
+            )
+        })
 }
 
 #[test]
@@ -1193,7 +1211,7 @@ fn the_stale_dialog_offers_open_that_worktree() {
     harness
         .get_by_role_and_label(Role::Button, "Open that worktree")
         .click();
-    harness.run();
+    settle_frames(&mut harness);
     wait_for(&mut harness, |h| tab_titles(h.state()).len() == 2);
     assert_eq!(
         active_title(harness.state()).as_deref(),

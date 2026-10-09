@@ -379,16 +379,30 @@ fn nothing_is_read_for_the_home_tab_while_a_repository_tab_is_shown() {
     // Opening the tab looked for the repository of its folder, once. Every read
     // of the sidebar lists the worktrees together with the references, so the
     // listings beyond those are lookups of the repository.
-    let calls = probe.calls(&path(&["work", "git-bull"]));
-    let count = |name: &str| calls.iter().filter(|call| *call == name).count();
-    assert!(count("references") > 0, "the sidebar was read: {calls:?}");
+    let count = |name: &str| {
+        probe
+            .calls(&path(&["work", "git-bull"]))
+            .iter()
+            .filter(|call| *call == name)
+            .count()
+    };
+    // A read of the sidebar lists the references first and the worktrees
+    // last, so the counts only say something between two reads.
+    let lookups = || count("worktrees").checked_sub(count("references"));
+    step_until(&mut harness, |_| {
+        count("references") > 0 && lookups() == Some(1)
+    });
+    // A lookup for the home tab would still come now.
+    for _ in 0..20 {
+        harness.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    step_until(&mut harness, |_| lookups() == Some(1));
     assert_eq!(
-        (
-            count("worktrees").checked_sub(count("references")),
-            count("summary")
-        ),
-        (Some(1), 0),
-        "{calls:?}"
+        count("summary"),
+        0,
+        "{:?}",
+        probe.calls(&path(&["work", "git-bull"]))
     );
 }
 
