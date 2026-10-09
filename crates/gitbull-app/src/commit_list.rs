@@ -412,7 +412,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     if header.dragging {
         view.commit_column_drag = Some(shown_columns);
     }
-    if header.finished || menu_action.is_some() {
+    if header.released || header.finished || menu_action.is_some() {
         view.commit_column_drag = None;
     }
     let graph_width = header

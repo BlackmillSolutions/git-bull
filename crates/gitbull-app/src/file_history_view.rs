@@ -174,7 +174,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     if header.dragging {
         view.file_column_drag = Some(shown_columns);
     }
-    if header.finished {
+    if header.released || header.finished {
         view.file_column_drag = None;
     }
     if count == 0 {

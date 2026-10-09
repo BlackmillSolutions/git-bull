@@ -86,6 +86,10 @@ pub(crate) struct OrderedHeader {
     pub(crate) viewport_width: f32,
     pub(crate) horizontal: bool,
     pub(crate) dragging: bool,
+    /// A drag ended, whether or not it changed the columns; the caller drops
+    /// its in-progress arrangement.
+    pub(crate) released: bool,
+    /// A drag ended with a changed arrangement, which is worth saving.
     pub(crate) finished: bool,
     pub(crate) menu_action: Option<HeaderMenuAction>,
 }
@@ -441,6 +445,7 @@ pub(crate) fn ordered_header<const N: usize>(
     });
 
     let mut dragging = false;
+    let mut released = false;
     let mut finished = false;
     let mut menu_action = None;
     if reorder {
@@ -483,10 +488,11 @@ pub(crate) fn ordered_header<const N: usize>(
                     );
                 }
             }
-            if response.drag_stopped()
-                && let Some(pointer) = response.interact_pointer_pos()
-            {
-                finished |= columns.move_to_x(column.id, pointer.x, &geometry);
+            if response.drag_stopped() {
+                released = true;
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    finished |= columns.move_to_x(column.id, pointer.x, &geometry);
+                }
             }
             if let Some(reset) = reset_label {
                 response.context_menu(|ui| {
@@ -544,6 +550,7 @@ pub(crate) fn ordered_header<const N: usize>(
                     dragging = true;
                 }
                 dragging |= response.drag_started();
+                released |= response.drag_stopped();
                 finished |= response.drag_stopped();
                 paint_edge(ui, x, viewport, &response);
             }
@@ -555,6 +562,7 @@ pub(crate) fn ordered_header<const N: usize>(
         viewport_width,
         horizontal,
         dragging,
+        released,
         finished,
         menu_action,
     }
@@ -754,6 +762,55 @@ mod tests {
         let geometry = columns.geometry(viewport, 0.0, 120.0);
         assert_eq!(geometry.span(ColumnId::Description).unwrap().span(), 300.0);
         assert_eq!(geometry.content_width, 782.0);
+    }
+
+    #[test]
+    fn a_header_drag_that_changes_nothing_still_reports_its_release() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        let titles = [
+            (ColumnId::Graph, "Graph".to_owned()),
+            (ColumnId::Description, "Description".to_owned()),
+            (ColumnId::Date, "Date".to_owned()),
+            (ColumnId::Author, "Author".to_owned()),
+            (ColumnId::Commit, "Commit".to_owned()),
+        ];
+        let mut released = false;
+        let mut finished = false;
+        let mut harness = Harness::builder()
+            .with_size(vec2(900.0, 200.0))
+            .build_ui(|ui| {
+                let mut columns = ordered_history();
+                let mut scroll = HorizontalScroll::default();
+                let header = ordered_header(
+                    ui,
+                    Id::new("columns"),
+                    0,
+                    &titles,
+                    &mut columns,
+                    &mut scroll,
+                    120.0,
+                    true,
+                    None,
+                );
+                released |= header.released;
+                finished |= header.finished;
+            });
+        harness.run();
+        let at = harness.get_by_label("Date").rect().center();
+        // Far from the midpoint of any neighbour, so the order stays.
+        harness.hover_at(at);
+        harness.drag_at(at);
+        harness.run();
+        harness.hover_at(at + vec2(2.0, 0.0));
+        harness.run();
+        harness.drop_at(at + vec2(2.0, 0.0));
+        harness.run();
+        drop(harness);
+
+        assert!(released, "the release of the drag is reported");
+        assert!(!finished, "an unchanged order is not worth saving");
     }
 
     #[test]
