@@ -194,6 +194,22 @@ pub enum CheckoutRequest {
     RemoteBranch(String),
 }
 
+/// What a double click or Enter on a commit of the list checks out (spec
+/// `commit-history`, requirement "Actions on a commit").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommitActivation {
+    /// The commit is the tip of the branch that is checked out and of no
+    /// other.
+    Nothing,
+    /// One thing to check out: the only other local branch at the commit, the
+    /// only remote branch there, or the commit itself.
+    Checkout(CheckoutRequest),
+    /// Several local branches are at the commit, or several remote branches:
+    /// the user chooses. Local branches by their short names, remote branches
+    /// by their full names, in the order of their names.
+    Choose(Vec<CheckoutRequest>),
+}
+
 /// What [`Session::start_checkout`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CheckoutStart {
@@ -969,6 +985,58 @@ impl Session {
     /// shows the new state then. `None` when nothing moved or it was shown.
     pub fn take_checked_out(&mut self) -> Option<Head> {
         self.checked_out.take()
+    }
+
+    /// What a double click or Enter on the commit `id` checks out. A branch
+    /// that points to the commit is what the user means by it, so the branch
+    /// is checked out and HEAD is not detached: a local branch other than the
+    /// one checked out first, then a remote branch that has no local branch
+    /// of its name yet. A remote branch whose local branch exists does not
+    /// count, because checking it out would lead to that branch, which may be
+    /// at another commit. Without a branch the commit itself is checked out.
+    pub fn commit_activation(&self, id: &ObjectId) -> CommitActivation {
+        let hex = id.to_string();
+        let references: &[Reference] = self
+            .sidebar
+            .as_ref()
+            .and_then(|sidebar| sidebar.as_ref().ok())
+            .map_or(&[], |sidebar| sidebar.references.as_slice());
+        let hex = hex.as_str();
+        let at = |kind: RefKind| {
+            references
+                .iter()
+                .filter(move |known| known.kind == kind && known.commit.as_deref() == Some(hex))
+        };
+        let current = match &self.opened.head {
+            Head::Branch(name) => Some(name.as_str()),
+            Head::Detached(_) => None,
+        };
+        let here = at(RefKind::Branch).any(|branch| Some(branch.short.as_str()) == current);
+        let mut found: Vec<CheckoutRequest> = at(RefKind::Branch)
+            .filter(|branch| Some(branch.short.as_str()) != current)
+            .map(|branch| CheckoutRequest::Branch(branch.short.clone()))
+            .collect();
+        if found.is_empty() && !here {
+            found = at(RefKind::RemoteBranch)
+                .filter(|remote| {
+                    local_name_of(&remote.name).is_some_and(|local| {
+                        self.reference(&format!("refs/heads/{local}")).is_none()
+                    })
+                })
+                .map(|remote| CheckoutRequest::RemoteBranch(remote.name.clone()))
+                .collect();
+        }
+        found.sort_by_key(|request| match request {
+            CheckoutRequest::Branch(name) | CheckoutRequest::RemoteBranch(name) => name.clone(),
+            CheckoutRequest::Tag(name) => name.clone(),
+            CheckoutRequest::Commit(id) => id.to_string(),
+        });
+        match found.len() {
+            0 if here => CommitActivation::Nothing,
+            0 => CommitActivation::Checkout(CheckoutRequest::Commit(*id)),
+            1 => CommitActivation::Checkout(found.remove(0)),
+            _ => CommitActivation::Choose(found),
+        }
     }
 
     /// What [`Session::start_checkout`] would do with `request` now, without
@@ -4138,5 +4206,102 @@ mod tests {
         wait_until(&mut session, loaded);
         session.poll();
         assert_eq!(session.take_navigation(), None);
+    }
+
+    // ---- what a double click on a commit checks out (spec `commit-history`)
+
+    fn tag_at(name: &str, commit: &str) -> Reference {
+        Reference {
+            name: format!("refs/tags/{name}"),
+            short: name.to_owned(),
+            kind: gitbull_git::refs::RefKind::Tag,
+            commit: Some(fake_id(commit).to_string()),
+            upstream: None,
+        }
+    }
+
+    /// `main` is checked out at e. d has one other branch, c has two, b has a
+    /// remote branch only, a has a tag only, and x has a remote branch whose
+    /// local twin is elsewhere.
+    fn tips() -> FakeBackend {
+        backend()
+            .with_history(root(), five_lines())
+            .with_references(
+                root(),
+                vec![
+                    branch("main", "e"),
+                    branch("feature", "d"),
+                    branch("one", "c"),
+                    branch("two", "c"),
+                    remote_branch("origin/topic", "b"),
+                    tag_at("v1", "a"),
+                    remote_branch("origin/feature", "a"),
+                ],
+            )
+    }
+
+    #[test]
+    fn a_commit_with_one_branch_is_activated_as_that_branch() {
+        let session = ready(tips());
+        assert_eq!(
+            session.commit_activation(&fake_id("d")),
+            CommitActivation::Checkout(CheckoutRequest::Branch("feature".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_commit_with_several_branches_offers_them_in_the_order_of_their_names() {
+        let session = ready(tips());
+        assert_eq!(
+            session.commit_activation(&fake_id("c")),
+            CommitActivation::Choose(vec![
+                CheckoutRequest::Branch("one".to_owned()),
+                CheckoutRequest::Branch("two".to_owned())
+            ])
+        );
+    }
+
+    #[test]
+    fn a_commit_with_a_remote_branch_only_is_activated_as_that_remote_branch() {
+        let session = ready(tips());
+        assert_eq!(
+            session.commit_activation(&fake_id("b")),
+            CommitActivation::Checkout(CheckoutRequest::RemoteBranch(
+                "refs/remotes/origin/topic".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_remote_branch_whose_local_branch_is_elsewhere_does_not_count() {
+        // `origin/feature` is at a, but `feature` is at d: checking it out
+        // would lead away from the commit that was activated.
+        let session = ready(tips());
+        assert_eq!(
+            session.commit_activation(&fake_id("a")),
+            CommitActivation::Checkout(CheckoutRequest::Commit(fake_id("a")))
+        );
+    }
+
+    #[test]
+    fn the_branch_that_is_checked_out_is_not_offered() {
+        let session = ready(tips());
+        // Only `main` is at e, and it is checked out: nothing is left to do.
+        assert_eq!(
+            session.commit_activation(&fake_id("e")),
+            CommitActivation::Nothing
+        );
+    }
+
+    #[test]
+    fn another_branch_at_the_commit_of_the_checked_out_one_is_checked_out() {
+        let backend = backend()
+            .with_history(root(), five_lines())
+            .with_references(root(), vec![branch("main", "e"), branch("release", "e")]);
+        let session = ready(backend);
+        assert_eq!(
+            session.commit_activation(&fake_id("e")),
+            CommitActivation::Checkout(CheckoutRequest::Branch("release".to_owned()))
+        );
     }
 }

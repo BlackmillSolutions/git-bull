@@ -48,7 +48,9 @@ use crate::style;
 use crate::theme::{Appearance, Palette, Rgb, SHAPE};
 use crate::virtual_list;
 use gitbull_core::search::{Search, SearchMode, SearchState};
-use gitbull_core::session::{BranchFilter, LoadState, NameRefusal, Session, StartAt, StartKind};
+use gitbull_core::session::{
+    BranchFilter, CheckoutRequest, LoadState, NameRefusal, Session, StartAt, StartKind,
+};
 use gitbull_git::object_id::ObjectId;
 use std::time::Duration;
 
@@ -131,6 +133,10 @@ enum Action {
     ConfirmDetach,
     CancelDetach,
     SetDetachDontShow(bool),
+    /// The choice among the branches at a commit: the one at this place, or
+    /// none.
+    ChooseBranch(usize),
+    CancelBranchChoice,
     /// Open the dialog "Create branch" at this starting point.
     BeginCreateBranch(StartAt, Origin),
     /// The dialog "Create branch": the name was edited, the option to check
@@ -210,6 +216,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         && app.close_question.is_none()
         && app.detach_pending.is_none()
         && app.create_dialog.is_none()
+        && app.branch_choice.is_none()
     {
         actions.extend(shortcuts(ui));
     }
@@ -269,6 +276,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         close_question_dialog(app, ui, &mut actions);
     } else if app.detach_pending.is_some() {
         detach_notice_dialog(app, ui, &mut actions);
+    } else if app.branch_choice.is_some() {
+        branch_choice_dialog(app, ui, &mut actions);
     } else if app.create_dialog.is_some() {
         create_dialog(app, ui, &mut actions);
     } else if let Some(dialog) = app.action_dialog() {
@@ -388,6 +397,8 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::CloseActionDialog => app.close_action_dialog(),
             Action::ConfirmDetach => app.confirm_detach(),
             Action::CancelDetach => app.detach_pending = None,
+            Action::ChooseBranch(index) => app.choose_branch(index),
+            Action::CancelBranchChoice => app.cancel_branch_choice(),
             Action::BeginCreateBranch(at, origin) => app.begin_create_branch(at, origin),
             Action::SetCreateName(text) => app.set_create_name(text),
             Action::SetCreateMessage(text) => app.set_create_message(text),
@@ -2078,6 +2089,61 @@ fn create_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
         actions.push(Action::SubmitCreate);
     } else if cancelled || (outcome.escape && !dialog.running) {
         actions.push(Action::CancelCreate);
+    }
+}
+
+/// The choice among the branches that point to the commit the user activated:
+/// a button for each, by its name, and Cancel, which Escape means too. The
+/// first branch has the focus.
+fn branch_choice_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let Some(branches) = &app.branch_choice else {
+        return;
+    };
+    let texts = &app.texts;
+    let names: Vec<String> = branches
+        .iter()
+        .map(|request| match request {
+            CheckoutRequest::Branch(name) => name.clone(),
+            // A remote branch as the sidebar names it, `origin/topic`.
+            CheckoutRequest::RemoteBranch(full) | CheckoutRequest::Tag(full) => full
+                .strip_prefix("refs/remotes/")
+                .or_else(|| full.strip_prefix("refs/tags/"))
+                .unwrap_or(full)
+                .to_owned(),
+            CheckoutRequest::Commit(id) => id.short(SHORT_HASH),
+        })
+        .collect();
+    let title = texts.text(Msg::BranchChoiceTitle);
+    let cancel = texts.text(Msg::DialogCancel);
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("branch-choice"),
+        &title,
+        |ui| {
+            ui.label(texts.text(Msg::BranchChoiceBody));
+            ui.add_space(SHAPE.space[1]);
+            let mut chosen = None;
+            for (index, name) in names.iter().enumerate() {
+                let button = components::Button::new(name).icon(icons::BRANCH).show(ui);
+                if index == 0 && ui.memory(|memory| memory.focused().is_none()) {
+                    button.request_focus();
+                }
+                if button.clicked() {
+                    chosen = Some(index);
+                }
+            }
+            chosen
+        },
+        |ui, chosen| {
+            let cancelled = components::Button::new(&cancel).show(ui).clicked();
+            (chosen, cancelled)
+        },
+    );
+    match outcome.inner {
+        (Some(index), _) => actions.push(Action::ChooseBranch(index)),
+        (None, true) => actions.push(Action::CancelBranchChoice),
+        (None, false) if outcome.escape => actions.push(Action::CancelBranchChoice),
+        (None, false) => {}
     }
 }
 

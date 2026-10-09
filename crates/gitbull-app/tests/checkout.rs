@@ -849,7 +849,7 @@ fn cancel_and_escape_leave_everything_and_keep_the_notice() {
 
 #[test]
 fn check_out_with_the_choice_ticked_hides_the_notice_for_good() {
-    let backend = backend();
+    let backend = commits_without_a_branch();
     let probe = backend.probe();
     let mut harness = open(backend);
     double_click(&mut harness, "v1.0");
@@ -894,9 +894,24 @@ fn a_tag_on_a_tree_shows_the_banner_and_changes_nothing() {
     assert_eq!(head(&harness), Head::Branch("main".to_owned()));
 }
 
+/// Like [`backend`], with no branch at the commits "Third" and "Fourth", so
+/// that a double click on them means the commit: `feature/diff` is at the
+/// commit of `side`, and the tag `v1.0` stays at "Third".
+fn commits_without_a_branch() -> FakeBackend {
+    backend().with_references(
+        root(),
+        vec![
+            branch("feature/diff", "x"),
+            branch("main", "e"),
+            branch("side", "x"),
+            tag("v1.0", Some("c")),
+        ],
+    )
+}
+
 #[test]
 fn double_click_and_enter_on_a_commit_check_it_out() {
-    let backend = backend();
+    let backend = commits_without_a_branch();
     let probe = backend.probe();
     let mut harness = open_without_notice(backend);
     double_click_commit(&mut harness, "Third");
@@ -919,7 +934,7 @@ fn double_click_and_enter_on_a_commit_check_it_out() {
 
 #[test]
 fn the_notice_comes_before_a_commit_is_checked_out() {
-    let backend = backend();
+    let backend = commits_without_a_branch();
     let probe = backend.probe();
     let mut harness = open(backend);
     double_click_commit(&mut harness, "Third");
@@ -1302,4 +1317,128 @@ fn the_button_of_a_dialog_stays_in_view_when_its_files_scroll() {
             .is_none(),
         "the press at {at:?} did not reach Cancel"
     );
+}
+
+// ---- a double click on a commit that a branch points to (spec
+// `commit-history`, requirement "Actions on a commit")
+
+#[test]
+fn a_double_click_on_the_tip_of_a_branch_checks_the_branch_out() {
+    let backend = backend();
+    let probe = backend.probe();
+    // The notice is on: it must not come, because HEAD is not detached.
+    let mut harness = open(backend);
+    double_click_commit(&mut harness, "Fourth");
+    settle_action(&mut harness);
+    assert_eq!(
+        probe.checkouts(),
+        [CheckoutTarget::Branch("feature/diff".to_owned())]
+    );
+    assert_eq!(head(&harness), Head::Branch("feature/diff".to_owned()));
+    assert!(
+        harness
+            .query_by_label_contains("no longer to a branch")
+            .is_none()
+    );
+}
+
+#[test]
+fn enter_on_the_tip_of_a_branch_checks_the_branch_out() {
+    let mut harness = open(backend());
+    commit_row(&harness, "Side work").click();
+    harness.run();
+    harness.key_press(Key::Enter);
+    settle_action(&mut harness);
+    assert_eq!(head(&harness), Head::Branch("side".to_owned()));
+}
+
+#[test]
+fn a_double_click_on_a_commit_with_a_remote_branch_only_checks_that_out() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click_commit(&mut harness, "Second");
+    settle_action(&mut harness);
+    assert_eq!(
+        probe.checkouts(),
+        [CheckoutTarget::RemoteBranch(
+            "refs/remotes/origin/release/0.1".to_owned()
+        )]
+    );
+    assert_eq!(head(&harness), Head::Branch("release/0.1".to_owned()));
+}
+
+#[test]
+fn the_tip_of_the_branch_that_is_checked_out_does_nothing() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click_commit(&mut harness, "Fifth");
+    harness.run();
+    assert!(probe.checkouts().is_empty());
+    assert!(
+        harness
+            .query_by_label_contains("no longer to a branch")
+            .is_none()
+    );
+}
+
+/// Like [`backend`], with the branch `other` at the commit of `feature/diff`.
+fn two_branches_at_one_commit() -> FakeBackend {
+    let mut references = references();
+    references.push(branch("other", "d"));
+    backend().with_references(root(), references)
+}
+
+#[test]
+fn a_commit_with_several_branches_asks_which_one() {
+    let backend = two_branches_at_one_commit();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click_commit(&mut harness, "Fourth");
+    harness.run();
+    harness.get_by_role_and_label(Role::Dialog, "Check out which branch?");
+    assert!(probe.checkouts().is_empty());
+    harness.get_by_role_and_label(Role::Button, "feature/diff");
+    harness.get_by_role_and_label(Role::Button, "Cancel");
+    harness.get_by_role_and_label(Role::Button, "other").click();
+    harness.run();
+    settle_action(&mut harness);
+    assert_eq!(head(&harness), Head::Branch("other".to_owned()));
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Dialog, "Check out which branch?")
+            .is_none()
+    );
+}
+
+#[test]
+fn escape_leaves_the_choice_of_a_branch_without_a_checkout() {
+    let backend = two_branches_at_one_commit();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    double_click_commit(&mut harness, "Fourth");
+    harness.run();
+    harness.get_by_role_and_label(Role::Dialog, "Check out which branch?");
+    harness.key_press(Key::Escape);
+    harness.run();
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Dialog, "Check out which branch?")
+            .is_none()
+    );
+    assert!(probe.checkouts().is_empty());
+}
+
+#[test]
+fn the_menu_entry_still_checks_out_the_commit_of_a_branch() {
+    let backend = backend();
+    let probe = backend.probe();
+    let mut harness = open(backend);
+    right_click_commit(&mut harness, "Fourth");
+    harness.get_by_label("Check out this commit").click();
+    harness.run();
+    // HEAD would be detached, so the notice comes first.
+    assert!(notice_is_shown(&harness, &fake_id("d").to_string()[..7]));
+    assert!(probe.checkouts().is_empty());
 }

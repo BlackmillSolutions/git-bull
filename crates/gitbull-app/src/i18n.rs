@@ -206,6 +206,8 @@ messages! {
     SettingsDetachNotice => "settings-detach-notice",
     SidebarCheckOut => "sidebar-check-out",
     CommitCheckOut => "commit-check-out",
+    BranchChoiceTitle => "branch-choice-title",
+    BranchChoiceBody => "branch-choice-body",
     CommitCreateBranch => "commit-create-branch",
     CommitCreateTag => "commit-create-tag",
     CreateTagTitle => "create-tag-title",

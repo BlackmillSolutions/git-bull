@@ -19,8 +19,8 @@ use gitbull_core::search::HashOutcome;
 use gitbull_core::seen::SeenFile;
 use gitbull_core::session::{
     Action as WriteAction, ActionDialog, BranchFilter, CheckoutRequest, CheckoutStart,
-    CreateBranchRequest, CreateStart, CreateTagRequest, NameRefusal, Navigation, Session, StartAt,
-    StartUnavailable, StartingPoint,
+    CommitActivation, CreateBranchRequest, CreateStart, CreateTagRequest, NameRefusal, Navigation,
+    Session, StartAt, StartUnavailable, StartingPoint,
 };
 use gitbull_core::settings::{
     ColourVision, InterfaceSize, Layout, Loaded, Settings, SettingsFile, ThemeSetting,
@@ -449,6 +449,8 @@ pub struct App {
     pub(crate) detach_pending: Option<PendingDetach>,
     /// The dialog that creates a branch.
     pub(crate) create_dialog: Option<CreateDialog>,
+    /// The branches at a commit the user activated, while they choose one.
+    pub(crate) branch_choice: Option<Vec<CheckoutRequest>>,
     /// The window is to be told to close in this frame.
     pub(crate) send_close: bool,
     dirty: bool,
@@ -500,6 +502,7 @@ impl App {
             close_confirmed: false,
             detach_pending: None,
             create_dialog: None,
+            branch_choice: None,
             send_close: false,
             dirty: false,
             last_saved: Instant::now(),
@@ -1084,6 +1087,40 @@ impl App {
             CheckoutStart::Started => {
                 session.start_checkout(request);
             }
+        }
+    }
+
+    /// A double click or Enter on a commit of the list. A branch at the commit
+    /// is what is checked out, so that HEAD stays on a branch; several are
+    /// offered to choose from, and a commit without one is checked out itself.
+    pub(crate) fn activate_commit(&mut self, id: ObjectId) {
+        let Some((session, _)) = self.active_view() else {
+            return;
+        };
+        if session.action().is_some() {
+            return;
+        }
+        match session.commit_activation(&id) {
+            CommitActivation::Nothing => {}
+            CommitActivation::Checkout(request) => self.checkout(request),
+            CommitActivation::Choose(branches) => self.branch_choice = Some(branches),
+        }
+    }
+
+    /// The user chose the branch at `index` of the ones offered.
+    pub(crate) fn choose_branch(&mut self, index: usize) {
+        let Some(branches) = self.branch_choice.take() else {
+            return;
+        };
+        self.refocus(Origin::Commits);
+        if let Some(request) = branches.into_iter().nth(index) {
+            self.checkout(request);
+        }
+    }
+
+    pub(crate) fn cancel_branch_choice(&mut self) {
+        if self.branch_choice.take().is_some() {
+            self.refocus(Origin::Commits);
         }
     }
 

@@ -384,7 +384,11 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     if open_file_status {
         app.show_view(View::FileStatus);
     }
-    if let Some(id) = activated_commit.or(check_out) {
+    // A double click or Enter takes the branch at the commit, if there is
+    // one; the entry of the menu means the commit itself.
+    if let Some(id) = activated_commit {
+        app.activate_commit(id);
+    } else if let Some(id) = check_out {
         app.checkout(CheckoutRequest::Commit(id));
     }
     if let Some(id) = create_branch {
