@@ -10,8 +10,9 @@ M2 improvements to finish before M3 starts.
 The read-only viewer, the interface improvements delivered so far, the
 worktree cockpit and the trust model for write operations provide the
 starting point, and checkout and the creation of branches and tags are
-delivered. All of it is released as 0.2.0. This roadmap schedules new work;
-the current application still does not offer staging or commit creation.
+delivered. All of it is released as 0.2.0. Since then whole files can be
+staged and unstaged. This roadmap schedules new work; the current
+application still does not stage hunks or lines and does not create commits.
 
 ## Released: 0.2.0
 
@@ -103,23 +104,44 @@ was interface polish that did not change the order above.
   widest branches first, then tags, behind a `+N` count that lists every hidden
   reference on hover.
 
+## Delivered: staging of files
+
+The OpenSpec change `stage-files` delivers staging and unstaging of whole
+files, modelled on GitKraken. How its actions queue is recorded in the
+amendment of [ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and
+the behaviour is specified in the staging spec, `openspec/specs/staging`
+once the change is archived.
+
+- The File status view lists two groups, Unstaged with the untracked files
+  above Staged, each in the order of its paths.
+- A file is staged or unstaged with the button on its row, the first entry of
+  its context menu, or S and U. Stage all and Unstage all, also
+  Ctrl+Shift+S and Ctrl+Shift+U, act on the files the filter lists.
+- Staging runs the clean filters of the repository, as `git add` does.
+  Unstaging works without a commit and during a merge, and never changes the
+  working copy.
+- Requests made in quick succession are kept and run in order, and the
+  selection moves to the next file. A file in conflict is not staged.
+
+Not delivered with it: hunks and lines, discarding changes, resolving
+conflicts, staging a folder as one, and selecting several files.
+
 ## Next: the local Git workflow
 
 | Order | Priority | Work |
 |---|---|---|
-| 1 | High | Stage and unstage files and hunks from the File status view. |
+| 1 | High | Stage and unstage hunks and lines from the diff of the File status view. |
 | 2 | High | Write a commit message, commit the staged changes and amend the last commit. |
 
-The next delivery should make file staging and the commit workflow usable.
-Hunk staging and amend remain part of the planned local operations and follow
-their corresponding basic actions. The detailed OpenSpec changes will define
-their behaviour and implementation steps.
+The next delivery should make the commit workflow usable. Hunk staging and
+amend remain part of the planned local operations and follow their
+corresponding basic actions. The detailed OpenSpec changes will define their
+behaviour and implementation steps.
 
 Each item starts with its own Explore and Propose and builds on the write
-invocation and on the write actions of the session. The
-[working-copy status spec](../openspec/specs/working-copy-status/spec.md)
-still requires that the File status view offers no action that changes the
-index, so the staging change must revise it.
+invocation and on the write actions of the session. Hunks need a patch that
+fits the content the index holds, while the diff shown is read with the
+repository's filters neutralised; that is the first question of its change.
 
 ## After the basic actions
 

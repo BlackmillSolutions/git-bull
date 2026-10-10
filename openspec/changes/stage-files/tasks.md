@@ -66,8 +66,8 @@ as the expected RED.
 
 ## 6. Specifications and documentation
 
-- [ ] 6.1 Edit the purpose of `openspec/specs/working-copy-status/spec.md` so that it no longer says the status offers no way to change anything, and verify it names staging and unstaging.
-- [ ] 6.2 Update `README.md` (what git-bull does, and the next priority) and `docs/roadmap.md` (staging of files delivered, hunks and commit next). Verify both name file staging as delivered and hunks as not.
+- [x] 6.1 Edit the purpose of `openspec/specs/working-copy-status/spec.md` so that it no longer says the status offers no way to change anything, and verify it names staging and unstaging.
+- [x] 6.2 Update `README.md` (what git-bull does, and the next priority) and `docs/roadmap.md` (staging of files delivered, hunks and commit next). Verify both name file staging as delivered and hunks as not.
 
 ## 7. Integration
 

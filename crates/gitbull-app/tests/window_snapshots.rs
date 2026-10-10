@@ -799,3 +799,69 @@ fn create_tag_dialog_with_a_message() {
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "create_tag_message", &options());
 }
+
+/// The File status view with its two groups: unstaged files, an untracked
+/// one among them, above the staged ones, the titles with their buttons and
+/// the selected row with its button (spec `staging`).
+fn file_status_view(theme: ThemeSetting) -> Harness<'static, App> {
+    use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
+    let entry = |kind, name: &str| StatusEntry {
+        kind,
+        path: name.into(),
+        old_path: None,
+        submodule: false,
+    };
+    let changed = |kind, name: &str| entry(StatusKind::Changed(kind), name);
+    let status = WorkingStatus {
+        staged: vec![
+            changed(ChangeKind::Added, "docs/staging.md"),
+            changed(ChangeKind::Modified, "src/session.rs"),
+        ],
+        unstaged: vec![
+            changed(ChangeKind::Deleted, "src/old.rs"),
+            changed(ChangeKind::Modified, "src/ui.rs"),
+        ],
+        untracked: vec![entry(StatusKind::Untracked, "notes.txt")],
+    };
+    let mut harness = repository_window(
+        dialog_backend().with_status(path(&["work", "git-bull"]), status),
+        theme,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    let item = harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| node.accesskit_node().label().as_deref() == Some("File status"))
+        .expect("File status in the sidebar")
+        .rect()
+        .center();
+    harness.hover_at(item);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: item,
+            button: eframe::egui::PointerButton::Primary,
+            pressed,
+            modifiers: eframe::egui::Modifiers::NONE,
+        });
+    }
+    wait_for(&mut harness, |h| {
+        h.query_all_by_role(Role::ListItem).next().is_some()
+    });
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+#[test]
+fn file_status_in_the_dark_palette() {
+    let mut harness = file_status_view(ThemeSetting::Dark);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_dark", &options());
+}
+
+#[test]
+fn file_status_in_the_light_palette() {
+    let mut harness = file_status_view(ThemeSetting::Light);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_light", &options());
+}
