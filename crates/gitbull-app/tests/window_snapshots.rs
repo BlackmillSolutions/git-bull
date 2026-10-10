@@ -823,8 +823,39 @@ fn file_status_view(theme: ThemeSetting) -> Harness<'static, App> {
         ],
         untracked: vec![entry(StatusKind::Untracked, "notes.txt")],
     };
+    // The diff of the file that is selected first, an untracked one.
+    let added = |number: u32, text: &str| DiffLine {
+        kind: LineKind::Added,
+        old_number: None,
+        new_number: Some(number),
+        text: text.to_owned(),
+        no_newline: false,
+        cut: false,
+        crlf: false,
+    };
+    let notes = FileDiff {
+        old_path: None,
+        new_path: Some("notes.txt".into()),
+        old_mode: None,
+        new_mode: Some("100644".to_owned()),
+        old_blob: None,
+        new_blob: None,
+        new_in_working_copy: true,
+        content: Content::Text(vec![Hunk {
+            header: "@@ -0,0 +1,2 @@".to_owned(),
+            old_start: 0,
+            new_start: 1,
+            lines: vec![
+                added(1, "Stage files one by one,"),
+                added(2, "or all of a group."),
+            ],
+        }]),
+        truncated: false,
+    };
     let mut harness = repository_window(
-        dialog_backend().with_status(path(&["work", "git-bull"]), status),
+        dialog_backend()
+            .with_status(path(&["work", "git-bull"]), status)
+            .with_working_diff(gitbull_git::status::Group::Untracked, "notes.txt", notes),
         theme,
         InterfaceSize::Percent100,
         (1280.0, 800.0),
@@ -846,6 +877,7 @@ fn file_status_view(theme: ThemeSetting) -> Harness<'static, App> {
     }
     wait_for(&mut harness, |h| {
         h.query_all_by_role(Role::ListItem).next().is_some()
+            && h.query_all_by_role(Role::Code).next().is_some()
     });
     harness.event(eframe::egui::Event::PointerGone);
     harness.run();
