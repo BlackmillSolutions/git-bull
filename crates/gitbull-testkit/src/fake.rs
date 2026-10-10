@@ -11,7 +11,7 @@ use gitbull_git::backend::{
 };
 use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
-use gitbull_git::changes::{FileChange, FileLines};
+use gitbull_git::changes::{ChangeKind, FileChange, FileLines};
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::commits::{CommitEntry, Since};
 use gitbull_git::compare::{BaseComparison, CompareRequest, Counts};
@@ -29,7 +29,7 @@ use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
 use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
-use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
+use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use gitbull_git::summary::Summary;
 use gitbull_git::switch::{CheckoutTarget, local_name_of};
 use gitbull_git::uncommitted::Uncommitted;
@@ -89,6 +89,18 @@ pub struct FakeBackend {
     statuses: Vec<(PathBuf, WorkingStatus)>,
     failing_statuses: Vec<PathBuf>,
     status_gates: Vec<(PathBuf, Gate)>,
+    /// Gates that hold one read of the status of a repository, by its number,
+    /// the first read being 1.
+    status_gates_at: Vec<(PathBuf, usize, Gate)>,
+    /// How often the status of each repository was read.
+    status_reads: Mutex<HashMap<PathBuf, usize>>,
+    /// The status after staging and unstaging, by repository; it takes the
+    /// place of the status given.
+    moved_statuses: Mutex<Vec<(PathBuf, WorkingStatus)>>,
+    /// What Git prints when staging fails; without, staging succeeds.
+    stage_failure: Option<String>,
+    /// What Git prints when unstaging fails; without, unstaging succeeds.
+    unstage_failure: Option<String>,
     /// The worktrees of a repository, the main one first.
     worktrees: Mutex<Vec<Vec<Worktree>>>,
     summaries: Mutex<Vec<(PathBuf, Summary)>>,
@@ -150,6 +162,76 @@ pub struct FakeBackend {
     /// others from then on.
     created_references: Mutex<Vec<(PathBuf, Reference)>>,
     probe: Probe,
+}
+
+/// What staging `paths` does to `status`: an untracked file becomes added, a
+/// changed file moves to the staged list, where a file listed in both merges.
+fn staged_in_memory(status: &mut WorkingStatus, paths: &[RepoPath]) {
+    for path in paths {
+        let found = |list: &mut Vec<StatusEntry>| {
+            let at = list.iter().position(|entry| entry.path == *path)?;
+            Some(list.remove(at))
+        };
+        let entry = match found(&mut status.untracked) {
+            Some(mut untracked) => {
+                untracked.kind = StatusKind::Changed(ChangeKind::Added);
+                Some(untracked)
+            }
+            None => found(&mut status.unstaged).map(|mut changed| {
+                if changed.kind == StatusKind::Conflicted {
+                    changed.kind = StatusKind::Changed(ChangeKind::Modified);
+                }
+                changed
+            }),
+        };
+        if let Some(entry) = entry
+            && !status.staged.iter().any(|known| known.path == *path)
+        {
+            status.staged.push(entry);
+        }
+    }
+}
+
+/// What unstaging `paths` does to `status`: an added or copied file becomes
+/// untracked, a changed file moves to the unstaged list, and a rename comes
+/// apart into the new file, untracked, and the old one, deleted, which is
+/// unstaged only when its path is among `paths` too.
+fn unstaged_in_memory(status: &mut WorkingStatus, paths: &[RepoPath]) {
+    for path in paths {
+        let Some(at) = status.staged.iter().position(|entry| entry.path == *path) else {
+            continue;
+        };
+        let mut entry = status.staged.remove(at);
+        let from = entry.old_path.take();
+        let renamed = entry.kind == StatusKind::Changed(ChangeKind::Renamed);
+        let new_file = matches!(
+            entry.kind,
+            StatusKind::Changed(ChangeKind::Added | ChangeKind::Copied | ChangeKind::Renamed)
+        );
+        if renamed && let Some(old) = from {
+            let deleted = StatusEntry {
+                kind: StatusKind::Changed(ChangeKind::Deleted),
+                path: old.clone(),
+                old_path: None,
+                submodule: false,
+            };
+            if paths.contains(&old) {
+                status.unstaged.push(deleted);
+            } else {
+                status.staged.push(deleted);
+            }
+        }
+        let listed = |list: &[StatusEntry]| list.iter().any(|known| known.path == *path);
+        if listed(&status.unstaged) || listed(&status.untracked) {
+            continue;
+        }
+        if new_file {
+            entry.kind = StatusKind::Untracked;
+            status.untracked.push(entry);
+        } else {
+            status.unstaged.push(entry);
+        }
+    }
 }
 
 /// How a scripted write ends.
@@ -667,6 +749,30 @@ impl FakeBackend {
         self
     }
 
+    /// The `n`-th read of the status of `root`, the first being 1, takes until
+    /// the test opens `gate`; the reads before and after it are not held.
+    pub fn with_status_gate_at(
+        mut self,
+        root: impl Into<PathBuf>,
+        n: usize,
+        gate: &Gate,
+    ) -> FakeBackend {
+        self.status_gates_at.push((root.into(), n, gate.clone()));
+        self
+    }
+
+    /// Staging fails with `stderr`, and nothing changes.
+    pub fn with_stage_failure(mut self, stderr: &str) -> FakeBackend {
+        self.stage_failure = Some(stderr.to_owned());
+        self
+    }
+
+    /// Unstaging fails with `stderr`, and nothing changes.
+    pub fn with_unstage_failure(mut self, stderr: &str) -> FakeBackend {
+        self.unstage_failure = Some(stderr.to_owned());
+        self
+    }
+
     /// The diff of `path` in `group` of the file status.
     pub fn with_working_diff(mut self, group: Group, path: &str, diff: FileDiff) -> FakeBackend {
         self.working_diffs.insert((group, path.to_owned()), diff);
@@ -845,6 +951,81 @@ impl FakeBackend {
                 return Err(WriteFailure::Failed(Error::Cancelled));
             }
         }
+        Ok(())
+    }
+
+    /// The status of `root` as it is now: as the test set it while the
+    /// repository is open, else as staging and unstaging left it, else as
+    /// given.
+    fn status_now(&self, repo: &Path, root: &Path) -> WorkingStatus {
+        if let Some(status) = self.live_of(repo).and_then(|live| live.status.clone()) {
+            return status;
+        }
+        let moved = self
+            .moved_statuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((_, status)) = moved.iter().find(|(known, _)| known == root) {
+            return status.clone();
+        }
+        self.statuses
+            .iter()
+            .find(|(known, _)| known == root)
+            .map(|(_, status)| status.clone())
+            .unwrap_or_default()
+    }
+
+    /// The status of `root` is `status` from now on.
+    fn move_status(&self, repo: &Path, root: PathBuf, status: WorkingStatus) {
+        if let Some(mut live) = self.live_of(repo)
+            && live.status.is_some()
+        {
+            live.status = Some(status);
+            return;
+        }
+        let mut moved = self
+            .moved_statuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        moved.retain(|(known, _)| *known != root);
+        moved.push((root, status));
+    }
+
+    /// Runs a staging or an unstaging: recorded, held by the gate of the
+    /// write actions, failing as scripted, else changing the status in memory.
+    fn index_action(
+        &self,
+        call: &str,
+        repo: &Path,
+        paths: &[RepoPath],
+        failure: Option<&String>,
+        cancel: &CancelToken,
+        change: impl FnOnce(&mut WorkingStatus, &[RepoPath]),
+    ) -> Result<(), WriteFailure> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        self.probe.record(call, repo);
+        self.probe.record_index(call, paths);
+        let root = self.root_of(repo);
+        self.hold_write(cancel)?;
+        if let Some(stderr) = failure {
+            return Err(WriteFailure::Failed(Error::CommandFailed {
+                command: format!("git {call}"),
+                code: Some(128),
+                stderr: stderr.clone(),
+            }));
+        }
+        let mut status = self.status_now(repo, &root);
+        change(&mut status, paths);
+        for list in [
+            &mut status.staged,
+            &mut status.unstaged,
+            &mut status.untracked,
+        ] {
+            list.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        }
+        self.move_status(repo, root, status);
         Ok(())
     }
 
@@ -1656,10 +1837,47 @@ impl Backend for FakeBackend {
         })
     }
 
+    fn stage(
+        &self,
+        repo: &Path,
+        paths: &[RepoPath],
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        let failure = self.stage_failure.as_ref();
+        self.index_action("stage", repo, paths, failure, cancel, staged_in_memory)
+    }
+
+    fn unstage(
+        &self,
+        repo: &Path,
+        paths: &[RepoPath],
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        let failure = self.unstage_failure.as_ref();
+        self.index_action("unstage", repo, paths, failure, cancel, unstaged_in_memory)
+    }
+
     fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error> {
         self.probe.record("status", repo);
         self.gone(repo)?;
         let root = self.root_of(repo);
+        let read = {
+            let mut reads = self.status_reads.lock().unwrap_or_else(|e| e.into_inner());
+            let read = reads.entry(root.clone()).or_default();
+            *read += 1;
+            *read
+        };
+        let held = self
+            .status_gates_at
+            .iter()
+            .find(|(known, n, _)| *known == root && *n == read);
+        if let Some((_, _, gate)) = held {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
         if let Some((_, gate)) = self.status_gates.iter().find(|(known, _)| *known == root) {
             let stop = gate.clone();
             cancel.on_cancel(move || stop.cancel());
@@ -1674,15 +1892,7 @@ impl Backend for FakeBackend {
                 stderr: "fatal: index file corrupt".to_owned(),
             });
         }
-        if let Some(status) = self.live_of(repo).and_then(|live| live.status.clone()) {
-            return Ok(status);
-        }
-        Ok(self
-            .statuses
-            .iter()
-            .find(|(known, _)| *known == root)
-            .map(|(_, status)| status.clone())
-            .unwrap_or_default())
+        Ok(self.status_now(repo, &root))
     }
 
     fn find_hash(
@@ -2201,6 +2411,8 @@ struct ProbeLog {
     opened: Vec<(String, String, String)>,
     /// Every checkout asked for, in order.
     checkouts: Vec<CheckoutTarget>,
+    /// Every staging and unstaging asked for, with its paths.
+    index_calls: Vec<(String, Vec<String>)>,
     /// Every branch creation asked for, in order.
     created_branches: Vec<CreatedBranch>,
     /// Every tag creation asked for, in order.
@@ -2280,6 +2492,20 @@ impl Probe {
 
     fn record(&self, call: &str, repo: &Path) {
         self.lock().calls.push((call.to_owned(), repo.to_owned()));
+    }
+
+    fn record_index(&self, call: &str, paths: &[RepoPath]) {
+        let paths = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        self.lock().index_calls.push((call.to_owned(), paths));
+    }
+
+    /// Every staging and unstaging asked for, in order: `stage` or `unstage`
+    /// with its paths.
+    pub fn index_calls(&self) -> Vec<(String, Vec<String>)> {
+        self.lock().index_calls.clone()
     }
 
     fn record_checkout(&self, target: &CheckoutTarget) {
@@ -2582,5 +2808,201 @@ mod tests {
             backend.head(&root).unwrap(),
             Head::Branch("main".to_owned())
         );
+    }
+
+    // ---- staging and unstaging
+
+    fn entry(kind: StatusKind, name: &str) -> StatusEntry {
+        StatusEntry {
+            kind,
+            path: RepoPath::new(name),
+            old_path: None,
+            submodule: false,
+        }
+    }
+
+    fn changed(kind: ChangeKind, name: &str) -> StatusEntry {
+        entry(StatusKind::Changed(kind), name)
+    }
+
+    fn names(list: &[StatusEntry]) -> Vec<String> {
+        list.iter()
+            .map(|entry| format!("{:?} {}", entry.kind, entry.path.to_string_lossy()))
+            .collect()
+    }
+
+    fn repo_paths(names: &[&str]) -> Vec<RepoPath> {
+        names.iter().map(|name| RepoPath::new(*name)).collect()
+    }
+
+    /// `a.rs` modified, `gone.rs` deleted and `new.txt` untracked; `both.rs`
+    /// staged and modified again.
+    fn working() -> WorkingStatus {
+        WorkingStatus {
+            staged: vec![changed(ChangeKind::Modified, "both.rs")],
+            unstaged: vec![
+                changed(ChangeKind::Modified, "a.rs"),
+                changed(ChangeKind::Modified, "both.rs"),
+                changed(ChangeKind::Deleted, "gone.rs"),
+            ],
+            untracked: vec![entry(StatusKind::Untracked, "new.txt")],
+        }
+    }
+
+    #[test]
+    fn staging_moves_files_into_the_staged_list() {
+        let root = path(&["work", "app"]);
+        let backend = FakeBackend::default().with_status(root.clone(), working());
+        let cancel = CancelToken::new();
+        backend
+            .stage(
+                &root,
+                &repo_paths(&["a.rs", "both.rs", "gone.rs", "new.txt"]),
+                &cancel,
+            )
+            .unwrap();
+        let status = backend.status(&root, &cancel).unwrap();
+        assert_eq!(
+            names(&status.staged),
+            [
+                "Changed(Modified) a.rs",
+                "Changed(Modified) both.rs",
+                "Changed(Deleted) gone.rs",
+                "Changed(Added) new.txt",
+            ]
+        );
+        assert!(status.unstaged.is_empty() && status.untracked.is_empty());
+        assert_eq!(
+            backend.probe().index_calls(),
+            [(
+                "stage".to_owned(),
+                vec![
+                    "a.rs".to_owned(),
+                    "both.rs".to_owned(),
+                    "gone.rs".to_owned(),
+                    "new.txt".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn unstaging_moves_files_back() {
+        let root = path(&["work", "app"]);
+        let mut renamed = changed(ChangeKind::Renamed, "moved.txt");
+        renamed.old_path = Some(RepoPath::new("keep.txt"));
+        let status = WorkingStatus {
+            staged: vec![
+                changed(ChangeKind::Added, "added.txt"),
+                changed(ChangeKind::Modified, "both.rs"),
+                changed(ChangeKind::Modified, "m.rs"),
+                renamed,
+            ],
+            unstaged: vec![changed(ChangeKind::Modified, "both.rs")],
+            untracked: Vec::new(),
+        };
+        let backend = FakeBackend::default().with_status(root.clone(), status);
+        let cancel = CancelToken::new();
+        backend
+            .unstage(
+                &root,
+                &repo_paths(&["added.txt", "both.rs", "m.rs", "moved.txt", "keep.txt"]),
+                &cancel,
+            )
+            .unwrap();
+        let status = backend.status(&root, &cancel).unwrap();
+        assert!(status.staged.is_empty(), "{:?}", names(&status.staged));
+        assert_eq!(
+            names(&status.unstaged),
+            [
+                "Changed(Modified) both.rs",
+                "Changed(Deleted) keep.txt",
+                "Changed(Modified) m.rs",
+            ]
+        );
+        assert_eq!(
+            names(&status.untracked),
+            ["Untracked added.txt", "Untracked moved.txt"]
+        );
+    }
+
+    #[test]
+    fn a_rename_unstaged_by_its_new_path_alone_leaves_the_deletion_staged() {
+        let root = path(&["work", "app"]);
+        let mut renamed = changed(ChangeKind::Renamed, "moved.txt");
+        renamed.old_path = Some(RepoPath::new("keep.txt"));
+        let status = WorkingStatus {
+            staged: vec![renamed],
+            ..WorkingStatus::default()
+        };
+        let backend = FakeBackend::default().with_status(root.clone(), status);
+        let cancel = CancelToken::new();
+        backend
+            .unstage(&root, &repo_paths(&["moved.txt"]), &cancel)
+            .unwrap();
+        let status = backend.status(&root, &cancel).unwrap();
+        assert_eq!(names(&status.staged), ["Changed(Deleted) keep.txt"]);
+        assert_eq!(names(&status.untracked), ["Untracked moved.txt"]);
+    }
+
+    #[test]
+    fn a_scripted_failure_changes_nothing() {
+        let root = path(&["work", "app"]);
+        let backend = FakeBackend::default()
+            .with_status(root.clone(), working())
+            .with_stage_failure("fatal: Unable to create index.lock");
+        let cancel = CancelToken::new();
+        let result = backend.stage(&root, &repo_paths(&["a.rs"]), &cancel);
+        assert!(
+            matches!(
+                &result,
+                Err(WriteFailure::Failed(Error::CommandFailed { stderr, .. }))
+                    if stderr.contains("index.lock")
+            ),
+            "{result:?}"
+        );
+        assert_eq!(backend.status(&root, &cancel).unwrap(), working());
+    }
+
+    #[test]
+    fn no_path_is_no_call() {
+        let root = path(&["work", "app"]);
+        let backend = FakeBackend::default().with_status(root.clone(), working());
+        backend.stage(&root, &[], &CancelToken::new()).unwrap();
+        backend.unstage(&root, &[], &CancelToken::new()).unwrap();
+        assert!(backend.probe().index_calls().is_empty());
+    }
+
+    #[test]
+    fn the_gate_holds_the_read_of_its_number_only() {
+        let root = path(&["work", "app"]);
+        let gate = Gate::new();
+        let backend = Arc::new(
+            FakeBackend::default()
+                .with_status(root.clone(), working())
+                .with_status_gate_at(root.clone(), 2, &gate),
+        );
+        let cancel = CancelToken::new();
+        // The first read is not held.
+        backend.status(&root, &cancel).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (held, at) = (Arc::clone(&backend), root.clone());
+        std::thread::spawn(move || {
+            let _ = sender.send(held.status(&at, &CancelToken::new()).is_ok());
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the second read is held"
+        );
+        gate.open();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        );
+        // Nor is the third.
+        backend.status(&root, &cancel).unwrap();
     }
 }

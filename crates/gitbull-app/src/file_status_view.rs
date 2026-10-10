@@ -1,5 +1,5 @@
-//! The file list of the File status view: the uncommitted changes in three
-//! groups (spec `working-copy-status`). The diff panel beside it shows the
+//! The file list of the File status view: the uncommitted changes in two
+//! groups, unstaged and staged (spec `working-copy-status`). The diff panel beside it shows the
 //! file chosen.
 
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use eframe::egui::{
     vec2,
 };
 use fluent_bundle::FluentArgs;
-use gitbull_core::file_status::{GROUPS, StatusState};
+use gitbull_core::file_status::{Shown, ShownFiles, StatusState};
 use gitbull_core::file_tree::{FileOrder, FileTree, Mode, Row};
 use gitbull_core::workspace::Failure;
 use gitbull_git::changes::ChangeKind;
@@ -32,9 +32,16 @@ pub const STATUS_LIST: &str = "file-status-list";
 /// The id of the filter field above the files.
 pub const STATUS_FILTER: &str = "file-status-filter";
 
-/// The index of `group` among the groups of the list.
-fn group_index(group: Group) -> usize {
-    GROUPS.iter().position(|g| *g == group).unwrap_or(0)
+/// The entry at `index` of the group at `shown` of the list, with the list
+/// of the status it is in.
+fn entry_at<'a>(
+    status: &'a WorkingStatus,
+    files: &ShownFiles,
+    shown: usize,
+    index: usize,
+) -> Option<(Group, &'a StatusEntry)> {
+    let (group, at) = files.file(shown, index)?;
+    Some((group, status.group(group).get(at)?))
 }
 
 /// The texts of the list, read before the tab is borrowed.
@@ -46,8 +53,12 @@ struct Texts {
     file_history: String,
     blame: String,
     copy_path: String,
+    /// "Stage file" and "Unstage file", by the group of the file.
+    index_file: [String; 2],
+    /// "Stage all" and "Unstage all", by the group.
+    index_all: [String; 2],
     /// The titles of the groups, with the number of their files.
-    titles: [String; 3],
+    titles: [String; 2],
     /// The names of the kinds of change, for assistive technology.
     kinds: [String; 6],
     conflicted: String,
@@ -57,12 +68,15 @@ struct Texts {
 impl Texts {
     fn new(app: &App, status: Option<&WorkingStatus>) -> Texts {
         let text = |msg| app.texts.text(msg);
-        let title = |msg, group| {
+        // A title counts the files of its shown group: the unstaged and the
+        // untracked files together.
+        let title = |msg, shown: Shown| {
+            let count = status.map_or(0, |status| match shown {
+                Shown::Unstaged => status.unstaged.len() + status.untracked.len(),
+                Shown::Staged => status.staged.len(),
+            });
             let mut args = FluentArgs::new();
-            args.set(
-                "count",
-                status.map_or(0, |status| status.group(group).len()),
-            );
+            args.set("count", count);
             app.texts.text_with(msg, Some(&args))
         };
         Texts {
@@ -72,11 +86,12 @@ impl Texts {
             file_history: text(Msg::FileHistory),
             blame: text(Msg::FileBlame),
             copy_path: text(Msg::CopyPath),
-            titles: [
-                title(Msg::FileStatusStaged, Group::Staged),
-                title(Msg::FileStatusUnstaged, Group::Unstaged),
-                title(Msg::FileStatusUntracked, Group::Untracked),
-            ],
+            index_file: [text(Msg::StageFile), text(Msg::UnstageFile)],
+            index_all: [text(Msg::StageAll), text(Msg::UnstageAll)],
+            titles: Shown::ALL.map(|shown| match shown {
+                Shown::Unstaged => title(Msg::FileStatusUnstaged, shown),
+                Shown::Staged => title(Msg::FileStatusStaged, shown),
+            }),
             kinds: [
                 Msg::ChangeAdded,
                 Msg::ChangeModified,
@@ -91,8 +106,9 @@ impl Texts {
         }
     }
 
-    fn title(&self, group: Group) -> &str {
-        &self.titles[group_index(group)]
+    /// The title of the group at `shown` of the list.
+    fn title(&self, shown: usize) -> &str {
+        &self.titles[shown]
     }
 
     fn kind(&self, kind: StatusKind) -> &str {
@@ -134,6 +150,13 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let Some((session, view)) = app.active_view() else {
         return false;
     };
+    // A request of the keyboard for all files holds for this pass alone: when
+    // no list is drawn below, as while the working copy is clean, it is gone
+    // and does not fire once files appear.
+    let asked_for_all = view.index_all.take();
+    // While a checkout or a creation runs, nothing is staged or unstaged; a
+    // staging that runs keeps further requests.
+    let busy = session.action().is_some_and(|action| !action.is_index());
     let Some(file_status) = session.file_status() else {
         return false;
     };
@@ -159,6 +182,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         }
         StatusState::Loaded(status) => status,
     };
+    let Some(files) = file_status.shown_files().map(Arc::clone) else {
+        return false;
+    };
     let chosen_mode = file_list::header(
         ui,
         Id::new(STATUS_FILTER),
@@ -180,8 +206,11 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             None => FileTree::shown_as(Arc::clone(order), chosen_mode, &view.status_files.filter),
         };
         if !tree.holds_selection() {
-            match file_status.chosen() {
-                Some((group, index)) => tree.select_file(group_index(group), index),
+            let chosen = file_status
+                .chosen()
+                .and_then(|(group, index)| files.place(group, index));
+            match chosen {
+                Some((shown, place)) => tree.select_file(shown, place),
                 None => tree.select_first(),
             }
         }
@@ -193,6 +222,43 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         .tree
         .as_ref()
         .map(|tree| Arc::clone(tree.order()));
+    // The files a group lists under the filter that can be staged, or
+    // unstaged: all of them but those in conflict.
+    let actable = |shown: Shown, index: usize| {
+        entry_at(status, &files, shown.index(), index)
+            .map(|(_, entry)| entry)
+            .filter(|entry| entry.kind != StatusKind::Conflicted)
+    };
+    let listed = |tree: &FileTree, shown: Shown, filter: &str| -> Vec<RepoPath> {
+        tree.files_matching(shown.index(), filter)
+            .filter_map(|index| actable(shown, index))
+            .map(|entry| entry.path.clone())
+            .collect()
+    };
+    let version = file_status.version();
+    let known = matches!(
+        &view.index_available,
+        Some((at, filter, _)) if *at == version && *filter == view.status_files.filter
+    );
+    if !known && let Some(tree) = &view.status_files.tree {
+        // Found once per status and filter, and without building anything:
+        // the first file that can be acted on answers it.
+        let filter = view.status_files.filter.as_str();
+        let available = Shown::ALL.map(|shown| {
+            tree.files_matching(shown.index(), filter)
+                .any(|index| actable(shown, index).is_some())
+        });
+        view.index_available = Some((version, filter.to_owned(), available));
+    }
+    let available = view
+        .index_available
+        .as_ref()
+        .map_or([false; 2], |(_, _, available)| *available);
+    // What the user asks for in this pass: single files, each with whether it
+    // is unstaged, and all files of a group.
+    let mut wanted: Vec<(bool, RepoPath)> = Vec::new();
+    let mut all = asked_for_all;
+    let mut all_clicked = None;
     let Some(output) = file_list::show(
         ui,
         Id::new(STATUS_LIST),
@@ -202,24 +268,60 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         &list_texts,
         palette,
         |ui, row, selected| {
-            let entry = status.group(GROUPS[row.group]).get(row.index);
-            if let (Some(entry), Some(order)) = (entry, &order) {
-                entry_row(ui, entry, order, row, selected, &texts, palette);
+            let entry = entry_at(status, &files, row.group, row.index);
+            if let (Some((_, entry)), Some(order)) = (entry, &order) {
+                // A file in conflict is not staged: that would mark it resolved.
+                let button = (entry.kind != StatusKind::Conflicted).then(|| RowButton {
+                    name: &texts.index_file[row.group],
+                    icon: index_icon(row.group),
+                    enabled: !busy,
+                });
+                if entry_row(ui, entry, order, row, selected, &texts, palette, button) {
+                    wanted.push((row.group == Shown::Staged.index(), entry.path.clone()));
+                }
             }
         },
-        |ui, group| title_row(ui, texts.title(GROUPS[group])),
+        |ui, group| {
+            let enabled = available[group] && !busy;
+            if title_row(ui, texts.title(group), &texts.index_all[group], enabled) {
+                all_clicked = Some(Shown::ALL[group]);
+            }
+        },
     ) else {
         return false;
     };
+    all = all.or(all_clicked);
+    if std::mem::take(&mut view.focus_status) {
+        output.response.request_focus();
+    }
+    // S stages and U unstages the selected file while the list has the focus.
+    let selected_entry = view
+        .status_files
+        .tree
+        .as_ref()
+        .and_then(FileTree::selected_file)
+        .and_then(|(shown, index)| Some((shown, entry_at(status, &files, shown, index)?.1)));
+    if output.response.has_focus()
+        && !busy
+        && let Some((shown, entry)) = selected_entry
+        && entry.kind != StatusKind::Conflicted
+    {
+        let key = match Shown::ALL[shown] {
+            Shown::Unstaged => egui::Key::S,
+            Shown::Staged => egui::Key::U,
+        };
+        if plain_key_pressed(ui, key) {
+            wanted.push((shown == Shown::Staged.index(), entry.path.clone()));
+        }
+    }
 
     // The menu acts on the entry it was opened for, wherever a refresh
     // moves it meanwhile, and on the path the last commit had of it then.
     if output.menu_opened.is_some() {
         view.status_menu = match view.status_files.menu {
             Some(Row::File { group, index, .. }) => {
-                let group = GROUPS[group];
-                status.group(group).get(index).map(|entry| {
-                    StatusMenu::File(entry.clone(), last_commit_path(status, group, entry))
+                entry_at(status, &files, group, index).map(|(group, entry)| {
+                    StatusMenu::File(group, entry.clone(), last_commit_path(status, group, entry))
                 })
             }
             Some(Row::Folder { group, folder, .. }) => order
@@ -229,7 +331,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         };
     }
     let (menu_entry, in_last_commit) = match &view.status_menu {
-        Some(StatusMenu::File(entry, path)) => (Some(entry), path.as_ref()),
+        Some(StatusMenu::File(group, entry, path)) => (Some((*group, entry)), path.as_ref()),
         Some(StatusMenu::Folder(_)) | None => (None, None),
     };
     let menu_folder = match &view.status_menu {
@@ -247,12 +349,26 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
                 }
                 return;
             }
-            let Some(entry) = menu_entry else {
+            let Some((group, entry)) = menu_entry else {
                 return;
             };
-            // Nothing here changes the index, the working copy or the
-            // repository. The history and blame show the file as of the last
-            // commit, which a file new to it does not have.
+            // Staging and unstaging change the index; nothing here changes
+            // the working copy or the history (spec `working-copy-status`,
+            // requirement "Actions that change the repository").
+            if entry.kind != StatusKind::Conflicted {
+                let shown = Shown::of(group).index();
+                let item = ui
+                    .add_enabled_ui(!busy, |ui| {
+                        components::menu_item(ui, None, &texts.index_file[shown], None)
+                    })
+                    .inner;
+                if item.clicked() {
+                    wanted.push((shown == Shown::Staged.index(), entry.path.clone()));
+                    ui.close();
+                }
+            }
+            // The history and blame show the file as of the last commit,
+            // which a file new to it does not have.
             if let Some(path) = in_last_commit {
                 if components::menu_item(ui, None, &texts.file_history, None).clicked() {
                     opened = Some(FileAction::History("HEAD".to_owned(), path.clone()));
@@ -269,13 +385,47 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             }
         });
     });
+    // The selected file is about to leave its group: the selection moves on
+    // at once, so that the same key acts on the next file.
+    let selected_path = selected_entry.map(|(shown, entry)| (shown, &entry.path));
+    let leaves = wanted
+        .iter()
+        .any(|(unstage, path)| selected_path == Some((if *unstage { 1 } else { 0 }, path)));
+    if leaves
+        && let Some(tree) = &mut view.status_files.tree
+        && let Some(row) = tree.successor_of_selected()
+    {
+        tree.select_row(row);
+        view.status_files.list.select(Some(row as u64));
+    }
+    let all = all.and_then(|shown| {
+        let tree = view.status_files.tree.as_ref()?;
+        Some((shown, listed(tree, shown, &view.status_files.filter)))
+    });
     let chosen = view
         .status_files
         .tree
         .as_ref()
         .and_then(FileTree::selected_file)
-        .map(|(group, index)| (GROUPS[group], index));
+        .and_then(|(shown, index)| files.file(shown, index));
     session.choose_status_file(chosen);
+    if !busy {
+        for (unstage, path) in wanted {
+            match unstage {
+                true => session.unstage(vec![path]),
+                false => session.stage(vec![path]),
+            };
+        }
+        match all {
+            Some((Shown::Unstaged, paths)) => {
+                session.stage(paths);
+            }
+            Some((Shown::Staged, paths)) => {
+                session.unstage(paths);
+            }
+            None => {}
+        }
+    }
     if let Some(action) = opened {
         app.open_file_action(action);
     }
@@ -306,7 +456,46 @@ fn last_commit_path(status: &WorkingStatus, group: Group, entry: &StatusEntry) -
     }
 }
 
-fn title_row(ui: &mut Ui, title: &str) {
+/// Whether `key` was pressed in this pass alone: with no modifier held, so
+/// that Shift+S and Alt+S stay free, and not as a repeat of a key held down,
+/// which would stage file after file. The press is taken.
+fn plain_key_pressed(ui: &Ui, key: egui::Key) -> bool {
+    ui.input_mut(|input| {
+        let at = input.events.iter().position(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: pressed,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if *pressed == key && modifiers.is_none()
+            )
+        });
+        at.map(|at| input.events.remove(at)).is_some()
+    })
+}
+
+/// The icon of the button that stages, or unstages, a file of the group at
+/// `shown` of the list.
+fn index_icon(shown: usize) -> &'static str {
+    match Shown::ALL[shown] {
+        Shown::Unstaged => crate::icons::PLUS,
+        Shown::Staged => crate::icons::MINIMIZE,
+    }
+}
+
+/// The button at the end of the row of a file.
+struct RowButton<'a> {
+    name: &'a str,
+    icon: &'static str,
+    enabled: bool,
+}
+
+/// Draws the title of a group with the button `all` at its end, which acts
+/// on every file the group lists. Returns whether the button was chosen.
+fn title_row(ui: &mut Ui, title: &str, all: &str, enabled: bool) -> bool {
     let rect = ui.max_rect();
     let row = ui.interact(rect, ui.id().with("title"), Sense::hover());
     row.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, title));
@@ -321,8 +510,32 @@ fn title_row(ui: &mut Ui, title: &str) {
             ui.add(Label::new(section_text(title)).truncate().selectable(false));
         },
     );
+    let mut clicked = false;
+    // The button is as high as a control, which is higher than a row: it is
+    // given that room around the middle of the row, so that its label stands
+    // on the line of the title.
+    let room = egui::Rect::from_center_size(
+        rect.center(),
+        vec2(rect.width() - 12.0, crate::theme::SHAPE.control_height),
+    );
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(room)
+            .layout(Layout::right_to_left(Align::Center)),
+        |ui| {
+            if !enabled {
+                ui.disable();
+            }
+            clicked = components::Button::new(all)
+                .kind(components::Kind::Ghost)
+                .show(ui)
+                .clicked();
+        },
+    );
+    clicked
 }
 
+#[expect(clippy::too_many_arguments, reason = "the parts of one row")]
 fn entry_row(
     ui: &mut Ui,
     entry: &StatusEntry,
@@ -331,8 +544,16 @@ fn entry_row(
     selected: bool,
     texts: &Texts,
     palette: &Palette,
-) {
+    button: Option<RowButton<'_>>,
+) -> bool {
     let rect = ui.max_rect();
+    // The button shows while the pointer is over the row and while the row
+    // is selected, and takes its click itself.
+    let button = button.filter(|_| selected || ui.rect_contains_pointer(rect));
+    let button_rect = egui::Rect::from_min_max(
+        pos2(rect.right() - rect.height() - 4.0, rect.top()),
+        pos2(rect.right() - 4.0, rect.bottom()),
+    );
     if selected {
         ui.painter()
             .rect_filled(rect, 0.0, color(palette.selection));
@@ -349,7 +570,10 @@ fn entry_row(
     let (letter, letter_color) = entry_marker(entry.kind, palette);
     let mut inner = rect;
     inner.min.x += row.indent();
-    inner.max.x -= 6.0;
+    inner.max.x = match button {
+        Some(_) => button_rect.left() - 2.0,
+        None => rect.right() - 6.0,
+    };
     ui.scope_builder(
         UiBuilder::new()
             .max_rect(inner)
@@ -371,6 +595,16 @@ fn entry_row(
             );
         },
     );
+    let Some(button) = button else {
+        return false;
+    };
+    ui.scope_builder(UiBuilder::new().max_rect(button_rect), |ui| {
+        if !button.enabled {
+            ui.disable();
+        }
+        components::icon_button_in(ui, button_rect, button.icon, button.name).clicked()
+    })
+    .inner
 }
 
 #[cfg(test)]
@@ -379,8 +613,12 @@ mod tests {
 
     #[test]
     fn the_groups_are_found_by_their_place_in_the_list() {
-        for (index, group) in GROUPS.into_iter().enumerate() {
-            assert_eq!(group_index(group), index);
+        for (index, shown) in Shown::ALL.into_iter().enumerate() {
+            assert_eq!(shown.index(), index);
         }
+        // The untracked files are listed with the unstaged ones.
+        assert_eq!(Shown::of(Group::Untracked), Shown::Unstaged);
+        assert_eq!(Shown::of(Group::Unstaged), Shown::Unstaged);
+        assert_eq!(Shown::of(Group::Staged), Shown::Staged);
     }
 }

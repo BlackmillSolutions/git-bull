@@ -45,6 +45,45 @@ A write action belongs to the `Session` of its tab, not to a view.
   means the action happened and the hook is to blame, which the dialog says;
   unequal means it did not.
 
+## Amendment of 2026-10-10: staging and unstaging
+
+Staging and unstaging files (change `stage-files`) are write actions of the
+session and use its slot, its worker thread and its token. A user stages file
+after file faster than a read of the whole state ends, so three rules are
+added. They hold for index actions, the actions that change the index alone;
+checkout and the creation of a branch or a tag stay as decided above.
+
+- **Index actions queue behind each other.** A staging or an unstaging that is
+  asked for while one runs, or waits for its status, is kept and runs after it,
+  in the order it was asked for. A request of the same kind as the last one
+  kept is merged into it, so that several presses of a key become one call of
+  Git. Index actions and the other write actions still exclude each other: a
+  checkout is refused while the slot or the queue holds an index action, and an
+  index action is refused while a checkout or a creation runs. A failure
+  empties the queue.
+- **An action reads again what it can have changed.** "The state is read again
+  after every outcome" stands, fitted to the action:
+
+  | Action | Read again |
+  |---|---|
+  | Checkout, creating a branch, creating a tag | HEAD, the references, the stashes, the submodules, the worktrees and the status |
+  | Staging, unstaging | the status |
+
+  An index action leaves a read of HEAD and the references that is under way
+  alone; the other actions drop one that began before they ended.
+- **An index action is over when its status arrived.** The slot is freed by
+  the first status that arrives after Git ended, not by a read of HEAD and the
+  references, and the next request that is kept starts in the same pass. What
+  a kept request may act on is decided then, on that status. The session
+  therefore names a running action for as long as there is work, which the
+  question before closing and the Git path of the settings rely on.
+
+Dropping the session cancels a running index action, as it cancels every write
+action. Git replaces the index file in one step, so stopping it leaves the
+index as it was or as it will be; a lock file may stay behind.
+
+## Later actions
+
 Each later action adds a variant to `Action`, a request that the interface
 makes, and an operation on `Backend`; it reuses the slot, the token, the read
 after the outcome and the dialogs. Tests run an action behind a gate, so that a

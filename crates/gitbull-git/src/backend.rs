@@ -23,6 +23,7 @@ use crate::facts::{self, RepositoryFacts};
 use crate::file_history::{self, FileCommit, FileHistoryStream};
 use crate::head::{self, Head};
 use crate::history::{self, CommitLine, HistoryStream, Revisions};
+use crate::index;
 use crate::invoke::{ConfigOverride, Git};
 use crate::merged::MergeCache;
 use crate::new_ref;
@@ -143,6 +144,28 @@ pub trait Backend: Send + Sync {
         name: &str,
         start: &str,
         message: Option<&str>,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure>;
+
+    /// Stages `paths` as they are in the working copy: a write that runs the
+    /// clean filters of the repository (spec `staging`). Only the index
+    /// changes, and without a path nothing runs. `cancel` belongs to the
+    /// action alone. See [`crate::index::stage`].
+    fn stage(
+        &self,
+        repo: &Path,
+        paths: &[RepoPath],
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure>;
+
+    /// Unstages `paths`: the index holds each as the last commit has it, or
+    /// not at all (spec `staging`). The working copy and a merge that is under
+    /// way stay as they are, and without a path nothing runs. A staged rename
+    /// is unstaged by both of its paths. See [`crate::index::unstage`].
+    fn unstage(
+        &self,
+        repo: &Path,
+        paths: &[RepoPath],
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure>;
 
@@ -458,6 +481,24 @@ impl Backend for CliBackend {
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure> {
         new_ref::create_tag(&self.git, repo, name, start, message, cancel)
+    }
+
+    fn stage(
+        &self,
+        repo: &Path,
+        paths: &[RepoPath],
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        index::stage(&self.git, repo, paths, cancel)
+    }
+
+    fn unstage(
+        &self,
+        repo: &Path,
+        paths: &[RepoPath],
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        index::unstage(&self.git, repo, paths, cancel)
     }
 
     fn history(

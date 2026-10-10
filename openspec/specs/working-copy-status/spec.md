@@ -2,8 +2,9 @@
 
 ## Purpose
 
-Working-copy status shows the uncommitted changes of a repository without
-offering any way to change them.
+Working-copy status shows the uncommitted changes of a repository, as
+unstaged and staged files, and is where files are staged and unstaged. It
+offers no way to change the working copy or the history.
 
 ## Requirements
 

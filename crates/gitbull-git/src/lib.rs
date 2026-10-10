@@ -25,6 +25,7 @@ pub mod filters;
 pub mod flags;
 pub mod head;
 pub mod history;
+pub mod index;
 pub mod invoke;
 #[cfg(windows)]
 mod job;

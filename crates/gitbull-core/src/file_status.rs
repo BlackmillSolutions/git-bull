@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gitbull_git::Backend;
 use gitbull_git::path::RepoPath;
-use gitbull_git::status::{Group, WorkingStatus};
+use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
 
 use crate::diff_document::Part;
 use crate::diff_pane::{DiffPane, DiffSource, DiffState, Highlighting};
@@ -23,9 +23,109 @@ pub enum StatusState {
     Failed(Failure),
 }
 
-/// The groups, in the order the file list shows them and its
-/// [`FileOrder`] holds them.
-pub const GROUPS: [Group; 3] = [Group::Staged, Group::Unstaged, Group::Untracked];
+/// A group of the file list, in the order it shows them and its
+/// [`FileOrder`] holds them (spec `working-copy-status`, requirement "File
+/// status view"). The status has three lists; the view shows two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Shown {
+    /// The unstaged and the untracked files together, in the order of their
+    /// paths.
+    Unstaged,
+    Staged,
+}
+
+impl Shown {
+    pub const ALL: [Shown; 2] = [Shown::Unstaged, Shown::Staged];
+
+    /// The place of the group in the list.
+    pub fn index(self) -> usize {
+        match self {
+            Shown::Unstaged => 0,
+            Shown::Staged => 1,
+        }
+    }
+
+    /// The shown group that lists the files of `group`.
+    pub fn of(group: Group) -> Shown {
+        match group {
+            Group::Unstaged | Group::Untracked => Shown::Unstaged,
+            Group::Staged => Shown::Staged,
+        }
+    }
+}
+
+/// Where each file of each shown group is in the status: its list and its
+/// place there.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShownFiles {
+    groups: [Vec<(Group, usize)>; 2],
+}
+
+impl ShownFiles {
+    /// The files of `status` as the list shows them. Git reports each of its
+    /// lists in the order of the paths, so the Unstaged group is a merge of
+    /// two of them.
+    pub fn of(status: &WorkingStatus) -> ShownFiles {
+        let (tracked, untracked) = (&status.unstaged, &status.untracked);
+        let mut unstaged = Vec::with_capacity(tracked.len() + untracked.len());
+        let (mut a, mut b) = (0, 0);
+        while a < tracked.len() || b < untracked.len() {
+            let tracked_first = match (tracked.get(a), untracked.get(b)) {
+                (Some(one), Some(other)) => one.path.as_bytes() <= other.path.as_bytes(),
+                (one, _) => one.is_some(),
+            };
+            if tracked_first {
+                unstaged.push((Group::Unstaged, a));
+                a += 1;
+            } else {
+                unstaged.push((Group::Untracked, b));
+                b += 1;
+            }
+        }
+        let staged = (0..status.staged.len())
+            .map(|index| (Group::Staged, index))
+            .collect();
+        ShownFiles {
+            groups: [unstaged, staged],
+        }
+    }
+
+    /// How many files `shown` lists.
+    pub fn len(&self, shown: Shown) -> usize {
+        self.groups[shown.index()].len()
+    }
+
+    pub fn is_empty(&self, shown: Shown) -> bool {
+        self.groups[shown.index()].is_empty()
+    }
+
+    /// The list and the place in it of the file at `index` of the group at
+    /// `shown` of the file list.
+    pub fn file(&self, shown: usize, index: usize) -> Option<(Group, usize)> {
+        self.groups.get(shown)?.get(index).copied()
+    }
+
+    /// The group of the file list and the place in it of the file at `index`
+    /// of `group` of the status.
+    pub fn place(&self, group: Group, index: usize) -> Option<(usize, usize)> {
+        let shown = Shown::of(group).index();
+        let place = self.groups[shown]
+            .iter()
+            .position(|known| *known == (group, index))?;
+        Some((shown, place))
+    }
+
+    /// The files of `shown` in `status`, in the order of the list.
+    pub fn entries<'a>(
+        &'a self,
+        status: &'a WorkingStatus,
+        shown: Shown,
+    ) -> impl Iterator<Item = (Group, &'a StatusEntry)> {
+        self.groups[shown.index()]
+            .iter()
+            .filter_map(|(group, index)| Some((*group, status.group(*group).get(*index)?)))
+    }
+}
 
 /// The uncommitted changes and the diff of the file chosen.
 pub struct FileStatus {
@@ -33,9 +133,11 @@ pub struct FileStatus {
     root: PathBuf,
     notify: Notify,
     state: StatusState,
-    work: Pending<(WorkingStatus, Arc<FileOrder>)>,
+    work: Pending<(WorkingStatus, Arc<FileOrder>, Arc<ShownFiles>)>,
     /// The prepared order of the files of the status shown.
     order: Option<Arc<FileOrder>>,
+    /// Where the files of that order are in the status.
+    shown: Option<Arc<ShownFiles>>,
     /// The file chosen, by its path, so that it stays chosen when the
     /// status is read again.
     chosen: Option<(Group, RepoPath)>,
@@ -54,6 +156,7 @@ impl FileStatus {
             state: StatusState::Loading,
             work: Pending::none(),
             order: None,
+            shown: None,
             chosen: None,
             pane,
             version: 0,
@@ -66,16 +169,16 @@ impl FileStatus {
         let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
         self.work.start(&self.notify, move |cancel| {
             let status = backend.status(&root, cancel)?;
+            let shown = ShownFiles::of(&status);
             let order = FileOrder::new(
-                GROUPS.map(|group| {
-                    status
-                        .group(group)
-                        .iter()
-                        .map(|entry| (&entry.path, entry.old_path.as_ref()))
+                Shown::ALL.map(|group| {
+                    shown
+                        .entries(&status, group)
+                        .map(|(_, entry)| (&entry.path, entry.old_path.as_ref()))
                 }),
                 true,
             );
-            Ok((status, Arc::new(order)))
+            Ok((status, Arc::new(order), Arc::new(shown)))
         });
     }
 
@@ -120,12 +223,14 @@ impl FileStatus {
         let mut changed = false;
         if let Some(status) = self.work.take() {
             self.state = match status {
-                Ok((status, order)) => {
+                Ok((status, order, shown)) => {
                     self.order = Some(order);
+                    self.shown = Some(shown);
                     StatusState::Loaded(status)
                 }
                 Err(failure) => {
                     self.order = None;
+                    self.shown = None;
                     StatusState::Failed(failure)
                 }
             };
@@ -181,6 +286,11 @@ impl FileStatus {
     /// The prepared order of the files of the status shown.
     pub fn file_order(&self) -> Option<&Arc<FileOrder>> {
         self.order.as_ref()
+    }
+
+    /// Where the files of [`FileStatus::file_order`] are in the status.
+    pub fn shown_files(&self) -> Option<&Arc<ShownFiles>> {
+        self.shown.as_ref()
     }
 
     /// Whether the status is known and has uncommitted changes.
@@ -345,11 +455,74 @@ mod tests {
         status.refresh();
         wait_until(&mut status, loaded);
         let order = status.file_order().expect("the order of the files");
-        assert_eq!(order.groups(), GROUPS.len());
-        for (group, path) in ["s.rs", "src/a.rs", "n.txt"].into_iter().enumerate() {
-            assert_eq!(order.file_path(group, 0), &RepoPath::new(path));
-        }
-        assert_eq!(GROUPS, [Group::Staged, Group::Unstaged, Group::Untracked]);
+        assert_eq!(order.groups(), Shown::ALL.len());
+        // Unstaged first, with the untracked file among the others by path.
+        assert_eq!(order.file_path(0, 0), &RepoPath::new("n.txt"));
+        assert_eq!(order.file_path(0, 1), &RepoPath::new("src/a.rs"));
+        assert_eq!(order.file_path(1, 0), &RepoPath::new("s.rs"));
+        assert_eq!(Shown::ALL, [Shown::Unstaged, Shown::Staged]);
+    }
+
+    #[test]
+    fn the_unstaged_group_holds_untracked_files_in_the_order_of_the_paths() {
+        let working = WorkingStatus {
+            staged: vec![modified("s.rs")],
+            unstaged: vec![modified("b.rs"), modified("d.rs")],
+            untracked: vec![
+                entry(StatusKind::Untracked, "a.txt"),
+                entry(StatusKind::Untracked, "c.txt"),
+                entry(StatusKind::Untracked, "e.txt"),
+            ],
+        };
+        let shown = ShownFiles::of(&working);
+        let listed: Vec<(Group, String)> = shown
+            .entries(&working, Shown::Unstaged)
+            .map(|(group, entry)| (group, entry.path.to_string()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (Group::Untracked, "a.txt".to_owned()),
+                (Group::Unstaged, "b.rs".to_owned()),
+                (Group::Untracked, "c.txt".to_owned()),
+                (Group::Unstaged, "d.rs".to_owned()),
+                (Group::Untracked, "e.txt".to_owned()),
+            ]
+        );
+        assert_eq!(shown.len(Shown::Unstaged), 5);
+        assert_eq!(shown.len(Shown::Staged), 1);
+        // Each file is found in the data by its place, and back.
+        assert_eq!(shown.file(0, 2), Some((Group::Untracked, 1)));
+        assert_eq!(shown.file(1, 0), Some((Group::Staged, 0)));
+        assert_eq!(shown.file(0, 5), None);
+        assert_eq!(shown.place(Group::Unstaged, 1), Some((0, 3)));
+        assert_eq!(shown.place(Group::Staged, 0), Some((1, 0)));
+    }
+
+    #[test]
+    fn the_diff_of_an_untracked_file_is_asked_for_as_untracked() {
+        let working = WorkingStatus {
+            unstaged: vec![modified("b.rs")],
+            untracked: vec![entry(StatusKind::Untracked, "a.txt")],
+            ..WorkingStatus::default()
+        };
+        let fake = FakeBackend::default()
+            .with_status(root(), working)
+            .with_working_diff(Group::Untracked, "a.txt", diff_of("a.txt", "new"));
+        let (mut status, probe) = file_status(fake);
+        status.refresh();
+        wait_until(&mut status, loaded);
+        // The first file of the Unstaged group is the untracked one.
+        let first = status.shown_files().and_then(|shown| shown.file(0, 0));
+        assert_eq!(first, Some((Group::Untracked, 0)));
+        status.choose(first);
+        wait_until(&mut status, diff_loaded);
+        let asked: Vec<(Group, String)> = probe
+            .working_diffs()
+            .into_iter()
+            .map(|(group, path, _)| (group, path))
+            .collect();
+        assert_eq!(asked, [(Group::Untracked, "a.txt".to_owned())]);
     }
 
     #[test]
