@@ -112,13 +112,16 @@ const BADGE_ICON_GAP: f32 = 3.0;
 /// `text_cell` keeps four points inside each edge of the title's cell.
 const TITLE_RESERVE: f32 = columns::MIN_DESCRIPTION + 8.0;
 
-/// Measurements belong to one ref generation and one effective small font.
+/// Measurements belong to one ref generation and one effective small font:
+/// its id, the scale, and the fonts behind it, which arrive after the first
+/// pass and leave the id as it is.
 /// Only commits that enter the virtual viewport receive an entry.
 #[derive(Default)]
 pub(crate) struct BadgeMetricsCache {
     revision: u64,
     font: Option<FontId>,
     scale: f32,
+    fonts: u64,
     min_description: f32,
     entries: HashMap<usize, BadgeMeasurements>,
 }
@@ -141,11 +144,17 @@ impl BadgeMetricsCache {
     fn prepare(&mut self, ui: &Ui, revision: u64, references: usize, head: bool) -> f32 {
         let font = TextStyle::Small.resolve(ui.style());
         let scale = ui.ctx().pixels_per_point();
-        if self.revision != revision || self.font.as_ref() != Some(&font) || self.scale != scale {
+        let fonts = crate::fonts::generation(ui.ctx());
+        if self.revision != revision
+            || self.font.as_ref() != Some(&font)
+            || self.scale != scale
+            || self.fonts != fonts
+        {
             self.entries.clear();
             self.revision = revision;
             self.font = Some(font);
             self.scale = scale;
+            self.fonts = fonts;
             self.min_description = TITLE_RESERVE
                 + if references > 0 {
                     badge_size(ui, &format!("+{references}"), false).x + BADGE_GAP

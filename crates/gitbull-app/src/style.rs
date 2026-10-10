@@ -327,6 +327,23 @@ mod tests {
     }
 
     #[test]
+    fn the_generation_of_the_fonts_changes_when_fonts_arrive() {
+        let ctx = context();
+        let before = fonts::generation(&ctx);
+
+        // egui takes the bundled fonts at the start of the next pass.
+        ctx.set_fonts(fonts::definitions());
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        let bundled = fonts::generation(&ctx);
+        assert_ne!(bundled, before, "the bundled fonts arrived unnoticed");
+
+        fonts::install(&ctx, &[]);
+        assert_ne!(fonts::generation(&ctx), bundled, "fallbacks went unnoticed");
+    }
+
+    #[test]
     fn style_is_set_only_when_the_appearance_or_the_colour_vision_changes() {
         let ctx = context();
         apply_style(&ctx, Appearance::Dark, ColourVision::Standard);
