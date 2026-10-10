@@ -295,7 +295,6 @@ copied = Copied
 panel-files = FILES
 file-status-staged = Staged files ({ $count })
 file-status-unstaged = Unstaged files ({ $count })
-file-status-untracked = Untracked files ({ $count })
 file-status-loading = Reading the status of the working copy…
 file-status-clean = There are no uncommitted changes.
 

@@ -260,15 +260,14 @@ fn each_file_is_listed_in_its_group_with_its_marker() {
     assert_eq!(
         listed(&mut harness),
         [
+            "Unstaged files (4)",
+            "Modified: both.txt",
+            "Modified: edited.txt",
+            "Untracked: new/one.txt",
+            "Untracked: new/two.txt",
             "Staged files (2)",
             "Added: staged.txt",
             "Modified: both.txt",
-            "Unstaged files (2)",
-            "Modified: both.txt",
-            "Modified: edited.txt",
-            "Untracked files (2)",
-            "Untracked: new/one.txt",
-            "Untracked: new/two.txt",
         ]
     );
 }
@@ -366,6 +365,29 @@ fn a_submodule_at_another_commit_is_modified_and_shows_both_commits() {
 }
 
 #[test]
+fn the_unstaged_group_lists_untracked_files_among_the_others_by_path() {
+    let status = WorkingStatus {
+        unstaged: vec![changed(MODIFIED, "b.rs")],
+        untracked: vec![
+            entry(StatusKind::Untracked, "a.txt"),
+            entry(StatusKind::Untracked, "c.txt"),
+        ],
+        ..WorkingStatus::default()
+    };
+    let mut harness = open_with(backend().with_status(root(), status));
+    show_file_status(&mut harness);
+    assert_eq!(
+        listed(&mut harness),
+        [
+            "Unstaged files (3)",
+            "Untracked: a.txt",
+            "Modified: b.rs",
+            "Untracked: c.txt",
+        ]
+    );
+}
+
+#[test]
 fn each_group_diffs_its_file_as_it_compares_it() {
     let backend = backend()
         .with_status(root(), mixed())
@@ -405,11 +427,12 @@ fn each_group_diffs_its_file_as_it_compares_it() {
         .filter(|node| node.accesskit_node().label().as_deref() == Some("Modified: both.txt"))
         .map(|node| node.rect().center())
         .collect();
-    click_at(&mut harness, both[0], PointerButton::Primary);
+    // The Unstaged group is the upper one.
+    click_at(&mut harness, both[1], PointerButton::Primary);
     wait_until(&mut harness, |h| {
         diff_lines(h).contains(&"Added, –, 1: 2".to_owned())
     });
-    click_at(&mut harness, both[1], PointerButton::Primary);
+    click_at(&mut harness, both[0], PointerButton::Primary);
     wait_until(&mut harness, |h| {
         diff_lines(h).contains(&"Added, –, 1: 3".to_owned())
     });
@@ -475,7 +498,7 @@ fn a_progress_indicator_shows_while_the_status_is_read() {
     wait_until(&mut harness, |h| has_row(h, "Head work"));
     show_file_status(&mut harness);
     gate.open();
-    assert_eq!(listed(&mut harness).len(), 9);
+    assert_eq!(listed(&mut harness).len(), 8);
 }
 
 #[test]
@@ -525,7 +548,7 @@ fn a_file_edited_elsewhere_appears_after_refresh() {
 
     assert_eq!(
         listed(&mut harness),
-        ["Untracked files (1)", "Untracked: notes.txt"]
+        ["Unstaged files (1)", "Untracked: notes.txt"]
     );
 }
 
@@ -684,7 +707,7 @@ fn selecting_the_uncommitted_row_opens_file_status() {
     wait_until(&mut harness, |h| has_row(h, "Uncommitted changes"));
     let at = row(&harness, "Uncommitted changes").unwrap().center();
     click_at(&mut harness, at, PointerButton::Primary);
-    assert_eq!(listed(&mut harness)[0], "Staged files (2)");
+    assert_eq!(listed(&mut harness)[0], "Unstaged files (4)");
 }
 
 fn press(harness: &mut Harness<'_, App>, key: eframe::egui::Key) {
@@ -744,7 +767,7 @@ fn enter_on_the_uncommitted_row_opens_file_status() {
     let mut harness = open_with(backend().with_status(root(), mixed()));
     move_onto_the_uncommitted_row(&mut harness);
     press(&mut harness, eframe::egui::Key::Enter);
-    assert_eq!(listed(&mut harness)[0], "Staged files (2)");
+    assert_eq!(listed(&mut harness)[0], "Unstaged files (4)");
 }
 
 #[test]
@@ -755,7 +778,7 @@ fn the_panel_below_the_uncommitted_row_opens_file_status() {
         .get_by_role_and_label(Role::Button, "Open File status")
         .click();
     harness.step();
-    assert_eq!(listed(&mut harness)[0], "Staged files (2)");
+    assert_eq!(listed(&mut harness)[0], "Unstaged files (4)");
 }
 
 #[test]
@@ -853,7 +876,9 @@ fn menu_of(harness: &mut Harness<'_, App>, label: &str) -> Vec<String> {
         .query_all_by_role(Role::ListItem)
         .filter(|node| node.accesskit_node().label().as_deref() == Some(label))
         .map(|node| node.rect().center())
-        .max_by(|a, b| a.y.total_cmp(&b.y))
+        // Of two rows of one label, the one of the Unstaged group, which is
+        // the upper one.
+        .min_by(|a, b| a.y.total_cmp(&b.y))
         .unwrap_or_else(|| panic!("no file {label}"));
     click_at(harness, at, PointerButton::Secondary);
     let buttons = labels(harness, Role::Button)
@@ -973,7 +998,7 @@ fn a_new_folder_lists_its_files_one_by_one_flat_and_as_a_tree() {
     assert_eq!(
         shown_rows(&harness),
         [
-            "Untracked files (2)",
+            "Unstaged files (2)",
             "Untracked: new/one.txt",
             "Untracked: new/two.txt"
         ]
@@ -982,7 +1007,7 @@ fn a_new_folder_lists_its_files_one_by_one_flat_and_as_a_tree() {
     assert_eq!(
         shown_rows(&harness),
         [
-            "Untracked files (2)",
+            "Unstaged files (2)",
             "new",
             "Untracked: one.txt",
             "Untracked: two.txt"
@@ -1029,8 +1054,8 @@ fn folders_stay_as_they_were_when_the_status_is_read_again() {
     show_file_status(&mut harness);
     listed(&mut harness);
     show_tree(&mut harness);
-    // The click collapses the staged folder; Down passes the title on to
-    // the unstaged one, which it selects without collapsing it.
+    // The click collapses the unstaged folder; Down passes the title on to
+    // the staged one, which it selects without collapsing it.
     let at = nth_row(&harness, "src", 0).rect().center();
     click_at(&mut harness, at, PointerButton::Primary);
     harness.key_press(Key::ArrowDown);
@@ -1052,11 +1077,11 @@ fn folders_stay_as_they_were_when_the_status_is_read_again() {
     assert_eq!(
         shown_rows(&harness),
         [
-            "Staged files (1)",
-            "src",
             "Unstaged files (1)",
             "src",
-            "Modified: b.rs"
+            "Staged files (1)",
+            "src",
+            "Modified: a.rs"
         ]
     );
     assert_eq!(state(&harness, 0), (Some(false), Some(false)));
@@ -1140,7 +1165,7 @@ fn the_tree_holds_for_both_lists_and_survives_a_restart() {
     });
     assert_eq!(
         shown_rows(&harness),
-        ["Untracked files (1)", "new", "Untracked: one.txt"]
+        ["Unstaged files (1)", "new", "Untracked: one.txt"]
     );
 
     let settings = harness.state().settings().clone();
@@ -1159,7 +1184,7 @@ fn the_tree_holds_for_both_lists_and_survives_a_restart() {
     });
     assert_eq!(
         shown_rows(&harness),
-        ["Untracked files (1)", "new", "Untracked: one.txt"]
+        ["Unstaged files (1)", "new", "Untracked: one.txt"]
     );
 }
 
@@ -1235,7 +1260,7 @@ fn the_uncommitted_row_selects_file_status_in_the_sidebar() {
     assert_eq!(selected_items(&harness), ["History"]);
     let at = row(&harness, "Uncommitted changes").unwrap().center();
     click_at(&mut harness, at, PointerButton::Primary);
-    assert_eq!(listed(&mut harness)[0], "Staged files (2)");
+    assert_eq!(listed(&mut harness)[0], "Unstaged files (4)");
     // Also for assistive technology: File status is the one selected row.
     assert_eq!(selected_items(&harness), ["File status"]);
 }
@@ -1257,6 +1282,6 @@ fn the_button_of_the_commit_panel_selects_file_status_in_place_of_a_branch() {
         .get_by_role_and_label(Role::Button, "Open File status")
         .click();
     harness.step();
-    assert_eq!(listed(&mut harness)[0], "Staged files (2)");
+    assert_eq!(listed(&mut harness)[0], "Unstaged files (4)");
     assert_eq!(selected_items(&harness), ["File status"]);
 }

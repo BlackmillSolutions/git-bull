@@ -1,5 +1,5 @@
-//! The file list of the File status view: the uncommitted changes in three
-//! groups (spec `working-copy-status`). The diff panel beside it shows the
+//! The file list of the File status view: the uncommitted changes in two
+//! groups, unstaged and staged (spec `working-copy-status`). The diff panel beside it shows the
 //! file chosen.
 
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use eframe::egui::{
     vec2,
 };
 use fluent_bundle::FluentArgs;
-use gitbull_core::file_status::{GROUPS, StatusState};
+use gitbull_core::file_status::{Shown, ShownFiles, StatusState};
 use gitbull_core::file_tree::{FileOrder, FileTree, Mode, Row};
 use gitbull_core::workspace::Failure;
 use gitbull_git::changes::ChangeKind;
@@ -32,9 +32,16 @@ pub const STATUS_LIST: &str = "file-status-list";
 /// The id of the filter field above the files.
 pub const STATUS_FILTER: &str = "file-status-filter";
 
-/// The index of `group` among the groups of the list.
-fn group_index(group: Group) -> usize {
-    GROUPS.iter().position(|g| *g == group).unwrap_or(0)
+/// The entry at `index` of the group at `shown` of the list, with the list
+/// of the status it is in.
+fn entry_at<'a>(
+    status: &'a WorkingStatus,
+    files: &ShownFiles,
+    shown: usize,
+    index: usize,
+) -> Option<(Group, &'a StatusEntry)> {
+    let (group, at) = files.file(shown, index)?;
+    Some((group, status.group(group).get(at)?))
 }
 
 /// The texts of the list, read before the tab is borrowed.
@@ -47,7 +54,7 @@ struct Texts {
     blame: String,
     copy_path: String,
     /// The titles of the groups, with the number of their files.
-    titles: [String; 3],
+    titles: [String; 2],
     /// The names of the kinds of change, for assistive technology.
     kinds: [String; 6],
     conflicted: String,
@@ -57,12 +64,15 @@ struct Texts {
 impl Texts {
     fn new(app: &App, status: Option<&WorkingStatus>) -> Texts {
         let text = |msg| app.texts.text(msg);
-        let title = |msg, group| {
+        // A title counts the files of its shown group: the unstaged and the
+        // untracked files together.
+        let title = |msg, shown: Shown| {
+            let count = status.map_or(0, |status| match shown {
+                Shown::Unstaged => status.unstaged.len() + status.untracked.len(),
+                Shown::Staged => status.staged.len(),
+            });
             let mut args = FluentArgs::new();
-            args.set(
-                "count",
-                status.map_or(0, |status| status.group(group).len()),
-            );
+            args.set("count", count);
             app.texts.text_with(msg, Some(&args))
         };
         Texts {
@@ -72,11 +82,10 @@ impl Texts {
             file_history: text(Msg::FileHistory),
             blame: text(Msg::FileBlame),
             copy_path: text(Msg::CopyPath),
-            titles: [
-                title(Msg::FileStatusStaged, Group::Staged),
-                title(Msg::FileStatusUnstaged, Group::Unstaged),
-                title(Msg::FileStatusUntracked, Group::Untracked),
-            ],
+            titles: Shown::ALL.map(|shown| match shown {
+                Shown::Unstaged => title(Msg::FileStatusUnstaged, shown),
+                Shown::Staged => title(Msg::FileStatusStaged, shown),
+            }),
             kinds: [
                 Msg::ChangeAdded,
                 Msg::ChangeModified,
@@ -91,8 +100,9 @@ impl Texts {
         }
     }
 
-    fn title(&self, group: Group) -> &str {
-        &self.titles[group_index(group)]
+    /// The title of the group at `shown` of the list.
+    fn title(&self, shown: usize) -> &str {
+        &self.titles[shown]
     }
 
     fn kind(&self, kind: StatusKind) -> &str {
@@ -159,6 +169,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         }
         StatusState::Loaded(status) => status,
     };
+    let Some(files) = file_status.shown_files().map(Arc::clone) else {
+        return false;
+    };
     let chosen_mode = file_list::header(
         ui,
         Id::new(STATUS_FILTER),
@@ -180,8 +193,11 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             None => FileTree::shown_as(Arc::clone(order), chosen_mode, &view.status_files.filter),
         };
         if !tree.holds_selection() {
-            match file_status.chosen() {
-                Some((group, index)) => tree.select_file(group_index(group), index),
+            let chosen = file_status
+                .chosen()
+                .and_then(|(group, index)| files.place(group, index));
+            match chosen {
+                Some((shown, place)) => tree.select_file(shown, place),
                 None => tree.select_first(),
             }
         }
@@ -202,12 +218,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         &list_texts,
         palette,
         |ui, row, selected| {
-            let entry = status.group(GROUPS[row.group]).get(row.index);
-            if let (Some(entry), Some(order)) = (entry, &order) {
+            let entry = entry_at(status, &files, row.group, row.index);
+            if let (Some((_, entry)), Some(order)) = (entry, &order) {
                 entry_row(ui, entry, order, row, selected, &texts, palette);
             }
         },
-        |ui, group| title_row(ui, texts.title(GROUPS[group])),
+        |ui, group| title_row(ui, texts.title(group)),
     ) else {
         return false;
     };
@@ -217,8 +233,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     if output.menu_opened.is_some() {
         view.status_menu = match view.status_files.menu {
             Some(Row::File { group, index, .. }) => {
-                let group = GROUPS[group];
-                status.group(group).get(index).map(|entry| {
+                entry_at(status, &files, group, index).map(|(group, entry)| {
                     StatusMenu::File(entry.clone(), last_commit_path(status, group, entry))
                 })
             }
@@ -274,7 +289,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         .tree
         .as_ref()
         .and_then(FileTree::selected_file)
-        .map(|(group, index)| (GROUPS[group], index));
+        .and_then(|(shown, index)| files.file(shown, index));
     session.choose_status_file(chosen);
     if let Some(action) = opened {
         app.open_file_action(action);
@@ -379,8 +394,12 @@ mod tests {
 
     #[test]
     fn the_groups_are_found_by_their_place_in_the_list() {
-        for (index, group) in GROUPS.into_iter().enumerate() {
-            assert_eq!(group_index(group), index);
+        for (index, shown) in Shown::ALL.into_iter().enumerate() {
+            assert_eq!(shown.index(), index);
         }
+        // The untracked files are listed with the unstaged ones.
+        assert_eq!(Shown::of(Group::Untracked), Shown::Unstaged);
+        assert_eq!(Shown::of(Group::Unstaged), Shown::Unstaged);
+        assert_eq!(Shown::of(Group::Staged), Shown::Staged);
     }
 }

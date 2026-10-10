@@ -306,7 +306,6 @@ messages! {
     PanelFiles => "panel-files",
     FileStatusStaged => "file-status-staged",
     FileStatusUnstaged => "file-status-unstaged",
-    FileStatusUntracked => "file-status-untracked",
     FileStatusLoading => "file-status-loading",
     FileStatusClean => "file-status-clean",
     DiffUnchanged => "diff-unchanged",
