@@ -18,6 +18,33 @@ decisions are in [`docs/adr`](docs/adr), and the next steps are in the
 [roadmap overview](docs/roadmap.md) and on the
 [GitHub roadmap](https://github.com/users/BlackmillSolutions/projects/1).
 
+## Screenshots
+
+The images are the snapshots that the tests of the interface compare, so
+they show git-bull as it is, with the small repositories of the tests.
+
+The history of a repository, with the details and the diff of a commit:
+
+![The History view in the dark theme: the sidebar, the commit list with reference badges, the commit details and a diff](crates/gitbull-app/tests/snapshots/window_dark.png)
+
+The same view in the light theme:
+
+![The History view in the light theme](crates/gitbull-app/tests/snapshots/window_light.png)
+
+The home tab, with the worktrees of each repository, their states and the
+detail panel of one of them:
+
+![The home tab in the dark theme: repositories and worktrees with their states, and the detail panel of a worktree](crates/gitbull-app/tests/snapshots/cockpit_dark.png)
+
+Creating a branch, with the name checked while it is typed:
+
+![The dialog "Create branch" with a starting point, a name and the option to check the branch out](crates/gitbull-app/tests/snapshots/create_branch_valid_dark.png)
+
+A checkout that would overwrite local changes is refused, and the files are
+listed:
+
+![The dialog "Cannot check out feature/graph" with the files that have local changes](crates/gitbull-app/tests/snapshots/checkout_dialog_dark.png)
+
 ## Installation
 
 ### Supported systems
