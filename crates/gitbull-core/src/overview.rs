@@ -373,7 +373,14 @@ fn work(
             guard.jobs.push_front(job);
         }
         guard.jobs.extend(outcome.back);
+        let ended = guard.jobs.is_empty() && guard.running == 0;
         wake.notify_all();
+        drop(guard);
+        // The last job may have had no report, and a report is sent before
+        // the round counts as ended: the interface is told of the end itself.
+        if ended {
+            notify();
+        }
     }
 }
 

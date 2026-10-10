@@ -1847,7 +1847,6 @@ fn load(
     }
 }
 
-/// Runs `work`, turning an error or a panic into a failure.
 /// The worktrees of the repository. A failure is not one of the read: without
 /// them no branch is marked, and a checkout of a branch that is in use falls
 /// back to Git's refusal.
@@ -1878,6 +1877,7 @@ fn failure_text(error: &Error) -> String {
     }
 }
 
+/// Runs `work`, turning an error or a panic into a failure.
 pub(crate) fn catch<T>(work: impl FnOnce() -> Result<T, Error>) -> Result<T, Failure> {
     catch_failure(|| work().map_err(Failure::Git))
 }

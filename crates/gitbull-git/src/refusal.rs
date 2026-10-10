@@ -134,9 +134,14 @@ fn worktree_in_use(line: &str) -> Option<Refusal> {
 }
 
 fn name_refusal(line: &str) -> Option<Refusal> {
+    // Older versions of Git wrote `A branch named 'main' already exists.`.
     if let Some(name) = line
         .strip_prefix("fatal: a branch named '")
-        .and_then(|rest| rest.strip_suffix("' already exists"))
+        .or_else(|| line.strip_prefix("fatal: A branch named '"))
+        .and_then(|rest| {
+            rest.strip_suffix("' already exists")
+                .or_else(|| rest.strip_suffix("' already exists."))
+        })
         .or_else(|| {
             line.strip_prefix("fatal: tag '")
                 .and_then(|rest| rest.strip_suffix("' already exists"))
@@ -249,6 +254,10 @@ mod tests {
         let cases = [
             (
                 "fatal: a branch named 'main' already exists\n",
+                Refusal::NameTaken("main".to_owned()),
+            ),
+            (
+                "fatal: A branch named 'main' already exists.\n",
                 Refusal::NameTaken("main".to_owned()),
             ),
             (

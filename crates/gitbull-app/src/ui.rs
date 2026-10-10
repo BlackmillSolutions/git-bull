@@ -205,19 +205,22 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         return;
     }
 
-    actions.extend(dropped_folders(ui));
+    // A dialog that acts on the tab shown keeps that tab shown: a folder
+    // dropped meanwhile would open another one under it.
+    let tab_dialog = app.close_question.is_some()
+        || app.detach_pending.is_some()
+        || app.create_dialog.is_some()
+        || app.branch_choice.is_some();
+    if !tab_dialog {
+        actions.extend(dropped_folders(ui));
+    }
     actions.extend(returned_to_window(ui));
     if let Some(focused) = window_focus(ui) {
         app.home.focused = focused;
     }
     // The window behind the settings dialog takes no keys, as it takes no
     // clicks.
-    if app.dialog.is_none()
-        && app.close_question.is_none()
-        && app.detach_pending.is_none()
-        && app.create_dialog.is_none()
-        && app.branch_choice.is_none()
-    {
+    if app.dialog.is_none() && !tab_dialog {
         actions.extend(shortcuts(ui));
     }
     // A close request of the system, such as Alt+F4 or the title bar of the

@@ -54,7 +54,9 @@ pub fn create_branch(
 
 /// Creates the tag `name` at the commit `start`.
 ///
-/// Without a message, or with one that is blank, the tag is lightweight.
+/// Without a message, or with one that is blank, the tag is lightweight, also
+/// when `tag.gpgSign` asks for signed tags: a signed tag needs a message, and
+/// Git would start the editor for it, which no dialog could answer.
 /// Otherwise it is annotated with that message, and signed when the
 /// configuration of the repository asks for it. The message goes through
 /// standard input, so that its length, its line breaks and its encoding do
@@ -78,9 +80,10 @@ pub fn create_tag(
     check_hash(start)?;
     let message = message.filter(|message| !message.trim().is_empty());
     let result = match message {
-        None => git
-            .write(WriteHooks::Run)
-            .run(repo, ["tag", name, start], None, cancel),
+        None => {
+            git.write(WriteHooks::Run)
+                .run(repo, ["tag", "--no-sign", name, start], None, cancel)
+        }
         Some(message) => git.write(WriteHooks::Run).run(
             repo,
             ["tag", "-a", "--cleanup=whitespace", "-F", "-", name, start],

@@ -141,12 +141,14 @@ pub(crate) fn check_name(name: &str) -> Result<(), WriteFailure> {
     Ok(())
 }
 
-/// A commit that is not a full hexadecimal hash.
+/// A commit that is not a full hexadecimal hash, of 40 or 64 digits: Git
+/// reads a shorter one as a reference of that name first.
 pub(crate) fn check_hash(id: &str) -> Result<(), WriteFailure> {
-    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    let full = matches!(id.len(), 40 | 64);
+    if !full || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid(
             "git switch",
-            "a commit must be given by its hexadecimal hash",
+            "a commit must be given by its full hexadecimal hash",
         ));
     }
     Ok(())

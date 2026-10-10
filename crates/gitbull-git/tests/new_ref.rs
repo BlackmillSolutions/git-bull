@@ -38,6 +38,7 @@ fn creating_references_preserves_git_behaviour() {
     a_failing_post_checkout_hook_still_leaves_the_branch_checked_out(&git);
 
     a_lightweight_tag(&git);
+    a_lightweight_tag_stays_lightweight_when_tags_are_signed(&git);
     an_annotated_tag_keeps_its_whole_message(&git);
     a_blank_message_makes_a_lightweight_tag(&git);
     a_tag_leaves_head_index_and_files(&git);
@@ -241,6 +242,8 @@ fn arguments_that_git_could_take_as_options_never_start_git(git: &Git) {
         ("topic", ""),
         ("topic", "--detach"),
         ("topic", "main"),
+        // A short hash: Git would read a reference of that name first.
+        ("topic", "abc1234"),
     ] {
         for checkout in [true, false] {
             match make(git, &repo, name, start, checkout) {
@@ -322,6 +325,15 @@ fn a_lightweight_tag(git: &Git) {
     tag(git, &repo, "v1.2", &feature, None).unwrap();
     assert_eq!(object_type(&repo, "v1.2"), "commit");
     assert_eq!(tagged_commit(&repo, "v1.2"), feature);
+}
+
+fn a_lightweight_tag_stays_lightweight_when_tags_are_signed(git: &Git) {
+    let (repo, feature) = repository();
+    // Git would make a signed tag of it and start the editor for its message.
+    repo.config("tag.gpgsign", "true");
+    tag(git, &repo, "v1.3", &feature, None).unwrap();
+    assert_eq!(object_type(&repo, "v1.3"), "commit");
+    assert_eq!(tagged_commit(&repo, "v1.3"), feature);
 }
 
 fn an_annotated_tag_keeps_its_whole_message(git: &Git) {

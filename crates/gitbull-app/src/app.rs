@@ -1323,6 +1323,11 @@ impl App {
         let Some(mut dialog) = self.create_dialog.take() else {
             return;
         };
+        // Without a session to ask, the dialog stays as it is.
+        if self.active_view().is_none() {
+            self.create_dialog = Some(dialog);
+            return;
+        }
         let Some((session, view)) = self.active_view() else {
             return;
         };
