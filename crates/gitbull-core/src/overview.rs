@@ -74,6 +74,13 @@ enum Job {
     Compare(Box<CompareJob>),
 }
 
+impl Job {
+    /// A base or a comparison, which comes after every status.
+    fn compares(&self) -> bool {
+        matches!(self, Job::Bases { .. } | Job::Compare(_))
+    }
+}
+
 struct CompareJob {
     worktree: PathBuf,
     main: PathBuf,
@@ -120,6 +127,11 @@ struct Queue {
     jobs: VecDeque<Job>,
     /// Jobs taken and not finished yet.
     running: usize,
+    /// Those of them that read a status or lead to one. A base or a
+    /// comparison waits for them, so that every row has its status first:
+    /// their place in the queue alone would let a worker start a comparison
+    /// while another still reads the last status.
+    reading: usize,
 }
 
 type Shared = Arc<(Mutex<Queue>, Condvar)>;
@@ -190,6 +202,7 @@ impl Overview {
                     .map(Job::Worktrees)
                     .collect(),
                 running: 0,
+                reading: 0,
             }),
             Condvar::new(),
         ));
@@ -344,19 +357,29 @@ fn work(
 ) {
     let (queue, wake) = &**queue;
     loop {
-        let job = {
+        let (job, compares) = {
             let mut guard = lock(queue);
             loop {
                 if cancel.is_cancelled() {
                     return;
                 }
-                if let Some(job) = guard.jobs.pop_front() {
-                    guard.running += 1;
-                    break job;
-                }
-                if guard.running == 0 {
-                    wake.notify_all();
-                    return;
+                let next = guard.jobs.front().map(Job::compares);
+                match next {
+                    // Waits for the statuses still being read.
+                    Some(true) if guard.reading > 0 => {}
+                    Some(compares) => {
+                        let job = guard.jobs.pop_front().expect("a job is in front");
+                        guard.running += 1;
+                        if !compares {
+                            guard.reading += 1;
+                        }
+                        break (job, compares);
+                    }
+                    None if guard.running == 0 => {
+                        wake.notify_all();
+                        return;
+                    }
+                    None => {}
                 }
                 guard = wake.wait(guard).unwrap_or_else(|error| error.into_inner());
             }
@@ -369,6 +392,9 @@ fn work(
         }
         let mut guard = lock(queue);
         guard.running -= 1;
+        if !compares {
+            guard.reading -= 1;
+        }
         for job in outcome.front.into_iter().rev() {
             guard.jobs.push_front(job);
         }
