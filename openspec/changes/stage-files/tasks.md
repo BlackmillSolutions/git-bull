@@ -71,5 +71,5 @@ as the expected RED.
 
 ## 7. Integration
 
-- [ ] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` once each, and verify all three pass.
+- [x] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` once each, and verify all three pass.
 - [ ] 7.2 Stage and unstage by hand in a real repository with the built application: a modified, a new and a deleted file, a renamed file, Stage all, three quick presses of S, a repository without a commit with a file edited after staging, and a file under a clean filter. Verify `git status` in a terminal agrees with the view after each.
