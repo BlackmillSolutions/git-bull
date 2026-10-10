@@ -481,6 +481,20 @@ fn row_button(harness: &Harness<'_, App>, file_label: &str, label: &str) -> Opti
         .find(|button| (button.y - at.y).abs() < 2.0)
 }
 
+/// The write actions that run now. A request starts its action in the pass
+/// that takes it, so this tells at once whether one was taken; the log of the
+/// backend is written by a worker and would tell it only later.
+fn running(harness: &Harness<'_, App>) -> Vec<gitbull_core::session::Action> {
+    harness
+        .state()
+        .workspace()
+        .map(|workspace| workspace.running_actions())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|running| running.action)
+        .collect()
+}
+
 fn selected_file(harness: &Harness<'_, App>) -> Option<String> {
     harness
         .query_all_by_role(Role::ListItem)
@@ -761,10 +775,12 @@ fn a_letter_typed_into_the_filter_stages_nothing() {
         .get_by_role_and_label(Role::TextInput, FILTER)
         .type_text("s.");
     harness.run();
+    // The key itself, as a keyboard sends it beside the text, and the
+    // shortcut of all files: with the filter focused neither stages.
+    press(&mut harness, Key::S);
+    assert!(running(&harness).is_empty());
     press_with(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
-    for _ in 0..5 {
-        harness.step();
-    }
+    assert!(running(&harness).is_empty());
     assert!(index_calls(&probe).is_empty());
     assert_eq!(shown_rows(&harness), ["Staged files (1)", "Modified: s.rs"]);
 }
@@ -781,6 +797,79 @@ fn press_with(harness: &mut Harness<'_, App>, modifiers: Modifiers, key: Key) {
         harness.step();
     }
     harness.step();
+}
+
+#[test]
+fn a_shortcut_pressed_while_nothing_is_listed_does_not_fire_later() {
+    let live = LiveRepo::new();
+    live.set_status(WorkingStatus::default());
+    let backend = backend().with_live(root(), &live);
+    let probe = backend.probe();
+    let mut harness = open_with(backend);
+    show_file_status(&mut harness);
+    wait_until(&mut harness, |h| {
+        text_shown(h, "There are no uncommitted changes.")
+    });
+    press_with(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::U);
+    press_with(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
+    // Changes appear afterwards.
+    live.set_status(three_unstaged());
+    harness
+        .get_by_role_and_label(Role::Button, "Refresh")
+        .click();
+    wait_until(&mut harness, |h| {
+        shown_rows(h).first().map(String::as_str) == Some("Unstaged files (3)")
+    });
+    for _ in 0..5 {
+        harness.step();
+        assert!(running(&harness).is_empty());
+    }
+    assert!(index_calls(&probe).is_empty());
+    assert_eq!(
+        shown_rows(&harness).first().map(String::as_str),
+        Some("Unstaged files (3)")
+    );
+}
+
+#[test]
+fn s_with_a_modifier_or_held_down_stages_nothing_more() {
+    let gate = Gate::new();
+    let backend = backend()
+        .with_status(root(), three_unstaged())
+        .with_checkout_gate(&gate);
+    let (mut harness, probe) = file_status_of(backend);
+    chosen(&mut harness, "Modified: a.rs");
+    press_with(&mut harness, Modifiers::SHIFT, Key::S);
+    assert!(running(&harness).is_empty());
+    press_with(&mut harness, Modifiers::ALT, Key::S);
+    assert!(running(&harness).is_empty());
+    // One press, then the repeats of a key held down.
+    harness.input_mut().events.push(Event::Key {
+        key: Key::S,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    });
+    harness.step();
+    for _ in 0..3 {
+        harness.input_mut().events.push(Event::Key {
+            key: Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.step();
+    }
+    gate.open();
+    wait_until(&mut harness, |h| {
+        shown_rows(h).first().map(String::as_str) == Some("Unstaged files (2)")
+    });
+    for _ in 0..5 {
+        harness.step();
+    }
+    assert_eq!(index_calls(&probe), [index_call("stage", &["a.rs"])]);
 }
 
 #[test]
@@ -825,8 +914,13 @@ fn the_buttons_are_unavailable_while_a_checkout_runs() {
     assert!(!enabled(&harness, "Stage all"));
     assert!(!enabled(&harness, "Unstage all"));
     assert!(!enabled(&harness, "Stage file"));
+    let checkout = gitbull_core::session::Action::Checkout {
+        target: "side".to_owned(),
+    };
     press(&mut harness, Key::S);
+    assert_eq!(running(&harness), std::slice::from_ref(&checkout));
     press_with(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
+    assert_eq!(running(&harness), std::slice::from_ref(&checkout));
     assert!(index_calls(&probe).is_empty());
     gate.open();
 }
@@ -871,10 +965,9 @@ fn shortcuts_do_nothing_while_the_settings_dialog_is_open() {
         .click();
     harness.run();
     press_with(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
+    assert!(running(&harness).is_empty());
     press(&mut harness, Key::S);
-    for _ in 0..5 {
-        harness.step();
-    }
+    assert!(running(&harness).is_empty());
     assert!(index_calls(&probe).is_empty());
 }
 
@@ -926,7 +1019,9 @@ fn a_failed_staging_shows_gits_message_and_the_keys_go_on_in_the_list() {
     assert!(!buttons(&harness, "Copy Git's message").is_empty());
     // Behind the dialog the keys do nothing.
     press(&mut harness, Key::S);
+    assert!(running(&harness).is_empty());
     press_with(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
+    assert!(running(&harness).is_empty());
     assert_eq!(index_calls(&probe).len(), 1);
     // The files are listed as they are.
     harness.get_by_role_and_label(Role::Button, "Close").click();

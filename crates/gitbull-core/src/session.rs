@@ -27,7 +27,7 @@ use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::stashes::{Stash, Submodule};
-use gitbull_git::status::{Group, StatusKind};
+use gitbull_git::status::{Group, StatusEntry, StatusKind};
 use gitbull_git::switch::{CheckoutTarget, local_name_of};
 use gitbull_git::worktrees::Worktree;
 use gitbull_git::{Backend, Error};
@@ -131,8 +131,28 @@ pub enum IndexStart {
 /// A staging or an unstaging that waits for the one that runs.
 struct IndexRequest {
     unstage: bool,
-    /// The files as they were asked for, each once.
+    /// The files as they were asked for, each once, in that order.
     paths: Vec<RepoPath>,
+    /// The same files, to tell in one step whether one was asked for.
+    asked: HashSet<RepoPath>,
+}
+
+impl IndexRequest {
+    fn new(unstage: bool) -> IndexRequest {
+        IndexRequest {
+            unstage,
+            paths: Vec::new(),
+            asked: HashSet::new(),
+        }
+    }
+
+    fn add(&mut self, paths: Vec<RepoPath>) {
+        for path in paths {
+            if self.asked.insert(path.clone()) {
+                self.paths.push(path);
+            }
+        }
+    }
 }
 
 /// Where a new branch or tag starts, as the user chose it.
@@ -1439,15 +1459,19 @@ impl Session {
     }
 
     fn request_index(&mut self, unstage: bool, paths: Vec<RepoPath>) -> IndexStart {
-        let running = self
-            .action
-            .as_ref()
-            .map(|running| running.action.is_index());
+        let running = self.action.as_ref().map(|running| {
+            let failed = !matches!(running.ended, None | Some(Ended::Done));
+            (running.action.is_index(), failed)
+        });
         match running {
-            Some(false) => IndexStart::Busy,
+            Some((false, _)) => IndexStart::Busy,
+            // The staging before it failed or was stopped, and its status is
+            // not read yet: nothing runs on a state the user has not seen,
+            // and nothing takes the dialog of the failure away.
+            Some((true, true)) => IndexStart::Nothing,
             // Kept as asked for: what it may act on is decided when it starts,
             // on the status that the action before it left.
-            Some(true) => {
+            Some((true, false)) => {
                 self.keep_index_request(unstage, paths);
                 IndexStart::Kept
             }
@@ -1462,24 +1486,11 @@ impl Session {
     /// the same kind, each file once.
     fn keep_index_request(&mut self, unstage: bool, paths: Vec<RepoPath>) {
         match self.index_queue.back_mut() {
-            Some(last) if last.unstage == unstage => {
-                for path in paths {
-                    if !last.paths.contains(&path) {
-                        last.paths.push(path);
-                    }
-                }
-            }
+            Some(last) if last.unstage == unstage => last.add(paths),
             _ => {
-                let mut once: Vec<RepoPath> = Vec::with_capacity(paths.len());
-                for path in paths {
-                    if !once.contains(&path) {
-                        once.push(path);
-                    }
-                }
-                self.index_queue.push_back(IndexRequest {
-                    unstage,
-                    paths: once,
-                });
+                let mut request = IndexRequest::new(unstage);
+                request.add(paths);
+                self.index_queue.push_back(request);
             }
         }
     }
@@ -1492,35 +1503,39 @@ impl Session {
         else {
             return (0, Vec::new());
         };
+        // The files the request may act on, by their paths, each looked up
+        // in one step: "all" of a large working copy names every file.
+        let listed: HashMap<&RepoPath, &StatusEntry> = if unstage {
+            status
+                .staged
+                .iter()
+                .map(|entry| (&entry.path, entry))
+                .collect()
+        } else {
+            status
+                .unstaged
+                .iter()
+                .chain(&status.untracked)
+                .filter(|entry| entry.kind != StatusKind::Conflicted)
+                .map(|entry| (&entry.path, entry))
+                .collect()
+        };
         let mut files = 0;
         let mut given: Vec<RepoPath> = Vec::new();
-        for (index, path) in paths.iter().enumerate() {
-            if paths[..index].contains(path) {
+        let mut taken: HashSet<&RepoPath> = HashSet::new();
+        let mut asked: HashSet<&RepoPath> = HashSet::new();
+        for path in paths {
+            let Some(entry) = listed.get(path).filter(|_| asked.insert(path)) else {
                 continue;
-            }
-            let from = if unstage {
-                let Some(entry) = status.staged.iter().find(|entry| entry.path == *path) else {
-                    continue;
-                };
-                // Not for a copy: its source may have staged changes of its own.
-                (entry.kind == StatusKind::Changed(ChangeKind::Renamed))
-                    .then(|| entry.old_path.clone())
-                    .flatten()
-            } else {
-                let listed = status
-                    .unstaged
-                    .iter()
-                    .chain(&status.untracked)
-                    .any(|entry| entry.path == *path && entry.kind != StatusKind::Conflicted);
-                if !listed {
-                    continue;
-                }
-                None
             };
+            // Not for a copy: its source may have staged changes of its own.
+            let from = (unstage && entry.kind == StatusKind::Changed(ChangeKind::Renamed))
+                .then_some(entry.old_path.as_ref())
+                .flatten();
             files += 1;
-            for one in std::iter::once(path.clone()).chain(from) {
-                if !given.contains(&one) {
-                    given.push(one);
+            for one in std::iter::once(path).chain(from) {
+                if taken.insert(one) {
+                    given.push(one.clone());
                 }
             }
         }
@@ -4940,6 +4955,34 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert!(staged_names(&session).contains(&"staged.rs".to_owned()));
+    }
+
+    #[test]
+    fn a_request_made_after_the_failure_and_before_its_status_does_not_run() {
+        // The status after the failed staging is held: the failure is known,
+        // its dialog is not shown yet.
+        let status = Gate::new();
+        let backend = with_changes()
+            .with_stage_failure("fatal: Unable to create '.git/index.lock': File exists.")
+            .with_status_gate_at(root(), 2, &status);
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        wait_until(&mut session, |_| count(&probe, "status") == 2);
+        session.poll();
+        assert_eq!(session.stage(repo_paths(&["b.rs"])), IndexStart::Nothing);
+        assert_eq!(
+            session.unstage(repo_paths(&["staged.rs"])),
+            IndexStart::Nothing
+        );
+        status.open();
+        wait_until(&mut session, idle);
+        assert_eq!(calls(&probe), [call("stage", &["a.rs"])]);
+        assert!(
+            matches!(session.dialog(), Some(ActionDialog::Failed { .. })),
+            "the dialog of the failure is shown: {:?}",
+            session.dialog()
+        );
     }
 
     #[test]

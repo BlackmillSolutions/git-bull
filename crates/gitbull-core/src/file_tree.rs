@@ -418,8 +418,24 @@ impl FileTree {
                         })
                 };
                 found(*index).or_else(|| {
-                    self.neighbours_of_selected()
-                        .find_map(|(_, neighbour)| found(neighbour))
+                    // The file left its group. Its neighbours are looked up in
+                    // one step each: after "Stage all" none of them is left,
+                    // and a search of the list per neighbour would cost the
+                    // square of its length.
+                    let places: HashMap<&RepoPath, usize> = order
+                        .groups
+                        .get(*group)
+                        .into_iter()
+                        .flat_map(|g| g.files.iter().enumerate())
+                        .map(|(at, file)| (&file.path, at))
+                        .collect();
+                    self.neighbours_of_selected().find_map(|(_, neighbour)| {
+                        let path = self.order.file_path(*group, neighbour);
+                        places.get(path).map(|index| Selected::File {
+                            group: *group,
+                            index: *index,
+                        })
+                    })
                 })
             }
             None => None,
@@ -461,17 +477,22 @@ impl FileTree {
         below.chain(above).filter(move |_| at.is_some())
     }
 
-    /// The files of `group` that the filter lets through, by their places
-    /// in the group, also inside collapsed folders: what "all" of a group
-    /// means while a filter narrows the list.
-    pub fn listed_files(&self, group: usize) -> Vec<usize> {
-        let Some(group) = self.order.groups.get(group) else {
-            return Vec::new();
-        };
-        let filter = self.lower_filter.as_str();
-        (0..group.files.len())
-            .filter(|index| filter.is_empty() || group.files[*index].matches(filter))
-            .collect()
+    /// The files of `group` that `filter` lets through, by their places in
+    /// the group, also inside collapsed folders: what "all" of a group means
+    /// while a filter narrows the list. The filter is given, so that it can
+    /// be asked before the tree has taken it.
+    pub fn files_matching(&self, group: usize, filter: &str) -> impl Iterator<Item = usize> + '_ {
+        let filter = filter.to_lowercase();
+        let files = self
+            .order
+            .groups
+            .get(group)
+            .map_or(&[][..], |group| group.files.as_slice());
+        files
+            .iter()
+            .enumerate()
+            .filter(move |(_, file)| filter.is_empty() || file.matches(&filter))
+            .map(|(index, _)| index)
     }
 
     /// The row of the first file shown that is not of `group`.

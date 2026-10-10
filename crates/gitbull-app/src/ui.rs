@@ -329,6 +329,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         }
     }
 
+    // Before the actions of this pass are applied, which ask for the next.
+    app.forget_unanswered_status_requests();
     apply(app, actions);
     app.forget_closed_views();
     if std::mem::take(&mut app.send_close) {

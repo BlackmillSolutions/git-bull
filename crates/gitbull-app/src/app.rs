@@ -1412,6 +1412,16 @@ impl App {
         }
     }
 
+    /// Drops what was asked of the File status views and not taken in the
+    /// pass that just drew: a view that was not drawn, as under the history of
+    /// a file, must not act on it when it is drawn again later.
+    pub(crate) fn forget_unanswered_status_requests(&mut self) {
+        for view in self.views.values_mut() {
+            view.index_all = None;
+            view.focus_status = false;
+        }
+    }
+
     /// Stages, or unstages, every file that the File status view of the
     /// active tab lists, when it is shown: the view does it when it is drawn
     /// next, as it knows what the filter lets through.

@@ -313,6 +313,13 @@ leave a lock on the index behind.
   request. Checking against the status makes this rare, not impossible.
 - [An unstaging without a path would reset the whole index.] → The guard of
   decision 2, with a test that runs it during a merge with staged files.
+- [A repository inside the working copy that is not a submodule is listed as
+  one untracked folder. Git stages it as a link to its commit and warns on
+  its error output, which a success does not show; without a commit in it Git
+  refuses it and every path given with it.] → Git's behaviour is taken over
+  as it is, by decision of 2026-10-11, and a test with real Git pins it.
+  Stage all then fails with Git's message until that folder is ignored,
+  removed or given a commit.
 - [Stage all with a filter stages less than "all".] → The button acts on what
   is listed, the count in the title says how many, and the spec states it.
   GitKraken has no filter in that place, so there is no model to follow.

@@ -44,6 +44,7 @@ fn index_operations_preserve_git_behaviour() {
     unstaging_works_without_a_commit(&git);
     unstaging_keeps_a_merge_and_its_conflicts(&git);
     no_path_starts_no_git(&git);
+    an_untracked_repository_inside_is_staged_as_git_stages_it(&git);
 }
 
 /// `main` has `file.txt`, `notes.txt` and `old.rs`, and is checked out.
@@ -370,4 +371,64 @@ fn no_path_starts_no_git(git: &Git) {
     );
     stage(&none, repo.path(), &[], &CancelToken::new()).unwrap();
     unstage(&none, repo.path(), &[], &CancelToken::new()).unwrap();
+}
+
+/// Git's own behaviour, taken over as it is: a repository inside the working
+/// copy is listed as one untracked folder. With a commit it is staged as a
+/// link to that commit, which Git warns about on its error output; without a
+/// commit Git refuses it, and with it every path of the request.
+fn an_untracked_repository_inside_is_staged_as_git_stages_it(git: &Git) {
+    let nested = |repo: &TestRepo, name: &str, commit: bool| {
+        let folder = repo.path().join(name);
+        fs::create_dir(&folder).unwrap();
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&folder)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        run(&["init", "--quiet"]);
+        if commit {
+            fs::write(folder.join("inner.txt"), "inner\n").unwrap();
+            run(&["add", "inner.txt"]);
+            run(&[
+                "-c",
+                "user.name=Index Test",
+                "-c",
+                "user.email=index@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "Inner",
+            ]);
+        }
+    };
+
+    let repo = repository();
+    nested(&repo, "inside", true);
+    assert_eq!(short(&repo), ["?? inside/"]);
+    add(git, &repo, &["inside/"]).unwrap();
+    assert_eq!(short(&repo), ["A  inside"]);
+    assert!(
+        repo.git(&["ls-files", "--stage", "inside"])
+            .starts_with("160000 ")
+    );
+
+    let repo = repository();
+    nested(&repo, "empty", false);
+    repo.write("notes.txt", "changed\n");
+    let result = add(git, &repo, &["empty/", "notes.txt"]);
+    assert!(
+        matches!(
+            &result,
+            Err(WriteFailure::Failed(Error::CommandFailed { .. }))
+        ),
+        "{result:?}"
+    );
+    // Nothing of the request was staged.
+    assert_eq!(short(&repo), [" M notes.txt", "?? empty/"]);
 }

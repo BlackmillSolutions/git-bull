@@ -150,6 +150,10 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     let Some((session, view)) = app.active_view() else {
         return false;
     };
+    // A request of the keyboard for all files holds for this pass alone: when
+    // no list is drawn below, as while the working copy is clean, it is gone
+    // and does not fire once files appear.
+    let asked_for_all = view.index_all.take();
     // While a checkout or a creation runs, nothing is staged or unstaged; a
     // staging that runs keeps further requests.
     let busy = session.action().is_some_and(|action| !action.is_index());
@@ -220,12 +224,15 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         .map(|tree| Arc::clone(tree.order()));
     // The files a group lists under the filter that can be staged, or
     // unstaged: all of them but those in conflict.
-    let listed = |tree: &FileTree, shown: Shown| -> Vec<RepoPath> {
-        tree.listed_files(shown.index())
-            .into_iter()
-            .filter_map(|index| entry_at(status, &files, shown.index(), index))
-            .filter(|(_, entry)| entry.kind != StatusKind::Conflicted)
-            .map(|(_, entry)| entry.path.clone())
+    let actable = |shown: Shown, index: usize| {
+        entry_at(status, &files, shown.index(), index)
+            .map(|(_, entry)| entry)
+            .filter(|entry| entry.kind != StatusKind::Conflicted)
+    };
+    let listed = |tree: &FileTree, shown: Shown, filter: &str| -> Vec<RepoPath> {
+        tree.files_matching(shown.index(), filter)
+            .filter_map(|index| actable(shown, index))
+            .map(|entry| entry.path.clone())
             .collect()
     };
     let version = file_status.version();
@@ -234,10 +241,14 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         Some((at, filter, _)) if *at == version && *filter == view.status_files.filter
     );
     if !known && let Some(tree) = &view.status_files.tree {
-        let mut tree = tree.renewed(Arc::clone(tree.order()));
-        tree.set_filter(&view.status_files.filter);
-        let available = Shown::ALL.map(|shown| !listed(&tree, shown).is_empty());
-        view.index_available = Some((version, view.status_files.filter.clone(), available));
+        // Found once per status and filter, and without building anything:
+        // the first file that can be acted on answers it.
+        let filter = view.status_files.filter.as_str();
+        let available = Shown::ALL.map(|shown| {
+            tree.files_matching(shown.index(), filter)
+                .any(|index| actable(shown, index).is_some())
+        });
+        view.index_available = Some((version, filter.to_owned(), available));
     }
     let available = view
         .index_available
@@ -246,7 +257,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     // What the user asks for in this pass: single files, each with whether it
     // is unstaged, and all files of a group.
     let mut wanted: Vec<(bool, RepoPath)> = Vec::new();
-    let mut all = view.index_all.take();
+    let mut all = asked_for_all;
     let mut all_clicked = None;
     let Some(output) = file_list::show(
         ui,
@@ -299,7 +310,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             Shown::Unstaged => egui::Key::S,
             Shown::Staged => egui::Key::U,
         };
-        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key)) {
+        if plain_key_pressed(ui, key) {
             wanted.push((shown == Shown::Staged.index(), entry.path.clone()));
         }
     }
@@ -389,7 +400,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     }
     let all = all.and_then(|shown| {
         let tree = view.status_files.tree.as_ref()?;
-        Some((shown, listed(tree, shown)))
+        Some((shown, listed(tree, shown, &view.status_files.filter)))
     });
     let chosen = view
         .status_files
@@ -445,6 +456,27 @@ fn last_commit_path(status: &WorkingStatus, group: Group, entry: &StatusEntry) -
     }
 }
 
+/// Whether `key` was pressed in this pass alone: with no modifier held, so
+/// that Shift+S and Alt+S stay free, and not as a repeat of a key held down,
+/// which would stage file after file. The press is taken.
+fn plain_key_pressed(ui: &Ui, key: egui::Key) -> bool {
+    ui.input_mut(|input| {
+        let at = input.events.iter().position(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: pressed,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if *pressed == key && modifiers.is_none()
+            )
+        });
+        at.map(|at| input.events.remove(at)).is_some()
+    })
+}
+
 /// The icon of the button that stages, or unstages, a file of the group at
 /// `shown` of the list.
 fn index_icon(shown: usize) -> &'static str {
@@ -479,9 +511,16 @@ fn title_row(ui: &mut Ui, title: &str, all: &str, enabled: bool) -> bool {
         },
     );
     let mut clicked = false;
+    // The button is as high as a control, which is higher than a row: it is
+    // given that room around the middle of the row, so that its label stands
+    // on the line of the title.
+    let room = egui::Rect::from_center_size(
+        rect.center(),
+        vec2(rect.width() - 12.0, crate::theme::SHAPE.control_height),
+    );
     ui.scope_builder(
         UiBuilder::new()
-            .max_rect(rect.shrink2(vec2(6.0, 0.0)))
+            .max_rect(room)
             .layout(Layout::right_to_left(Align::Center)),
         |ui| {
             if !enabled {
