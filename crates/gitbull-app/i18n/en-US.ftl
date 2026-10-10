@@ -210,6 +210,16 @@ create-refused-taken = Git refused the name: a branch of this name exists, or th
 create-refused-invalid = Git refused the name: it is not a valid branch name.
 action-create-tag = Creating tag { $name }
 create-tag-failed-title = The tag { $name } could not be created
+action-stage = { $count ->
+    [one] Staging 1 file
+   *[other] Staging { $count } files
+}
+action-unstage = { $count ->
+    [one] Unstaging 1 file
+   *[other] Unstaging { $count } files
+}
+stage-failed-title = The files could not be staged
+unstage-failed-title = The files could not be unstaged
 create-tag-refused-taken = Git refused the name: a tag of this name exists, or the name would need one to be a folder.
 create-tag-refused-invalid = Git refused the name: it is not a valid tag name.
 close-question-title = Stop the running action?

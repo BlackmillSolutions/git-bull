@@ -1714,6 +1714,16 @@ pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
             args.set("name", name.clone());
             app.texts.text_with(Msg::ActionCreateTag, Some(&args))
         }
+        WriteAction::Stage { files } => {
+            let mut args = FluentArgs::new();
+            args.set("count", *files as i64);
+            app.texts.text_with(Msg::ActionStage, Some(&args))
+        }
+        WriteAction::Unstage { files } => {
+            let mut args = FluentArgs::new();
+            args.set("count", *files as i64);
+            app.texts.text_with(Msg::ActionUnstage, Some(&args))
+        }
     }
 }
 
@@ -1732,6 +1742,9 @@ fn action_dialog(
     let target = |action: &WriteAction| match action {
         WriteAction::Checkout { target } => target.clone(),
         WriteAction::CreateBranch { name } | WriteAction::CreateTag { name } => name.clone(),
+        // Staging and unstaging name no target; their dialog has a title of
+        // its own.
+        WriteAction::Stage { .. } | WriteAction::Unstage { .. } => String::new(),
     };
     let named = |msg: Msg, name: &str| {
         let mut args = FluentArgs::new();
@@ -1744,6 +1757,8 @@ fn action_dialog(
         WriteAction::Checkout { target } => named(Msg::CheckoutFailedTitle, target),
         WriteAction::CreateBranch { name } => named(Msg::CreateFailedTitle, name),
         WriteAction::CreateTag { name } => named(Msg::CreateTagFailedTitle, name),
+        WriteAction::Stage { .. } => texts.text(Msg::StageFailedTitle),
+        WriteAction::Unstage { .. } => texts.text(Msg::UnstageFailedTitle),
     };
     let (title, intro, details, close_label, copy) = match dialog {
         ActionDialog::BlockedByChanges { target, files } => (

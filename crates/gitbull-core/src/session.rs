@@ -7,7 +7,7 @@
 //! Content is read only for rows in view. Dropping the session stops all of
 //! it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use gitbull_git::backend::ContentSource;
 use gitbull_git::cancel::CancelToken;
+use gitbull_git::changes::ChangeKind;
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::content::CommitContent;
 use gitbull_git::head::Head;
@@ -26,7 +27,7 @@ use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::stashes::{Stash, Submodule};
-use gitbull_git::status::Group;
+use gitbull_git::status::{Group, StatusKind};
 use gitbull_git::switch::{CheckoutTarget, local_name_of};
 use gitbull_git::worktrees::Worktree;
 use gitbull_git::{Backend, Error};
@@ -37,7 +38,7 @@ use crate::content_cache::ContentCache;
 use crate::details::Details;
 use crate::diff_document::Part;
 use crate::file_history::FileHistory;
-use crate::file_status::FileStatus;
+use crate::file_status::{FileStatus, StatusState};
 use crate::graph::{Checkpoint, Graph, GraphBuilder};
 use crate::highlight::HighlightTheme;
 use crate::opening::OpenedRepository;
@@ -99,6 +100,39 @@ pub enum Action {
     CreateBranch { name: String },
     /// Creating a tag, by its name.
     CreateTag { name: String },
+    /// Staging this many files.
+    Stage { files: usize },
+    /// Unstaging this many files.
+    Unstage { files: usize },
+}
+
+impl Action {
+    /// Staging or unstaging, which changes the index alone: such actions
+    /// queue behind each other, and only the status is read after them
+    /// (ADR 0008).
+    pub fn is_index(&self) -> bool {
+        matches!(self, Action::Stage { .. } | Action::Unstage { .. })
+    }
+}
+
+/// What [`Session::stage`] and [`Session::unstage`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexStart {
+    /// Git runs now; [`Session::action`] names it.
+    Started,
+    /// A staging or an unstaging runs: the request is kept and runs after it.
+    Kept,
+    /// A checkout or a creation runs in this tab.
+    Busy,
+    /// No file of the request can be staged, or unstaged, as the status is.
+    Nothing,
+}
+
+/// A staging or an unstaging that waits for the one that runs.
+struct IndexRequest {
+    unstage: bool,
+    /// The files as they were asked for, each once.
+    paths: Vec<RepoPath>,
 }
 
 /// Where a new branch or tag starts, as the user chose it.
@@ -265,6 +299,9 @@ struct RunningAction {
     cancel: CancelToken,
     /// How it ended, once Git ended; the state is read again meanwhile.
     ended: Option<Ended>,
+    /// For a staging or an unstaging that ended: how many statuses had
+    /// arrived by then. It is over when one more has.
+    status_at: Option<u64>,
 }
 
 enum Ended {
@@ -376,6 +413,8 @@ pub struct Session {
     /// again after it.
     action: Option<RunningAction>,
     action_result: Option<Receiver<Result<(), WriteFailure>>>,
+    /// Stagings and unstagings asked for while one runs, in their order.
+    index_queue: VecDeque<IndexRequest>,
     /// What the last action asks the user to see, until it is closed.
     dialog: Option<ActionDialog>,
     /// Where HEAD ended after an action that moved it; taken by the interface,
@@ -458,6 +497,7 @@ impl Session {
             theme: HighlightTheme::Light,
             action: None,
             action_result: None,
+            index_queue: VecDeque::new(),
             dialog: None,
             checked_out: None,
         }
@@ -686,6 +726,7 @@ impl Session {
         if let Some(status) = &mut self.file_status {
             changed |= status.poll();
         }
+        changed |= self.finish_index_action();
         if let Some(source) = &self.content {
             while let Some(answer) = source.try_next() {
                 // A commit whose content cannot be read keeps its
@@ -1166,6 +1207,7 @@ impl Session {
             expected: Some(expected),
             cancel,
             ended: None,
+            status_at: None,
         });
         self.action_result = Some(receiver);
         CheckoutStart::Started
@@ -1271,6 +1313,7 @@ impl Session {
             expected,
             cancel,
             ended: None,
+            status_at: None,
         });
         self.action_result = Some(receiver);
         CreateStart::Started
@@ -1298,12 +1341,17 @@ impl Session {
         let Some(running) = &mut self.action else {
             return;
         };
+        if running.action.is_index() {
+            self.index_action_ended(result);
+            return;
+        }
         let action = running.action.clone();
         // What the dialog of a refused checkout calls the target: the branch
         // that was to be checked out, existing or new.
         let target = match &action {
             Action::Checkout { target } => target.clone(),
             Action::CreateBranch { name } | Action::CreateTag { name } => name.clone(),
+            Action::Stage { .. } | Action::Unstage { .. } => String::new(),
         };
         running.ended = Some(match result {
             Ok(()) => Ended::Done,
@@ -1348,7 +1396,10 @@ impl Session {
     /// shows what the user must see. A failure that left HEAD at the target
     /// means the action happened, and the hook is to blame.
     fn finish_action(&mut self) {
-        let Some(running) = self.action.take_if(|running| running.ended.is_some()) else {
+        // A staging or an unstaging waits for its status, not for this read.
+        let over =
+            |running: &mut RunningAction| running.ended.is_some() && !running.action.is_index();
+        let Some(running) = self.action.take_if(over) else {
             return;
         };
         // HEAD is where the action should have left it, whatever Git reported:
@@ -1369,6 +1420,215 @@ impl Session {
             }),
             Some(Ended::Done | Ended::Cancelled) | None => None,
         };
+    }
+
+    /// Stages `paths`, files of the Unstaged group, in the background (spec
+    /// `staging`). Files in conflict, and files the status does not list as
+    /// unstaged or untracked, are left out. While a staging or an unstaging
+    /// runs, the request is kept and runs after it; requests of the same kind
+    /// that follow each other run as one.
+    pub fn stage(&mut self, paths: Vec<RepoPath>) -> IndexStart {
+        self.request_index(false, paths)
+    }
+
+    /// Unstages `paths`, files of the Staged group, in the background, as
+    /// [`Session::stage`] stages. A file staged as renamed is unstaged with the
+    /// file it came from.
+    pub fn unstage(&mut self, paths: Vec<RepoPath>) -> IndexStart {
+        self.request_index(true, paths)
+    }
+
+    fn request_index(&mut self, unstage: bool, paths: Vec<RepoPath>) -> IndexStart {
+        let running = self
+            .action
+            .as_ref()
+            .map(|running| running.action.is_index());
+        match running {
+            Some(false) => IndexStart::Busy,
+            // Kept as asked for: what it may act on is decided when it starts,
+            // on the status that the action before it left.
+            Some(true) => {
+                self.keep_index_request(unstage, paths);
+                IndexStart::Kept
+            }
+            None => match self.start_index_action(unstage, &paths) {
+                true => IndexStart::Started,
+                false => IndexStart::Nothing,
+            },
+        }
+    }
+
+    /// Appends a request to the queue, into its last entry when that is of
+    /// the same kind, each file once.
+    fn keep_index_request(&mut self, unstage: bool, paths: Vec<RepoPath>) {
+        match self.index_queue.back_mut() {
+            Some(last) if last.unstage == unstage => {
+                for path in paths {
+                    if !last.paths.contains(&path) {
+                        last.paths.push(path);
+                    }
+                }
+            }
+            _ => {
+                let mut once: Vec<RepoPath> = Vec::with_capacity(paths.len());
+                for path in paths {
+                    if !once.contains(&path) {
+                        once.push(path);
+                    }
+                }
+                self.index_queue.push_back(IndexRequest {
+                    unstage,
+                    paths: once,
+                });
+            }
+        }
+    }
+
+    /// The files of `paths` that the status at hand lets a staging, or an
+    /// unstaging, act on, each once, and the paths to give Git for them: for
+    /// a staged rename also the file it came from.
+    fn index_paths(&self, unstage: bool, paths: &[RepoPath]) -> (usize, Vec<RepoPath>) {
+        let Some(StatusState::Loaded(status)) = self.file_status.as_ref().map(FileStatus::state)
+        else {
+            return (0, Vec::new());
+        };
+        let mut files = 0;
+        let mut given: Vec<RepoPath> = Vec::new();
+        for (index, path) in paths.iter().enumerate() {
+            if paths[..index].contains(path) {
+                continue;
+            }
+            let from = if unstage {
+                let Some(entry) = status.staged.iter().find(|entry| entry.path == *path) else {
+                    continue;
+                };
+                // Not for a copy: its source may have staged changes of its own.
+                (entry.kind == StatusKind::Changed(ChangeKind::Renamed))
+                    .then(|| entry.old_path.clone())
+                    .flatten()
+            } else {
+                let listed = status
+                    .unstaged
+                    .iter()
+                    .chain(&status.untracked)
+                    .any(|entry| entry.path == *path && entry.kind != StatusKind::Conflicted);
+                if !listed {
+                    continue;
+                }
+                None
+            };
+            files += 1;
+            for one in std::iter::once(path.clone()).chain(from) {
+                if !given.contains(&one) {
+                    given.push(one);
+                }
+            }
+        }
+        (files, given)
+    }
+
+    /// Starts a staging or an unstaging of what `paths` leaves to act on;
+    /// returns whether anything started.
+    fn start_index_action(&mut self, unstage: bool, paths: &[RepoPath]) -> bool {
+        let (files, given) = self.index_paths(unstage, paths);
+        if given.is_empty() {
+            return false;
+        }
+        self.dialog = None;
+        let cancel = CancelToken::new();
+        let (backend, root, notify) = (
+            Arc::clone(&self.backend),
+            self.opened.root.clone(),
+            Arc::clone(&self.notify),
+        );
+        let token = cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = catch_write(|| match unstage {
+                true => backend.unstage(&root, &given, &token),
+                false => backend.stage(&root, &given, &token),
+            });
+            if sender.send(result).is_ok() {
+                notify();
+            }
+        });
+        self.action = Some(RunningAction {
+            action: match unstage {
+                true => Action::Unstage { files },
+                false => Action::Stage { files },
+            },
+            expected: None,
+            cancel,
+            ended: None,
+            status_at: None,
+        });
+        self.action_result = Some(receiver);
+        true
+    }
+
+    /// Git ended a staging or an unstaging: remember how, and read the status
+    /// again, and nothing else. A read of HEAD and the references that is
+    /// under way goes on.
+    fn index_action_ended(&mut self, result: Result<(), WriteFailure>) {
+        let Some(running) = &mut self.action else {
+            return;
+        };
+        running.ended = Some(match result {
+            Ok(()) => Ended::Done,
+            Err(WriteFailure::Failed(Error::Cancelled)) => Ended::Cancelled,
+            Err(WriteFailure::Failed(error)) => Ended::Failed(failure_text(&error)),
+            // The index operations report no refusal.
+            Err(WriteFailure::Refused(refusal)) => Ended::Failed(format!("{refusal:?}")),
+        });
+        if !matches!(running.ended, Some(Ended::Done)) {
+            self.index_queue.clear();
+        }
+        match &mut self.file_status {
+            Some(status) => {
+                running.status_at = Some(status.version());
+                status.refresh();
+            }
+            // Without a working copy nothing was staged; do not wait.
+            None => running.status_at = None,
+        }
+    }
+
+    /// Ends a staging or an unstaging whose status arrived, and starts the
+    /// next one that is kept, in the same pass, so that
+    /// [`Session::action`] names an action for as long as there is work.
+    /// Returns whether anything changed.
+    fn finish_index_action(&mut self) -> bool {
+        let version = self.file_status.as_ref().map(FileStatus::version);
+        let over = |running: &mut RunningAction| {
+            running.action.is_index()
+                && running.ended.is_some()
+                && match (running.status_at, version) {
+                    (Some(at), Some(now)) => now > at,
+                    _ => true,
+                }
+        };
+        let Some(running) = self.action.take_if(over) else {
+            return false;
+        };
+        if let Some(Ended::Failed(message)) = running.ended {
+            self.dialog = Some(ActionDialog::Failed {
+                action: running.action,
+                message,
+            });
+        }
+        let readable = matches!(
+            self.file_status.as_ref().map(FileStatus::state),
+            Some(StatusState::Loaded(_))
+        );
+        if !readable {
+            self.index_queue.clear();
+        }
+        while let Some(next) = self.index_queue.pop_front() {
+            if self.start_index_action(next.unstage, &next.paths) {
+                break;
+            }
+        }
+        true
     }
 
     /// Why the repository cannot be shown any more: its history failed to
@@ -4322,5 +4582,395 @@ mod tests {
             session.commit_activation(&fake_id("e")),
             CommitActivation::Checkout(CheckoutRequest::Branch("release".to_owned()))
         );
+    }
+
+    // ---- write actions: staging and unstaging (spec `staging`)
+
+    use gitbull_git::changes::ChangeKind;
+    use gitbull_git::status::{StatusEntry, StatusKind};
+
+    fn file(kind: StatusKind, name: &str) -> StatusEntry {
+        StatusEntry {
+            kind,
+            path: name.into(),
+            old_path: None,
+            submodule: false,
+        }
+    }
+
+    fn change(kind: ChangeKind, name: &str) -> StatusEntry {
+        file(StatusKind::Changed(kind), name)
+    }
+
+    /// `a.rs`, `b.rs` and `c.rs` modified, `conflict.rs` in conflict and
+    /// `new.txt` untracked; `staged.rs` staged, `moved.txt` staged as renamed
+    /// from `keep.txt`, and `copy.txt` staged as a copy of `staged.rs`.
+    fn working() -> WorkingStatus {
+        let mut renamed = change(ChangeKind::Renamed, "moved.txt");
+        renamed.old_path = Some("keep.txt".into());
+        let mut copied = change(ChangeKind::Copied, "copy.txt");
+        copied.old_path = Some("staged.rs".into());
+        WorkingStatus {
+            staged: vec![copied, renamed, change(ChangeKind::Modified, "staged.rs")],
+            unstaged: vec![
+                change(ChangeKind::Modified, "a.rs"),
+                change(ChangeKind::Modified, "b.rs"),
+                change(ChangeKind::Modified, "c.rs"),
+                file(StatusKind::Conflicted, "conflict.rs"),
+            ],
+            untracked: vec![file(StatusKind::Untracked, "new.txt")],
+        }
+    }
+
+    fn with_changes() -> FakeBackend {
+        on_main().with_status(root(), working())
+    }
+
+    /// A session whose status is read.
+    fn staging(backend: FakeBackend) -> Session {
+        let mut session = ready(backend);
+        wait_until(&mut session, status_read);
+        session
+    }
+
+    fn repo_paths(names: &[&str]) -> Vec<RepoPath> {
+        names.iter().map(|name| RepoPath::from(*name)).collect()
+    }
+
+    fn calls(probe: &gitbull_testkit::Probe) -> Vec<(String, Vec<String>)> {
+        probe.index_calls()
+    }
+
+    fn call(kind: &str, paths: &[&str]) -> (String, Vec<String>) {
+        (
+            kind.to_owned(),
+            paths.iter().map(|path| (*path).to_owned()).collect(),
+        )
+    }
+
+    fn staged_names(session: &Session) -> Vec<String> {
+        match session.file_status().map(FileStatus::state) {
+            Some(StatusState::Loaded(status)) => status
+                .staged
+                .iter()
+                .map(|entry| entry.path.to_string())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_staging_runs_and_names_itself() {
+        let gate = Gate::new();
+        let backend = with_changes().with_checkout_gate(&gate);
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        assert_eq!(session.action(), Some(&Action::Stage { files: 1 }));
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(calls(&probe), [call("stage", &["a.rs"])]);
+        assert!(staged_names(&session).contains(&"a.rs".to_owned()));
+        assert!(session.dialog().is_none());
+    }
+
+    #[test]
+    fn requests_made_meanwhile_are_kept_and_merged() {
+        let gate = Gate::new();
+        let backend = with_changes().with_checkout_gate(&gate);
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        assert_eq!(session.stage(repo_paths(&["b.rs"])), IndexStart::Kept);
+        assert_eq!(session.stage(repo_paths(&["c.rs"])), IndexStart::Kept);
+        // Named twice, passed once.
+        assert_eq!(session.stage(repo_paths(&["b.rs"])), IndexStart::Kept);
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(
+            calls(&probe),
+            [call("stage", &["a.rs"]), call("stage", &["b.rs", "c.rs"])]
+        );
+    }
+
+    #[test]
+    fn a_request_for_a_file_already_moved_starts_nothing() {
+        let gate = Gate::new();
+        let backend = with_changes().with_checkout_gate(&gate);
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        // The row is still listed, and the user chooses its button again.
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Kept);
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(calls(&probe), [call("stage", &["a.rs"])]);
+        assert!(session.dialog().is_none());
+    }
+
+    #[test]
+    fn a_file_the_status_does_not_list_is_not_staged() {
+        let backend = with_changes();
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(
+            session.stage(repo_paths(&["no-such.rs"])),
+            IndexStart::Nothing
+        );
+        assert_eq!(
+            session.stage(repo_paths(&["staged.rs"])),
+            IndexStart::Nothing
+        );
+        assert_eq!(session.unstage(repo_paths(&["a.rs"])), IndexStart::Nothing);
+        assert!(session.action().is_none());
+        assert!(calls(&probe).is_empty());
+    }
+
+    #[test]
+    fn files_in_conflict_are_left_out() {
+        let backend = with_changes();
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(
+            session.stage(repo_paths(&["conflict.rs"])),
+            IndexStart::Nothing
+        );
+        assert_eq!(
+            session.stage(repo_paths(&["a.rs", "conflict.rs", "new.txt"])),
+            IndexStart::Started
+        );
+        assert_eq!(session.action(), Some(&Action::Stage { files: 2 }));
+        wait_until(&mut session, idle);
+        assert_eq!(calls(&probe), [call("stage", &["a.rs", "new.txt"])]);
+    }
+
+    #[test]
+    fn a_stage_and_an_unstage_of_one_file_keep_their_order() {
+        let gate = Gate::new();
+        let backend = with_changes().with_checkout_gate(&gate);
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        assert_eq!(session.unstage(repo_paths(&["a.rs"])), IndexStart::Kept);
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(
+            calls(&probe),
+            [call("stage", &["a.rs"]), call("unstage", &["a.rs"])]
+        );
+        assert!(!staged_names(&session).contains(&"a.rs".to_owned()));
+    }
+
+    #[test]
+    fn a_rename_is_unstaged_with_both_paths_and_a_copy_alone() {
+        let backend = with_changes();
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(
+            session.unstage(repo_paths(&["moved.txt"])),
+            IndexStart::Started
+        );
+        assert_eq!(session.action(), Some(&Action::Unstage { files: 1 }));
+        wait_until(&mut session, idle);
+        assert_eq!(
+            session.unstage(repo_paths(&["copy.txt"])),
+            IndexStart::Started
+        );
+        wait_until(&mut session, idle);
+        assert_eq!(
+            calls(&probe),
+            [
+                call("unstage", &["moved.txt", "keep.txt"]),
+                call("unstage", &["copy.txt"])
+            ]
+        );
+        // The source of the copy keeps its staged change.
+        assert!(staged_names(&session).contains(&"staged.rs".to_owned()));
+    }
+
+    #[test]
+    fn index_actions_and_other_write_actions_exclude_each_other() {
+        let gate = Gate::new();
+        let mut session = staging(with_changes().with_checkout_gate(&gate));
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        assert_eq!(session.stage(repo_paths(&["b.rs"])), IndexStart::Kept);
+        assert_eq!(
+            session.start_checkout(named("feature")),
+            CheckoutStart::Busy
+        );
+        assert_eq!(
+            session.start_create_branch(topic("topic", false)),
+            CreateStart::Busy
+        );
+        gate.open();
+        wait_until(&mut session, idle);
+
+        let gate = Gate::new();
+        let mut session = staging(with_changes().with_checkout_gate(&gate));
+        assert_eq!(
+            session.start_checkout(named("feature")),
+            CheckoutStart::Started
+        );
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Busy);
+        gate.open();
+        wait_until(&mut session, idle);
+    }
+
+    #[test]
+    fn the_slot_stays_taken_until_the_status_was_read_again() {
+        // The first read of the status is the one of showing the tab; the
+        // second follows the staging.
+        let status = Gate::new();
+        let backend = with_changes().with_status_gate_at(root(), 2, &status);
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        // Git has ended, and the read of the status after it is held.
+        wait_until(&mut session, |_| count(&probe, "status") == 2);
+        for _ in 0..20 {
+            session.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(session.action(), Some(&Action::Stage { files: 1 }));
+        assert_eq!(
+            session.start_checkout(named("feature")),
+            CheckoutStart::Busy
+        );
+        status.open();
+        wait_until(&mut session, idle);
+    }
+
+    #[test]
+    fn a_staging_reads_the_status_again_and_nothing_else() {
+        let backend = with_changes();
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        let before = |call: &str| count(&probe, call);
+        let (heads, references, statuses) =
+            (before("head"), before("references"), before("status"));
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        wait_until(&mut session, idle);
+        assert_eq!(count(&probe, "status"), statuses + 1);
+        assert_eq!(count(&probe, "head"), heads);
+        assert_eq!(count(&probe, "references"), references);
+    }
+
+    #[test]
+    fn a_refresh_in_flight_is_applied_and_does_not_end_the_staging() {
+        let gate = Gate::new();
+        let live = LiveRepo::new();
+        live.set_references(vec![branch("main", "e")]);
+        live.set_lines(five_lines());
+        live.set_status(working());
+        let backend = backend().with_live(root(), &live).with_checkout_gate(&gate);
+        let mut session = staging(backend);
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        with_new_commit(&live);
+        session.refresh();
+        wait_until(&mut session, |s| listed_at(s, "refs/heads/main", "f"));
+        assert_eq!(session.action(), Some(&Action::Stage { files: 1 }));
+        gate.open();
+        wait_until(&mut session, idle);
+        assert!(listed_at(&session, "refs/heads/main", "f"));
+    }
+
+    fn listed_at(session: &Session, full: &str, commit: &str) -> bool {
+        let id = fake_id(commit).to_string();
+        session
+            .sidebar()
+            .and_then(|sidebar| sidebar.as_ref().ok())
+            .is_some_and(|sidebar| {
+                sidebar
+                    .references
+                    .iter()
+                    .any(|known| known.name == full && known.commit.as_deref() == Some(&id))
+            })
+    }
+
+    #[test]
+    fn the_action_is_never_none_between_two_kept_requests() {
+        let gate = Gate::new();
+        let mut session = staging(with_changes().with_checkout_gate(&gate));
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        assert_eq!(
+            session.unstage(repo_paths(&["staged.rs"])),
+            IndexStart::Kept
+        );
+        gate.open();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = Vec::new();
+        loop {
+            session.poll();
+            match session.action() {
+                Some(action) if seen.last() != Some(action) => seen.push(action.clone()),
+                Some(_) => {}
+                None => break,
+            }
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // The first poll that found no action came after both.
+        assert_eq!(
+            seen,
+            [Action::Stage { files: 1 }, Action::Unstage { files: 1 }]
+        );
+    }
+
+    #[test]
+    fn a_failed_staging_empties_the_queue_and_shows_gits_message() {
+        let gate = Gate::new();
+        let backend = with_changes()
+            .with_checkout_gate(&gate)
+            .with_stage_failure("fatal: Unable to create '.git/index.lock': File exists.");
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        assert_eq!(
+            session.unstage(repo_paths(&["staged.rs"])),
+            IndexStart::Kept
+        );
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(calls(&probe), [call("stage", &["a.rs"])]);
+        match session.dialog() {
+            Some(ActionDialog::Failed { action, message }) => {
+                assert_eq!(action, &Action::Stage { files: 1 });
+                assert!(message.contains("index.lock"), "{message}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(staged_names(&session).contains(&"staged.rs".to_owned()));
+    }
+
+    #[test]
+    fn a_status_that_fails_to_load_empties_the_queue_and_frees_the_slot() {
+        let live = LiveRepo::new();
+        live.set_references(vec![branch("main", "e")]);
+        live.set_lines(five_lines());
+        live.set_status(working());
+        let gate = Gate::new();
+        let backend = backend().with_live(root(), &live).with_checkout_gate(&gate);
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        assert_eq!(session.stage(repo_paths(&["b.rs"])), IndexStart::Kept);
+        // The folder goes away: the status after the staging fails to load.
+        live.set_missing(true);
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(calls(&probe), [call("stage", &["a.rs"])]);
+    }
+
+    #[test]
+    fn dropping_the_session_stops_a_staging() {
+        let gate = Gate::new();
+        let mut session = staging(with_changes().with_checkout_gate(&gate));
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        drop(session);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gate.was_cancelled() {
+            assert!(Instant::now() < deadline, "the action was not stopped");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }
