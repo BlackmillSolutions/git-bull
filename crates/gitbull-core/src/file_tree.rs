@@ -461,6 +461,19 @@ impl FileTree {
         below.chain(above).filter(move |_| at.is_some())
     }
 
+    /// The files of `group` that the filter lets through, by their places
+    /// in the group, also inside collapsed folders: what "all" of a group
+    /// means while a filter narrows the list.
+    pub fn listed_files(&self, group: usize) -> Vec<usize> {
+        let Some(group) = self.order.groups.get(group) else {
+            return Vec::new();
+        };
+        let filter = self.lower_filter.as_str();
+        (0..group.files.len())
+            .filter(|index| filter.is_empty() || group.files[*index].matches(filter))
+            .collect()
+    }
+
     /// The row of the first file shown that is not of `group`.
     fn first_file_outside(&self, group: usize) -> Option<usize> {
         self.rows

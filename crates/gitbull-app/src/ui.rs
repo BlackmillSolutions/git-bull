@@ -16,6 +16,7 @@ use gitbull_git::Error;
 
 use std::path::PathBuf;
 
+use gitbull_core::file_status::Shown;
 use gitbull_core::git_setup::GitCheck;
 use gitbull_core::overview::Request;
 use gitbull_git::head::Head;
@@ -86,6 +87,10 @@ const LARGER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::
 const LARGER_TOO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Equals);
 const SMALLER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
 const DEFAULT_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Num0);
+const STAGE_ALL: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
+const UNSTAGE_ALL: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::U);
 
 /// Sizes the UI starts with when the settings have none.
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -157,6 +162,8 @@ enum Action {
     ShowAllBranches(String),
     /// Look for changes made outside git-bull in the tab shown.
     Refresh,
+    /// Stage all, or unstage all, files that the File status view lists.
+    IndexAll(Shown),
     /// The window gained the focus: the tab shown looks for changes, and
     /// the home tab reads again after a reading still running.
     Returned,
@@ -219,8 +226,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         app.home.focused = focused;
     }
     // The window behind the settings dialog takes no keys, as it takes no
-    // clicks.
-    if app.dialog.is_none() && !tab_dialog {
+    // clicks; nor does the one behind the dialog of a write action.
+    if app.dialog.is_none() && !tab_dialog && app.action_dialog().is_none() {
         actions.extend(shortcuts(ui));
     }
     // A close request of the system, such as Alt+F4 or the title bar of the
@@ -349,6 +356,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
                     workspace.refresh_active();
                 }
             }
+            Action::IndexAll(shown) => app.index_all(shown),
             Action::Returned => {
                 if app.home_shown() {
                     app.read_home(Request::Again);
@@ -608,6 +616,12 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
                 actions.push(Action::MoveHunk(HunkMove::Previous));
             } else if input.consume_shortcut(&NEXT_HUNK) {
                 actions.push(Action::MoveHunk(HunkMove::Next));
+            }
+            // In a text field these keys belong to the text.
+            if input.consume_shortcut(&STAGE_ALL) {
+                actions.push(Action::IndexAll(Shown::Unstaged));
+            } else if input.consume_shortcut(&UNSTAGE_ALL) {
+                actions.push(Action::IndexAll(Shown::Staged));
             }
         }
         if input.consume_shortcut(&OPEN) || input.consume_shortcut(&NEW_TAB) {
@@ -2240,8 +2254,18 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let mut args = FluentArgs::new();
     args.set("action", action_text(app, &first.action));
     args.set("tab", first.title.clone());
+    // What stopping leaves behind differs: a checkout can leave the working
+    // copy half updated, a staging only files that were not staged and a lock
+    // on the index.
+    let index = first.action.is_index();
     let body = match (question, relevant.len()) {
+        (CloseQuestion::Tab(_), _) if index => {
+            texts.text_with(Msg::CloseQuestionTabIndex, Some(&args))
+        }
         (CloseQuestion::Tab(_), _) => texts.text_with(Msg::CloseQuestionTab, Some(&args)),
+        (CloseQuestion::Window, 1) if index => {
+            texts.text_with(Msg::CloseQuestionWindowIndex, Some(&args))
+        }
         (CloseQuestion::Window, 1) => texts.text_with(Msg::CloseQuestionWindow, Some(&args)),
         (CloseQuestion::Window, count) => {
             args.set("count", count as i64);
