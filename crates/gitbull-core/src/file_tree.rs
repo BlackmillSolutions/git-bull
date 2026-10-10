@@ -388,6 +388,11 @@ impl FileTree {
     /// The rows of `order`, a list read again, with the mode, the filter,
     /// the collapsed folders that still hold files and the selection of
     /// this tree; a selected file is found again by its path in its group.
+    ///
+    /// A selected file that was shown and is no longer in its group, as
+    /// after it was staged, gives way to the file below it in the rows that
+    /// were shown, else to the one above it, each of its group; when the
+    /// group has no such file, to the first file of another group.
     pub fn renewed(&self, order: Arc<FileOrder>) -> FileTree {
         let holds = |(group, path): &FolderKey| {
             order
@@ -401,24 +406,81 @@ impl FileTree {
         let selected = match &self.selected {
             Some(folder @ Selected::Folder { .. }) => Some(folder.clone()),
             Some(Selected::File { group, index }) => {
-                let path = self.order.file_path(*group, *index);
-                order
-                    .groups
-                    .get(*group)
-                    .and_then(|g| g.files.iter().position(|file| file.path == *path))
-                    .map(|index| Selected::File {
-                        group: *group,
-                        index,
-                    })
+                let found = |index: usize| {
+                    let path = self.order.file_path(*group, index);
+                    order
+                        .groups
+                        .get(*group)
+                        .and_then(|g| g.files.iter().position(|file| file.path == *path))
+                        .map(|index| Selected::File {
+                            group: *group,
+                            index,
+                        })
+                };
+                found(*index).or_else(|| {
+                    self.neighbours_of_selected()
+                        .find_map(|(_, neighbour)| found(neighbour))
+                })
             }
             None => None,
+        };
+        // The file left its group, and no file of the group that was shown is
+        // left: the first file of another group takes over.
+        let left = match (&self.selected, &selected, self.selected_row) {
+            (Some(Selected::File { group, .. }), None, Some(_)) => Some(*group),
+            _ => None,
         };
         let mut tree = FileTree::unbuilt(order, self.mode, &self.filter);
         tree.collapsed = collapsed;
         tree.selected = selected;
         tree.wants_first = self.wants_first;
         tree.build();
+        if let Some(left) = left
+            && let Some(row) = tree.first_file_outside(left)
+        {
+            tree.select_row(row);
+        }
         tree
+    }
+
+    /// The files of the group of the selected file in the rows shown, each
+    /// with its row: those below it from the nearest on, then those above it
+    /// from the nearest on. Nothing while no file is selected and shown.
+    fn neighbours_of_selected(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let at = match (&self.selected, self.selected_row) {
+            (Some(Selected::File { group, .. }), Some(row)) => Some((*group, row)),
+            _ => None,
+        };
+        let (of, row) = at.unwrap_or((usize::MAX, 0));
+        let file = move |at: usize| match self.rows.get(at) {
+            Some(Row::File { group, index, .. }) if *group == of => Some((at, *index)),
+            _ => None,
+        };
+        let below = (row + 1..self.rows.len()).filter_map(file);
+        let above = (0..row).rev().filter_map(file);
+        below.chain(above).filter(move |_| at.is_some())
+    }
+
+    /// The row of the first file shown that is not of `group`.
+    fn first_file_outside(&self, group: usize) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| matches!(row, Row::File { group: of, .. } if *of != group))
+    }
+
+    /// The row that takes over when the selected file leaves its group: the
+    /// file below it, else the one above it, each of its group, else the
+    /// first file of another group. `None` while no file is selected and
+    /// shown, and for the only file shown.
+    pub fn successor_of_selected(&self) -> Option<usize> {
+        let (Some(Selected::File { group, .. }), Some(_)) = (&self.selected, self.selected_row)
+        else {
+            return None;
+        };
+        self.neighbours_of_selected()
+            .next()
+            .map(|(row, _)| row)
+            .or_else(|| self.first_file_outside(*group))
     }
 
     pub fn order(&self) -> &Arc<FileOrder> {
@@ -1131,12 +1193,95 @@ mod tests {
     }
 
     #[test]
-    fn a_selected_file_gone_from_the_list_read_again_leaves_nothing_selected() {
-        let mut tree = tree(&APP);
-        tree.select_file(0, 1);
-        let renewed = tree.renewed(order(&["src/app/main.rs", "README.md"]));
+    fn a_selected_file_gone_from_the_only_list_leaves_nothing_selected() {
+        let mut tree = FileTree::new(order(&["a.rs"]));
+        tree.select_file(0, 0);
+        let renewed = tree.renewed(order(&[]));
         assert!(!renewed.holds_selection());
         assert_eq!(renewed.selected_row(), None);
+    }
+
+    /// Two groups, flat, with `selected` of the first group selected.
+    fn two_groups(first: &[&str], second: &[&str], selected: &str) -> FileTree {
+        let mut tree = FileTree::new(groups(&[first, second]));
+        let row = row_named(&tree, selected);
+        tree.select_row(row);
+        tree
+    }
+
+    #[test]
+    fn a_selected_file_that_left_its_group_gives_way_to_the_one_below() {
+        let tree = two_groups(&["a.rs", "b.rs", "c.rs"], &["s.rs"], "b.rs");
+        // `b.rs` was staged.
+        let renewed = tree.renewed(groups(&[&["a.rs", "c.rs"], &["b.rs", "s.rs"]]));
+        assert_eq!(selected_text(&renewed).as_deref(), Some("c.rs"));
+        assert_eq!(renewed.selected_file(), Some((0, 1)));
+    }
+
+    #[test]
+    fn the_last_file_of_its_group_gives_way_to_the_one_above() {
+        let tree = two_groups(&["a.rs", "b.rs", "c.rs"], &["s.rs"], "c.rs");
+        let renewed = tree.renewed(groups(&[&["a.rs", "b.rs"], &["c.rs", "s.rs"]]));
+        assert_eq!(renewed.selected_file(), Some((0, 1)));
+    }
+
+    #[test]
+    fn a_file_the_filter_hides_is_passed_over() {
+        let mut tree = two_groups(
+            &["src/a.rs", "src/b.txt", "src/c.rs"],
+            &["s.rs"],
+            "src/a.rs",
+        );
+        tree.set_mode(Mode::Tree);
+        tree.set_filter(".rs");
+        assert_eq!(selected_text(&tree).as_deref(), Some("a.rs"));
+        let renewed = tree.renewed(groups(&[&["src/b.txt", "src/c.rs"], &["s.rs", "src/a.rs"]]));
+        assert_eq!(selected_text(&renewed).as_deref(), Some("c.rs"));
+    }
+
+    #[test]
+    fn a_file_in_a_collapsed_folder_is_passed_over() {
+        let mut tree = two_groups(&["a.rs", "lib/b.rs", "z.rs"], &["s.rs"], "a.rs");
+        tree.set_mode(Mode::Tree);
+        let lib = folder(&tree, 0, "lib");
+        tree.toggle(0, lib);
+        let renewed = tree.renewed(groups(&[&["lib/b.rs", "z.rs"], &["a.rs", "s.rs"]]));
+        assert_eq!(selected_text(&renewed).as_deref(), Some("z.rs"));
+    }
+
+    #[test]
+    fn a_group_left_without_files_gives_way_to_the_first_file_of_the_other() {
+        let tree = two_groups(&["a.rs"], &["s.rs", "t.rs"], "a.rs");
+        let renewed = tree.renewed(groups(&[&[], &["a.rs", "s.rs", "t.rs"]]));
+        assert_eq!(renewed.selected_file(), Some((1, 0)));
+
+        // Also from the second group to the first.
+        let mut tree = FileTree::new(groups(&[&["a.rs", "b.rs"], &["s.rs"]]));
+        let row = row_named(&tree, "s.rs");
+        tree.select_row(row);
+        let renewed = tree.renewed(groups(&[&["a.rs", "b.rs", "s.rs"], &[]]));
+        assert_eq!(renewed.selected_file(), Some((0, 0)));
+    }
+
+    #[test]
+    fn a_selected_file_that_stays_in_its_group_stays_selected() {
+        let tree = two_groups(&["a.rs", "b.rs", "c.rs"], &["s.rs"], "b.rs");
+        // Another file was staged.
+        let renewed = tree.renewed(groups(&[&["b.rs", "c.rs"], &["a.rs", "s.rs"]]));
+        assert_eq!(selected_text(&renewed).as_deref(), Some("b.rs"));
+    }
+
+    #[test]
+    fn the_successor_of_the_selected_file_is_found_in_the_rows_shown() {
+        let tree = two_groups(&["a.rs", "b.rs", "c.rs"], &["s.rs"], "b.rs");
+        assert_eq!(tree.successor_of_selected(), Some(row_named(&tree, "c.rs")));
+        let tree = two_groups(&["a.rs", "b.rs", "c.rs"], &["s.rs"], "c.rs");
+        assert_eq!(tree.successor_of_selected(), Some(row_named(&tree, "b.rs")));
+        let tree = two_groups(&["a.rs"], &["s.rs"], "a.rs");
+        assert_eq!(tree.successor_of_selected(), Some(row_named(&tree, "s.rs")));
+        // A folder has no successor, nor has the only file.
+        let tree = FileTree::new(order(&["a.rs"]));
+        assert_eq!(tree.successor_of_selected(), None);
     }
 
     #[test]

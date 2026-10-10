@@ -52,8 +52,8 @@ as the expected RED.
 
 ## 4. Selection that follows the work
 
-- [ ] 4.1 Write tests in `crates/gitbull-core/src/file_tree.rs` for `FileTree::renewed` as design decision 5 has it: the selected file left its group and the file below it in the rows shown is selected; the last file of its group, and the one above it is selected; a filtered tree, where a hidden file between two shown ones is passed over; a collapsed folder is passed over; the group is left without files and the first file of the other shown group is selected; a selected folder stays as it is; a selected file that is still in its group stays selected. Verify they fail on the assertions about the new selection, since `renewed` drops the selection today.
-- [ ] 4.2 Implement the rule in `FileTree::renewed`, and a method `successor_of_selected()` that the view uses to move the selection at once. Verify `cargo test -p gitbull-core --lib file_tree --locked` passes.
+- [x] 4.1 Write tests in `crates/gitbull-core/src/file_tree.rs` for `FileTree::renewed` as design decision 5 has it: the selected file left its group and the file below it in the rows shown is selected; the last file of its group, and the one above it is selected; a filtered tree, where a hidden file between two shown ones is passed over; a collapsed folder is passed over; the group is left without files and the first file of the other shown group is selected; a selected folder stays as it is; a selected file that is still in its group stays selected. Verify they fail on the assertions about the new selection, since `renewed` drops the selection today.
+- [x] 4.2 Implement the rule in `FileTree::renewed`, and a method `successor_of_selected()` that the view uses to move the selection at once. Verify `cargo test -p gitbull-core --lib file_tree --locked` passes.
 
 ## 5. File status view: staging
 
