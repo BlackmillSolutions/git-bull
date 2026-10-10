@@ -10,8 +10,27 @@ M2 improvements to finish before M3 starts.
 The read-only viewer, the interface improvements delivered so far, the
 worktree cockpit and the trust model for write operations provide the
 starting point, and checkout and the creation of branches and tags are
-delivered. This roadmap schedules new work; the current application still
-does not offer staging or commit creation.
+delivered. All of it is released as 0.2.0. This roadmap schedules new work;
+the current application still does not offer staging or commit creation.
+
+## Released: 0.2.0
+
+On 2026-10-10, [pull request #38](https://github.com/BlackmillSolutions/git-bull/pull/38)
+brought the three deliveries below and the worktree cockpit
+([pull request #32](https://github.com/BlackmillSolutions/git-bull/pull/32))
+to `master`, and
+[git-bull 0.2.0](https://github.com/BlackmillSolutions/git-bull/releases/tag/v0.2.0)
+was published from it with the five packages. Its notes are in
+[`docs/release-notes/0.2.0.md`](release-notes/0.2.0.md).
+
+- A review of the pull request led to fixes before the release: a
+  lightweight tag stays lightweight when `tag.gpgSign` is set, a folder
+  dropped while a dialog acts on a tab is ignored, a commit for a write must
+  be a full hash, the home tab compares only after every status was read and
+  tells the interface when a round ends, and the reference badges are
+  measured again when fonts arrive.
+- Unlike 0.1.0, the release had no pre-release, and its packages were not
+  started by hand on clean installations of the oldest supported systems.
 
 ## Delivered: the foundation for local Git operations
 
