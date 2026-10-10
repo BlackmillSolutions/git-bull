@@ -4089,7 +4089,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 ## Rust crates
 
-The 352 crates of the release build on x86_64-pc-windows-msvc, aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu.
+The 355 crates of the release build on x86_64-pc-windows-msvc, aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu.
 
 | Crate | Version | Licence |
 |---|---|---|
@@ -4210,6 +4210,7 @@ The 352 crates of the release build on x86_64-pc-windows-msvc, aarch64-apple-dar
 | futures-util | 0.3.34 | MIT OR Apache-2.0 |
 | gethostname | 1.1.0 | Apache-2.0 |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 |
+| getrandom | 0.4.3 | MIT OR Apache-2.0 |
 | glow | 0.17.0 | MIT OR Apache-2.0 OR Zlib |
 | glutin_wgl_sys | 0.6.1 | Apache-2.0 |
 | gpu-allocator | 0.28.0 | MIT OR Apache-2.0 |
@@ -4326,6 +4327,7 @@ The 352 crates of the release build on x86_64-pc-windows-msvc, aarch64-apple-dar
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 |
 | simd-adler32 | 0.3.10 | MIT |
 | simdutf8 | 0.1.5 | MIT OR Apache-2.0 |
+| similar | 3.2.0 | Apache-2.0 |
 | siphasher | 1.0.4 | MIT OR Apache-2.0 |
 | skrifa | 0.44.0 | MIT OR Apache-2.0 |
 | slab | 0.4.12 | MIT |
@@ -4343,6 +4345,7 @@ The 352 crates of the release build on x86_64-pc-windows-msvc, aarch64-apple-dar
 | syn | 3.0.6 | MIT OR Apache-2.0 |
 | synstructure | 0.14.0 | MIT |
 | syntect | 5.3.0 | MIT |
+| tempfile | 3.27.0 | MIT OR Apache-2.0 |
 | thiserror | 1.0.69 | MIT OR Apache-2.0 |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 |
 | thiserror-impl | 1.0.69 | MIT OR Apache-2.0 |
@@ -4988,7 +4991,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-Used by ahash 0.8.12, arrayvec 0.7.8, async-channel 2.5.0, async-executor 1.14.0, async-io 2.6.0, async-lock 3.4.2, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, bitflags 1.3.2, bitflags 2.13.2, blocking 1.7.0, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.9.4, core-foundation-sys 0.8.7, core-graphics 0.23.2, core-graphics-types 0.1.3, core_detect 1.0.0, crossbeam-utils 0.8.23, displaydoc 0.2.7, either 1.18.0, equivalent 1.0.2, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.10, fnv 1.0.7, form_urlencoded 1.2.2, futures-lite 2.6.1, gethostname 1.1.0, glow 0.17.0, hashbrown 0.16.1, hashbrown 0.17.1, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.15.0, khronos-egl 6.0.0, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, lock_api 0.4.14, log 0.4.34, num-traits 0.2.19, once_cell 1.21.4, ordered-stream 0.2.0, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, percent-encoding 2.3.2, piper 0.2.5, png 0.18.1, polling 3.11.0, pollster 0.4.0, pollster 1.0.1, regex-automata 0.4.18, regex-syntax 0.8.11, renderdoc-sys 1.1.0, roxmltree 0.20.0, rustc-hash 1.1.0, rustix 0.38.44, rustix 1.1.5, scoped-tls 1.0.1, scopeguard 1.2.0, signal-hook-registry 1.4.8, smallvec 1.16.2, smol_str 0.2.2, stable_deref_trait 1.2.1, ttf-parser 0.25.1, unic-langid 0.9.6, unic-langid-impl 0.9.6, unicode-segmentation 1.13.3, unicode-width 0.2.2, url 2.5.8, uuid 1.26.1, weezl 0.1.12:
+Used by ahash 0.8.12, arrayvec 0.7.8, async-channel 2.5.0, async-executor 1.14.0, async-io 2.6.0, async-lock 3.4.2, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, bitflags 1.3.2, bitflags 2.13.2, blocking 1.7.0, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.9.4, core-foundation-sys 0.8.7, core-graphics 0.23.2, core-graphics-types 0.1.3, core_detect 1.0.0, crossbeam-utils 0.8.23, displaydoc 0.2.7, either 1.18.0, equivalent 1.0.2, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.10, fnv 1.0.7, form_urlencoded 1.2.2, futures-lite 2.6.1, gethostname 1.1.0, glow 0.17.0, hashbrown 0.16.1, hashbrown 0.17.1, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.15.0, khronos-egl 6.0.0, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, lock_api 0.4.14, log 0.4.34, num-traits 0.2.19, once_cell 1.21.4, ordered-stream 0.2.0, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, percent-encoding 2.3.2, piper 0.2.5, png 0.18.1, polling 3.11.0, pollster 0.4.0, pollster 1.0.1, regex-automata 0.4.18, regex-syntax 0.8.11, renderdoc-sys 1.1.0, roxmltree 0.20.0, rustc-hash 1.1.0, rustix 0.38.44, rustix 1.1.5, scoped-tls 1.0.1, scopeguard 1.2.0, signal-hook-registry 1.4.8, similar 3.2.0, smallvec 1.16.2, smol_str 0.2.2, stable_deref_trait 1.2.1, tempfile 3.27.0, ttf-parser 0.25.1, unic-langid 0.9.6, unic-langid-impl 0.9.6, unicode-segmentation 1.13.3, unicode-width 0.2.2, url 2.5.8, uuid 1.26.1, weezl 0.1.12:
 
 ```text
                               Apache License
@@ -9388,6 +9391,37 @@ DEALINGS IN THE SOFTWARE.
 Used by getrandom 0.3.4:
 
 ```text
+Copyright (c) 2018-2025 The rust-random Project Developers
+Copyright (c) 2014 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+Used by getrandom 0.3.4, getrandom 0.4.3:
+
+```text
                               Apache License
                         Version 2.0, January 2004
                      https://www.apache.org/licenses/
@@ -9591,10 +9625,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-Used by getrandom 0.3.4:
+Used by getrandom 0.4.3:
 
 ```text
-Copyright (c) 2018-2025 The rust-random Project Developers
+Copyright (c) 2018-2026 The rust-random Project Developers
 Copyright (c) 2014 The Rust Project Developers
 
 Permission is hereby granted, free of charge, to any
@@ -12741,6 +12775,36 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+Used by tempfile 3.27.0:
+
+```text
+Copyright (c) 2015 Steven Allen
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 Used by tiff 0.11.3:

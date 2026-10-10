@@ -48,6 +48,18 @@ pub fn loaded(ctx: &egui::Context) -> bool {
 /// The record that the bundled fonts are loaded.
 const LOADED: &str = "bundled-fonts-loaded";
 
+/// Counts the calls of [`install`] in the context's data.
+const INSTALLED: &str = "fallback-fonts-installed";
+
+/// Changes whenever text may measure differently with the same font id: when
+/// the bundled fonts arrive, and when fallbacks are installed. What is
+/// measured once and kept, such as the widths of badges, is measured again
+/// when it changes.
+pub fn generation(ctx: &egui::Context) -> u64 {
+    let installed = ctx.data(|data| data.get_temp::<u64>(egui::Id::new(INSTALLED)));
+    2 * installed.unwrap_or(0) + u64::from(loaded(ctx))
+}
+
 /// egui's emoji fonts, in their order.
 const EMOJI: [&str; 2] = ["NotoEmoji-Regular", "emoji-icon-font"];
 
@@ -205,6 +217,7 @@ pub fn choose(db: &fontdb::Database) -> Vec<Fallback> {
 
 /// Registers `fallbacks` last in the chain of every family of text.
 pub fn install(ctx: &egui::Context, fallbacks: &[Fallback]) {
+    ctx.data_mut(|data| *data.get_temp_mut_or_default::<u64>(egui::Id::new(INSTALLED)) += 1);
     for fallback in fallbacks {
         let mut data = FontData::from_owned(fallback.data.clone());
         data.index = fallback.index;

@@ -24,7 +24,7 @@ use jiff::tz::TimeZone;
 
 use crate::app::{App, FileAction};
 use crate::commit_list::{
-    BadgeLook, SHORT_HASH, badge_size, color, local_date, original_date, paint_badge,
+    BadgeLook, SHORT_HASH, badge_size_for, color, local_date, original_date, paint_badge,
 };
 use crate::components;
 use crate::file_list::{self, FileRow, ListTexts};
@@ -218,7 +218,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             None => session.details().parent().into_iter().collect(),
         }
     };
-    let badges = session.badges(&commit).to_vec();
+    let badges = session.shared_badges(&commit);
     let content = session.content(&commit).cloned();
     let counts = session.details().line_counts().cloned();
     let changes = texts.file_count.as_deref().map(|files| Changes {
@@ -665,9 +665,13 @@ const LISTED_REFERENCES: usize = 50;
 fn references(ui: &mut Ui, badges: &[Badge], palette: &Palette) {
     for badge in badges.iter().take(SHOWN_REFERENCES) {
         // One widget per badge, so that a row breaks between badges only.
-        let size = badge_size(ui, &badge.name, true);
+        let size = badge_size_for(ui, badge);
         let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &badge.name));
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_description(badge.tooltip.as_str())
+        });
+        response.on_hover_text(&badge.tooltip);
         if ui.is_rect_visible(rect) {
             paint_badge(
                 ui,
@@ -680,16 +684,16 @@ fn references(ui: &mut Ui, badges: &[Badge], palette: &Palette) {
     }
     let rest = &badges[badges.len().min(SHOWN_REFERENCES)..];
     if !rest.is_empty() {
+        let count: usize = rest.iter().map(|badge| badge.references.len()).sum();
         let mut names: Vec<&str> = rest
             .iter()
+            .flat_map(|badge| badge.references.iter().map(String::as_str))
             .take(LISTED_REFERENCES)
-            .map(|badge| badge.name.as_str())
             .collect();
-        if rest.len() > LISTED_REFERENCES {
+        if count > LISTED_REFERENCES {
             names.push("…");
         }
-        ui.weak(format!("+{}", rest.len()))
-            .on_hover_text(names.join("\n"));
+        ui.weak(format!("+{count}")).on_hover_text(names.join("\n"));
     }
 }
 

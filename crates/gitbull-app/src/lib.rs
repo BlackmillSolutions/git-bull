@@ -13,6 +13,7 @@ pub mod file_list;
 pub mod file_status_view;
 pub mod fonts;
 pub mod graph_view;
+pub mod home_panel;
 pub mod home_view;
 pub mod i18n;
 pub mod icons;

@@ -153,6 +153,9 @@ impl eframe::App for NativeApp {
         if let Some(due) = self.app.save_due_in() {
             ctx.request_repaint_after(due);
         }
+        if let Some(due) = self.app.home_due_in() {
+            ctx.request_repaint_after(due);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

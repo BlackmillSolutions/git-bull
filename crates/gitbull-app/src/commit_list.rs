@@ -1,16 +1,22 @@
 //! The commit list: graph, description with badges, date, author and hash.
 
+use std::collections::HashMap;
 use std::ops::Range;
+use std::path::Path;
+use std::sync::Arc;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{
-    Align2, Color32, ComboBox, Event, Id, InputState, Key, Modal, Modifiers, Pos2, ProgressBar,
-    Rangef, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo, WidgetType,
-    pos2, vec2,
+    Align2, Color32, ComboBox, Event, FontId, Id, InputState, Key, Modal, Modifiers, Pos2,
+    ProgressBar, Rangef, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2,
+    WidgetInfo, WidgetType, pos2, vec2,
 };
 use gitbull_core::badges::{Badge, BadgeKind};
 use gitbull_core::graph::{GraphRow, uncommitted_rows};
-use gitbull_core::session::{BranchFilter, CommitGraph, History, LoadState, Session};
+use gitbull_core::session::{
+    BranchFilter, CheckoutRequest, CommitGraph, History, LoadState, Session, StartAt,
+};
+use gitbull_core::settings::{HistoryColumn, HistoryColumns, Layout};
 use gitbull_core::store::Row;
 use gitbull_core::workspace::{Failure, View};
 use gitbull_git::commit_graph::WRITE_ARGS;
@@ -18,8 +24,10 @@ use gitbull_git::object_id::ObjectId;
 use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 
-use crate::app::{App, TabView};
-use crate::columns::{self, Column, Widths, text_cell};
+use crate::app::{App, Origin, TabView};
+use crate::columns::{
+    self, Column, ColumnGeometry, ColumnId, ColumnSpec, HeaderMenuAction, OrderedColumns, text_cell,
+};
 use crate::components::{self, Button, Kind, focus_ring};
 use crate::graph_view::{self, LANE_WIDTH, Shape as GraphShape};
 use crate::i18n::Msg;
@@ -49,32 +57,6 @@ fn format_in(seconds: i64, zone: TimeZone, format: &str) -> String {
     }
 }
 
-/// How many of the badges with `widths` fit into `room` pixels, with `gap`
-/// between them, when the rest is shown as a count of `count_width(rest)`.
-pub fn badges_that_fit(
-    widths: &[f32],
-    room: f32,
-    gap: f32,
-    count_width: impl Fn(usize) -> f32,
-) -> usize {
-    let all: f32 = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
-    if all <= room {
-        return widths.len();
-    }
-    // Each shown badge is followed by a gap, before the next or the count.
-    let mut used = 0.0;
-    let mut shown = 0;
-    for (index, width) in widths.iter().enumerate() {
-        let rest = widths.len() - index - 1;
-        if used + width + gap + count_width(rest) > room {
-            break;
-        }
-        used += width + gap;
-        shown += 1;
-    }
-    shown
-}
-
 /// The graph column starts with room for eight lanes and can be dragged
 /// wider or narrower; the other columns are shared with the file history
 /// (`columns::shared`).
@@ -83,6 +65,43 @@ const GRAPH_RANGE: Rangef = Rangef {
     min: 24.0,
     max: 600.0,
 };
+
+fn history_columns(saved: &HistoryColumns, layout: Layout) -> OrderedColumns<5> {
+    let shared = Layout {
+        date_column: saved.widths.date,
+        author_column: saved.widths.author,
+        hash_column: saved.widths.commit,
+        ..layout
+    };
+    let [date, author, commit] = columns::shared(&shared);
+    let graph = Column::new(saved.widths.graph, GRAPH_WIDTH, GRAPH_RANGE);
+    let specs = [
+        ColumnSpec::new(ColumnId::Graph, graph.width, graph.range),
+        ColumnSpec::new(
+            ColumnId::Description,
+            saved.widths.description.unwrap_or(columns::MIN_DESCRIPTION),
+            Rangef::new(columns::MIN_DESCRIPTION, 10_000.0),
+        ),
+        ColumnSpec::new(ColumnId::Date, date.width, date.range),
+        ColumnSpec::new(ColumnId::Author, author.width, author.range),
+        ColumnSpec::new(ColumnId::Commit, commit.width, commit.range),
+    ];
+    OrderedColumns::new(std::array::from_fn(|index| {
+        let id = match saved.order[index] {
+            HistoryColumn::Graph => ColumnId::Graph,
+            HistoryColumn::Description => ColumnId::Description,
+            HistoryColumn::Date => ColumnId::Date,
+            HistoryColumn::Author => ColumnId::Author,
+            HistoryColumn::Commit => ColumnId::Commit,
+        };
+        let mut spec = *specs
+            .iter()
+            .find(|spec| spec.id == id)
+            .expect("all History columns");
+        spec.visible = !saved.hidden.contains(&saved.order[index]);
+        spec
+    }))
+}
 const NODE_RADIUS: f32 = 4.0;
 const BADGE_HEIGHT: f32 = 17.0;
 const BADGE_PADDING: f32 = 5.0;
@@ -90,6 +109,172 @@ const BADGE_GAP: f32 = 4.0;
 /// The size of the icon in a badge, and the room between icon and name.
 const BADGE_ICON: f32 = 11.0;
 const BADGE_ICON_GAP: f32 = 3.0;
+/// `text_cell` keeps four points inside each edge of the title's cell.
+const TITLE_RESERVE: f32 = columns::MIN_DESCRIPTION + 8.0;
+
+/// Measurements belong to one ref generation and one effective small font:
+/// its id, the scale, and the fonts behind it, which arrive after the first
+/// pass and leave the id as it is.
+/// Only commits that enter the virtual viewport receive an entry.
+#[derive(Default)]
+pub(crate) struct BadgeMetricsCache {
+    revision: u64,
+    font: Option<FontId>,
+    scale: f32,
+    fonts: u64,
+    min_description: f32,
+    entries: HashMap<usize, BadgeMeasurements>,
+}
+
+struct BadgeMeasurements {
+    widths: Vec<f32>,
+    priority: Vec<usize>,
+    hidden_width_prefix: Vec<f32>,
+    hidden_ref_prefix: Vec<usize>,
+    hidden: Vec<bool>,
+    shown: Vec<usize>,
+    room: f32,
+    hidden_refs: usize,
+    counter_width: f32,
+    counter_label: String,
+    hidden_names: String,
+}
+
+impl BadgeMetricsCache {
+    fn prepare(&mut self, ui: &Ui, revision: u64, references: usize, head: bool) -> f32 {
+        let font = TextStyle::Small.resolve(ui.style());
+        let scale = ui.ctx().pixels_per_point();
+        let fonts = crate::fonts::generation(ui.ctx());
+        if self.revision != revision
+            || self.font.as_ref() != Some(&font)
+            || self.scale != scale
+            || self.fonts != fonts
+        {
+            self.entries.clear();
+            self.revision = revision;
+            self.font = Some(font);
+            self.scale = scale;
+            self.fonts = fonts;
+            self.min_description = TITLE_RESERVE
+                + if references > 0 {
+                    badge_size(ui, &format!("+{references}"), false).x + BADGE_GAP
+                } else {
+                    0.0
+                }
+                + if head {
+                    badge_size(ui, "HEAD", true).x + BADGE_GAP
+                } else {
+                    0.0
+                };
+        }
+        self.min_description.max(TITLE_RESERVE)
+    }
+
+    fn measure<'a>(&'a mut self, ui: &Ui, badges: &[Badge]) -> &'a mut BadgeMeasurements {
+        let key = badges.as_ptr() as usize;
+        self.entries.entry(key).or_insert_with(|| {
+            let widths: Vec<f32> = badges
+                .iter()
+                .map(|badge| badge_size_for(ui, badge).x)
+                .collect();
+            let mut priority: Vec<usize> = (0..badges.len())
+                .filter(|index| badges[*index].kind != BadgeKind::Head)
+                .collect();
+            priority.sort_by(|a, b| {
+                let group = |index: usize| usize::from(badges[index].kind == BadgeKind::Tag);
+                group(*a)
+                    .cmp(&group(*b))
+                    .then_with(|| widths[*b].total_cmp(&widths[*a]))
+                    .then_with(|| b.cmp(a))
+            });
+            let mut width = 0.0;
+            let mut references = 0;
+            let mut hidden_width_prefix = Vec::with_capacity(priority.len());
+            let mut hidden_ref_prefix = Vec::with_capacity(priority.len());
+            for index in &priority {
+                width += widths[*index];
+                references += badges[*index].references.len();
+                hidden_width_prefix.push(width);
+                hidden_ref_prefix.push(references);
+            }
+            BadgeMeasurements {
+                widths,
+                priority,
+                hidden_width_prefix,
+                hidden_ref_prefix,
+                hidden: vec![false; badges.len()],
+                shown: Vec::new(),
+                room: f32::NAN,
+                hidden_refs: 0,
+                counter_width: 0.0,
+                counter_label: String::new(),
+                hidden_names: String::new(),
+            }
+        })
+    }
+}
+
+impl BadgeMeasurements {
+    fn fit(&mut self, badges: &[Badge], room: f32, count_width: impl Fn(usize) -> f32) {
+        if self.room == room {
+            return;
+        }
+        self.room = room;
+        self.hidden.fill(false);
+        self.shown.clear();
+        self.hidden_refs = 0;
+        self.counter_width = 0.0;
+        self.counter_label.clear();
+        self.hidden_names.clear();
+        let widths: f32 = self.widths.iter().sum();
+        if widths + BADGE_GAP * badges.len() as f32 <= room {
+            self.shown.extend(0..badges.len());
+            return;
+        }
+        if self.priority.is_empty() {
+            self.shown.extend(0..badges.len());
+            return;
+        }
+        let mut low = 1;
+        let mut high = self.priority.len();
+        while low < high {
+            let middle = (low + high) / 2;
+            let index = middle - 1;
+            let needed = widths - self.hidden_width_prefix[index]
+                + BADGE_GAP * (badges.len() - middle) as f32
+                + count_width(self.hidden_ref_prefix[index])
+                + BADGE_GAP;
+            if needed <= room {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        if low > 0 {
+            let index = low - 1;
+            self.hidden_refs = self.hidden_ref_prefix[index];
+            self.counter_width = count_width(self.hidden_refs);
+            for &hidden in &self.priority[..low] {
+                self.hidden[hidden] = true;
+            }
+        }
+        for (index, badge) in badges.iter().enumerate() {
+            if self.hidden[index] {
+                for name in &badge.references {
+                    if !self.hidden_names.is_empty() {
+                        self.hidden_names.push('\n');
+                    }
+                    self.hidden_names.push_str(name);
+                }
+            } else {
+                self.shown.push(index);
+            }
+        }
+        if self.hidden_refs > 0 {
+            self.counter_label = format!("+{}", self.hidden_refs);
+        }
+    }
+}
 /// Digits of the abbreviated hash.
 pub(crate) const SHORT_HASH: usize = 7;
 
@@ -106,7 +291,7 @@ struct RowData {
     summary: Option<String>,
     author: Option<String>,
     short: String,
-    badges: Vec<Badge>,
+    badges: Arc<[Badge]>,
     graph: GraphRow,
     /// The history of a shallow clone ends at this commit.
     boundary: bool,
@@ -158,23 +343,34 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let name = app.texts.text(Msg::ViewHistory);
     let empty = app.texts.text(Msg::HistoryEmpty);
     let copy_label = app.texts.text(Msg::CopyFullHash);
+    let reset_columns = app.texts.text(Msg::HistoryColumnsReset);
+    let check_out_label = app.texts.text(Msg::CommitCheckOut);
+    let create_branch_label = app.texts.text(Msg::CommitCreateBranch);
+    let create_tag_label = app.texts.text(Msg::CommitCreateTag);
     let titles = [
-        Msg::ColumnGraph,
-        Msg::ColumnDescription,
-        Msg::ColumnDate,
-        Msg::ColumnAuthor,
-        Msg::ColumnCommit,
-    ]
-    .map(|column| app.texts.text(column));
+        (ColumnId::Graph, app.texts.text(Msg::ColumnGraph)),
+        (
+            ColumnId::Description,
+            app.texts.text(Msg::ColumnDescription),
+        ),
+        (ColumnId::Date, app.texts.text(Msg::ColumnDate)),
+        (ColumnId::Author, app.texts.text(Msg::ColumnAuthor)),
+        (ColumnId::Commit, app.texts.text(Msg::ColumnCommit)),
+    ];
     let filter_texts =
         [Msg::FilterAllBranches, Msg::FilterCurrentBranch].map(|msg| app.texts.text(msg));
     let graph_texts = GraphTexts::new(app);
     let zone = app.time_zone.clone();
-    let layout = app.settings().layout;
-    let mut widths = Widths {
-        leading: Some(Column::new(layout.graph_column, GRAPH_WIDTH, GRAPH_RANGE)),
-        trailing: columns::shared(&layout),
+    let Some(repository) = app
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .map(|session| session.opened().repository.clone())
+    else {
+        return;
     };
+    let saved = app.settings().history_columns_for(&repository);
+    let initial_columns = history_columns(&saved, app.settings().layout);
     let filter = match app.active_view() {
         Some((session, _)) => session.filter().clone(),
         None => return,
@@ -195,14 +391,43 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         commits,
         uncommitted,
     };
-    let resized = columns::header(
+    let description_min = view.badge_metrics.prepare(
+        ui,
+        session.sidebar_version(),
+        session.badge_reference_count(),
+        session.has_head_badge(),
+    );
+    let mut shown_columns = view.commit_column_drag.unwrap_or(initial_columns);
+    let header = columns::ordered_header(
         ui,
         Id::new("commit-list-columns"),
         list.len(),
         &titles,
-        &mut widths,
+        &mut shown_columns,
+        &mut view.commit_horizontal,
+        description_min,
+        true,
+        Some(&reset_columns),
     );
-    let graph_width = widths.leading.map_or(GRAPH_WIDTH, |graph| graph.width);
+    let menu_action = header.menu_action;
+    if let Some(HeaderMenuAction::Toggle(id)) = menu_action {
+        let visible = shown_columns
+            .columns
+            .iter()
+            .find(|column| column.id == id)
+            .is_some_and(|column| column.visible);
+        shown_columns.set_visible(id, !visible);
+    }
+    if header.dragging {
+        view.commit_column_drag = Some(shown_columns);
+    }
+    if header.released || header.finished || menu_action.is_some() {
+        view.commit_column_drag = None;
+    }
+    let graph_width = header
+        .geometry
+        .span(ColumnId::Graph)
+        .map_or(0.0, |span| span.span());
     // A reloaded history took the place of the one shown: the selected
     // commit is selected again where it now is, if it still exists.
     let generation = session.history_generation();
@@ -243,12 +468,24 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         ui.vertical_centered(|ui| ui.label(RichText::new(empty).weak()));
         // The list stays an area that Tab moves to.
         focus_area(ui, COMMIT_LIST, &name);
-        if resized {
-            record(app, widths);
-        }
+        persist_header(
+            app,
+            &repository,
+            shown_columns,
+            header.finished,
+            menu_action,
+        );
         return;
     }
-    let height = f64::from(ui.available_height());
+    let height = f64::from(
+        (ui.available_height()
+            - if header.horizontal {
+                columns::HORIZONTAL_SCROLLBAR_HEIGHT + ui.spacing().item_spacing.y
+            } else {
+                0.0
+            })
+        .max(0.0),
+    );
     let visible = view.commits.visible_rows(rows, height);
     session.set_fill_rows((visible.end - visible.start) as usize);
     // Rows around the view too, so that scrolling in this frame finds them.
@@ -270,19 +507,44 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let lanes = graph_view::shown_lanes(graph_width, needed);
 
     // Its rows are rows of a grid, with the columns of the header.
-    let output = VirtualList::new(Id::new(COMMIT_LIST), Role::Grid, name, rows).show(
+    let output = columns::with_horizontal_list(
         ui,
-        &mut view.commits,
-        |ui, row, selected| {
-            if let Some(data) = row
-                .checked_sub(gathered.start)
-                .and_then(|i| data.get(i as usize))
-            {
-                draw_row(ui, data, selected, palette, &row_texts, &widths, lanes);
-            }
+        Id::new("commit-list-horizontal"),
+        &header,
+        &mut view.commit_horizontal,
+        |ui| {
+            VirtualList::new(Id::new(COMMIT_LIST), Role::Grid, name, rows).show(
+                ui,
+                &mut view.commits,
+                |ui, row, selected| {
+                    if let Some(data) = row
+                        .checked_sub(gathered.start)
+                        .and_then(|i| data.get(i as usize))
+                    {
+                        draw_row(
+                            ui,
+                            data,
+                            selected,
+                            palette,
+                            &row_texts,
+                            &header.geometry,
+                            lanes,
+                            &mut view.badge_metrics,
+                        );
+                    }
+                },
+            )
         },
     );
 
+    if std::mem::take(&mut view.focus_commits) {
+        output.response.request_focus();
+    }
+    // What the user selects stands: a navigation that still waits for its
+    // commit to load, as after a checkout, does not replace it later.
+    if output.clicked.is_some() || output.selection_changed {
+        session.cancel_navigation();
+    }
     let selected = view.commits.selected().filter(|row| *row < rows);
     let selected_commit = selected.and_then(|row| list.commit(row));
     view.selected_id = selected_commit.map(|row| session.history().store.id(row as Row));
@@ -297,6 +559,15 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         .into_iter()
         .flatten()
         .any(|row| row < rows && list.commit(row).is_none());
+
+    // A double click or Enter on a commit checks it out; the row "Uncommitted
+    // changes" opens the File status view instead.
+    let activated_commit = output
+        .activated
+        .filter(|row| *row < rows)
+        .and_then(|row| list.commit(row))
+        .map(|row| session.history().store.id(row as Row));
+    let busy = session.action().is_some();
 
     let hash_of = |row: u64| {
         list.commit(row)
@@ -316,8 +587,38 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             .map(|row| session.history().store.id(row as Row));
     }
     let menu_commit = view.commit_menu;
+    let mut check_out = None;
+    let mut create_branch = None;
+    let mut create_tag = None;
     output.response.context_menu(|ui| {
         components::menu(ui, |ui| {
+            let entry = ui
+                .add_enabled_ui(!busy && menu_commit.is_some(), |ui| {
+                    components::menu_item(ui, None, &check_out_label, None)
+                })
+                .inner;
+            if entry.clicked() {
+                check_out = menu_commit;
+                ui.close();
+            }
+            let entry = ui
+                .add_enabled_ui(!busy && menu_commit.is_some(), |ui| {
+                    components::menu_item(ui, None, &create_branch_label, None)
+                })
+                .inner;
+            if entry.clicked() {
+                create_branch = menu_commit;
+                ui.close();
+            }
+            let entry = ui
+                .add_enabled_ui(!busy && menu_commit.is_some(), |ui| {
+                    components::menu_item(ui, None, &create_tag_label, None)
+                })
+                .inner;
+            if entry.clicked() {
+                create_tag = menu_commit;
+                ui.close();
+            }
             if components::menu_item(ui, None, &copy_label, None).clicked() {
                 if let Some(commit) = menu_commit {
                     ui.ctx().copy_text(commit.to_string());
@@ -326,11 +627,28 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
             }
         });
     });
-    if resized {
-        record(app, widths);
-    }
+    persist_header(
+        app,
+        &repository,
+        shown_columns,
+        header.finished,
+        menu_action,
+    );
     if open_file_status {
         app.show_view(View::FileStatus);
+    }
+    // A double click or Enter takes the branch at the commit, if there is
+    // one; the entry of the menu means the commit itself.
+    if let Some(id) = activated_commit {
+        app.activate_commit(id);
+    } else if let Some(id) = check_out {
+        app.checkout(CheckoutRequest::Commit(id));
+    }
+    if let Some(id) = create_branch {
+        app.begin_create_branch(StartAt::Commit(id), Origin::Commits);
+    }
+    if let Some(id) = create_tag {
+        app.begin_create_tag(StartAt::Commit(id), Origin::Commits);
     }
 }
 
@@ -491,12 +809,45 @@ fn short_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// Records the widths of the columns after a drag.
-fn record(app: &mut App, widths: Widths<3>) {
-    app.update_layout(|layout| {
-        layout.graph_column = widths.leading.map(|graph| graph.width);
-        columns::record_shared(layout, widths.trailing);
-    });
+/// Records the visible order and widths after a completed header interaction.
+fn record(app: &mut App, repository: &Path, columns: OrderedColumns<5>) {
+    let mut saved = app.settings().history_columns_for(repository);
+    saved.order.clear();
+    saved.hidden.clear();
+    for spec in columns.columns {
+        let id = match spec.id {
+            ColumnId::Graph => HistoryColumn::Graph,
+            ColumnId::Description => HistoryColumn::Description,
+            ColumnId::Date => HistoryColumn::Date,
+            ColumnId::Author => HistoryColumn::Author,
+            ColumnId::Commit => HistoryColumn::Commit,
+            ColumnId::Path => continue,
+        };
+        saved.order.push(id);
+        if !spec.visible {
+            saved.hidden.push(id);
+        }
+        saved.widths.set(id, Some(spec.width));
+    }
+    app.update_history_columns(saved);
+}
+
+fn persist_header(
+    app: &mut App,
+    repository: &Path,
+    columns: OrderedColumns<5>,
+    finished: bool,
+    action: Option<HeaderMenuAction>,
+) {
+    match action {
+        Some(HeaderMenuAction::Reset) => app.update_history_columns(HistoryColumns {
+            repository: repository.to_owned(),
+            ..HistoryColumns::default()
+        }),
+        Some(HeaderMenuAction::Toggle(_)) => record(app, repository, columns),
+        None if finished => record(app, repository, columns),
+        None => {}
+    }
 }
 
 /// Whether the user asked to copy, by the shortcut or by the platform's
@@ -533,14 +884,33 @@ fn gather(
     let mut commits: Vec<(ObjectId, i64, GraphRow)> = {
         let mut history = session.history();
         let History { store, graph, .. } = &mut *history;
-        let graph_rows = graph.rows(store, first as Row..end as Row, limit).to_vec();
-        (first..end)
-            .zip(graph_rows)
-            .map(|(row, graph_row)| {
-                let row = row as Row;
-                (store.id(row), store.timestamp(row), graph_row)
-            })
-            .collect()
+        if limit == 0 {
+            (first..end)
+                .map(|row| {
+                    let row = row as Row;
+                    (
+                        store.id(row),
+                        store.timestamp(row),
+                        GraphRow {
+                            column: 0,
+                            color: 0,
+                            upper: Vec::new(),
+                            lower: Vec::new(),
+                            width: 0,
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            let graph_rows = graph.rows(store, first as Row..end as Row, limit).to_vec();
+            (first..end)
+                .zip(graph_rows)
+                .map(|(row, graph_row)| {
+                    let row = row as Row;
+                    (store.id(row), store.timestamp(row), graph_row)
+                })
+                .collect()
+        }
     };
     let mut uncommitted = None;
     if let Some(at) = list.uncommitted
@@ -563,7 +933,7 @@ fn gather(
                 summary: Some(uncommitted_text.to_owned()),
                 author: Some(String::new()),
                 short: String::new(),
-                badges: Vec::new(),
+                badges: Arc::from([]),
                 graph: uncommitted.clone().unwrap_or_else(|| GraphRow {
                     column: 0,
                     color: 0,
@@ -619,7 +989,7 @@ fn commit_data(
         summary,
         author,
         short: id.short(SHORT_HASH),
-        badges: session.badges(&id).to_vec(),
+        badges: session.shared_badges(&id),
         graph,
         boundary: session.is_boundary(&id),
     }
@@ -632,14 +1002,19 @@ struct RowTexts {
     matched: String,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one visible commit row and its shared layout"
+)]
 fn draw_row(
     ui: &mut Ui,
     data: &RowData,
     selected: bool,
     palette: &Palette,
     texts: &RowTexts,
-    widths: &Widths<3>,
+    geometry: &ColumnGeometry,
     lanes: usize,
+    badge_metrics: &mut BadgeMetricsCache,
 ) {
     let loading = texts.loading.as_str();
     let rect = ui.max_rect();
@@ -651,11 +1026,12 @@ fn draw_row(
         let bar = Rect::from_min_size(rect.min, vec2(3.0, rect.height()));
         ui.painter().rect_filled(bar, 0.0, accent);
     }
-    let cells = widths.cells(rect);
-    let (graph, description) = (cells.leading, cells.description);
-    let [date, author, commit] = cells.trailing;
-    let shapes = graph_view::shapes(&data.graph, lanes, graph.height(), data.boundary);
-    paint_graph(ui, graph, &shapes, palette);
+    if let Some(graph) = geometry.cell(ColumnId::Graph, rect)
+        && graph.intersects(ui.clip_rect())
+    {
+        let shapes = graph_view::shapes(&data.graph, lanes, graph.height(), data.boundary);
+        paint_graph(ui, graph, &shapes, palette);
+    }
 
     let row = ui.interact(rect, ui.id().with("row"), Sense::hover());
     let label = match data.uncommitted {
@@ -678,22 +1054,38 @@ fn draw_row(
         }
     });
 
-    let summary_left = draw_badges(ui, description, &data.badges, palette);
-    let summary = Rect::from_min_max(pos2(summary_left, description.top()), description.max);
-    match &data.summary {
-        Some(text) if data.uncommitted => text_cell(ui, summary, RichText::new(text).italics()),
-        Some(text) => text_cell(ui, summary, RichText::new(text)),
-        None => text_cell(ui, summary, RichText::new(loading).weak()),
-    };
-    let date_cell = text_cell(ui, date, RichText::new(&data.date));
-    if let Some(tooltip) = &data.tooltip {
-        date_cell.on_hover_text(tooltip);
+    if let Some(description) = geometry.cell(ColumnId::Description, rect)
+        && description.intersects(ui.clip_rect())
+    {
+        let summary_left = draw_badges(ui, description, &data.badges, palette, badge_metrics);
+        let summary = Rect::from_min_max(pos2(summary_left, description.top()), description.max);
+        match &data.summary {
+            Some(text) if data.uncommitted => text_cell(ui, summary, RichText::new(text).italics()),
+            Some(text) => text_cell(ui, summary, RichText::new(text)),
+            None => text_cell(ui, summary, RichText::new(loading).weak()),
+        };
     }
-    match &data.author {
-        Some(text) => text_cell(ui, author, RichText::new(text)),
-        None => text_cell(ui, author, RichText::new(loading).weak()),
-    };
-    text_cell(ui, commit, RichText::new(&data.short).monospace());
+    if let Some(date) = geometry.cell(ColumnId::Date, rect)
+        && date.intersects(ui.clip_rect())
+    {
+        let date_cell = text_cell(ui, date, RichText::new(&data.date));
+        if let Some(tooltip) = &data.tooltip {
+            date_cell.on_hover_text(tooltip);
+        }
+    }
+    if let Some(author) = geometry.cell(ColumnId::Author, rect)
+        && author.intersects(ui.clip_rect())
+    {
+        match &data.author {
+            Some(text) => text_cell(ui, author, RichText::new(text)),
+            None => text_cell(ui, author, RichText::new(loading).weak()),
+        };
+    }
+    if let Some(commit) = geometry.cell(ColumnId::Commit, rect)
+        && commit.intersects(ui.clip_rect())
+    {
+        text_cell(ui, commit, RichText::new(&data.short).monospace());
+    }
 }
 
 /// Paints the shapes of one row into its graph cell, each lane in the
@@ -749,49 +1141,63 @@ fn paint_graph(ui: &Ui, cell: Rect, shapes: &[GraphShape], palette: &Palette) {
     }
 }
 
-/// Draws the badges that fit into half of the description, and a count of
-/// the others whose tooltip lists all. Returns where the description starts.
-fn draw_badges(ui: &mut Ui, cell: Rect, badges: &[Badge], palette: &Palette) -> f32 {
+/// Keeps all references visible while 120 points remain for the title.
+fn draw_badges(
+    ui: &mut Ui,
+    cell: Rect,
+    badges: &[Badge],
+    palette: &Palette,
+    cache: &mut BadgeMetricsCache,
+) -> f32 {
     if badges.is_empty() {
         return cell.left();
     }
-    let widths: Vec<f32> = badges
-        .iter()
-        .map(|badge| badge_size(ui, &badge.name, true).x)
-        .collect();
-    let count_width = |rest: usize| badge_size(ui, &format!("+{rest}"), false).x;
-    let shown = badges_that_fit(&widths, cell.width() / 2.0, BADGE_GAP, count_width);
-    let rest = badges.len() - shown;
-    // The badge that counts the rest, when some do not fit.
-    let rest_width = (rest > 0).then(|| count_width(rest));
+    let measured = cache.measure(ui, badges);
+    measured.fit(badges, (cell.width() - TITLE_RESERVE).max(0.0), |count| {
+        badge_size(ui, &format!("+{count}"), false).x
+    });
 
     let mut x = cell.left();
     let top = cell.center().y - BADGE_HEIGHT / 2.0;
-    let mut place = |ui: &mut Ui, index: usize, name: &str, width: f32, look: BadgeLook| {
-        let rect = Rect::from_min_size(pos2(x, top), vec2(width, BADGE_HEIGHT));
-        paint_badge(ui, rect, name, &look, palette);
-        x += width + BADGE_GAP;
-        let response = ui.interact(rect, ui.id().with(("badge", index)), Sense::hover());
-        response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, name));
-        response
-    };
-    for (index, (badge, width)) in badges.iter().zip(&widths).take(shown).enumerate() {
+    let mut place =
+        |ui: &mut Ui, index: usize, name: &str, width: f32, look: BadgeLook, full_names: &str| {
+            let rect = Rect::from_min_size(pos2(x, top), vec2(width, BADGE_HEIGHT));
+            if rect.intersects(ui.clip_rect()) {
+                paint_badge(ui, rect, name, &look, palette);
+            }
+            x += width + BADGE_GAP;
+            let response = ui.interact(rect, ui.id().with(("badge", index)), Sense::hover());
+            response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, name));
+            ui.ctx()
+                .accesskit_node_builder(response.id, |node| node.set_description(full_names));
+            response.on_hover_text(full_names);
+        };
+    for &index in &measured.shown {
+        let badge = &badges[index];
         place(
             ui,
             index,
             &badge.name,
-            *width,
+            measured.widths[index],
             BadgeLook::of(badge.kind, palette),
+            &badge.tooltip,
         );
     }
-    if let Some(rest_width) = rest_width {
-        let all: Vec<&str> = badges.iter().map(|badge| badge.name.as_str()).collect();
+    if measured.hidden_refs > 0 {
         let look = BadgeLook {
             colour: color(palette.text_muted),
             icon: None,
+            second_icon: None,
             outlined: false,
         };
-        place(ui, shown, &format!("+{rest}"), rest_width, look).on_hover_text(all.join("\n"));
+        place(
+            ui,
+            badges.len(),
+            &measured.counter_label,
+            measured.counter_width,
+            look,
+            &measured.hidden_names,
+        );
     }
     x
 }
@@ -800,6 +1206,7 @@ fn draw_badges(ui: &mut Ui, cell: Rect, badges: &[Badge], palette: &Palette) -> 
 pub(crate) struct BadgeLook {
     colour: Color32,
     icon: Option<&'static str>,
+    second_icon: Option<&'static str>,
     outlined: bool,
 }
 
@@ -809,6 +1216,7 @@ impl BadgeLook {
         BadgeLook {
             colour: color(badge_color(kind, palette)),
             icon: Some(badge_icon(kind)),
+            second_icon: (kind == BadgeKind::CombinedBranch).then_some(icons::REMOTE_BRANCH),
             outlined: badge_outlined(kind),
         }
     }
@@ -828,6 +1236,18 @@ pub(crate) fn badge_size(ui: &Ui, name: &str, icon: bool) -> Vec2 {
         0.0
     };
     vec2(text + icon + 2.0 * BADGE_PADDING, BADGE_HEIGHT)
+}
+
+pub(crate) fn badge_size_for(ui: &Ui, badge: &Badge) -> Vec2 {
+    badge_size(ui, &badge.name, true)
+        + vec2(
+            if badge.kind == BadgeKind::CombinedBranch {
+                BADGE_ICON + BADGE_ICON_GAP
+            } else {
+                0.0
+            },
+            0.0,
+        )
 }
 
 /// Draws a badge that shows `name` into `rect`. A filled badge draws its
@@ -853,6 +1273,16 @@ pub(crate) fn paint_badge(ui: &Ui, rect: Rect, name: &str, look: &BadgeLook, pal
         );
         left += BADGE_ICON + BADGE_ICON_GAP;
     }
+    if let Some(icon) = look.second_icon {
+        painter.text(
+            pos2(left, rect.center().y),
+            Align2::LEFT_CENTER,
+            icon,
+            icons::font(ui.ctx(), BADGE_ICON),
+            content,
+        );
+        left += BADGE_ICON + BADGE_ICON_GAP;
+    }
     let font = TextStyle::Small.resolve(ui.style());
     let galley = painter.layout_no_wrap(name.to_owned(), font, content);
     let at = pos2(left, rect.center().y - galley.size().y / 2.0);
@@ -865,6 +1295,7 @@ pub(crate) fn badge_icon(kind: BadgeKind) -> &'static str {
     match kind {
         BadgeKind::Head => icons::HEAD,
         BadgeKind::Branch => icons::BRANCH,
+        BadgeKind::CombinedBranch => icons::BRANCH,
         BadgeKind::RemoteBranch => icons::REMOTE_BRANCH,
         BadgeKind::Tag => icons::TAG,
     }
@@ -879,6 +1310,7 @@ pub(crate) fn badge_color(kind: BadgeKind, palette: &Palette) -> Rgb {
     match kind {
         BadgeKind::Head => palette.badge_head,
         BadgeKind::Branch => palette.badge_branch,
+        BadgeKind::CombinedBranch => palette.badge_branch,
         BadgeKind::RemoteBranch => palette.badge_remote,
         BadgeKind::Tag => palette.badge_tag,
     }
@@ -961,36 +1393,46 @@ mod tests {
         assert_eq!(local_date(commit, &fixed(2)), "2026-03-02 01:30");
     }
 
-    fn count(_: usize) -> f32 {
-        30.0
-    }
-
     #[test]
-    fn all_badges_are_shown_when_they_fit() {
-        assert_eq!(badges_that_fit(&[40.0, 50.0], 100.0, 4.0, count), 2);
-    }
-
-    #[test]
-    fn badges_that_do_not_fit_leave_room_for_the_count() {
-        // Three fit alone (40 + 4 + 40 + 4 + 40 = 128), but two and the
-        // count need 40 + 4 + 40 + 4 + 30 = 118.
-        assert_eq!(badges_that_fit(&[40.0; 5], 130.0, 4.0, count), 2);
-    }
-
-    #[test]
-    fn forty_tags_show_those_that_fit_and_a_count() {
-        // 5 * 50 + 5 * 4 + 30 = 300.
-        let shown = badges_that_fit(&[50.0; 40], 300.0, 4.0, count);
-        assert_eq!(shown, 5);
-    }
-
-    #[test]
-    fn without_room_for_one_badge_only_the_count_is_shown() {
-        assert_eq!(badges_that_fit(&[80.0, 80.0], 60.0, 4.0, count), 0);
-    }
-
-    #[test]
-    fn no_badges_need_no_room() {
-        assert_eq!(badges_that_fit(&[], 0.0, 4.0, count), 0);
+    fn fitting_hides_widest_branches_before_tags_and_counts_combined_refs() {
+        let badge = |kind, name: &str, refs: &[&str]| Badge {
+            kind,
+            name: name.to_owned(),
+            references: refs.iter().map(|name| (*name).to_owned()).collect(),
+            remote_count: 0,
+            tooltip: refs.join("\n"),
+        };
+        let badges = [
+            badge(BadgeKind::Head, "HEAD", &["HEAD"]),
+            badge(BadgeKind::Tag, "v1", &["refs/tags/v1"]),
+            badge(
+                BadgeKind::CombinedBranch,
+                "long",
+                &["refs/heads/long", "refs/remotes/origin/long"],
+            ),
+            badge(BadgeKind::Branch, "short", &["refs/heads/short"]),
+        ];
+        let mut measured = BadgeMeasurements {
+            widths: vec![30.0, 40.0, 120.0, 50.0],
+            priority: vec![2, 3, 1],
+            hidden_width_prefix: vec![120.0, 170.0, 210.0],
+            hidden_ref_prefix: vec![2, 3, 4],
+            hidden: vec![false; 4],
+            shown: Vec::new(),
+            room: f32::NAN,
+            hidden_refs: 0,
+            counter_width: 0.0,
+            counter_label: String::new(),
+            hidden_names: String::new(),
+        };
+        measured.fit(&badges, 300.0, |_| 30.0);
+        assert_eq!(measured.hidden, [false; 4]);
+        measured.fit(&badges, 166.0, |_| 30.0);
+        assert_eq!(measured.hidden, [false, false, true, false]);
+        assert_eq!(measured.hidden_refs, 2);
+        measured.fit(&badges, 165.0, |_| 30.0);
+        assert_eq!(measured.hidden, [false, false, true, true]);
+        assert_eq!(measured.hidden_refs, 3);
+        assert!(measured.hidden_names.contains("refs/remotes/origin/long"));
     }
 }

@@ -7,17 +7,20 @@ mod support;
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::os::OperatingSystem;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder, SnapshotOptions, image_snapshot_options};
 use gitbull_app::app::App;
 use gitbull_app::ui;
+use gitbull_core::session::CheckoutRequest;
 use gitbull_core::settings::{InterfaceSize, Settings, ThemeSetting};
 use gitbull_git::changes::{ChangeKind, FileChange};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
 use gitbull_git::history::CommitLine;
 use gitbull_git::refs::{RefKind, Reference};
-use gitbull_testkit::{FakeBackend, fake_id};
+use gitbull_git::refusal::Refusal;
+use gitbull_git::switch::CheckoutTarget;
+use gitbull_testkit::{FakeBackend, FakeWrite, commit_line, fake_id};
 use support::{Setup, TestApp, build, path, settle_window, wait_for_references};
 
 /// The main window of `test` at 1280 by 800, rendered with a graphics
@@ -336,4 +339,463 @@ fn home_tab_in_the_dark_palette() {
     let mut harness = home_tab(ThemeSetting::Dark);
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "home_dark", &options());
+}
+
+/// The cockpit of [`support::cockpit_setup`] in a window of `size`, in
+/// `theme`, with `fix-reload` selected where the panel shows: a worktree at
+/// work with uncommitted files, overlapping another.
+fn cockpit(theme: ThemeSetting, size: (f32, f32)) -> Harness<'static, App> {
+    let mut setup = support::cockpit_setup();
+    setup.settings.theme = theme;
+    let harness = Harness::builder().with_size(size).wgpu().build_ui_state(
+        |ui, app: &mut App| {
+            app.logic();
+            ui::show(app, ui);
+        },
+        build(setup).app,
+    );
+    harness.ctx.set_fonts(gitbull_app::fonts::definitions());
+    let mut harness = harness;
+    harness.step();
+    wait_for(&mut harness, |h| !h.state().home_reading());
+    if size.0 >= 900.0 {
+        let row = support::home_row(&harness, "fix-reload").expect("the row of fix-reload");
+        harness.hover_at(row.center());
+        for pressed in [true, false] {
+            harness.event(eframe::egui::Event::PointerButton {
+                pos: row.center(),
+                button: eframe::egui::PointerButton::Primary,
+                pressed,
+                modifiers: eframe::egui::Modifiers::NONE,
+            });
+        }
+        wait_for(&mut harness, |h| h.query_by_label("Uncommitted").is_some());
+    }
+    // The pointer leaves the window.
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+/// Scenarios "Panel of a worktree" and "Chips of the main states": every
+/// main state, the overlap and new-branch marks, the comparisons, and the
+/// panel of a worktree at work.
+#[test]
+fn cockpit_in_the_light_palette() {
+    let mut harness = cockpit(ThemeSetting::Light, (1280.0, 800.0));
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "cockpit_light", &options());
+}
+
+#[test]
+fn cockpit_in_the_dark_palette() {
+    let mut harness = cockpit(ThemeSetting::Dark, (1280.0, 800.0));
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "cockpit_dark", &options());
+}
+
+/// Scenario "Narrow window": the panel hidden behind its button, numbers
+/// shortened.
+#[test]
+fn cockpit_in_a_narrow_window() {
+    let mut harness = cockpit(ThemeSetting::Light, (800.0, 700.0));
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "cockpit_narrow", &options());
+}
+
+/// A repository window over `backend`, in `theme` and `interface`, in a window
+/// of `size` points, settled and with the pointer outside.
+fn repository_window(
+    backend: FakeBackend,
+    theme: ThemeSetting,
+    interface: InterfaceSize,
+    size: (f32, f32),
+) -> Harness<'static, App> {
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![path(&["work", "git-bull"])],
+            active_tab: Some(0),
+            theme,
+            interface_size: interface,
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let harness = Harness::builder().with_size(size).wgpu().build_ui_state(
+        |ui, app: &mut App| {
+            app.logic();
+            ui::show(app, ui);
+        },
+        test.app,
+    );
+    harness.ctx.set_fonts(gitbull_app::fonts::definitions());
+    let mut harness = harness;
+    settle_window(&mut harness);
+    wait_for_references(&mut harness);
+    // The commit list and the descriptions of its commits load apart from the
+    // sidebar; an image taken before they came would differ from run to run.
+    wait_for(&mut harness, |h| {
+        h.state()
+            .workspace()
+            .and_then(|workspace| workspace.active())
+            .and_then(|tab| tab.session())
+            .is_some_and(|session| {
+                matches!(
+                    session.history().state,
+                    gitbull_core::session::LoadState::Loaded
+                )
+            })
+    });
+    // The descriptions follow. A window too small to show a row of the list
+    // has none to wait for, so this gives up after a while.
+    for _ in 0..500 {
+        let described = harness.query_all_by_role(Role::Row).any(|row| {
+            row.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with(OLDEST_COMMIT))
+        });
+        if described {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    harness.run();
+    harness
+}
+
+/// The description of the oldest commit of [`dialog_backend`].
+const OLDEST_COMMIT: &str = "Read the history of a repository";
+
+fn branch_reference(name: &str, commit: &str) -> Reference {
+    Reference {
+        name: format!("refs/heads/{name}"),
+        short: name.to_owned(),
+        kind: RefKind::Branch,
+        commit: Some(fake_id(commit).to_string()),
+        upstream: None,
+    }
+}
+
+/// The backend of the dialog snapshots: `main` and `feature/graph`, a tag, and
+/// a checkout of `feature/graph` that local changes block.
+fn dialog_backend() -> FakeBackend {
+    let root = path(&["work", "git-bull"]);
+    let files: Vec<String> = [
+        "Cargo.toml",
+        "README.md",
+        "crates/gitbull-app/src/components.rs",
+        "crates/gitbull-app/src/ui.rs",
+        "crates/gitbull-core/src/session.rs",
+        "docs/adr/0008-write-actions-belong-to-the-session.md",
+        "openspec/changes/checkout-and-refs/tasks.md",
+        "crates/gitbull-git/tests/switch.rs",
+    ]
+    .iter()
+    .map(|file| (*file).to_owned())
+    .collect();
+    FakeBackend::default()
+        .with_repository(root.clone())
+        .with_history(
+            root.clone(),
+            vec![commit_line("b", &["a"]), commit_line("a", &[])],
+        )
+        .with_references(
+            root,
+            vec![
+                branch_reference("main", "b"),
+                branch_reference("feature/graph", "a"),
+                Reference {
+                    name: "refs/tags/v1.0".to_owned(),
+                    short: "v1.0".to_owned(),
+                    kind: RefKind::Tag,
+                    commit: Some(fake_id("a").to_string()),
+                    upstream: None,
+                },
+            ],
+        )
+        .with_checkout(
+            CheckoutTarget::Branch("feature/graph".to_owned()),
+            FakeWrite::Refused(Refusal::TrackedChanges(files)),
+        )
+        .with_content(fake_id("b"), described("Draw the graph of a merge"))
+        .with_content(fake_id("a"), described(OLDEST_COMMIT))
+}
+
+/// The content of a commit with this description, by Ada Lovelace.
+fn described(summary: &str) -> gitbull_git::content::CommitContent {
+    let person = Signature {
+        name: "Ada Lovelace".to_owned(),
+        email: "ada@example.com".to_owned(),
+        time: 1_767_268_800,
+        offset_minutes: 0,
+    };
+    gitbull_git::content::CommitContent {
+        author: person.clone(),
+        committer: person,
+        message: format!("{summary}\n"),
+    }
+}
+
+/// The dialog of a checkout that local changes block, over the window of a
+/// repository, in `theme` and `interface`, in a window of `size` points. The
+/// files are many and one is long, so that the dialog has to scroll in the
+/// smallest window.
+fn blocked_checkout(
+    theme: ThemeSetting,
+    interface: InterfaceSize,
+    size: (f32, f32),
+) -> Harness<'static, App> {
+    let mut harness = repository_window(dialog_backend(), theme, interface, size);
+    harness
+        .state_mut()
+        .workspace_mut()
+        .and_then(|workspace| workspace.active_mut())
+        .and_then(|tab| tab.session_mut())
+        .expect("an open session")
+        .start_checkout(CheckoutRequest::Branch("feature/graph".to_owned()));
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Dialog, "Cannot check out feature/graph")
+            .is_some()
+    });
+    // The pointer leaves the window, and the dialog has been laid out.
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+/// The notice before the tag `v1.0` is checked out and HEAD is detached.
+fn detach_notice(theme: ThemeSetting) -> Harness<'static, App> {
+    let mut harness = repository_window(
+        dialog_backend(),
+        theme,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    harness
+        .state_mut()
+        .checkout(CheckoutRequest::Tag("refs/tags/v1.0".to_owned()));
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Dialog, "Check out v1.0?")
+            .is_some()
+    });
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+/// Scenarios "Tracked file would be overwritten" and "Several files".
+#[test]
+fn checkout_dialog_in_the_light_palette() {
+    let mut harness = blocked_checkout(
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "checkout_dialog_light", &options());
+}
+
+#[test]
+fn checkout_dialog_in_the_dark_palette() {
+    let mut harness = blocked_checkout(
+        ThemeSetting::Dark,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "checkout_dialog_dark", &options());
+}
+
+/// Scenario "Window too small for the list".
+#[test]
+fn checkout_dialog_at_150_percent() {
+    let mut harness = blocked_checkout(
+        ThemeSetting::Light,
+        InterfaceSize::Percent150,
+        (1280.0 / 1.5, 800.0 / 1.5),
+    );
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "checkout_dialog_150", &options());
+}
+
+/// Scenario "Window too small for a dialog": the smallest window, 640 by 400
+/// pixels, at 150 %. The title and the buttons are in view; the message and
+/// the list need not be.
+#[test]
+fn checkout_dialog_in_the_smallest_window() {
+    let mut harness = blocked_checkout(
+        ThemeSetting::Light,
+        InterfaceSize::Percent150,
+        (640.0 / 1.5, 400.0 / 1.5),
+    );
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "checkout_dialog_smallest", &options());
+}
+
+/// Scenarios "Notice is shown" of `checkout`.
+#[test]
+fn detach_notice_in_the_light_palette() {
+    let mut harness = detach_notice(ThemeSetting::Light);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "detach_notice_light", &options());
+}
+
+#[test]
+fn detach_notice_in_the_dark_palette() {
+    let mut harness = detach_notice(ThemeSetting::Dark);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "detach_notice_dark", &options());
+}
+
+/// Scenario "Appearance section" with the section "Behaviour" of `app-settings`.
+#[test]
+fn settings_dialog_with_the_section_behaviour() {
+    let mut harness = repository_window(
+        dialog_backend(),
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    harness
+        .get_by_role_and_label(Role::Button, "Settings")
+        .click();
+    harness.run();
+    harness.get_by_label("Behaviour");
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "settings_behaviour", &options());
+}
+
+/// Scenario "Branch checked out elsewhere": a branch that a linked worktree has
+/// checked out carries the mark of a worktree in the sidebar.
+#[test]
+fn sidebar_with_a_branch_of_another_worktree() {
+    let fix = path(&["work", "git-bull-fix"]);
+    let linked = |folder, id: &str, branch: &str| gitbull_git::worktrees::Worktree {
+        path: folder,
+        head: Some(fake_id(id).to_string()),
+        branch: Some(branch.to_owned()),
+        bare: false,
+        detached: false,
+        prunable: false,
+    };
+    let backend = dialog_backend()
+        .with_repository(fix.clone())
+        .with_worktrees(vec![
+            linked(path(&["work", "git-bull"]), "b", "main"),
+            linked(fix, "a", "feature/graph"),
+        ]);
+    let mut harness = repository_window(
+        backend,
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "sidebar_worktree_mark", &options());
+}
+
+/// The dialog "Create branch", opened with the Branch button of the toolbar at
+/// HEAD, with `name` typed into its field.
+fn create_branch_dialog(theme: ThemeSetting, name: &str) -> Harness<'static, App> {
+    let backend = dialog_backend();
+    let mut harness = repository_window(backend, theme, InterfaceSize::Percent100, (1280.0, 800.0));
+    harness
+        .get_by_role_and_label(Role::Button, "Branch")
+        .click();
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Dialog, "Create branch")
+            .is_some()
+    });
+    harness.run();
+    if !name.is_empty() {
+        harness
+            .get_by_role_and_label(Role::TextInput, "Branch name")
+            .type_text(name);
+        harness.run();
+    }
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+/// Scenario "Dialog opens focused" of `reference-creation`; the toolbar behind
+/// it shows the Branch button.
+#[test]
+fn create_branch_dialog_when_it_opens() {
+    let mut harness = create_branch_dialog(ThemeSetting::Light, "");
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "create_branch_empty", &options());
+}
+
+/// Scenario "Name that is a folder of another branch".
+#[test]
+fn create_branch_dialog_with_a_problem() {
+    let mut harness = create_branch_dialog(ThemeSetting::Light, "main/next");
+    harness.get_by_label("main is a branch, and this name would need it to be a folder.");
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "create_branch_problem", &options());
+}
+
+/// Scenario "Valid name", in the dark palette.
+#[test]
+fn create_branch_dialog_with_a_valid_name() {
+    let mut harness = create_branch_dialog(ThemeSetting::Dark, "fix/login-2");
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "create_branch_valid_dark", &options());
+}
+
+/// Scenario "Annotated tag" of `reference-creation`: the dialog "Create tag"
+/// with a name and a message of two lines.
+#[test]
+fn create_tag_dialog_with_a_message() {
+    let backend = dialog_backend();
+    let mut harness = repository_window(
+        backend,
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+    );
+    let row = harness
+        .get_all_by_role(Role::Row)
+        .next()
+        .expect("a commit row")
+        .rect()
+        .center();
+    harness.hover_at(row);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: row,
+            button: eframe::egui::PointerButton::Secondary,
+            pressed,
+            modifiers: eframe::egui::Modifiers::NONE,
+        });
+    }
+    harness.run();
+    harness.get_by_label("Create tag here…").click();
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Dialog, "Create tag")
+            .is_some()
+    });
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, "Tag name")
+        .type_text("v1.3");
+    harness.run();
+    let message = harness.get_by_role_and_label(Role::MultilineTextInput, "Message (optional)");
+    message.focus();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::MultilineTextInput, "Message (optional)")
+        .type_text("Release 1.3\nThe graph of merges");
+    harness.run();
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "create_tag_message", &options());
 }

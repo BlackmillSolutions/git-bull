@@ -8,16 +8,42 @@ stays fluid for histories with more than one million commits.
 ## Requirements
 
 ### Requirement: Commit list
-The commit list SHALL show one row per commit with the columns Graph,
-Description, Date, Author and Commit. The Description column SHALL show the
-first line of the message. The Date column SHALL show the commit date, which
-is the date the list is ordered by. The Commit column SHALL show the
-abbreviated hash. Commits SHALL be ordered from newest to oldest by commit
-date, and a commit MUST NOT appear above any of its children.
+The commit list SHALL show one row per commit with the available columns
+Graph, Description, Date, Author and Commit. All five SHALL be visible by
+default. The user SHALL be able to reorder all five by dragging their
+headers. A header menu SHALL let the user show or hide Graph, Date, Author
+and Commit and restore the default order, visibility and widths. Description
+SHALL remain visible because it contains reference badges and the commit
+title. Reordering or hiding a column SHALL affect its header and every row
+without changing commit order or selection. The Description column SHALL
+show the first line of the message. The Date column SHALL show the commit
+date, which is the date the list is ordered by. The Commit column SHALL show
+the abbreviated hash. Commits SHALL be ordered from newest to oldest by
+commit date, and a commit MUST NOT appear above any of its children.
 
 #### Scenario: Columns are shown
-- **WHEN** a repository with commits is open
-- **THEN** each row shows the graph, the first line of the message, the commit date, the author and the abbreviated hash
+- **WHEN** a repository with commits is open and its column arrangement has not been changed
+- **THEN** each row shows the graph, the first line of the message, the commit date, the author and the abbreviated hash in that order
+
+#### Scenario: Headers are rearranged
+- **WHEN** the user drags the Commit header before Date
+- **THEN** Commit appears before Date in the header and every visible row, and the selected commit stays selected
+
+#### Scenario: Graph and Description can be moved
+- **WHEN** the user drags the Graph header after Description
+- **THEN** the graph and commit titles exchange their positions in the header and rows
+
+#### Scenario: A column is hidden and restored
+- **WHEN** the user hides Author in the header menu and then shows it again
+- **THEN** Author disappears from, then returns to, the header and rows without changing commit order
+
+#### Scenario: Description remains available
+- **WHEN** the user opens the header menu
+- **THEN** the menu does not offer to hide Description
+
+#### Scenario: Default arrangement is restored
+- **WHEN** the user chooses to restore the default arrangement
+- **THEN** Graph, Description, Date, Author and Commit are visible in that order with their default widths
 
 #### Scenario: Parent with a later date
 - **WHEN** a commit has a later commit date than its child
@@ -28,24 +54,59 @@ date, and a commit MUST NOT appear above any of its children.
 - **THEN** the Date column shows the later day
 
 ### Requirement: Reference badges
-Branches, tags and remote branches SHALL appear as badges before the
-description of the commit they point to. HEAD SHALL have its own badge. Each
-kind of reference SHALL have its own colour. When a commit has more badges
-than fit into half the width of the Description column, the remaining ones
-SHALL be summarised as a count, and the tooltip SHALL list all of them.
+Branches, tags and remote branches SHALL appear as badges before the title
+of the commit they point to, within Description. Tags SHALL appear before
+branch badges. HEAD SHALL have its own badge and remain visible. Each kind of reference SHALL
+have its own colour and a distinct non-colour cue. A local branch and one or
+more remote branches with the same branch name SHALL share a compact badge
+when they point to the same commit; the badge SHALL indicate local and each
+remote presence and reveal their full names. References on different commits
+MUST NOT be combined. All badges SHALL be shown while at least 120 logical
+points remain for the commit title. If this cannot be met, the longest
+branch badges SHALL be summarised first, then tags, by a `+N` badge whose
+count is the number of hidden references and whose tooltip lists their full
+names. The title SHALL use the remaining space and truncate with an
+ellipsis when needed. When any references can be hidden, the minimum width
+of Description SHALL also leave room for the `+N` badge and HEAD, where
+present, beside the 120-point title area.
 
 #### Scenario: Commit with several references
 - **WHEN** the branch `main`, the remote branch `origin/main` and HEAD point to the same commit
-- **THEN** the row of that commit shows three badges before the description
+- **THEN** the row shows a distinct HEAD badge and one compact badge indicating both local `main` and remote `origin/main` before the title
+
+#### Scenario: Tags before branches
+- **WHEN** a tag `v1.0`, a branch `main` and a remote branch `origin/main` point to the same commit
+- **THEN** the tag badge appears before the branch badge
 
 #### Scenario: Detached HEAD
 - **WHEN** no branch is checked out
 - **THEN** the HEAD badge appears on the checked-out commit without a branch badge belonging to it
 
+#### Scenario: Diverged branches stay separate
+- **WHEN** local `main` and remote `origin/main` point to different commits
+- **THEN** each appears on its own commit and neither badge claims that both references point there
+
+#### Scenario: Badges fit alongside the title
+- **WHEN** all badges fit while leaving at least 120 logical points for the title
+- **THEN** all badges remain visible even if they occupy more than half of Description
+
+#### Scenario: Longest branches are summarised first
+- **WHEN** several branch badges do not fit beside 120 logical points of title and a tag badge is also present
+- **THEN** the longest branch badges are hidden behind `+N` until the title has 120 logical points, while the tag remains visible if it fits
+- **AND** the tooltip lists the full names of the hidden references
+
 #### Scenario: More badges than fit
-- **WHEN** forty tags point to the same commit
-- **THEN** the row shows the badges that fit, followed by a count of the remaining ones
-- **AND** the description of the commit stays visible
+- **WHEN** forty tags point to the same commit and they cannot all fit beside 120 logical points of title
+- **THEN** the row shows the tags that fit and a `+N` badge counting the hidden tags
+- **AND** the title retains at least 120 logical points and the tooltip lists every hidden tag
+
+#### Scenario: Description is resized to its minimum
+- **WHEN** the user narrows Description as far as it goes on a commit with more references than fit
+- **THEN** a `+N` badge and at least 120 logical points for the title remain visible
+
+#### Scenario: Combined badge is summarised
+- **WHEN** a compact badge representing local `main` and remote `origin/main` is hidden behind `+N`
+- **THEN** the count includes both references and the tooltip names both
 
 ### Requirement: Date display
 Dates SHALL be shown as `YYYY-MM-DD HH:MM` in the local time zone. A tooltip
@@ -289,3 +350,70 @@ cores, 16 GB of memory and an SSD.
 #### Scenario: Memory after loading
 - **WHEN** the history of the Linux kernel repository has loaded completely
 - **THEN** git-bull uses less than 250 MB of memory
+
+### Requirement: Actions on a commit
+A double click or Enter on a commit of the commit list SHALL check out what the
+user means by it, under the requirements of `checkout`. A branch that points to
+the commit SHALL be checked out in place of the commit, so that HEAD stays on a
+branch and no notice comes: a local branch other than the one that is checked
+out, and without one a remote branch that has no local branch of its name yet,
+which is checked out as a remote branch is. A remote branch whose local branch
+exists SHALL NOT count, because that branch may be at another commit. With
+several such branches git-bull SHALL ask which one, in a dialog with a button
+for each and Cancel, and SHALL check nothing out until the user chose. A commit
+that only the checked-out branch points to SHALL do nothing. A commit without
+such a branch SHALL be checked out itself; HEAD is detached there, after the
+notice unless the user has hidden it. The context menu of a commit SHALL offer,
+besides copying its hash, "Check out this commit", which always means the commit
+itself, "Create branch here…" and "Create tag here…". The row "Uncommitted changes" SHALL offer none of these and SHALL keep
+opening the File status view on a double click or Enter. A single click and the
+arrow keys SHALL still only select. While a write action runs in the tab, the
+entries that check out or create SHALL be unavailable.
+
+#### Scenario: Double click on a commit
+- **WHEN** the notice before detaching HEAD is hidden and the user double-clicks a commit that no branch points to
+- **THEN** HEAD is detached at that commit
+
+#### Scenario: Enter on a commit
+- **WHEN** a commit that no branch points to is selected, the notice is not hidden and the user presses Enter
+- **THEN** the notice appears and nothing is checked out until the user confirms
+
+#### Scenario: Double click on the tip of a branch
+- **WHEN** the branch `feature` points to a commit, `main` is checked out and the user double-clicks that commit
+- **THEN** `feature` is checked out, HEAD points to it, and no notice appears
+
+#### Scenario: Several branches at the commit
+- **WHEN** the branches `feature` and `other` point to a commit and the user double-clicks it
+- **THEN** a dialog asks which branch, with a button for each and Cancel, and nothing is checked out until the user chose
+
+#### Scenario: Remote branch only
+- **WHEN** only `origin/topic` points to a commit, no local branch `topic` exists and the user double-clicks the commit
+- **THEN** the local branch `topic` is created with `origin/topic` as its upstream and checked out
+
+#### Scenario: Remote branch whose local branch is elsewhere
+- **WHEN** `origin/feature` points to a commit, the local branch `feature` is at another commit and the user double-clicks the commit
+- **THEN** the commit itself is checked out, after the notice
+
+#### Scenario: Tip of the checked-out branch
+- **WHEN** only the checked-out branch points to a commit and the user double-clicks it
+- **THEN** nothing is checked out and no notice appears
+
+#### Scenario: The menu means the commit
+- **WHEN** the branch `feature` points to a commit and the user chooses Check out this commit in its menu
+- **THEN** the notice appears, and confirming it detaches HEAD at the commit
+
+#### Scenario: Menu of a commit
+- **WHEN** the user opens the context menu of a commit
+- **THEN** it offers Copy hash, Check out this commit, Create branch here and Create tag here
+
+#### Scenario: Single click and arrow keys only select
+- **WHEN** the user clicks a commit once, or moves to it with the arrow keys
+- **THEN** the commit is selected and its details are shown, and nothing is checked out
+
+#### Scenario: Row of the uncommitted changes
+- **WHEN** the user double-clicks the row "Uncommitted changes"
+- **THEN** the File status view is shown, and nothing is checked out
+
+#### Scenario: Menu entries while an action runs
+- **WHEN** a checkout runs in the tab and the user opens the context menu of a commit
+- **THEN** Check out this commit, Create branch here and Create tag here are unavailable, and Copy hash is available

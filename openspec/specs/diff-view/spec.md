@@ -230,11 +230,13 @@ tab as `→` across the width of the tab, and the end of every line as `↵`
 when it ends with a line feed or as `␍↵` when it ends with a carriage
 return and a line feed, in a colour that does not compete with the text. A
 line without a line break at the end of the file SHALL keep its note and
-show no mark of a line ending. Every line, revealed context lines
+show no mark of a line ending; a carriage return it ends in SHALL appear as
+`␍`. Every line, revealed context lines
 included, SHALL show the line ending Git compares: in the working copy that
 is the line ending after Git converted it, for example with
 `core.autocrlf`. When the two lines of a pair differ only in their line
-endings, the marks of their line endings SHALL be marked as changed. The
+endings, or in such a carriage return, these marks SHALL be marked as
+changed. The
 toggle SHALL keep its state across restarts. Copying and assistive
 technology SHALL receive the real text of a line, never the marks and never
 a carriage return.
@@ -246,6 +248,10 @@ a carriage return.
 #### Scenario: Change of line endings
 - **WHEN** invisible characters are shown and the user selects a file whose lines a commit converted from CRLF to LF
 - **THEN** the removed lines end in `␍↵` and the added lines in `↵`, and these marks are marked as changed
+
+#### Scenario: Carriage return at the end of a file
+- **WHEN** invisible characters are shown and a change removes the carriage return that ends the last line of a file without a line feed
+- **THEN** the removed line ends in `␍` and the added line in no mark, both keep the note of the missing line break, and the `␍` is marked as changed
 
 #### Scenario: Line endings converted by Git
 - **WHEN** `core.autocrlf` is `true`, a file in the working copy has CRLF line endings, invisible characters are shown, and the user reveals lines between two hunks of its diff

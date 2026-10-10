@@ -5,29 +5,40 @@
 //! `gitbull-testkit`. Each read operation joins the trait when git-bull
 //! first needs it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::ai_diff::{self, AiDiff, AiDiffRequest};
+use crate::bases;
 use crate::blame::{self, BlameEntry, BlameStream};
 use crate::blob;
 use crate::cancel::CancelToken;
 use crate::changes::{self, FileChange, FileLines};
 use crate::commit_graph::{self, GraphProgress};
+use crate::commits::{self, CommitEntry, Since};
+use crate::compare::{self, BaseComparison, CompareRequest, Setting};
 use crate::content::{Content, ContentReader};
 use crate::diff::{self, FileDiff};
 use crate::error::Error;
+use crate::facts::{self, RepositoryFacts};
 use crate::file_history::{self, FileCommit, FileHistoryStream};
 use crate::head::{self, Head};
 use crate::history::{self, CommitLine, HistoryStream, Revisions};
-use crate::invoke::Git;
+use crate::invoke::{ConfigOverride, Git};
+use crate::merged::MergeCache;
+use crate::new_ref;
 use crate::object_id::ObjectId;
 use crate::path::RepoPath;
 use crate::refs::{self, Reference};
+use crate::refusal::WriteFailure;
 use crate::repository::{self, RepositoryInfo};
 use crate::search::{self, HashMatch, Location, SearchKind, SearchStream};
 use crate::shallow;
 use crate::stashes::{self, Stash, Submodule};
 use crate::status::{self, Group, StatusEntry, WorkingStatus};
 use crate::summary::{self, Summary};
+use crate::switch::{self, CheckoutTarget};
+use crate::uncommitted::{self, Uncommitted};
+use crate::version::{Capabilities, GitVersion};
 use crate::working_copy;
 use crate::worktrees::{self, Worktree};
 
@@ -67,6 +78,9 @@ pub trait ContentSource: Send {
 
 /// Every read operation git-bull performs on a repository.
 pub trait Backend: Send + Sync {
+    /// What the Git behind it can do beyond the oldest supported Git.
+    fn capabilities(&self) -> Capabilities;
+
     /// Checks the repository that contains `path`.
     fn inspect(&self, path: &Path) -> Result<RepositoryInfo, Error>;
 
@@ -94,6 +108,43 @@ pub trait Backend: Send + Sync {
         cancel: &CancelToken,
         progress: Box<dyn FnMut(GraphProgress) + Send>,
     ) -> Result<(), Error>;
+
+    /// Checks `target` out: a write that runs the hooks and filters of the
+    /// repository (spec `checkout`). Changes in the working copy that would be
+    /// overwritten make Git refuse, and the refusal comes back as data. `cancel`
+    /// belongs to the action alone. See [`crate::switch::checkout`].
+    fn checkout(
+        &self,
+        repo: &Path,
+        target: &CheckoutTarget,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure>;
+
+    /// Creates the branch `name` at the commit `start` (a full hash) without an
+    /// upstream, and checks it out when `checkout` is set; a refused checkout
+    /// creates no branch (spec `reference-creation`). `cancel` belongs to the
+    /// action alone. See [`crate::new_ref::create_branch`].
+    fn create_branch(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        checkout: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure>;
+
+    /// Creates the tag `name` at the commit `start` (a full hash): lightweight
+    /// without a message, annotated with one (spec `reference-creation`).
+    /// HEAD, the index and the working copy stay as they are. See
+    /// [`crate::new_ref::create_tag`].
+    fn create_tag(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        message: Option<&str>,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure>;
 
     /// The structure of the history reachable from `revisions`.
     fn history(
@@ -165,8 +216,75 @@ pub trait Backend: Send + Sync {
     /// [`Error::NotARepository`].
     fn worktrees(&self, repo: &Path, cancel: &CancelToken) -> Result<Vec<Worktree>, Error>;
 
-    /// The working copy at `worktree` in short, for the home tab.
-    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error>;
+    /// What the home tab reads of the repository that contains `repo` once
+    /// for all of its worktrees.
+    fn facts(&self, repo: &Path, cancel: &CancelToken) -> Result<RepositoryFacts, Error>;
+
+    /// The branch that `tip` most likely started from, by its full name,
+    /// with Git 2.47 or newer; `None` with an older Git or when Git marks
+    /// none. The `integration` branches stay candidates, and win a tie
+    /// (design of `worktree-cockpit`, decision 3).
+    fn detect_base(
+        &self,
+        repo: &Path,
+        tip: &str,
+        integration: &[String],
+        cancel: &CancelToken,
+    ) -> Result<Option<String>, Error>;
+
+    /// Compares a branch or a detached HEAD with its base, in `repo`, where
+    /// `facts` were read (design of `worktree-cockpit`, decisions 4 and 5).
+    fn compare(
+        &self,
+        repo: &Path,
+        facts: &RepositoryFacts,
+        request: &CompareRequest,
+        cancel: &CancelToken,
+    ) -> Result<BaseComparison, Error>;
+
+    /// What came on `tip` after the commit `seen` (design of
+    /// `worktree-cockpit`, decision 9).
+    fn since(
+        &self,
+        repo: &Path,
+        seen: &str,
+        tip: &str,
+        cancel: &CancelToken,
+    ) -> Result<Since, Error>;
+
+    /// The commits of `from..tip`, newest first, at most `limit` of them.
+    fn commit_list(
+        &self,
+        repo: &Path,
+        from: &str,
+        tip: &str,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<CommitEntry>, Error>;
+
+    /// The uncommitted files of the worktree at `worktree` with their
+    /// lines, untracked files included, with the `overrides` of the facts
+    /// of its repository or, without them, those of its own configuration.
+    fn uncommitted(
+        &self,
+        worktree: &Path,
+        overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Uncommitted, Error>;
+
+    /// The diffs of a worktree for "Copy as AI context", cut after 2,000
+    /// lines (design of `worktree-cockpit`, decision 12).
+    fn ai_diff(&self, request: &AiDiffRequest<'_>, cancel: &CancelToken) -> Result<AiDiff, Error>;
+
+    /// The working copy at `worktree` in short, for the home tab, with the
+    /// `overrides` of the facts of its repository, or, without them, with
+    /// those of its own configuration.
+    fn summary(
+        &self,
+        worktree: &Path,
+        overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Summary, Error>;
 
     /// The commit whose hash starts with `text`.
     fn find_hash(&self, repo: &Path, text: &str, cancel: &CancelToken) -> Result<HashMatch, Error>;
@@ -243,15 +361,37 @@ pub trait Backend: Send + Sync {
 /// Reads repositories through the Git command line.
 pub struct CliBackend {
     git: Git,
+    capabilities: Capabilities,
+    /// Patch ids and outcomes of `merge-tree`, kept across rounds.
+    merges: MergeCache,
+    /// Where quarantines of objects are made.
+    temp_dir: PathBuf,
 }
 
 impl CliBackend {
-    pub fn new(git: Git) -> CliBackend {
-        CliBackend { git }
+    /// Reads with `git`, whose version the start-up check found.
+    pub fn new(git: Git, version: GitVersion) -> CliBackend {
+        CliBackend {
+            git,
+            capabilities: Capabilities::of(version),
+            merges: MergeCache::default(),
+            temp_dir: std::env::temp_dir(),
+        }
+    }
+
+    /// Makes quarantines of objects in `folder` instead of the system's
+    /// temporary folder.
+    pub fn with_temp_dir(mut self, folder: PathBuf) -> CliBackend {
+        self.temp_dir = folder;
+        self
     }
 }
 
 impl Backend for CliBackend {
+    fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
     fn inspect(&self, path: &Path) -> Result<RepositoryInfo, Error> {
         repository::inspect(&self.git, path)
     }
@@ -287,6 +427,37 @@ impl Backend for CliBackend {
         progress: Box<dyn FnMut(GraphProgress) + Send>,
     ) -> Result<(), Error> {
         commit_graph::write_commit_graph(&self.git, repo, cancel, progress)
+    }
+
+    fn checkout(
+        &self,
+        repo: &Path,
+        target: &CheckoutTarget,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        switch::checkout(&self.git, repo, target, cancel)
+    }
+
+    fn create_branch(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        checkout: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        new_ref::create_branch(&self.git, repo, name, start, checkout, cancel)
+    }
+
+    fn create_tag(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        message: Option<&str>,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        new_ref::create_tag(&self.git, repo, name, start, message, cancel)
     }
 
     fn history(
@@ -367,8 +538,79 @@ impl Backend for CliBackend {
         worktrees::worktrees(&self.git, repo, cancel)
     }
 
-    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error> {
-        summary::summary(&self.git, worktree, cancel)
+    fn facts(&self, repo: &Path, cancel: &CancelToken) -> Result<RepositoryFacts, Error> {
+        facts::facts(&self.git, repo, cancel)
+    }
+
+    fn detect_base(
+        &self,
+        repo: &Path,
+        tip: &str,
+        integration: &[String],
+        cancel: &CancelToken,
+    ) -> Result<Option<String>, Error> {
+        if !self.capabilities.is_base {
+            return Ok(None);
+        }
+        bases::detect_base(&self.git, repo, tip, integration, cancel)
+    }
+
+    fn compare(
+        &self,
+        repo: &Path,
+        facts: &RepositoryFacts,
+        request: &CompareRequest,
+        cancel: &CancelToken,
+    ) -> Result<BaseComparison, Error> {
+        let setting = Setting {
+            merge_tree: self.capabilities.merge_tree,
+            temp_dir: &self.temp_dir,
+            cache: &self.merges,
+        };
+        compare::compare(&self.git, repo, facts, request, &setting, cancel)
+    }
+
+    fn since(
+        &self,
+        repo: &Path,
+        seen: &str,
+        tip: &str,
+        cancel: &CancelToken,
+    ) -> Result<Since, Error> {
+        commits::since(&self.git, repo, seen, tip, cancel)
+    }
+
+    fn commit_list(
+        &self,
+        repo: &Path,
+        from: &str,
+        tip: &str,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<CommitEntry>, Error> {
+        commits::commit_list(&self.git, repo, from, tip, limit, cancel)
+    }
+
+    fn uncommitted(
+        &self,
+        worktree: &Path,
+        overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Uncommitted, Error> {
+        uncommitted::uncommitted(&self.git, worktree, overrides, cancel)
+    }
+
+    fn ai_diff(&self, request: &AiDiffRequest<'_>, cancel: &CancelToken) -> Result<AiDiff, Error> {
+        ai_diff::ai_diff(&self.git, request, cancel)
+    }
+
+    fn summary(
+        &self,
+        worktree: &Path,
+        overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Summary, Error> {
+        summary::summary(&self.git, worktree, overrides, cancel)
     }
 
     fn find_hash(&self, repo: &Path, text: &str, cancel: &CancelToken) -> Result<HashMatch, Error> {

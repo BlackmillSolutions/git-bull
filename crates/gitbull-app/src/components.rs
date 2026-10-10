@@ -8,18 +8,123 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id,
-    KeyboardShortcut, Label, Layout, Margin, ModifierNames, Rect, Response, RichText, ScrollArea,
-    Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType, vec2,
+    self, Align, Align2, AsIdSalt, Color32, Context, CornerRadius, Event, Frame, Galley, Id, Key,
+    KeyboardShortcut, Label, Layout, Margin, Modal, ModifierNames, Modifiers, Rect, Response,
+    RichText, ScrollArea, Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, WidgetInfo, WidgetType,
+    vec2,
 };
 
 use crate::icons;
 use crate::style::active_palette;
-use crate::theme::{Palette, SHAPE, TYPE};
+use crate::theme::{Chip, Palette, SHAPE, TYPE};
 use crate::ui::color;
 
 /// The size of an icon in a control, in points.
 const ICON_SIZE: f32 = 16.0;
+
+/// The widest a dialog of a write action gets, in points.
+const DIALOG_WIDTH: f32 = 460.0;
+
+/// What a [`dialog`] returns.
+pub struct DialogOutcome<T> {
+    /// What the contents returned, such as the button that was chosen.
+    pub inner: T,
+    /// Escape was pressed in this frame.
+    pub escape: bool,
+}
+
+/// A dialog in the frame that all dialogs of write actions share (spec
+/// `checkout`, requirement "Dialogs of write actions"), built like the
+/// settings dialog: the window behind takes no input, a click beside the dialog
+/// does not close it, and what does not fit the window scrolls. It has a title
+/// in the style of titles, which assistive technology reads with the contents.
+///
+/// The buttons of a dialog are its `footer`, which stays in view below the
+/// `body` however much of the body has to scroll; the footer gets what the body
+/// returned.
+///
+/// Escape is reported, not acted on: the caller decides what it means.
+pub fn dialog<B, F>(
+    ctx: &Context,
+    id: Id,
+    title: &str,
+    body: impl FnOnce(&mut Ui) -> B,
+    footer: impl FnOnce(&mut Ui, B) -> F,
+) -> DialogOutcome<F> {
+    let room = dialog_room(ctx);
+    let modal = Modal::new(id).area(dialog_area(ctx, id)).show(ctx, |ui| {
+        // Assistive technology meets a dialog, named by its title, and not
+        // only its parts.
+        ctx.accesskit_node_builder(ui.id(), |node| {
+            node.set_role(egui::accesskit::Role::Dialog);
+            node.set_label(title);
+        });
+        ui.set_width(room.x.min(DIALOG_WIDTH));
+        // egui offers a modal the height it had in the last frame, at first
+        // 400 points; the scroll area below may grow to the room.
+        ui.set_max_height(room.y);
+        ui.label(RichText::new(title).text_style(TextStyle::Name(crate::style::TITLE.into())));
+        ui.add_space(SHAPE.space[1]);
+        // The room of the footer: a row of buttons and the space above it.
+        let footer_height =
+            SHAPE.control_height.max(SHAPE.target) + SHAPE.space[2] + ui.spacing().item_spacing.y;
+        let shown = ScrollArea::vertical()
+            .id_salt(id.with("scroll"))
+            .max_height((room.y - ui.min_rect().height() - footer_height).max(0.0))
+            // In a window too small for it, the body gives way to the title
+            // and the buttons.
+            .min_scrolled_height(0.0)
+            .auto_shrink([false, true])
+            .show(ui, body)
+            .inner;
+        ui.add_space(SHAPE.space[2]);
+        footer(ui, shown)
+    });
+    let escape = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
+    DialogOutcome {
+        inner: modal.inner,
+        escape,
+    }
+}
+
+/// Where the title bar of the window ends, told by the window each frame.
+const TITLE_BAR_BOTTOM: &str = "title-bar-bottom";
+
+/// Tells dialogs where the title bar ends, so that they stay below it.
+pub fn set_title_bar_bottom(ctx: &Context, bottom: f32) {
+    ctx.data_mut(|data| data.insert_temp(Id::new(TITLE_BAR_BOTTOM), bottom));
+}
+
+/// The part of the window a dialog may lie in: below the title bar, with a
+/// margin to the edges. The buttons of the window lie above a dialog, so that
+/// the window can still be moved, minimised and closed, and must not cover it.
+/// The margin gives way in a window too small for it.
+fn dialog_region(ctx: &Context) -> Rect {
+    let window = ctx.content_rect();
+    let title_bar: f32 = ctx
+        .data(|data| data.get_temp(Id::new(TITLE_BAR_BOTTOM)))
+        .unwrap_or(window.top());
+    let margin = (2.0 * SHAPE.space[3]).min(window.height() / 12.0);
+    let top = (title_bar + SHAPE.space[0]).max(window.top() + margin);
+    Rect::from_min_max(
+        egui::pos2(window.left() + margin, top.min(window.bottom())),
+        egui::pos2(window.right() - margin, (window.bottom() - margin).max(top)),
+    )
+}
+
+/// The room the contents of a dialog may take in the window, without the frame
+/// of the dialog; what does not fit scrolls.
+pub fn dialog_room(ctx: &Context) -> egui::Vec2 {
+    let frame = egui::Frame::popup(&ctx.global_style()).total_margin().sum();
+    (dialog_region(ctx).size() - frame).max(egui::Vec2::ZERO)
+}
+
+/// Where a dialog lies: in the middle of the part of the window below the
+/// title bar, not of the whole window.
+pub fn dialog_area(ctx: &Context, id: Id) -> egui::Area {
+    let offset = dialog_region(ctx).center() - ctx.content_rect().center();
+    Modal::default_area(id).anchor(egui::Align2::CENTER_CENTER, offset)
+}
 
 /// How a button looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,17 +292,11 @@ pub fn copy_button(
     };
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), sense);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
-    let record = Id::new(COPIED);
     if response.clicked()
         && let Some(text) = text
     {
         ui.ctx().copy_text(text.to_owned());
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(record, response.id));
-    }
-    let confirmed = ui.ctx().data(|data| data.get_temp::<Id>(record)) == Some(response.id);
-    if confirmed && !response.hovered() {
-        ui.ctx().data_mut(|data| data.remove::<Id>(record));
+        confirm_copy(ui.ctx(), response.id);
     }
     let ink = match enabled {
         true => color(palette.text),
@@ -208,15 +307,35 @@ pub fn copy_button(
         ink,
     );
     paint_icon_button(ui, &response, rect, icon, radius(), colours);
-    // egui hides a tooltip after a click until the pointer moves; the
-    // confirmation shows at once.
-    if confirmed && response.hovered() {
-        response.show_tooltip_ui(|ui| {
-            ui.label(copied);
-        });
+    if show_copied(&response, copied) {
         return response;
     }
     tooltip(response, name, None)
+}
+
+/// Records that the button `id` copied its text, so that its tooltip
+/// confirms the copy until the pointer leaves it.
+pub fn confirm_copy(ctx: &Context, id: Id) {
+    ctx.data_mut(|data| data.insert_temp(Id::new(COPIED), id));
+}
+
+/// Shows `copied` in the tooltip of the button of `response` while its
+/// copy is confirmed and the pointer stays on it; returns whether it did.
+pub fn show_copied(response: &Response, copied: &str) -> bool {
+    let record = Id::new(COPIED);
+    let confirmed = response.ctx.data(|data| data.get_temp::<Id>(record)) == Some(response.id);
+    if confirmed && !response.hovered() {
+        response.ctx.data_mut(|data| data.remove::<Id>(record));
+    }
+    // egui hides a tooltip after a click until the pointer moves; the
+    // confirmation shows at once.
+    let shown = confirmed && response.hovered();
+    if shown {
+        response.show_tooltip_ui(|ui| {
+            ui.label(copied);
+        });
+    }
+    shown
 }
 
 /// An [`icon_button`] that switches `value` on and off. While on it is
@@ -1014,6 +1133,50 @@ pub fn changed_lines(ui: &mut Ui, added: u64, removed: u64, width: f32) -> Respo
     let (rect, response) = ui.allocate_exact_size(vec2(width, SHAPE.target), Sense::hover());
     paint_changed_lines(ui, rect.right(), rect.center().y, added, removed);
     response
+}
+
+/// The height of a chip, such as the main state of a worktree.
+pub const CHIP_HEIGHT: f32 = 18.0;
+const CHIP_PADDING: f32 = 6.0;
+const CHIP_ICON: f32 = 12.0;
+const CHIP_ICON_GAP: f32 = 4.0;
+
+/// The size of a chip that shows `word` after its icon.
+pub fn chip_size(ui: &Ui, word: &str) -> egui::Vec2 {
+    let font = TextStyle::Small.resolve(ui.style());
+    let text = ui
+        .painter()
+        .layout_no_wrap(word.to_owned(), font, Color32::PLACEHOLDER)
+        .size()
+        .x;
+    vec2(
+        CHIP_PADDING + CHIP_ICON + CHIP_ICON_GAP + text + CHIP_PADDING,
+        CHIP_HEIGHT,
+    )
+}
+
+/// Paints a chip into `rect`: `icon` and `word` in its ink on its fill,
+/// which is opaque, so that it reads the same on every row.
+pub fn paint_chip(ui: &Ui, rect: Rect, icon: &str, word: &str, chip: Chip) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, SHAPE.radius_small, color(chip.fill));
+    let ink = color(chip.ink);
+    let middle = rect.center().y;
+    let left = rect.left() + CHIP_PADDING;
+    painter.text(
+        egui::pos2(left, middle),
+        Align2::LEFT_CENTER,
+        icon,
+        icons::font(ui.ctx(), CHIP_ICON),
+        ink,
+    );
+    painter.text(
+        egui::pos2(left + CHIP_ICON + CHIP_ICON_GAP, middle),
+        Align2::LEFT_CENTER,
+        word,
+        TextStyle::Small.resolve(ui.style()),
+        ink,
+    );
 }
 
 #[cfg(test)]

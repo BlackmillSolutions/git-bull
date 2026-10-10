@@ -10,19 +10,25 @@ use eframe::egui::{
     RichText, Sense, Ui,
 };
 use fluent_bundle::FluentArgs;
+use gitbull_core::session::Action as WriteAction;
 use gitbull_core::workspace::{Failure, Tab, TabId, TabState, View, Workspace};
 use gitbull_git::Error;
 
 use std::path::PathBuf;
 
 use gitbull_core::git_setup::GitCheck;
+use gitbull_core::overview::Request;
 use gitbull_git::head::Head;
 use gitbull_git::locate::LocateError;
+use gitbull_git::ref_name::{NameKind, NameProblem};
+use gitbull_git::refs::Reference;
 use gitbull_git::version::GitVersion;
 
 use gitbull_core::settings::{ColourVision, InterfaceSize, ThemeSetting};
 
-use crate::app::{App, GitMessage, GitStatus, HunkMove, Notice, Overlay, SettingsDialog};
+use crate::app::{
+    App, CloseQuestion, GitMessage, GitStatus, HunkMove, Notice, Origin, Overlay, SettingsDialog,
+};
 use crate::blame_view;
 use crate::commit_list;
 use crate::commit_panel;
@@ -42,7 +48,9 @@ use crate::style;
 use crate::theme::{Appearance, Palette, Rgb, SHAPE};
 use crate::virtual_list;
 use gitbull_core::search::{Search, SearchMode, SearchState};
-use gitbull_core::session::{BranchFilter, LoadState, Session};
+use gitbull_core::session::{
+    BranchFilter, CheckoutRequest, LoadState, NameRefusal, Session, StartAt, StartKind,
+};
 use gitbull_git::object_id::ObjectId;
 use std::time::Duration;
 
@@ -102,6 +110,7 @@ enum Action {
     SetColourVision(ColourVision),
     SetInterfaceSize(InterfaceSize),
     SetSystemTitleBar(bool),
+    SetDetachNotice(bool),
     /// The next larger and smaller interface size.
     Larger,
     Smaller,
@@ -112,6 +121,31 @@ enum Action {
     BrowseGit,
     ApplyGit,
     CloseActive,
+    /// The user asked to close the window; asks first when a write action
+    /// runs.
+    AskCloseWindow,
+    /// Answers of the question asked before closing while an action runs.
+    KeepOpen,
+    CloseAnyway,
+    /// The user closed the dialog that the last write action asked for.
+    CloseActionDialog,
+    /// Answers of the notice before detaching HEAD.
+    ConfirmDetach,
+    CancelDetach,
+    SetDetachDontShow(bool),
+    /// The choice among the branches at a commit: the one at this place, or
+    /// none.
+    ChooseBranch(usize),
+    CancelBranchChoice,
+    /// Open the dialog "Create branch" at this starting point.
+    BeginCreateBranch(StartAt, Origin),
+    /// The dialog "Create branch": the name was edited, the option to check
+    /// out was set, Create or Cancel was chosen.
+    SetCreateName(String),
+    SetCreateMessage(String),
+    SetCreateCheckout(bool),
+    SubmitCreate,
+    CancelCreate,
     NextTab,
     PreviousTab,
     /// Move the active tab this many places to the right, or to the left.
@@ -123,6 +157,9 @@ enum Action {
     ShowAllBranches(String),
     /// Look for changes made outside git-bull in the tab shown.
     Refresh,
+    /// The window gained the focus: the tab shown looks for changes, and
+    /// the home tab reads again after a reading still running.
+    Returned,
     /// Search the tab shown in this mode for this text.
     Search(SearchMode, String),
     NextMatch,
@@ -168,12 +205,33 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         return;
     }
 
-    actions.extend(dropped_folders(ui));
+    // A dialog that acts on the tab shown keeps that tab shown: a folder
+    // dropped meanwhile would open another one under it.
+    let tab_dialog = app.close_question.is_some()
+        || app.detach_pending.is_some()
+        || app.create_dialog.is_some()
+        || app.branch_choice.is_some();
+    if !tab_dialog {
+        actions.extend(dropped_folders(ui));
+    }
     actions.extend(returned_to_window(ui));
+    if let Some(focused) = window_focus(ui) {
+        app.home.focused = focused;
+    }
     // The window behind the settings dialog takes no keys, as it takes no
     // clicks.
-    if app.dialog.is_none() {
+    if app.dialog.is_none() && !tab_dialog {
         actions.extend(shortcuts(ui));
+    }
+    // A close request of the system, such as Alt+F4 or the title bar of the
+    // system, is asked about like the button of the window.
+    if ui.ctx().input(|input| input.viewport().close_requested())
+        && !app.close_confirmed
+        && !app.running_actions().is_empty()
+    {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        actions.push(Action::AskCloseWindow);
     }
     let focus_search = actions
         .iter()
@@ -214,6 +272,20 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if app.dialog.is_some() {
         settings_dialog(app, ui, &mut actions);
     }
+    // Before the dialogs are drawn, so that what Git said about a name shows
+    // in the dialog that asked, and not in a dialog of its own for a frame.
+    app.poll_create();
+    if app.close_question.is_some() {
+        close_question_dialog(app, ui, &mut actions);
+    } else if app.detach_pending.is_some() {
+        detach_notice_dialog(app, ui, &mut actions);
+    } else if app.branch_choice.is_some() {
+        branch_choice_dialog(app, ui, &mut actions);
+    } else if app.create_dialog.is_some() {
+        create_dialog(app, ui, &mut actions);
+    } else if let Some(dialog) = app.action_dialog() {
+        action_dialog(app, &dialog, ui, &mut actions);
+    }
     Panel::bottom("status_bar").show(ui, |ui| status_bar(app, ui));
     if let Some(notice) = &app.notice {
         Panel::top("notice").show(ui, |ui| notice_bar(app, notice, ui, &mut actions));
@@ -252,6 +324,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     apply(app, actions);
     app.forget_closed_views();
+    if std::mem::take(&mut app.send_close) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+    }
 }
 
 fn apply(app: &mut App, actions: Vec<Action>) {
@@ -262,18 +337,21 @@ fn apply(app: &mut App, actions: Vec<Action>) {
                     workspace.activate(id);
                 }
             }
-            Action::Close(id) => {
-                if let Some(workspace) = app.workspace_mut() {
-                    workspace.close(id);
-                }
-            }
+            Action::Close(id) => app.request_close_tab(id),
             Action::ShowHome(focus_filter) => app.show_home(focus_filter),
             Action::Open(path) => app.open(path),
             Action::DismissNotice => app.notice = None,
             Action::ShowAllBranches(reference) => app.show_all_branches(&reference),
             Action::Refresh => {
                 if app.home_shown() {
-                    app.read_home();
+                    app.read_home(Request::Refresh);
+                } else if let Some(workspace) = app.workspace_mut() {
+                    workspace.refresh_active();
+                }
+            }
+            Action::Returned => {
+                if app.home_shown() {
+                    app.read_home(Request::Again);
                 } else if let Some(workspace) = app.workspace_mut() {
                     workspace.refresh_active();
                 }
@@ -293,6 +371,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::SetColourVision(vision) => app.set_colour_vision(vision),
             Action::SetInterfaceSize(size) => app.set_interface_size(size),
             Action::SetSystemTitleBar(system) => app.set_system_title_bar(system),
+            Action::SetDetachNotice(show) => app.set_detach_notice(show),
             Action::Larger => app.set_interface_size(app.settings().interface_size.larger()),
             Action::Smaller => app.set_interface_size(app.settings().interface_size.smaller()),
             Action::SetLanguage(language) => app.set_language(language),
@@ -307,10 +386,31 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::BrowseGit => app.browse_git(),
             Action::ApplyGit => app.apply_git_input(),
             Action::CloseActive => {
-                if let Some(workspace) = app.workspace_mut()
-                    && let Some(id) = workspace.active().map(|tab| tab.id())
+                if let Some(id) = app
+                    .workspace()
+                    .and_then(|workspace| workspace.active())
+                    .map(|tab| tab.id())
                 {
-                    workspace.close(id);
+                    app.request_close_tab(id);
+                }
+            }
+            Action::AskCloseWindow => app.close_question = Some(CloseQuestion::Window),
+            Action::KeepOpen => app.close_question = None,
+            Action::CloseAnyway => app.close_anyway(),
+            Action::CloseActionDialog => app.close_action_dialog(),
+            Action::ConfirmDetach => app.confirm_detach(),
+            Action::CancelDetach => app.detach_pending = None,
+            Action::ChooseBranch(index) => app.choose_branch(index),
+            Action::CancelBranchChoice => app.cancel_branch_choice(),
+            Action::BeginCreateBranch(at, origin) => app.begin_create_branch(at, origin),
+            Action::SetCreateName(text) => app.set_create_name(text),
+            Action::SetCreateMessage(text) => app.set_create_message(text),
+            Action::SetCreateCheckout(on) => app.set_create_checkout(on),
+            Action::SubmitCreate => app.submit_create(),
+            Action::CancelCreate => app.cancel_create(),
+            Action::SetDetachDontShow(on) => {
+                if let Some(pending) = &mut app.detach_pending {
+                    pending.dont_show = on;
                 }
             }
             Action::Retry(id) => {
@@ -562,6 +662,18 @@ fn shortcuts(ui: &Ui) -> Vec<Action> {
     actions
 }
 
+/// Whether the window has the focus, as this pass tells it: by an event,
+/// else as the window reports it; `None` when it tells nothing.
+fn window_focus(ui: &Ui) -> Option<bool> {
+    ui.ctx().input(|input| {
+        let event = input.events.iter().rev().find_map(|event| match event {
+            egui::Event::WindowFocused(focused) => Some(*focused),
+            _ => None,
+        });
+        event.or(input.viewport().focused)
+    })
+}
+
 /// Returning to the window may follow work in a terminal, so it refreshes.
 fn returned_to_window(ui: &Ui) -> Option<Action> {
     ui.ctx()
@@ -571,7 +683,7 @@ fn returned_to_window(ui: &Ui) -> Option<Action> {
                 .iter()
                 .any(|event| matches!(event, egui::Event::WindowFocused(true)))
         })
-        .then_some(Action::Refresh)
+        .then_some(Action::Returned)
 }
 
 /// Folders dropped onto the window this frame. A dropped file opens the
@@ -642,6 +754,11 @@ fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>
             args.set("error", error.clone());
             app.texts.text_with(Msg::HomeFileManagerFailed, Some(&args))
         }
+        Notice::CopyFailed(error) => {
+            let mut args = FluentArgs::new();
+            args.set("error", error.clone());
+            app.texts.text_with(Msg::CockpitCopyFailed, Some(&args))
+        }
     };
     let show_all = app.texts.text(Msg::NoticeShowAllBranches);
     let offered: &[&str] = match notice {
@@ -670,7 +787,8 @@ fn notice_kind(notice: &Notice) -> BannerKind {
         | Notice::NotACommit(_)
         | Notice::HashUnknown(_)
         | Notice::HashAmbiguous(_)
-        | Notice::FileManagerFailed(_) => BannerKind::Warning,
+        | Notice::FileManagerFailed(_)
+        | Notice::CopyFailed(_) => BannerKind::Warning,
     }
 }
 
@@ -817,11 +935,12 @@ const WINDOW_BUTTON: f32 = 46.0;
 fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let kind = title_bar_of(app, ui.ctx());
     if kind == TitleBar::System && app.workspace().is_none() {
+        components::set_title_bar_bottom(ui.ctx(), 0.0);
         return;
     }
     let own = kind != TitleBar::System;
     let frame = egui::Frame::side_top_panel(ui.style());
-    Panel::top("title_bar").frame(frame).show(ui, |ui| {
+    let bar = Panel::top("title_bar").frame(frame).show(ui, |ui| {
         if own {
             // First, so that the tabs and buttons on it take their own
             // clicks; with the margin of the panel, to its edges. Without
@@ -877,14 +996,15 @@ fn title_bar(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
                 row.left_top(),
                 egui::pos2(ui.max_rect().right(), row.bottom()),
             ) + frame.inner_margin;
-            window_buttons(app, ui.ctx(), bar);
+            window_buttons(app, ui.ctx(), bar, actions);
         }
     });
+    components::set_title_bar_bottom(ui.ctx(), bar.response.rect.bottom());
 }
 
 /// Minimize, Maximize or Restore, and Close window at the right end of
 /// `bar`, on the layer of the window controls (design, decision 3).
-fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
+fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect, actions: &mut Vec<Action>) {
     let mut ui = window_controls(ctx, "window-buttons", bar);
     let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
     let size = if maximized {
@@ -910,7 +1030,7 @@ fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
         (icons::CLOSE, Msg::WindowClose, egui::ViewportCommand::Close),
     ];
     // While the settings dialog is open, Tab stays in it.
-    let focusable = app.dialog.is_none();
+    let focusable = app.dialog.is_none() && app.close_question.is_none();
     let count = buttons.len();
     for (index, (icon, name, command)) in buttons.into_iter().enumerate() {
         let right = bar.right() - WINDOW_BUTTON * (count - 1 - index) as f32;
@@ -921,7 +1041,11 @@ fn window_buttons(app: &App, ctx: &egui::Context, bar: egui::Rect) {
         let closes = matches!(command, egui::ViewportCommand::Close);
         let name = app.texts.text(name);
         if components::window_button(&mut ui, rect, icon, &name, closes, focusable).clicked() {
-            ctx.send_viewport_cmd(command);
+            if closes && !app.close_confirmed && !app.running_actions().is_empty() {
+                actions.push(Action::AskCloseWindow);
+            } else {
+                ctx.send_viewport_cmd(command);
+            }
         }
     }
 }
@@ -1354,6 +1478,8 @@ fn tab_button(
 fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>) {
     let appearance = appearance(app, ui);
     ui.horizontal(|ui| {
+        // The right edge of the toolbar, before its parts can push it out.
+        let edge = ui.max_rect().right();
         let open = app.texts.text(Msg::ToolbarOpen);
         let open = Button::new(&open)
             .kind(Kind::Ghost)
@@ -1370,16 +1496,41 @@ fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>
         if refresh.show(ui).clicked() {
             actions.push(Action::Refresh);
         }
+        // Branch belongs to a repository tab: it starts at the commit selected
+        // in the list, at HEAD otherwise.
+        let in_repository = app
+            .workspace()
+            .and_then(|workspace| workspace.active())
+            .is_some_and(|tab| tab.session().is_some());
+        if in_repository {
+            let start = app.toolbar_start();
+            let branch = app.texts.text(Msg::ToolbarBranch);
+            let branch = ui
+                .add_enabled_ui(app.can_create_at(&start), |ui| {
+                    Button::new(&branch)
+                        .kind(Kind::Ghost)
+                        .icon(icons::BRANCH)
+                        .show(ui)
+                })
+                .inner;
+            if branch.clicked() {
+                actions.push(Action::BeginCreateBranch(start, Origin::Commits));
+            }
+        }
         let search = app
             .workspace()
             .and_then(|workspace| workspace.active())
             .and_then(|tab| tab.session())
             .map(|session| session.search());
+        let searching = search.is_some();
         if let Some(search) = search {
             ui.separator();
             search_bar(app, ui, search, focus_search, actions);
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Where the parts on the left end; the ones on the right start at the
+        // other edge.
+        let left_end = ui.min_rect().right();
+        let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let settings = app.texts.text(Msg::ToolbarSettings);
             if components::icon_button(ui, icons::GEAR, &settings, None).clicked() {
                 actions.push(Action::OpenSettings);
@@ -1392,8 +1543,58 @@ fn toolbar(app: &App, ui: &mut Ui, focus_search: bool, actions: &mut Vec<Action>
             let theme = app.texts.text(Msg::ToolbarTheme);
             let theme = components::icon_button(ui, icon, &theme, None);
             egui::Popup::menu(&theme).show(|ui| theme_choice(app, ui, actions));
+            ui.min_rect().width()
         });
+        // The search gives way when the toolbar has less room than its parts
+        // ask for, as at a large interface size, and takes the room back when
+        // there is some again. What is found here holds for the next frame.
+        if searching {
+            let slack = edge - right.inner - left_end - ui.spacing().item_spacing.x;
+            let before = search_room(ui.ctx());
+            let mut room = before;
+            let toolbar = edge;
+            let fitting = (room.field + slack).clamp(SEARCH_FIELD_MIN, SEARCH_FIELD_WIDTH);
+            if room.compact_below.is_none()
+                && fitting <= SEARCH_FIELD_MIN
+                && room.field + slack < SEARCH_FIELD_MIN
+            {
+                // Even the narrowest field does not fit: Previous and Next
+                // become icons, until the toolbar is wide enough for their
+                // labels again.
+                room.compact_below = Some(toolbar + (SEARCH_FIELD_MIN - (room.field + slack)));
+            } else if room.compact_below.is_some_and(|needed| toolbar >= needed) {
+                room.compact_below = None;
+            }
+            room.field = fitting;
+            if room != before {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(Id::new(SEARCH_ROOM), room));
+                ui.ctx().request_repaint();
+            }
+        }
     });
+}
+
+/// The width the search field asks for, and the least it shrinks to.
+const SEARCH_FIELD_WIDTH: f32 = 260.0;
+const SEARCH_FIELD_MIN: f32 = 80.0;
+const SEARCH_ROOM: &str = "search-room";
+
+/// How the search fits the toolbar in this frame.
+#[derive(Clone, Copy, PartialEq)]
+struct SearchRoom {
+    /// The width of the field.
+    field: f32,
+    /// Previous and Next are icons while the toolbar is narrower than this.
+    compact_below: Option<f32>,
+}
+
+fn search_room(ctx: &egui::Context) -> SearchRoom {
+    ctx.data(|data| data.get_temp(Id::new(SEARCH_ROOM)))
+        .unwrap_or(SearchRoom {
+            field: SEARCH_FIELD_WIDTH,
+            compact_below: None,
+        })
 }
 
 /// The search field with its mode, Previous and Next, and the number of
@@ -1426,7 +1627,9 @@ fn search_bar(app: &App, ui: &mut Ui, search: &Search, focus: bool, actions: &mu
         .accesskit_node_builder(combo.response.id, |node| node.set_label(mode_name));
     let mut text = search.text().to_owned();
     let hint = app.texts.text(Msg::SearchHint);
-    let field = ui.add(components::text_edit(&mut text, &hint, 260.0).id(Id::new(SEARCH_FIELD)));
+    let room = search_room(ui.ctx());
+    let field =
+        ui.add(components::text_edit(&mut text, &hint, room.field).id(Id::new(SEARCH_FIELD)));
     ui.ctx()
         .accesskit_node_builder(field.id, |node| node.set_label(hint.as_str()));
     if focus {
@@ -1441,16 +1644,24 @@ fn search_bar(app: &App, ui: &mut Ui, search: &Search, focus: bool, actions: &mu
     }
     let found = !search.matches().is_empty();
     ui.add_enabled_ui(found, |ui| {
-        if Button::new(&app.texts.text(Msg::SearchPrevious))
-            .show(ui)
-            .clicked()
-        {
+        let (previous, next) = (
+            app.texts.text(Msg::SearchPrevious),
+            app.texts.text(Msg::SearchNext),
+        );
+        // In a toolbar without room for their labels they are icons, named
+        // by a tooltip and for assistive technology as before.
+        let (previous, next) = if room.compact_below.is_some() {
+            (
+                components::icon_button(ui, icons::PREVIOUS_HUNK, &previous, None),
+                components::icon_button(ui, icons::NEXT_HUNK, &next, None),
+            )
+        } else {
+            (Button::new(&previous).show(ui), Button::new(&next).show(ui))
+        };
+        if previous.clicked() {
             actions.push(Action::PreviousMatch);
         }
-        if Button::new(&app.texts.text(Msg::SearchNext))
-            .show(ui)
-            .clicked()
-        {
+        if next.clicked() {
             actions.push(Action::NextMatch);
         }
     });
@@ -1485,6 +1696,578 @@ fn theme_choice(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     }
 }
 
+/// What a write action is called, such as "Checking out feature".
+pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
+    match action {
+        WriteAction::Checkout { target } => {
+            let mut args = FluentArgs::new();
+            args.set("target", target.clone());
+            app.texts.text_with(Msg::ActionCheckout, Some(&args))
+        }
+        WriteAction::CreateBranch { name } => {
+            let mut args = FluentArgs::new();
+            args.set("name", name.clone());
+            app.texts.text_with(Msg::ActionCreateBranch, Some(&args))
+        }
+        WriteAction::CreateTag { name } => {
+            let mut args = FluentArgs::new();
+            args.set("name", name.clone());
+            app.texts.text_with(Msg::ActionCreateTag, Some(&args))
+        }
+    }
+}
+
+/// The dialog that the last write action of the tab asks for: the changes or
+/// untracked files that block a checkout, a failure with Git's message, or a
+/// hook that failed after the action took place. The safe button has the focus
+/// first, and Escape closes the dialog.
+fn action_dialog(
+    app: &App,
+    dialog: &gitbull_core::session::ActionDialog,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+) {
+    use gitbull_core::session::ActionDialog;
+    let texts = &app.texts;
+    let target = |action: &WriteAction| match action {
+        WriteAction::Checkout { target } => target.clone(),
+        WriteAction::CreateBranch { name } | WriteAction::CreateTag { name } => name.clone(),
+    };
+    let named = |msg: Msg, name: &str| {
+        let mut args = FluentArgs::new();
+        args.set("target", name.to_owned());
+        args.set("name", name.to_owned());
+        texts.text_with(msg, Some(&args))
+    };
+    // A failure is told in the words of what was asked for.
+    let failed_title = |action: &WriteAction| match action {
+        WriteAction::Checkout { target } => named(Msg::CheckoutFailedTitle, target),
+        WriteAction::CreateBranch { name } => named(Msg::CreateFailedTitle, name),
+        WriteAction::CreateTag { name } => named(Msg::CreateTagFailedTitle, name),
+    };
+    let (title, intro, details, close_label, copy) = match dialog {
+        ActionDialog::BlockedByChanges { target, files } => (
+            named(Msg::CheckoutBlockedTitle, target),
+            texts.text(Msg::CheckoutBlockedChanges),
+            files.join("\n"),
+            texts.text(Msg::DialogCancel),
+            false,
+        ),
+        ActionDialog::BlockedByUntracked { target, files } => (
+            named(Msg::CheckoutBlockedTitle, target),
+            texts.text(Msg::CheckoutBlockedUntracked),
+            files.join("\n"),
+            texts.text(Msg::DialogCancel),
+            false,
+        ),
+        ActionDialog::LocalBranchFollowsOther {
+            target,
+            local,
+            upstream,
+        } => {
+            let mut args = FluentArgs::new();
+            args.set("local", local.clone());
+            let body = match upstream {
+                Some(upstream) => {
+                    args.set("upstream", upstream.clone());
+                    texts.text_with(Msg::CheckoutTwinFollows, Some(&args))
+                }
+                None => texts.text_with(Msg::CheckoutTwinFollowsNone, Some(&args)),
+            };
+            (
+                named(Msg::CheckoutBlockedTitle, target),
+                body,
+                String::new(),
+                texts.text(Msg::DialogClose),
+                false,
+            )
+        }
+        ActionDialog::WorktreeInUse { target, folder } => {
+            let mut args = FluentArgs::new();
+            args.set("target", target.clone());
+            args.set("folder", folder.display().to_string());
+            (
+                named(Msg::CheckoutBlockedTitle, target),
+                texts.text_with(Msg::CheckoutWorktreeBody, Some(&args)),
+                String::new(),
+                texts.text(Msg::DialogCancel),
+                false,
+            )
+        }
+        ActionDialog::NameRefused { action, why } => (
+            failed_title(action),
+            texts.text(refused_name_msg(
+                if matches!(action, WriteAction::CreateTag { .. }) {
+                    NameKind::Tag
+                } else {
+                    NameKind::Branch
+                },
+                why,
+            )),
+            String::new(),
+            texts.text(Msg::DialogClose),
+            false,
+        ),
+        ActionDialog::Failed { action, message } => (
+            failed_title(action),
+            texts.text(Msg::CheckoutFailedBody),
+            message.clone(),
+            texts.text(Msg::DialogClose),
+            true,
+        ),
+        ActionDialog::HookFailed { action, output } => (
+            named(Msg::CheckoutHookTitle, &target(action)),
+            texts.text(Msg::CheckoutHookBody),
+            output.clone(),
+            texts.text(Msg::DialogClose),
+            true,
+        ),
+    };
+    let copy_label = texts.text(Msg::DialogCopyMessage);
+    // A branch that another worktree has checked out can be shown there.
+    let open_folder = match dialog {
+        ActionDialog::WorktreeInUse { folder, .. } => Some(folder.clone()),
+        _ => None,
+    };
+    let open_label = open_folder
+        .as_ref()
+        .map(|_| texts.text(Msg::CheckoutOpenWorktree));
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("action-dialog"),
+        &title,
+        |ui| {
+            ui.label(intro);
+            ui.add_space(SHAPE.space[1]);
+            // A file or a line of Git's message per label, so that each is read
+            // and found on its own.
+            for line in details.lines() {
+                ui.label(RichText::new(line).monospace());
+            }
+        },
+        |ui, ()| {
+            let (mut close, mut open) = (false, false);
+            ui.horizontal(|ui| {
+                // The button that shows the other worktree is the main choice;
+                // the safe one has the focus.
+                let opener = open_label.as_ref().map(|label| {
+                    components::Button::new(label)
+                        .kind(components::Kind::Primary)
+                        .show(ui)
+                });
+                let button = components::Button::new(&close_label)
+                    .kind(if opener.is_some() {
+                        components::Kind::Secondary
+                    } else {
+                        components::Kind::Primary
+                    })
+                    .show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    button.request_focus();
+                }
+                close = button.clicked();
+                open = opener.is_some_and(|opener| opener.clicked());
+                if copy && components::Button::new(&copy_label).show(ui).clicked() {
+                    ui.ctx().copy_text(details.clone());
+                }
+            });
+            (close, open)
+        },
+    );
+    let (close, open) = outcome.inner;
+    if open && let Some(folder) = open_folder {
+        actions.push(Action::Open(folder));
+    }
+    if close || open || outcome.escape {
+        actions.push(Action::CloseActionDialog);
+    }
+}
+
+/// What says that Git refused a name which the check of the dialog let through.
+fn refused_name_msg(kind: NameKind, why: &NameRefusal) -> Msg {
+    match (kind, why) {
+        (NameKind::Branch, NameRefusal::Taken) => Msg::CreateRefusedTaken,
+        (NameKind::Branch, NameRefusal::Invalid) => Msg::CreateRefusedInvalid,
+        (NameKind::Tag, NameRefusal::Taken) => Msg::CreateTagRefusedTaken,
+        (NameKind::Tag, NameRefusal::Invalid) => Msg::CreateTagRefusedInvalid,
+    }
+}
+
+/// How a problem with a name is worded.
+fn name_problem_text(texts: &i18n::Translations, kind: NameKind, problem: &NameProblem) -> String {
+    let branch = kind == NameKind::Branch;
+    let with = |msg: Msg, key: &str, value: &str| {
+        let mut args = FluentArgs::new();
+        args.set(key, value.to_owned());
+        texts.text_with(msg, Some(&args))
+    };
+    match problem {
+        // An empty name needs no explanation: Create is unavailable.
+        NameProblem::Empty => String::new(),
+        NameProblem::Character(c) if c.is_ascii_control() => texts.text(Msg::NameControl),
+        NameProblem::Character(c) => with(Msg::NameCharacter, "character", &c.to_string()),
+        NameProblem::DoubleDot => texts.text(Msg::NameDoubleDot),
+        NameProblem::AtBrace => texts.text(Msg::NameAtBrace),
+        NameProblem::LeadingDash => texts.text(Msg::NameLeadingDash),
+        NameProblem::LeadingSlash => texts.text(Msg::NameLeadingSlash),
+        NameProblem::TrailingSlash => texts.text(Msg::NameTrailingSlash),
+        NameProblem::DoubleSlash => texts.text(Msg::NameDoubleSlash),
+        NameProblem::EndsWithDot => texts.text(Msg::NameEndsWithDot),
+        NameProblem::EndsWithLock => texts.text(Msg::NameEndsWithLock),
+        NameProblem::PartStartsWithDot => texts.text(Msg::NamePartStartsWithDot),
+        NameProblem::Reserved(name) => with(Msg::NameReserved, "name", name),
+        NameProblem::Taken => texts.text(if branch {
+            Msg::NameTakenBranch
+        } else {
+            Msg::NameTakenTag
+        }),
+        NameProblem::NeedsFolder(existing) => with(
+            if branch {
+                Msg::NameNeedsFolderBranch
+            } else {
+                Msg::NameNeedsFolderTag
+            },
+            "existing",
+            existing,
+        ),
+        NameProblem::IsFolderOf(existing) => with(
+            if branch {
+                Msg::NameIsFolderOfBranch
+            } else {
+                Msg::NameIsFolderOfTag
+            },
+            "existing",
+            existing,
+        ),
+    }
+}
+
+/// The dialog "Create branch" or "Create tag": the starting point, the name
+/// with its check while the user types, and for a branch the option to check
+/// it out, for a tag a message, which is optional. The cursor starts in the
+/// name; Enter there creates when the name is valid, and Escape cancels.
+fn create_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let Some(dialog) = &app.create_dialog else {
+        return;
+    };
+    let texts = &app.texts;
+    let references: Vec<Reference> = app
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .and_then(|session| session.sidebar())
+        .and_then(|sidebar| sidebar.as_ref().ok())
+        .map(|sidebar| sidebar.references.clone())
+        .unwrap_or_default();
+    let problem = dialog.problem(&references);
+    let available = problem.is_none() && !dialog.running;
+    // The commit as the dialog names it: the short hash and the first line of
+    // its message, once that is known.
+    let commit = {
+        let short = dialog.start.commit.short(SHORT_HASH);
+        match &dialog.description {
+            Some(description) if !description.is_empty() => format!("{short} {description}"),
+            _ => short,
+        }
+    };
+    let start = match &dialog.start.kind {
+        StartKind::Commit => commit,
+        StartKind::Reference(name) => {
+            let mut args = FluentArgs::new();
+            args.set("name", name.clone());
+            args.set("commit", commit);
+            texts.text_with(Msg::CreateStartReference, Some(&args))
+        }
+        StartKind::Head => {
+            let mut args = FluentArgs::new();
+            args.set("commit", commit);
+            texts.text_with(Msg::CreateStartHead, Some(&args))
+        }
+    };
+    let tag = dialog.kind == NameKind::Tag;
+    let title = texts.text(if tag {
+        Msg::CreateTagTitle
+    } else {
+        Msg::CreateBranchTitle
+    });
+    let hint = texts.text(if tag {
+        Msg::CreateTagName
+    } else {
+        Msg::CreateBranchName
+    });
+    let message_hint = texts.text(Msg::CreateTagMessage);
+    let check_out = texts.text(Msg::CreateCheckOut);
+    let create = texts.text(Msg::CreateConfirm);
+    let cancel = texts.text(Msg::DialogCancel);
+    let shown_problem = problem
+        .as_ref()
+        .map(|problem| name_problem_text(texts, dialog.kind, problem))
+        .filter(|text| !text.is_empty());
+    let refused = dialog
+        .refused
+        .as_ref()
+        .map(|why| texts.text(refused_name_msg(dialog.kind, why)));
+    let mut name = dialog.name.clone();
+    let mut message = dialog.message.clone();
+    let mut checkout = dialog.checkout;
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("create-reference"),
+        &title,
+        |ui| {
+            ui.label(RichText::new(texts.text(Msg::CreateStartCaption)).weak());
+            ui.label(start);
+            ui.add_space(SHAPE.space[1]);
+            let field = ui
+                .add_enabled_ui(!dialog.running, |ui| {
+                    ui.add(components::text_edit(&mut name, &hint, 320.0))
+                })
+                .inner;
+            ui.ctx()
+                .accesskit_node_builder(field.id, |node| node.set_label(hint.as_str()));
+            if ui.memory(|memory| memory.focused().is_none()) && !dialog.running {
+                field.request_focus();
+            }
+            if let Some(text) = shown_problem.or(refused) {
+                components::error_text(ui, text);
+            }
+            ui.add_space(SHAPE.space[1]);
+            ui.add_enabled_ui(!dialog.running, |ui| {
+                if tag {
+                    // Several lines: Enter is a line break here.
+                    let field = ui.add(
+                        egui::TextEdit::multiline(&mut message)
+                            .hint_text(message_hint.as_str())
+                            .desired_rows(4)
+                            .desired_width(320.0),
+                    );
+                    ui.ctx().accesskit_node_builder(field.id, |node| {
+                        node.set_label(message_hint.as_str());
+                    });
+                } else {
+                    components::checkbox(ui, &mut checkout, &check_out);
+                }
+            });
+            if let Some(failure) = &dialog.failure {
+                // A line of Git's message per label, so that each is found alone.
+                for line in failure.lines() {
+                    components::error_text(ui, line);
+                }
+            }
+            field
+        },
+        |ui, field| {
+            let (mut submit, mut cancelled) = (false, false);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(available, |ui| {
+                    submit = components::Button::new(&create)
+                        .kind(components::Kind::Primary)
+                        .show(ui)
+                        .clicked();
+                });
+                ui.add_enabled_ui(!dialog.running, |ui| {
+                    cancelled = components::Button::new(&cancel).show(ui).clicked();
+                });
+            });
+            // Enter in the name does what Create does.
+            if (field.lost_focus() || field.has_focus())
+                && ui.input(|input| input.key_pressed(Key::Enter))
+            {
+                submit = true;
+            }
+            (submit, cancelled)
+        },
+    );
+    if name != dialog.name {
+        actions.push(Action::SetCreateName(name));
+    }
+    if message != dialog.message {
+        actions.push(Action::SetCreateMessage(message));
+    }
+    if checkout != dialog.checkout {
+        actions.push(Action::SetCreateCheckout(checkout));
+    }
+    let (submit, cancelled) = outcome.inner;
+    if submit && available {
+        actions.push(Action::SubmitCreate);
+    } else if cancelled || (outcome.escape && !dialog.running) {
+        actions.push(Action::CancelCreate);
+    }
+}
+
+/// The choice among the branches that point to the commit the user activated:
+/// a button for each, by its name, and Cancel, which Escape means too. The
+/// first branch has the focus.
+fn branch_choice_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let Some(branches) = &app.branch_choice else {
+        return;
+    };
+    let texts = &app.texts;
+    let names: Vec<String> = branches
+        .iter()
+        .map(|request| match request {
+            CheckoutRequest::Branch(name) => name.clone(),
+            // A remote branch as the sidebar names it, `origin/topic`.
+            CheckoutRequest::RemoteBranch(full) | CheckoutRequest::Tag(full) => full
+                .strip_prefix("refs/remotes/")
+                .or_else(|| full.strip_prefix("refs/tags/"))
+                .unwrap_or(full)
+                .to_owned(),
+            CheckoutRequest::Commit(id) => id.short(SHORT_HASH),
+        })
+        .collect();
+    let title = texts.text(Msg::BranchChoiceTitle);
+    let cancel = texts.text(Msg::DialogCancel);
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("branch-choice"),
+        &title,
+        |ui| {
+            ui.label(texts.text(Msg::BranchChoiceBody));
+            ui.add_space(SHAPE.space[1]);
+            let mut chosen = None;
+            for (index, name) in names.iter().enumerate() {
+                let button = components::Button::new(name).icon(icons::BRANCH).show(ui);
+                if index == 0 && ui.memory(|memory| memory.focused().is_none()) {
+                    button.request_focus();
+                }
+                if button.clicked() {
+                    chosen = Some(index);
+                }
+            }
+            chosen
+        },
+        |ui, chosen| {
+            let cancelled = components::Button::new(&cancel).show(ui).clicked();
+            (chosen, cancelled)
+        },
+    );
+    match outcome.inner {
+        (Some(index), _) => actions.push(Action::ChooseBranch(index)),
+        (None, true) => actions.push(Action::CancelBranchChoice),
+        (None, false) if outcome.escape => actions.push(Action::CancelBranchChoice),
+        (None, false) => {}
+    }
+}
+
+/// The notice before a tag or a commit is checked out and HEAD no longer
+/// points to a branch. Cancel has the focus first, and Escape means it.
+fn detach_notice_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let Some(pending) = &app.detach_pending else {
+        return;
+    };
+    let texts = &app.texts;
+    let mut args = FluentArgs::new();
+    args.set("target", pending.target.clone());
+    let title = texts.text_with(Msg::DetachTitle, Some(&args));
+    let check_out = texts.text(Msg::DetachCheckOut);
+    let cancel = texts.text(Msg::DialogCancel);
+    let dont_show = texts.text(Msg::DetachDontShow);
+    let mut ticked = pending.dont_show;
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("detach-notice"),
+        &title,
+        |ui| {
+            ui.label(texts.text(Msg::DetachBody));
+            ui.add_space(SHAPE.space[1]);
+            components::checkbox(ui, &mut ticked, &dont_show);
+        },
+        |ui, ()| {
+            let mut choice = None;
+            ui.horizontal(|ui| {
+                let go = components::Button::new(&check_out)
+                    .kind(components::Kind::Primary)
+                    .show(ui);
+                let stop = components::Button::new(&cancel).show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    stop.request_focus();
+                }
+                if go.clicked() {
+                    choice = Some(Action::ConfirmDetach);
+                } else if stop.clicked() {
+                    choice = Some(Action::CancelDetach);
+                }
+            });
+            choice
+        },
+    );
+    if ticked != pending.dont_show {
+        actions.push(Action::SetDetachDontShow(ticked));
+    }
+    if let Some(choice) = outcome.inner {
+        actions.push(choice);
+    } else if outcome.escape {
+        actions.push(Action::CancelDetach);
+    }
+}
+
+/// The question before a tab or the window closes while a write action runs.
+/// Keep open is the default: it has the focus first, and Escape means it.
+fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let Some(question) = app.close_question else {
+        return;
+    };
+    let running = app.running_actions();
+    let relevant: Vec<_> = running
+        .iter()
+        .filter(|action| match question {
+            CloseQuestion::Tab(id) => action.id == id,
+            CloseQuestion::Window => true,
+        })
+        .collect();
+    // The action ended meanwhile: nothing is left to stop, so the close goes on.
+    let Some(first) = relevant.first() else {
+        actions.push(Action::CloseAnyway);
+        return;
+    };
+    let texts = &app.texts;
+    let mut args = FluentArgs::new();
+    args.set("action", action_text(app, &first.action));
+    args.set("tab", first.title.clone());
+    let body = match (question, relevant.len()) {
+        (CloseQuestion::Tab(_), _) => texts.text_with(Msg::CloseQuestionTab, Some(&args)),
+        (CloseQuestion::Window, 1) => texts.text_with(Msg::CloseQuestionWindow, Some(&args)),
+        (CloseQuestion::Window, count) => {
+            args.set("count", count as i64);
+            texts.text_with(Msg::CloseQuestionWindowMany, Some(&args))
+        }
+    };
+    let keep = texts.text(Msg::CloseKeepOpen);
+    let anyway = texts.text(Msg::CloseAnyway);
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("close-question"),
+        &texts.text(Msg::CloseQuestionTitle),
+        |ui| {
+            ui.label(body);
+        },
+        |ui, _| {
+            let mut choice = None;
+            ui.horizontal(|ui| {
+                let keep = components::Button::new(&keep)
+                    .kind(components::Kind::Primary)
+                    .show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    keep.request_focus();
+                }
+                if keep.clicked() {
+                    choice = Some(Action::KeepOpen);
+                }
+                if components::Button::new(&anyway).show(ui).clicked() {
+                    choice = Some(Action::CloseAnyway);
+                }
+            });
+            choice
+        },
+    );
+    if let Some(choice) = outcome.inner {
+        actions.push(choice);
+    } else if outcome.escape {
+        actions.push(Action::KeepOpen);
+    }
+}
+
 fn settings_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let Some(dialog) = &app.dialog else {
         return;
@@ -1495,31 +2278,33 @@ fn settings_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     let list_open = egui::Popup::is_any_open(ui.ctx());
     // The dialog keeps a margin to the edges of the window, which may be
     // small at a large interface size; what does not fit scrolls.
-    let room = ui.ctx().content_rect().size() - egui::Vec2::splat(4.0 * SHAPE.space[3]);
+    let room = components::dialog_room(ui.ctx());
     // Modal: the window behind takes no input. A click beside the dialog
     // does not close it either; Escape and the close button do.
-    let modal = egui::Modal::new(Id::new("settings")).show(ui.ctx(), |ui| {
-        ui.set_width(room.x.min(540.0));
-        // egui offers a modal the height it had in the last frame, at first
-        // 400 points; the scroll area below may grow to the room.
-        ui.set_max_height(room.y);
-        let mut close = false;
-        ui.horizontal(|ui| {
-            let title = RichText::new(texts.text(Msg::SettingsTitle))
-                .text_style(egui::TextStyle::Name(style::TITLE.into()));
-            ui.label(title);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let name = texts.text(Msg::SettingsClose);
-                close = components::icon_button(ui, icons::CLOSE, &name, None).clicked();
+    let modal = egui::Modal::new(Id::new("settings"))
+        .area(components::dialog_area(ui.ctx(), Id::new("settings")))
+        .show(ui.ctx(), |ui| {
+            ui.set_width(room.x.min(540.0));
+            // egui offers a modal the height it had in the last frame, at first
+            // 400 points; the scroll area below may grow to the room.
+            ui.set_max_height(room.y);
+            let mut close = false;
+            ui.horizontal(|ui| {
+                let title = RichText::new(texts.text(Msg::SettingsTitle))
+                    .text_style(egui::TextStyle::Name(style::TITLE.into()));
+                ui.label(title);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let name = texts.text(Msg::SettingsClose);
+                    close = components::icon_button(ui, icons::CLOSE, &name, None).clicked();
+                });
             });
+            egui::ScrollArea::vertical()
+                .id_salt("settings")
+                .max_height(room.y - ui.min_rect().height())
+                .auto_shrink([false, true])
+                .show(ui, |ui| settings_sections(app, dialog, ui, actions));
+            close
         });
-        egui::ScrollArea::vertical()
-            .id_salt("settings")
-            .max_height(room.y - ui.min_rect().height())
-            .auto_shrink([false, true])
-            .show(ui, |ui| settings_sections(app, dialog, ui, actions));
-        close
-    });
     let escape = !list_open
         && ui
             .ctx()
@@ -1616,6 +2401,13 @@ fn settings_sections(app: &App, dialog: &SettingsDialog, ui: &mut Ui, actions: &
             ui.end_row();
         });
 
+    settings_section(ui, texts.text(Msg::SettingsBehaviour));
+    let mut notice = settings.detach_notice;
+    components::checkbox(ui, &mut notice, &texts.text(Msg::SettingsDetachNotice));
+    if notice != settings.detach_notice {
+        actions.push(Action::SetDetachNotice(notice));
+    }
+
     let language_title = settings_section(ui, texts.text(Msg::SettingsLanguage));
     let mut language = settings.language.clone();
     let combo = egui::ComboBox::from_id_salt("language")
@@ -1661,6 +2453,11 @@ fn settings_sections(app: &App, dialog: &SettingsDialog, ui: &mut Ui, actions: &
         }
         Some(GitMessage::Problem(problem)) => {
             components::error_text(ui, git_problem(app, problem));
+        }
+        Some(GitMessage::Busy(action)) => {
+            let mut args = FluentArgs::new();
+            args.set("action", action_text(app, action));
+            components::error_text(ui, texts.text_with(Msg::SettingsGitBusy, Some(&args)));
         }
         None => {}
     }
@@ -1716,6 +2513,9 @@ fn status_bar(app: &App, ui: &mut Ui) {
                 }
             });
             ui.label(commits_text(app, session));
+            if let Some(action) = session.action() {
+                ui.label(action_text(app, action));
+            }
         } else if app.home_shown() {
             let repositories = app.home.list.repositories();
             let worktrees: usize = repositories
@@ -1747,6 +2547,7 @@ fn history(app: &mut App, ui: &mut Ui) {
     let layout = app.settings().layout;
     let palette = style::active_palette(ui.ctx());
     app.poll_navigation();
+    app.poll_checkout();
     app.poll_search();
     // The search starts once its text has settled, and its matches arrive
     // meanwhile; nothing else may wake the window for them.
@@ -1887,6 +2688,8 @@ fn apply_sidebar(app: &mut App, actions: Vec<SidebarAction>) {
             SidebarAction::ShowOnly(name) => {
                 app.set_branch_filter(BranchFilter::Selected(vec![name]))
             }
+            SidebarAction::Checkout(request) => app.checkout(request),
+            SidebarAction::CreateBranch(at) => app.begin_create_branch(at, Origin::Sidebar),
             SidebarAction::OpenSubmodule(path) => {
                 let root = app
                     .workspace()

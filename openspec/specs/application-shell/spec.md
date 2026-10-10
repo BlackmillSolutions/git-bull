@@ -27,10 +27,12 @@ divider in the commit panel between the details of the commit and the list
 of changed files, and every column width SHALL be adjustable. The divider
 in the commit panel SHALL stay where the user left it, whatever the length
 of the message, and SHALL keep room for a few rows of changed files. In a
-list whose columns have headers, the edge between two headers SHALL be
-draggable: dragging it SHALL change the width of the column on its side
-away from the Description column, which SHALL take the remaining width; a
-drag MUST NOT make the Description column narrower than a minimum width.
+list whose columns have headers, the edge between two visible headers SHALL
+be draggable: dragging it SHALL exchange width between those two adjacent
+columns while other column widths and the outer edges of the table stay in
+place. A drag MUST NOT make either column narrower than its minimum width.
+When the columns at their minimum widths do not fit the available area, the
+header and rows SHALL scroll horizontally together without overlapping cells.
 Over a divider or such an edge, the pointer SHALL show that it can be
 dragged.
 
@@ -61,15 +63,20 @@ dragged.
 
 #### Scenario: Column is resized
 - **WHEN** the user drags the edge of a column header in the commit list
-- **THEN** the column changes its width
+- **THEN** the two columns beside the edge change their widths and the other columns stay in place
 
 #### Scenario: Column right of the Description is resized
-- **WHEN** the user drags the edge between the headers Author and Commit of the commit list 40 points to the left
-- **THEN** the Commit column is 40 points wider, the Date and Author columns keep their widths, and the Description column is 40 points narrower
+- **WHEN** the user drags the edge between the headers Author and Commit of the commit list 40 points to the left and both columns have room within their limits
+- **THEN** the Commit column is 40 points wider and the Author column is 40 points narrower
+- **AND** Graph, Description, Date and the table's outer edges stay in place
 
 #### Scenario: Description keeps a minimum width
 - **WHEN** the user drags the edge between the headers Description and Date of the commit list as far left as it goes
 - **THEN** the Date column grows only until the Description column has its minimum width
+
+#### Scenario: Columns exceed the available width
+- **WHEN** the main area becomes narrower than the sum of the visible columns at their minimum widths
+- **THEN** the header and rows can be scrolled horizontally together and no column overlaps another
 
 #### Scenario: Pointer over an edge
 - **WHEN** the user moves the pointer over the edge between two column headers or over the divider in the commit panel
@@ -80,25 +87,44 @@ dragged.
 - **THEN** the window shows the title bar, the toolbar, the list of repositories and the status bar, and no sidebar
 
 ### Requirement: Toolbar shows working actions only
-The toolbar SHALL offer Open, Refresh, the search field, the theme switch
-and Settings. Open SHALL show the home tab with the keyboard focus in its
-filter, and the search field SHALL be shown while a repository tab is
-shown. It MUST NOT show actions that the application cannot perform. Open
-and Refresh SHALL show an icon and their label; the theme switch and
-Settings SHALL show an icon, with a tooltip that names them.
+The toolbar SHALL offer Open, Refresh, Branch, the search field, the theme
+switch and Settings. Open SHALL show the home tab with the keyboard focus in
+its filter, and the search field and Branch SHALL be shown while a repository
+tab is shown. Branch SHALL open the dialog "Create branch" at the starting point
+of requirement "Starting points" of `reference-creation`, and SHALL be
+unavailable while a write action runs in the tab and in a repository without a
+commit. It MUST NOT show actions that the application cannot perform. Open,
+Refresh and Branch SHALL show an icon and their label; the theme switch and
+Settings SHALL show an icon, with a tooltip that names them. No part of the
+toolbar SHALL lie over another: where the toolbar has less room than its parts
+ask for, as at a large interface size, the search field SHALL become narrower
+first, and Previous and Next SHALL then show as icons with a tooltip that names
+them.
 
 #### Scenario: Toolbar content
 - **WHEN** a repository tab is shown
-- **THEN** the toolbar offers Open, Refresh, the search field, the theme switch and Settings
-- **AND** it shows no action for commit, pull, push, branch or stash
+- **THEN** the toolbar offers Open, Refresh, Branch, the search field, the theme switch and Settings
+- **AND** it shows no action for commit, pull, push or stash
 
 #### Scenario: Icons and labels
 - **WHEN** the main window is shown
-- **THEN** Open and Refresh show an icon and their label, and the theme switch and Settings show an icon that names them in a tooltip
+- **THEN** Open, Refresh and Branch show an icon and their label, and the theme switch and Settings show an icon that names them in a tooltip
+
+#### Scenario: Toolbar without room
+- **WHEN** the interface size is 150 % in a window of 1280 by 800 pixels and a repository tab is shown
+- **THEN** the search field is narrower than usual and no part of the toolbar lies over another
 
 #### Scenario: Toolbar of the home tab
 - **WHEN** the home tab is shown
-- **THEN** the toolbar offers Open, Refresh, the theme switch and Settings, and no search field
+- **THEN** the toolbar offers Open, Refresh, the theme switch and Settings, and no search field and no Branch
+
+#### Scenario: Branch opens the dialog
+- **WHEN** a repository tab is shown and the user chooses Branch
+- **THEN** the dialog "Create branch" opens
+
+#### Scenario: Branch while an action runs
+- **WHEN** a checkout runs in the tab
+- **THEN** Branch is unavailable
 
 ### Requirement: Repository tabs
 git-bull SHALL show each open repository in its own tab, after the home
@@ -545,3 +571,39 @@ the tabs in a tab bar of their own below it.
 #### Scenario: Home tab with many tabs
 - **WHEN** 30 tabs are open in a window of the smallest size and the user scrolls the row of tabs to its end
 - **THEN** the home tab is still visible at the left of the tabs
+
+### Requirement: Closing while a write action runs
+While a write action runs in a tab (checking out, creating a branch or a tag),
+closing that tab, with its button or with Ctrl+W, and closing the window SHALL
+first ask the user, and SHALL NOT stop the action without asking. The question
+SHALL name the action and the tab and warn that stopping it can leave the working
+copy half updated. It SHALL offer Keep open, which is the default, and Close
+anyway. Close anyway SHALL close the tab or the window and stop the action. This
+replaces, for write actions, the stopping of all background work of a closed tab
+(requirement "Repository tabs"). Closing a tab or the window in which no write
+action runs SHALL NOT ask anything.
+
+#### Scenario: Closing a tab during a checkout
+- **WHEN** a checkout runs in a tab and the user closes the tab
+- **THEN** a question names the checkout and the tab and offers Keep open and Close anyway
+- **AND** the tab stays open and the checkout continues until the user chooses
+
+#### Scenario: Keeping the tab open
+- **WHEN** the question is shown and the user chooses Keep open
+- **THEN** the tab stays open and the checkout runs to its end
+
+#### Scenario: Closing anyway
+- **WHEN** the question is shown and the user chooses Close anyway
+- **THEN** the tab closes and the checkout is stopped
+
+#### Scenario: Closing the window during an action
+- **WHEN** a checkout runs in one of three open tabs and the user closes the window
+- **THEN** the same question appears and the window stays open until the user chooses
+
+#### Scenario: Ctrl+W during an action
+- **WHEN** a checkout runs in the active tab and the user presses Ctrl+W
+- **THEN** the question appears and the tab stays open
+
+#### Scenario: No action runs
+- **WHEN** no write action runs and the user closes a tab
+- **THEN** the tab closes without a question

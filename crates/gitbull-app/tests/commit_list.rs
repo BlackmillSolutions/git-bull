@@ -3,13 +3,16 @@
 mod support;
 
 use eframe::egui::accesskit::Role;
-use eframe::egui::{CursorIcon, Event, Id, Key, Modifiers, OutputCommand, PointerButton, vec2};
+use eframe::egui::{
+    CursorIcon, Event, Id, Key, Modifiers, MouseWheelUnit, OutputCommand, PointerButton,
+    TouchPhase, vec2,
+};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use gitbull_app::app::App;
 use gitbull_app::icons;
 use gitbull_app::ui::{AREA_COMMIT_PANEL, AREA_DIFF, AREA_SIDEBAR, COMMIT_LIST};
-use gitbull_core::settings::{Layout, Settings};
+use gitbull_core::settings::{HistoryColumnWidths, Layout, Settings};
 use gitbull_git::content::{CommitContent, Signature};
 use gitbull_git::head::Head;
 use gitbull_git::history::CommitLine;
@@ -21,8 +24,8 @@ use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 use support::{
     BURST, Setup, build, column_header, commit_list_scroll, drag_by, edge_left_of, find_row,
-    long_history, path, settle_window, turn_wheel, wait_for_references, wait_for_row, window,
-    window_at_60_fps,
+    long_history, path, settle_window, sized_window, turn_wheel, wait_for_references, wait_for_row,
+    window, window_at_60_fps,
 };
 
 fn seconds(text: &str) -> i64 {
@@ -205,35 +208,82 @@ fn the_date_tooltip_shows_the_original_offset() {
 }
 
 #[test]
-fn head_branch_and_remote_branch_are_badges_before_the_description() {
+fn head_and_shared_local_remote_branch_are_badges_before_the_description() {
     let harness = open(backend());
     let description = harness.get_by_label("Fix the parser").rect();
-    for name in ["HEAD", "main", "origin/main"] {
+    for name in ["HEAD", "main"] {
         let rect = badge(&harness, name, description);
         assert!(
             rect.right() <= description.left(),
             "{name} is not before the description"
         );
     }
+    assert!(badge_node(&harness, "origin/main").is_none());
     let first = harness.get_by_label("First commit").rect();
     badge(&harness, "v1.0", first);
 }
 
 #[test]
-fn each_kind_of_reference_shows_its_icon_in_its_badge() {
+fn combined_branch_shows_both_icons_and_tag_uses_its_own() {
     let harness = open(backend());
     let top = harness.get_by_label("Fix the parser").rect();
     let bottom = harness.get_by_label("First commit").rect();
     for (name, icon, row) in [
         ("HEAD", icons::HEAD, top),
         ("main", icons::BRANCH, top),
-        ("origin/main", icons::REMOTE_BRANCH, top),
         ("v1.0", icons::TAG, bottom),
     ] {
         let rect = badge(&harness, name, row);
         let texts = support::texts_in(harness.output(), rect);
         assert!(texts.iter().any(|text| text == icon), "{name}: {texts:?}");
     }
+    let combined = badge(&harness, "main", top);
+    let texts = support::texts_in(harness.output(), combined);
+    assert!(
+        texts.iter().any(|text| text == icons::REMOTE_BRANCH),
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn a_tag_precedes_the_shared_branch_and_its_accessible_name_has_both_refs() {
+    let refs = vec![
+        reference("refs/heads/main", RefKind::Branch, "c"),
+        reference("refs/remotes/origin/main", RefKind::RemoteBranch, "c"),
+        reference("refs/tags/v1.0", RefKind::Tag, "c"),
+    ];
+    let harness = open(backend().with_references(root(), refs));
+    let title = harness.get_by_label("Fix the parser").rect();
+    assert!(badge(&harness, "v1.0", title).left() < badge(&harness, "main", title).left());
+    let combined = harness
+        .get_all_by_label("main")
+        .find(|node| (node.rect().center().y - title.center().y).abs() < 2.0)
+        .expect("combined branch chip");
+    let full = combined
+        .accesskit_node()
+        .description()
+        .expect("full reference names");
+    assert!(full.contains("refs/heads/main") && full.contains("refs/remotes/origin/main"));
+}
+
+#[test]
+fn several_matching_remotes_share_one_chip_with_their_count() {
+    let refs = vec![
+        reference("refs/heads/main", RefKind::Branch, "c"),
+        reference("refs/remotes/origin/main", RefKind::RemoteBranch, "c"),
+        reference("refs/remotes/fork/main", RefKind::RemoteBranch, "c"),
+    ];
+    let harness = open(backend().with_references(root(), refs));
+    let title = harness.get_by_label("Fix the parser").rect();
+    let combined = harness
+        .get_all_by_label("main · 2")
+        .find(|node| (node.rect().center().y - title.center().y).abs() < 2.0)
+        .expect("combined branch with remote count");
+    let full = combined
+        .accesskit_node()
+        .description()
+        .expect("full reference names");
+    assert!(full.contains("refs/remotes/origin/main") && full.contains("refs/remotes/fork/main"));
 }
 
 /// Where the badge `name` is drawn, if it is.
@@ -274,7 +324,11 @@ fn badges_that_do_not_fit_are_counted_and_the_description_stays_visible() {
     let mut harness = open(backend().with_references(root(), tags));
     // The sidebar lists the tags too; the badges are the label nodes.
     for _ in 0..500 {
-        if badge_node(&harness, "release-001").is_some() {
+        if harness
+            .get_all_by_role(Role::Label)
+            .filter_map(|node| node.accesskit_node().value())
+            .any(|text| text.starts_with('+'))
+        {
             break;
         }
         harness.step();
@@ -289,22 +343,15 @@ fn badges_that_do_not_fit_are_counted_and_the_description_stays_visible() {
     let shown = (1..=40)
         .filter(|n| badge_node(&harness, &format!("release-{n:03}")).is_some())
         .count();
-    assert!(shown > 0 && rest > 0, "{shown} shown, {rest} counted");
+    assert!(rest > 0, "{shown} shown, {rest} counted");
     assert_eq!(shown + rest, 40);
 
-    // Badges and count take at most half of the description column.
+    // Badges use all available room until the 120-point title reserve.
     let column = harness.get_by_label("Description").rect().left()
         ..harness.get_by_label("Date").rect().left();
     let count = harness.get_by_label(&format!("+{rest}")).rect();
-    let first_badge = badge_node(&harness, "release-001").unwrap();
-    assert!(
-        count.right() - first_badge.left() <= (column.end - column.start) / 2.0,
-        "badges take {} of {}",
-        count.right() - first_badge.left(),
-        column.end - column.start
-    );
-    let first = harness.get_by_label("First commit").rect();
-    assert!(first.width() > 0.0);
+    assert!(column.end - count.right() >= 128.0 - 1.0);
+    harness.get_by_label("First commit");
 }
 
 #[test]
@@ -697,7 +744,13 @@ fn dragging_the_edge_of_the_graph_column_changes_and_keeps_its_width() {
         "moved by {}",
         after - before
     );
-    let kept = harness.state().settings().layout.graph_column.unwrap();
+    let kept = harness
+        .state()
+        .settings()
+        .history_columns_for(&root())
+        .widths
+        .graph
+        .unwrap();
     assert!(
         (kept - (before - graph.left() + 40.0)).abs() < 12.0,
         "{kept}"
@@ -705,14 +758,14 @@ fn dragging_the_edge_of_the_graph_column_changes_and_keeps_its_width() {
 }
 
 /// Where the settings keep the width of a column.
-type SavedWidth = fn(&Layout) -> Option<f32>;
+type SavedWidth = fn(&HistoryColumnWidths) -> Option<f32>;
 
 /// The columns whose edges at their left can be dragged, with where their
 /// widths are saved and their widths before any drag.
 const RESIZED: [(&str, SavedWidth, f32); 3] = [
-    ("Date", |layout| layout.date_column, 130.0),
-    ("Author", |layout| layout.author_column, 160.0),
-    ("Commit", |layout| layout.hash_column, 80.0),
+    ("Date", |widths| widths.date, 130.0),
+    ("Author", |widths| widths.author, 160.0),
+    ("Commit", |widths| widths.commit, 80.0),
 ];
 
 /// The left edges of the titles of the columns right of the Graph.
@@ -728,34 +781,193 @@ fn header_widths(harness: &Harness<'_, App>) -> [f32; 4] {
 }
 
 #[test]
-fn dragging_an_edge_right_of_the_description_widens_only_the_column_right_of_it() {
+fn dragging_an_edge_resizes_only_its_two_adjacent_columns() {
     for (title, saved, width) in RESIZED {
         let mut harness = open(backend());
         let before = header_widths(&harness);
         let edge = edge_left_of(&harness, title);
         drag_by(&mut harness, edge, vec2(-40.0, 0.0));
 
-        // The column is 40 points wider, the Description 40 narrower, and
-        // every other column as wide as before.
+        // The column is 40 points wider and takes it from its left neighbour.
         let after = header_widths(&harness);
         for (index, name) in ["Description", "Date", "Author", "Commit"]
             .iter()
             .enumerate()
         {
             let grew = after[index] - before[index];
-            let expected = match *name {
-                "Description" => -40.0,
-                name if name == title => 40.0,
-                _ => 0.0,
+            let expected = if *name == title {
+                40.0
+            } else if ["Date", "Author", "Commit"]
+                .iter()
+                .position(|name| *name == title)
+                .and_then(|index| ["Description", "Date", "Author"].get(index))
+                == Some(name)
+            {
+                -40.0
+            } else {
+                0.0
             };
             assert!(
                 (grew - expected).abs() < 1.0,
                 "dragging {title}: {name} grew by {grew}"
             );
         }
-        let kept = saved(&harness.state().settings().layout).expect("a saved width");
+        let kept = saved(
+            &harness
+                .state()
+                .settings()
+                .history_columns_for(&root())
+                .widths,
+        )
+        .expect("a saved width");
         assert!((kept - (width + 40.0)).abs() < 1.0, "{title}: {kept}");
     }
+}
+
+#[test]
+fn dragging_graph_header_after_description_reorders_header_and_row() {
+    let mut harness = open(backend());
+    let graph = column_header(&harness, "Graph");
+    let date = column_header(&harness, "Date");
+    drag_by(
+        &mut harness,
+        graph.center(),
+        eframe::egui::pos2(date.left() - 16.0, graph.center().y) - graph.center(),
+    );
+
+    let graph = column_header(&harness, "Graph");
+    let description = column_header(&harness, "Description");
+    assert!(
+        description.left() < graph.left(),
+        "{description:?} {graph:?}"
+    );
+    assert_eq!(
+        harness
+            .state()
+            .settings()
+            .history_columns_for(&root())
+            .order[0],
+        gitbull_core::settings::HistoryColumn::Description
+    );
+    let selected = row(&harness, "Fix the parser");
+    assert!(selected.rect().top() > graph.bottom());
+
+    let date_before = column_header(&harness, "Date").left();
+    let graph_before = graph.left();
+    let edge = edge_left_of(&harness, "Graph");
+    drag_by(&mut harness, edge, vec2(40.0, 0.0));
+    assert!((column_header(&harness, "Graph").left() - graph_before - 40.0).abs() < 1.0);
+    assert!((column_header(&harness, "Date").left() - date_before).abs() < 1.0);
+}
+
+#[test]
+fn dragging_commit_before_date_keeps_the_selected_commit() {
+    let mut harness = open(backend());
+    click_row(&mut harness, "Rebased change", PointerButton::Primary);
+    let commit = column_header(&harness, "Commit");
+    let date = column_header(&harness, "Date");
+    let destination = eframe::egui::pos2(date.left() + 16.0, commit.center().y);
+    drag_by(&mut harness, commit.center(), destination - commit.center());
+    assert!(column_header(&harness, "Commit").left() < column_header(&harness, "Date").left());
+    assert_eq!(
+        harness
+            .state()
+            .settings()
+            .history_columns_for(&root())
+            .order[2],
+        gitbull_core::settings::HistoryColumn::Commit
+    );
+    assert_eq!(
+        row(&harness, "Rebased change")
+            .accesskit_node()
+            .is_selected(),
+        Some(true)
+    );
+    let y = row(&harness, "Rebased change").rect().center().y;
+    let date = harness
+        .get_all_by_label("2026-02-20 11:00")
+        .find(|node| (node.rect().center().y - y).abs() < 2.0)
+        .expect("Date in the selected row");
+    assert!(harness.get_by_label(&short("b")).rect().left() < date.rect().left());
+}
+
+fn open_header_menu(harness: &mut Harness<'_, App>) {
+    let at = column_header(harness, "Date").center();
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
+#[test]
+fn the_header_menu_hides_author_and_can_restore_defaults() {
+    let mut harness = open(backend());
+    open_header_menu(&mut harness);
+    harness.get_by_label("Restore default columns");
+    let menu_author = harness
+        .get_all_by_label("Author")
+        .find(|node| node.accesskit_node().role() == Role::CheckBox)
+        .expect("Author menu item");
+    menu_author.click();
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .settings()
+            .history_columns_for(&root())
+            .hidden
+            .contains(&gitbull_core::settings::HistoryColumn::Author)
+    );
+    assert!(harness.query_by_label("Author").is_none());
+
+    open_header_menu(&mut harness);
+    harness
+        .get_all_by_label("Author")
+        .find(|node| node.accesskit_node().role() == Role::CheckBox)
+        .expect("Author menu item")
+        .click();
+    harness.run();
+    column_header(&harness, "Author");
+    assert!(
+        harness
+            .state()
+            .settings()
+            .history_columns_for(&root())
+            .hidden
+            .is_empty()
+    );
+
+    let edge = edge_left_of(&harness, "Commit");
+    drag_by(&mut harness, edge, vec2(-30.0, 0.0));
+    open_header_menu(&mut harness);
+    harness.get_by_label("Restore default columns").click();
+    harness.run();
+    let saved = harness.state().settings().history_columns_for(&root());
+    assert!(saved.hidden.is_empty());
+    assert_eq!(saved.order, gitbull_core::settings::HistoryColumn::ALL);
+    assert_eq!(saved.widths.commit, None);
+    column_header(&harness, "Author");
+}
+
+#[test]
+fn hiding_graph_keeps_commit_rows_and_the_required_description() {
+    let mut harness = open(backend());
+    open_header_menu(&mut harness);
+    harness
+        .get_all_by_label("Graph")
+        .find(|node| node.accesskit_node().role() == Role::CheckBox)
+        .expect("Graph menu item")
+        .click();
+    harness.run();
+    assert!(harness.query_by_label("Graph").is_none());
+    column_header(&harness, "Description");
+    row(&harness, "Fix the parser");
 }
 
 #[test]
@@ -771,11 +983,12 @@ fn a_drag_towards_the_description_leaves_it_its_minimum_width() {
     drag_by(&mut harness, edge, vec2(20.0 - edge.x, 0.0));
 
     let [description, date, ..] = header_lefts(&harness);
-    assert!(
-        (date - description - 120.0).abs() < 1.0,
-        "{}",
-        date - description
-    );
+    let minimum = date - description;
+    assert!(minimum >= 120.0, "{minimum}");
+    let edge = edge_left_of(&harness, "Date");
+    drag_by(&mut harness, edge, vec2(-100.0, 0.0));
+    let [description, date, ..] = header_lefts(&harness);
+    assert!((date - description - minimum).abs() < 1.0);
 }
 
 #[test]
@@ -795,7 +1008,7 @@ fn the_pointer_over_an_edge_of_the_header_shows_that_it_can_be_dragged() {
     harness.run();
     assert_eq!(
         harness.output().platform_output.cursor_icon,
-        CursorIcon::Default
+        CursorIcon::Grab
     );
 }
 
@@ -842,6 +1055,36 @@ fn the_headers_stand_over_the_columns_of_a_list_that_scrolls() {
         (hash.left() - header.left()).abs() < 0.5,
         "{hash:?} {header:?}"
     );
+}
+
+#[test]
+fn a_narrow_history_scrolls_header_and_rows_horizontally_together() {
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: backend(),
+        ..Setup::default()
+    });
+    let mut harness = sized_window((760.0, 600.0), test.app);
+    settle_window(&mut harness);
+    wait_for_label(&mut harness, "Fix the parser");
+    wait_for_references(&mut harness);
+    let before = column_header(&harness, "Description").left();
+    harness.hover_at(row(&harness, "Fix the parser").rect().center());
+    harness.event(Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: vec2(-80.0, 0.0),
+        phase: TouchPhase::Move,
+        modifiers: Modifiers::NONE,
+    });
+    harness.step();
+    let after = column_header(&harness, "Description").left();
+    assert!(after < before - 30.0, "{before} -> {after}");
+    let description = harness.get_by_label("Fix the parser").rect();
+    assert!(description.left() >= after);
 }
 
 #[test]

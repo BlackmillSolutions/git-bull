@@ -89,6 +89,20 @@ pub struct Palette {
     pub status_conflict: Rgb,
     /// Colours of the commit graph, used in turn.
     pub lanes: [Rgb; 8],
+    /// The chips of the main states of worktrees in the home tab.
+    pub state_conflict: Chip,
+    pub state_working: Chip,
+    pub state_new: Chip,
+    pub state_ready: Chip,
+    pub state_paused: Chip,
+}
+
+/// A chip: its text and icon in `ink` on an opaque `fill`, so that it reads
+/// the same in a plain, a selected and a hovered row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chip {
+    pub fill: Rgb,
+    pub ink: Rgb,
 }
 
 /// Sizes of the design system, in points at the interface size 100 %.
@@ -203,6 +217,26 @@ pub const LIGHT: Palette = Palette {
         Rgb(0xbf, 0x39, 0x89),
         Rgb(0x9a, 0x67, 0x00),
     ],
+    state_conflict: Chip {
+        fill: Rgb(0xfc, 0xe8, 0xe7),
+        ink: Rgb(0xa1, 0x20, 0x1b),
+    },
+    state_working: Chip {
+        fill: Rgb(0xe5, 0xef, 0xfa),
+        ink: Rgb(0x0a, 0x4d, 0x94),
+    },
+    state_new: Chip {
+        fill: Rgb(0xcc, 0xeb, 0xe7),
+        ink: Rgb(0x0b, 0x5c, 0x55),
+    },
+    state_ready: Chip {
+        fill: Rgb(0xda, 0xfb, 0xe1),
+        ink: Rgb(0x11, 0x5c, 0x26),
+    },
+    state_paused: Chip {
+        fill: Rgb(0xfd, 0xf2, 0xd5),
+        ink: Rgb(0x70, 0x46, 0x00),
+    },
 };
 
 pub const DARK: Palette = Palette {
@@ -254,6 +288,26 @@ pub const DARK: Palette = Palette {
         Rgb(0xf7, 0x78, 0xba),
         Rgb(0xd2, 0x99, 0x22),
     ],
+    state_conflict: Chip {
+        fill: Rgb(0x3d, 0x1a, 0x1c),
+        ink: Rgb(0xff, 0x9a, 0x92),
+    },
+    state_working: Chip {
+        fill: Rgb(0x13, 0x2a, 0x40),
+        ink: Rgb(0x8c, 0xc4, 0xff),
+    },
+    state_new: Chip {
+        fill: Rgb(0x14, 0x39, 0x36),
+        ink: Rgb(0x2d, 0xd4, 0xbf),
+    },
+    state_ready: Chip {
+        fill: Rgb(0x12, 0x36, 0x1f),
+        ink: Rgb(0x56, 0xd3, 0x64),
+    },
+    state_paused: Chip {
+        fill: Rgb(0x38, 0x2a, 0x0e),
+        ink: Rgb(0xf0, 0xc3, 0x5c),
+    },
 };
 
 /// For protanopia and deuteranopia, after the palette of Okabe and Ito:
@@ -285,6 +339,18 @@ pub const LIGHT_RED_GREEN: Palette = Palette {
         Rgb(0x4a, 0x5f, 0xa8),
         Rgb(0x9e, 0x6a, 0x3a),
     ],
+    state_conflict: Chip {
+        fill: Rgb(0xff, 0xe7, 0xcc),
+        ink: Rgb(0x8a, 0x3d, 0x00),
+    },
+    state_new: Chip {
+        fill: Rgb(0xec, 0xe6, 0xfb),
+        ink: Rgb(0x55, 0x3a, 0x9e),
+    },
+    state_ready: Chip {
+        fill: Rgb(0xd3, 0xef, 0xe9),
+        ink: Rgb(0x0b, 0x5c, 0x55),
+    },
     ..LIGHT
 };
 
@@ -315,6 +381,18 @@ pub const DARK_RED_GREEN: Palette = Palette {
         Rgb(0xb8, 0xc0, 0xcc),
         Rgb(0xf0, 0xe4, 0x42),
     ],
+    state_conflict: Chip {
+        fill: Rgb(0x3d, 0x2a, 0x0c),
+        ink: Rgb(0xff, 0xa9, 0x4d),
+    },
+    state_new: Chip {
+        fill: Rgb(0x2a, 0x24, 0x42),
+        ink: Rgb(0xb3, 0x9d, 0xff),
+    },
+    state_ready: Chip {
+        fill: Rgb(0x14, 0x39, 0x36),
+        ink: Rgb(0x2d, 0xd4, 0xbf),
+    },
     ..DARK
 };
 
@@ -346,6 +424,18 @@ pub const LIGHT_BLUE_YELLOW: Palette = Palette {
         Rgb(0xbf, 0x39, 0x89),
         Rgb(0x5c, 0x6f, 0x00),
     ],
+    state_working: Chip {
+        fill: Rgb(0xe8, 0xea, 0xf0),
+        ink: Rgb(0x2f, 0x3d, 0x5c),
+    },
+    state_new: Chip {
+        fill: Rgb(0xfb, 0xe4, 0xf1),
+        ink: Rgb(0x8f, 0x1f, 0x5c),
+    },
+    state_ready: Chip {
+        fill: Rgb(0xd3, 0xef, 0xe9),
+        ink: Rgb(0x0b, 0x5c, 0x55),
+    },
     ..LIGHT
 };
 
@@ -376,6 +466,18 @@ pub const DARK_BLUE_YELLOW: Palette = Palette {
         Rgb(0xf7, 0x78, 0xba),
         Rgb(0xe3, 0xc7, 0x5a),
     ],
+    state_working: Chip {
+        fill: Rgb(0x26, 0x2b, 0x38),
+        ink: Rgb(0xb8, 0xc4, 0xdc),
+    },
+    state_new: Chip {
+        fill: Rgb(0x3f, 0x17, 0x30),
+        ink: Rgb(0xff, 0x8f, 0xcb),
+    },
+    state_ready: Chip {
+        fill: Rgb(0x14, 0x39, 0x36),
+        ink: Rgb(0x2d, 0xd4, 0xbf),
+    },
     ..DARK
 };
 
@@ -627,6 +729,20 @@ mod tests {
                     (&tint, over(*lane, p.list, band)),
                     4.5,
                 );
+            }
+            for (state, chip) in [
+                ("state_conflict", p.state_conflict),
+                ("state_working", p.state_working),
+                ("state_new", p.state_new),
+                ("state_ready", p.state_ready),
+                ("state_paused", p.state_paused),
+            ] {
+                // The fill is opaque: in a plain, a selected and a hovered
+                // row the ink stands on the fill alone.
+                for row in ["list", "selection", "hover"] {
+                    let fill = format!("{state} fill in a {row} row");
+                    pairs.need(name, ("chip ink", chip.ink), (&fill, chip.fill), 4.5);
+                }
             }
             for fill in [
                 ("badge_head", p.badge_head),

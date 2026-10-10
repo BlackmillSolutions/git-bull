@@ -12,16 +12,35 @@ interface.
 git-bull SHALL persist the following in one file in the operating system's
 configuration directory for applications: theme, colour vision, interface
 size, whether to use the system title bar, whether the diff shows invisible
-characters, whether file lists show a tree of folders, language, the path
+characters, whether file lists show a tree of folders, whether to show the notice before
+checking out a tag or a commit, language, the path
 to the Git executable, recently opened and pinned repositories with the
-worktrees last found in them, open tabs in their order and the active tab,
-which may be the home tab, window size and position, divider positions and
-column widths. A path that is not valid UTF-8 SHALL be left out of the
-saved settings; the other settings SHALL still be saved.
+worktrees last found in them and the base branch the user set for a
+repository, open tabs in their order and the active tab,
+which may be the home tab, window size and position, divider positions,
+and the History column order, visibility and widths for each repository.
+Date, Author and Commit widths SHALL be shared with File history in that
+repository. Existing global column widths SHALL provide the initial widths
+for a repository without saved History columns, and SHALL continue to be
+saved as fallback widths when its path cannot be saved. A path that is not
+valid UTF-8 SHALL be left out of the saved settings; the other settings
+SHALL still be saved.
 
 #### Scenario: Layout survives a restart
 - **WHEN** the user changes a divider position and a column width, closes git-bull and starts it again
 - **THEN** the divider position and the column width are as the user left them
+
+#### Scenario: History arrangement survives a restart
+- **WHEN** the user reorders History columns, hides Author, changes the width of Commit, closes git-bull and starts it again
+- **THEN** that repository shows the chosen order, visibility and width
+
+#### Scenario: Different repositories have different arrangements
+- **WHEN** the user arranges History columns differently in two repositories and switches between their tabs
+- **THEN** each tab uses its repository's arrangement
+
+#### Scenario: Earlier global widths seed a repository
+- **WHEN** git-bull starts with settings containing global column widths but no repository-specific History arrangement
+- **THEN** the History and File history columns initially use those saved widths and the default History order and visibility
 
 #### Scenario: Window geometry survives a restart
 - **WHEN** the user resizes and moves the window on Windows, on macOS or on Linux under X11, closes git-bull and starts it again
@@ -37,7 +56,7 @@ saved settings; the other settings SHALL still be saved.
 
 #### Scenario: Repository path that is not valid UTF-8
 - **WHEN** the user has opened a repository whose path is not valid UTF-8, changes a column width, closes git-bull and starts it again
-- **THEN** the column width is as the user left it
+- **THEN** the column width is as the user left it through the global fallback
 - **AND** that repository is neither restored as a tab nor listed among the recently opened repositories, and the tab that was active is active again
 
 #### Scenario: Settings file of an earlier version
@@ -56,6 +75,10 @@ saved settings; the other settings SHALL still be saved.
 - **WHEN** git-bull starts with a settings file that does not say whether file lists show a tree
 - **THEN** file lists are flat, and every other setting from the file is kept
 
+#### Scenario: Settings file without the setting for the notice
+- **WHEN** git-bull starts with a settings file that does not say whether to show the notice before checking out a tag or a commit
+- **THEN** the notice is shown, and every other setting from the file is kept
+
 #### Scenario: Window geometry right after a change of the interface size
 - **WHEN** the user changes the interface size with Ctrl+Plus and closes git-bull in the next moment
 - **THEN** the window starts again with the size and position it had
@@ -64,13 +87,26 @@ saved settings; the other settings SHALL still be saved.
 - **WHEN** git-bull starts with a settings file that names no pinned repositories and no worktrees
 - **THEN** no repository is pinned, the home tab finds the worktrees when it reads the repositories, and every other setting from the file is kept
 
+#### Scenario: Base of a repository survives a restart
+- **WHEN** the user set `dev` as the base of a repository, closes git-bull and starts it again
+- **THEN** the repository is compared with `dev`, shown as set
+
+#### Scenario: Settings file without bases
+- **WHEN** git-bull starts with a settings file that names no base for any repository
+- **THEN** every base is detected, and every other setting from the file is kept
+
+#### Scenario: Base set through another path of the repository
+- **WHEN** the recently opened repositories name a repository by a path written as Git writes it, the user pinned it under its path as the file system writes it, and set its base in the home tab
+- **THEN** the base applies to the repository whichever of its paths lists it, and is kept once in the settings
+
 ### Requirement: Recently opened repositories
 git-bull SHALL remember the 20 most recently opened repositories, most
 recent first. Opening a worktree SHALL count as opening its repository, so
 that the worktrees of one repository take one place. Pinned repositories
 SHALL be kept apart from this limit, in the order the user pinned them.
 Removing a repository from the list of the home tab SHALL remove every path
-of it from the recently opened and from the pinned repositories.
+of it from the recently opened and from the pinned repositories, and SHALL
+forget the base the user set for it.
 
 #### Scenario: List is capped
 - **WHEN** 20 repositories are in the list and the user opens another one
@@ -91,6 +127,10 @@ of it from the recently opened and from the pinned repositories.
 #### Scenario: Removed repository
 - **WHEN** the user removes a pinned repository from the list of the home tab
 - **THEN** it is neither pinned nor among the recently opened repositories
+
+#### Scenario: Removed repository forgets its base
+- **WHEN** the user set the base of a repository to `dev` and removes it from the list of the home tab
+- **THEN** the settings no longer name a base for it
 
 ### Requirement: Settings dialog
 The settings dialog SHALL offer, in a section "Appearance", the theme, the
@@ -260,3 +300,43 @@ settings dialog.
 #### Scenario: Largest size
 - **WHEN** the interface size is 150 % and the user presses Ctrl+Plus
 - **THEN** the interface size stays 150 %
+
+### Requirement: Notice before detaching HEAD
+The setting "Show a notice before checking out a tag or a commit" SHALL decide
+whether git-bull shows the notice of requirement "Notice before detaching HEAD" of
+`checkout`. It SHALL be on by default, and the settings dialog SHALL offer it as a
+switch in a section "Behaviour". The choice not to show the notice again, made in
+the notice itself, SHALL turn the switch off, and turning the switch on again
+SHALL bring the notice back. The setting SHALL be saved without user action.
+
+#### Scenario: On by default
+- **WHEN** git-bull starts without a settings file
+- **THEN** the switch in the section "Behaviour" of the settings dialog is on
+
+#### Scenario: Hidden in the notice
+- **WHEN** the user ticks "Don't show this again" in the notice and chooses Check out
+- **THEN** the switch in the settings dialog is off, and it stays off after a restart
+
+#### Scenario: Brought back in the dialog
+- **WHEN** the switch is off and the user turns it on in the settings dialog
+- **THEN** the next checkout of a tag or a commit shows the notice
+
+#### Scenario: Turned off in the dialog
+- **WHEN** the user turns the switch off in the settings dialog
+- **THEN** the next checkout of a tag or a commit happens without the notice
+
+### Requirement: Git path while a write action runs
+While a write action runs in any tab (checking out, creating a branch or a tag),
+the settings dialog SHALL NOT apply another Git executable, because applying it
+opens every tab again and would stop the action. It SHALL keep the previous value
+and show a message that names the action and asks the user to wait for it. When no
+write action runs, a valid path SHALL be applied as before.
+
+#### Scenario: Another path during a checkout
+- **WHEN** a checkout runs in a tab and the user enters the path of another valid Git executable in the settings dialog
+- **THEN** the dialog shows a message that a checkout is running and the path is not applied
+- **AND** the checkout runs on
+
+#### Scenario: Path applied after the action
+- **WHEN** the action has ended and the user applies the same path again
+- **THEN** git-bull uses that executable from then on

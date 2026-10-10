@@ -1,18 +1,23 @@
 //! Test helpers for git-bull.
 //!
 //! [`TestRepo`] creates a real Git repository in a temporary folder. Commits
-//! get fixed authors and dates, and the user's own Git configuration is shut
-//! out, so tests behave the same on every machine. [`FakeBackend`] answers
+//! get fixed authors and dates, the user's own Git configuration is shut
+//! out, and Git maintains nothing in the background, so tests behave the
+//! same on every machine. [`FakeBackend`] answers
 //! like Git without running it.
 
 mod fake;
 pub mod generator;
 
-pub use fake::{FakeBackend, Gate, HistoryFeed, LiveRepo, Probe, commit_line, fake_id};
+pub use fake::{
+    CreatedBranch, CreatedTag, FakeBackend, FakeWrite, Gate, HistoryFeed, LiveRepo, Probe,
+    commit_line, fake_id,
+};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use gitbull_git::version::GitVersion;
 use tempfile::TempDir;
 
 /// The author and committer of every commit made through [`TestRepo`].
@@ -23,11 +28,20 @@ pub const AUTHOR_EMAIL: &str = "ada@example.com";
 /// is one minute later.
 const FIRST_COMMIT_EPOCH: u64 = 1_767_268_800;
 
+/// The version of the Git that the tests run, from the search path.
+pub fn git_version() -> GitVersion {
+    let output = Command::new("git")
+        .arg("--version")
+        .output()
+        .expect("Git runs");
+    GitVersion::parse(&String::from_utf8_lossy(&output.stdout)).expect("a Git version")
+}
+
 /// A Git repository in a temporary folder, deleted when dropped.
 pub struct TestRepo {
     _root: TempDir,
     work: PathBuf,
-    empty_config: PathBuf,
+    global_config: PathBuf,
     commits: u64,
 }
 
@@ -132,13 +146,20 @@ impl TestRepo {
         let root = tempfile::tempdir().expect("temporary folder");
         let work = root.path().join("repo");
         // Outside the working tree, so that it never shows up as a change.
-        let empty_config = root.path().join("empty-gitconfig");
+        // A commit would otherwise start Git's maintenance, which Git 2.47
+        // runs detached and which may still take its lock in the object
+        // folder while a test compares that folder.
+        let global_config = root.path().join("test-gitconfig");
         std::fs::create_dir(&work).expect("working tree");
-        std::fs::write(&empty_config, "").expect("empty Git configuration");
+        std::fs::write(
+            &global_config,
+            "[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n",
+        )
+        .expect("Git configuration of the tests");
         TestRepo {
             _root: root,
             work,
-            empty_config,
+            global_config,
             commits: 0,
         }
     }
@@ -243,7 +264,7 @@ impl TestRepo {
             .args(args)
             .current_dir(&self.work)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
+            .env("GIT_CONFIG_GLOBAL", &self.global_config)
             .env("GIT_AUTHOR_NAME", AUTHOR_NAME)
             .env("GIT_AUTHOR_EMAIL", AUTHOR_EMAIL)
             .env("GIT_COMMITTER_NAME", AUTHOR_NAME)

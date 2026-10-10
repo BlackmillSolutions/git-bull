@@ -13,10 +13,10 @@ use gitbull_testkit::TestRepo;
 
 fn session(repo: &TestRepo) -> Session {
     let executable = locate_git(None, Os::current(), &SystemProbe).expect("Git is installed");
-    let backend: Arc<dyn Backend> = Arc::new(CliBackend::new(Git::new(
-        executable,
-        PathBuf::from("/empty-hooks"),
-    )));
+    let backend: Arc<dyn Backend> = Arc::new(CliBackend::new(
+        Git::new(executable, PathBuf::from("/empty-hooks")),
+        gitbull_testkit::git_version(),
+    ));
     let opened = open(backend.as_ref(), repo.path()).unwrap();
     Session::new(opened, backend, Arc::new(|| {}))
 }

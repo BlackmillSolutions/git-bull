@@ -1,6 +1,9 @@
 # Build output
 /target
 
+# Local Git worktrees
+/.worktrees/
+
 # Brainstorming mockups and session state
 .superpowers/
 

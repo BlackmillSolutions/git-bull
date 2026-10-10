@@ -29,12 +29,17 @@ pub fn neutralised_filters_cancellable(
 }
 
 fn overrides_from(output: Vec<u8>) -> Result<Vec<ConfigOverride>, Error> {
-    let names = repository_filter_names(&output).map_err(|message| Error::Parse {
+    overrides_from_listing(&output).map_err(|message| Error::Parse {
         command: format!("git {}", config::LIST.join(" ")),
         message,
         bytes: output.clone(),
-    })?;
-    Ok(overrides_for(&names))
+    })
+}
+
+/// The overrides that neutralise the filters a listing of
+/// [`config::LIST`] names in the local or worktree scope.
+pub(crate) fn overrides_from_listing(output: &[u8]) -> Result<Vec<ConfigOverride>, String> {
+    Ok(overrides_for(&repository_filter_names(output)?))
 }
 
 /// Names of filter drivers with an entry in the local or worktree scope, from

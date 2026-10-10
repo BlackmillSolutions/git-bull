@@ -6,14 +6,17 @@ remotes and stashes, a commit list with graph, and commit details with diffs
 below. It is built to stay fluid on repositories with more than a million
 commits.
 
-git-bull is in early development. The first milestone is a read-only viewer,
-and the second, now under way, improves its interface; the first release,
-0.1.0, follows when the second is done. Until then, the pre-releases on the
-releases page can be tried. What git-bull does is
+git-bull is in early development. The current release, 0.2.0, holds the
+viewer, the worktree cockpit of the home tab, and the first write actions:
+it checks out branches, tags and commits and creates branches and tags; it
+is on the releases page. The next development priority is the rest of the
+local Git operations: staging and committing. The commit graph's
+visual redesign is deferred with low priority. What git-bull does is
 specified in [`openspec/specs`](openspec/specs), the changes being planned
 or built are in [`openspec/changes`](openspec/changes), the architecture
-decisions are in [`docs/adr`](docs/adr), and the plan ahead is on the
-[roadmap](https://github.com/users/BlackmillSolutions/projects/1).
+decisions are in [`docs/adr`](docs/adr), and the next steps are in the
+[roadmap overview](docs/roadmap.md) and on the
+[GitHub roadmap](https://github.com/users/BlackmillSolutions/projects/1).
 
 ## Installation
 
@@ -123,7 +126,8 @@ Windows).
 
 ### Checks
 
-These are the checks that CI runs on every push:
+CI runs these checks for pull requests into `dev` or `master`, except for
+planning-only branches under `plan/`:
 
 ```sh
 cargo fmt --all --check
@@ -134,6 +138,16 @@ cargo deny check
 
 `cargo deny` checks the licences of all dependencies and known security
 advisories. Install it once with `cargo install cargo-deny --locked`.
+
+### OpenSpec
+
+The shared Claude Code and Codex workflows in `.claude/` and `.agents/`
+are generated with **OpenSpec 1.13.2**. Use the same CLI version when
+running `openspec init` or `openspec update`:
+
+```sh
+npm install --global @fission-ai/openspec@1.13.2
+```
 
 ## Licence
 

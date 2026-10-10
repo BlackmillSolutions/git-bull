@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+use gitbull_git::ai_diff::{AiDiff, AiDiffRequest};
 use gitbull_git::backend::{
     BlameEntries, CommitStream, ContentSource, FileCommitStream, MatchStream,
 };
@@ -12,21 +13,29 @@ use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::{FileChange, FileLines};
 use gitbull_git::commit_graph::GraphProgress;
+use gitbull_git::commits::{CommitEntry, Since};
+use gitbull_git::compare::{BaseComparison, CompareRequest, Counts};
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
+use gitbull_git::facts::RepositoryFacts;
 use gitbull_git::file_history::FileCommit;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
+use gitbull_git::merged::{Prediction, Unpredicted};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::path::RepoPath;
-use gitbull_git::refs::Reference;
+use gitbull_git::refs::{RefKind, Reference};
+use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
 use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
 use gitbull_git::summary::Summary;
+use gitbull_git::switch::{CheckoutTarget, local_name_of};
+use gitbull_git::uncommitted::Uncommitted;
+use gitbull_git::version::Capabilities;
 use gitbull_git::worktrees::Worktree;
-use gitbull_git::{Backend, Error};
+use gitbull_git::{Backend, ConfigOverride, Error};
 
 /// An object id made from a short name, such as the commits of a test.
 pub fn fake_id(name: &str) -> ObjectId {
@@ -81,8 +90,8 @@ pub struct FakeBackend {
     failing_statuses: Vec<PathBuf>,
     status_gates: Vec<(PathBuf, Gate)>,
     /// The worktrees of a repository, the main one first.
-    worktrees: Vec<Vec<Worktree>>,
-    summaries: Vec<(PathBuf, Summary)>,
+    worktrees: Mutex<Vec<Vec<Worktree>>>,
+    summaries: Mutex<Vec<(PathBuf, Summary)>>,
     /// Holds every summary.
     summary_gate: Option<Gate>,
     working_diffs: HashMap<(Group, String), FileDiff>,
@@ -99,7 +108,81 @@ pub struct FakeBackend {
     /// By revision and path.
     file_contents: HashMap<(String, String), Vec<u8>>,
     inspect_delay: Option<std::time::Duration>,
+    /// What the Git it stands for can do; everything when not set.
+    capabilities: Option<Capabilities>,
+    /// The facts of a repository, by a folder inside it.
+    facts: Mutex<Vec<(PathBuf, RepositoryFacts)>>,
+    /// The base Git detects for a tip, by a folder of its repository.
+    detected: Vec<(PathBuf, String, String)>,
+    /// Tips whose base Git fails to detect.
+    failing_detections: Vec<String>,
+    /// The comparison of a tip with its base, by a folder of its
+    /// repository.
+    comparisons: Mutex<Vec<(PathBuf, String, BaseComparison)>>,
+    /// Tips that Git fails to compare with their base.
+    failing_comparisons: Vec<String>,
+    /// Worktrees whose uncommitted files Git fails to read.
+    failing_uncommitted: Vec<PathBuf>,
+    /// Holds every comparison.
+    compare_gate: Option<Gate>,
+    /// What came after a seen commit, by the seen commit and the tip.
+    since: Mutex<HashMap<(String, String), Since>>,
+    /// The commits of a range, newest first, by its two ends.
+    commit_lists: HashMap<(String, String), Vec<CommitEntry>>,
+    /// The uncommitted files of a worktree.
+    uncommitted: Vec<(PathBuf, Uncommitted)>,
+    /// The diffs of a worktree for the AI context.
+    ai_diffs: Vec<(PathBuf, AiDiff)>,
+    /// What a checkout of a target does; a target without an entry succeeds.
+    checkouts: Vec<(CheckoutTarget, FakeWrite)>,
+    /// What creating the branch of a name does; a name without an entry
+    /// succeeds.
+    branch_creations: Vec<(String, FakeWrite)>,
+    /// What creating the tag of a name does; a name without an entry succeeds.
+    tag_creations: Vec<(String, FakeWrite)>,
+    /// Holds every write action until it opens or is cancelled.
+    checkout_gate: Option<Gate>,
+    /// Folders inside repositories whose worktrees Git fails to list.
+    failing_worktrees: Vec<PathBuf>,
+    /// HEAD after checkouts, by folder; it takes the place of the HEAD given.
+    moved_heads: Mutex<Vec<(PathBuf, Head)>>,
+    /// References created by write actions, by folder; they are listed with the
+    /// others from then on.
+    created_references: Mutex<Vec<(PathBuf, Reference)>>,
     probe: Probe,
+}
+
+/// How a scripted write ends.
+#[derive(Clone, Debug)]
+pub enum FakeWrite {
+    /// Git does it.
+    Done,
+    /// Git refuses, and nothing changes.
+    Refused(Refusal),
+    /// Git fails with `stderr`, and nothing changes.
+    Failed { stderr: String },
+    /// Git does it and then reports a failure, as a failing post-checkout hook
+    /// makes it do.
+    FailedAfterDoing { stderr: String },
+}
+
+/// A branch that was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedBranch {
+    pub name: String,
+    /// The full hash of the starting point.
+    pub start: String,
+    pub checkout: bool,
+}
+
+/// A tag that was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedTag {
+    pub name: String,
+    /// The full hash of the starting point.
+    pub start: String,
+    /// The message of an annotated tag; `None` for a lightweight one.
+    pub message: Option<String>,
 }
 
 /// How checking a path goes wrong on purpose.
@@ -128,6 +211,165 @@ enum History {
 }
 
 impl FakeBackend {
+    /// The facts of the repository at `root`; without them a repository
+    /// has no remotes, no branches and no configuration to neutralise.
+    pub fn with_facts(self, root: impl Into<PathBuf>, facts: RepositoryFacts) -> FakeBackend {
+        self.set_facts(root, facts);
+        self
+    }
+
+    /// Changes the facts of the repository at `root` while the backend is
+    /// in use, as when a branch moves.
+    pub fn set_facts(&self, root: impl Into<PathBuf>, facts: RepositoryFacts) {
+        let root = root.into();
+        let mut known = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|(path, _)| *path != root);
+        known.push((root, facts));
+    }
+
+    /// Lets Git detect `base` as the branch `tip` started from, both by
+    /// their full names, in the repository at `root`.
+    pub fn with_detected_base(
+        mut self,
+        root: impl Into<PathBuf>,
+        tip: &str,
+        base: &str,
+    ) -> FakeBackend {
+        self.detected
+            .push((root.into(), tip.to_owned(), base.to_owned()));
+        self
+    }
+
+    /// Detecting the base of `tip`, by its full name, fails as Git does.
+    pub fn with_failing_detection(mut self, tip: &str) -> FakeBackend {
+        self.failing_detections.push(tip.to_owned());
+        self
+    }
+
+    /// Comparing `tip`, by its full name, with its base fails as Git does.
+    pub fn with_failing_comparison(mut self, tip: &str) -> FakeBackend {
+        self.failing_comparisons.push(tip.to_owned());
+        self
+    }
+
+    /// Compares `tip` with its base as `comparison` says, in the
+    /// repository at `root`; without it, a tip is level with its base.
+    pub fn with_comparison(
+        self,
+        root: impl Into<PathBuf>,
+        tip: &str,
+        comparison: BaseComparison,
+    ) -> FakeBackend {
+        self.set_comparison(root, tip, comparison);
+        self
+    }
+
+    /// Changes the comparison of `tip` while the backend is in use, as when
+    /// a branch moves.
+    pub fn set_comparison(&self, root: impl Into<PathBuf>, tip: &str, comparison: BaseComparison) {
+        let root = root.into();
+        let mut comparisons = self.comparisons.lock().unwrap_or_else(|e| e.into_inner());
+        comparisons.retain(|(known, known_tip, _)| !(*known == root && known_tip == tip));
+        comparisons.push((root, tip.to_owned(), comparison));
+    }
+
+    /// Lets `since` commits have come on `tip` after `seen`; without it,
+    /// nothing came after a commit.
+    pub fn with_since(self, seen: &str, tip: &str, since: Since) -> FakeBackend {
+        self.set_since(seen, tip, since);
+        self
+    }
+
+    /// Changes what came on `tip` after `seen` while the backend is in use.
+    pub fn set_since(&self, seen: &str, tip: &str, since: Since) {
+        self.since
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((seen.to_owned(), tip.to_owned()), since);
+    }
+
+    /// The commits of `from..tip`, newest first.
+    pub fn with_commit_list(
+        mut self,
+        from: &str,
+        tip: &str,
+        commits: Vec<CommitEntry>,
+    ) -> FakeBackend {
+        self.commit_lists
+            .insert((from.to_owned(), tip.to_owned()), commits);
+        self
+    }
+
+    /// Reading the uncommitted files of the worktree at `worktree` fails as
+    /// Git does.
+    pub fn with_failing_uncommitted(mut self, worktree: impl Into<PathBuf>) -> FakeBackend {
+        self.failing_uncommitted.push(worktree.into());
+        self
+    }
+
+    /// The uncommitted files of the worktree at `worktree`.
+    pub fn with_uncommitted(
+        mut self,
+        worktree: impl Into<PathBuf>,
+        files: Uncommitted,
+    ) -> FakeBackend {
+        self.uncommitted.push((worktree.into(), files));
+        self
+    }
+
+    /// The diffs of the worktree at `worktree` for the AI context.
+    pub fn with_ai_diff(mut self, worktree: impl Into<PathBuf>, diff: AiDiff) -> FakeBackend {
+        self.ai_diffs.push((worktree.into(), diff));
+        self
+    }
+
+    /// Holds every comparison until `gate` opens.
+    pub fn with_compare_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.compare_gate = Some(gate.clone());
+        self
+    }
+
+    /// Lets a checkout of `target` end as `outcome`; without an entry it
+    /// succeeds and moves HEAD there.
+    pub fn with_checkout(mut self, target: CheckoutTarget, outcome: FakeWrite) -> FakeBackend {
+        self.checkouts.push((target, outcome));
+        self
+    }
+
+    /// Lets creating the branch `name` end as `outcome`; without an entry it
+    /// succeeds, and with a checkout it moves HEAD there.
+    pub fn with_create_branch(mut self, name: &str, outcome: FakeWrite) -> FakeBackend {
+        self.branch_creations.push((name.to_owned(), outcome));
+        self
+    }
+
+    /// Lets creating the tag `name` end as `outcome`; without an entry it
+    /// succeeds.
+    pub fn with_create_tag(mut self, name: &str, outcome: FakeWrite) -> FakeBackend {
+        self.tag_creations.push((name.to_owned(), outcome));
+        self
+    }
+
+    /// Listing the worktrees of the repository that contains `folder` fails as
+    /// if `git worktree list` did.
+    pub fn with_failing_worktrees(mut self, folder: impl Into<PathBuf>) -> FakeBackend {
+        self.failing_worktrees.push(folder.into());
+        self
+    }
+
+    /// Holds every write action until `gate` opens; cancelling the action ends
+    /// it.
+    pub fn with_checkout_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.checkout_gate = Some(gate.clone());
+        self
+    }
+
+    /// Answers as a Git that can do only `capabilities`.
+    pub fn with_capabilities(mut self, capabilities: Capabilities) -> FakeBackend {
+        self.capabilities = Some(capabilities);
+        self
+    }
+
     /// Adds a repository with a working tree at `work_tree`.
     pub fn with_repository(mut self, work_tree: impl Into<PathBuf>) -> FakeBackend {
         let work_tree = work_tree.into();
@@ -192,16 +434,36 @@ impl FakeBackend {
     /// The repository has `worktrees`, its main worktree first; asked from
     /// any of them, the backend lists them all, as Git does. Without this, a
     /// repository has its main worktree alone.
-    pub fn with_worktrees(mut self, worktrees: Vec<Worktree>) -> FakeBackend {
-        self.worktrees.push(worktrees);
+    pub fn with_worktrees(self, worktrees: Vec<Worktree>) -> FakeBackend {
+        self.set_worktrees(worktrees);
         self
+    }
+
+    /// Changes the worktrees of the repository whose main worktree comes
+    /// first in `worktrees` while the backend is in use, as when a commit
+    /// moves the HEAD of one.
+    pub fn set_worktrees(&self, worktrees: Vec<Worktree>) {
+        let mut known = self.worktrees.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|listed| {
+            listed.first().map(|main| &main.path) != worktrees.first().map(|main| &main.path)
+        });
+        known.push(worktrees);
     }
 
     /// The summary of the working copy at `worktree`. Without it, a working
     /// copy is summarised from its HEAD and its status.
-    pub fn with_summary(mut self, worktree: impl Into<PathBuf>, summary: Summary) -> FakeBackend {
-        self.summaries.push((worktree.into(), summary));
+    pub fn with_summary(self, worktree: impl Into<PathBuf>, summary: Summary) -> FakeBackend {
+        self.set_summary(worktree, summary);
         self
+    }
+
+    /// Changes the summary of the working copy at `worktree` while the
+    /// backend is in use, as when a file changes.
+    pub fn set_summary(&self, worktree: impl Into<PathBuf>, summary: Summary) {
+        let worktree = worktree.into();
+        let mut known = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        known.retain(|(path, _)| *path != worktree);
+        known.push((worktree, summary));
     }
 
     /// Every summary waits until the test opens `gate`.
@@ -573,9 +835,77 @@ impl FakeBackend {
     }
 }
 
+impl FakeBackend {
+    /// Waits for the gate of the write actions, if there is one.
+    fn hold_write(&self, cancel: &CancelToken) -> Result<(), WriteFailure> {
+        if let Some(gate) = &self.checkout_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(WriteFailure::Failed(Error::Cancelled));
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends a write action as scripted. `effect` is what the action leaves
+    /// behind when it does what it was asked to, even if Git then reports a
+    /// failure.
+    fn finish_write(
+        &self,
+        command: &str,
+        outcome: FakeWrite,
+        effect: impl FnOnce(),
+    ) -> Result<(), WriteFailure> {
+        let failed = |stderr: String| {
+            WriteFailure::Failed(Error::CommandFailed {
+                command: command.to_owned(),
+                code: Some(1),
+                stderr,
+            })
+        };
+        match outcome {
+            FakeWrite::Done => {
+                effect();
+                Ok(())
+            }
+            FakeWrite::Refused(refusal) => Err(WriteFailure::Refused(refusal)),
+            FakeWrite::Failed { stderr } => Err(failed(stderr)),
+            FakeWrite::FailedAfterDoing { stderr } => {
+                effect();
+                Err(failed(stderr))
+            }
+        }
+    }
+
+    /// HEAD of `folder` is `head` from now on.
+    fn move_head(&self, folder: PathBuf, head: Head) {
+        self.moved_heads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((folder, head));
+    }
+}
+
 impl Backend for FakeBackend {
+    fn capabilities(&self) -> Capabilities {
+        self.capabilities.unwrap_or(Capabilities::ALL)
+    }
+
     fn head(&self, repo: &Path) -> Result<Head, Error> {
         self.gone(repo)?;
+        let folder = self.root_of(repo);
+        if let Some(head) = self
+            .moved_heads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .rev()
+            .find(|(known, _)| *known == folder)
+            .map(|(_, head)| head.clone())
+        {
+            return Ok(head);
+        }
         if let Some(head) = self.live_of(repo).and_then(|live| live.head.clone()) {
             return Ok(head);
         }
@@ -643,20 +973,29 @@ impl Backend for FakeBackend {
                 .and_then(|root| held.iter().position(|(known, ..)| *known == root));
             at.map(|at| held.remove(at))
         };
-        if let Some((_, references, gate)) = first {
-            gate.wait();
-            return Ok(references);
-        }
-        if let Some(references) = self.live_of(repo).and_then(|live| live.references.clone()) {
-            return Ok(references);
-        }
         let root = self.root_of(repo);
-        Ok(self
-            .references
-            .iter()
-            .find(|(known, _)| *known == root)
-            .map(|(_, references)| references.clone())
-            .unwrap_or_default())
+        let mut listed = if let Some((_, references, gate)) = first {
+            gate.wait();
+            references
+        } else if let Some(references) = self.live_of(repo).and_then(|live| live.references.clone())
+        {
+            references
+        } else {
+            self.references
+                .iter()
+                .find(|(known, _)| *known == root)
+                .map(|(_, references)| references.clone())
+                .unwrap_or_default()
+        };
+        listed.extend(
+            self.created_references
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(known, _)| *known == root)
+                .map(|(_, reference)| reference.clone()),
+        );
+        Ok(listed)
     }
 
     fn stashes(&self, repo: &Path) -> Result<Vec<Stash>, Error> {
@@ -702,6 +1041,117 @@ impl Backend for FakeBackend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(&root))
+    }
+
+    fn checkout(
+        &self,
+        repo: &Path,
+        target: &CheckoutTarget,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        self.probe.record("checkout", repo);
+        self.probe.record_checkout(target);
+        let folder = self.root_of(repo);
+        self.hold_write(cancel)?;
+        let outcome = self
+            .checkouts
+            .iter()
+            .find(|(known, _)| known == target)
+            .map(|(_, outcome)| outcome.clone())
+            .unwrap_or(FakeWrite::Done);
+        let moved = match target {
+            CheckoutTarget::Branch(name) => Head::Branch(name.clone()),
+            CheckoutTarget::Commit(id) => Head::Detached(id.clone()),
+            CheckoutTarget::RemoteBranch(remote) => {
+                Head::Branch(local_name_of(remote).unwrap_or_else(|| remote.clone()))
+            }
+        };
+        self.finish_write("git switch", outcome, || self.move_head(folder, moved))
+    }
+
+    fn create_branch(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        checkout: bool,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        self.probe.record("create-branch", repo);
+        self.probe.record_created_branch(CreatedBranch {
+            name: name.to_owned(),
+            start: start.to_owned(),
+            checkout,
+        });
+        let folder = self.root_of(repo);
+        self.hold_write(cancel)?;
+        let outcome = self
+            .branch_creations
+            .iter()
+            .find(|(known, _)| known == name)
+            .map(|(_, outcome)| outcome.clone())
+            .unwrap_or(FakeWrite::Done);
+        self.finish_write(
+            if checkout { "git switch" } else { "git branch" },
+            outcome,
+            || {
+                self.created_references
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((
+                        folder.clone(),
+                        Reference {
+                            name: format!("refs/heads/{name}"),
+                            short: name.to_owned(),
+                            kind: RefKind::Branch,
+                            commit: Some(start.to_owned()),
+                            upstream: None,
+                        },
+                    ));
+                if checkout {
+                    self.move_head(folder.clone(), Head::Branch(name.to_owned()));
+                }
+            },
+        )
+    }
+
+    fn create_tag(
+        &self,
+        repo: &Path,
+        name: &str,
+        start: &str,
+        message: Option<&str>,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        self.probe.record("create-tag", repo);
+        self.probe.record_created_tag(CreatedTag {
+            name: name.to_owned(),
+            start: start.to_owned(),
+            message: message.map(str::to_owned),
+        });
+        let folder = self.root_of(repo);
+        self.hold_write(cancel)?;
+        let outcome = self
+            .tag_creations
+            .iter()
+            .find(|(known, _)| known == name)
+            .map(|(_, outcome)| outcome.clone())
+            .unwrap_or(FakeWrite::Done);
+        self.finish_write("git tag", outcome, || {
+            self.created_references
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((
+                    folder.clone(),
+                    Reference {
+                        name: format!("refs/tags/{name}"),
+                        short: name.to_owned(),
+                        kind: RefKind::Tag,
+                        commit: Some(start.to_owned()),
+                        upstream: None,
+                    },
+                ));
+        })
     }
 
     fn write_commit_graph(
@@ -920,7 +1370,23 @@ impl Backend for FakeBackend {
             return Err(Error::Cancelled);
         }
         self.gone(repo)?;
-        if let Some(listed) = self.worktrees.iter().find(|listed| {
+        if self
+            .failing_worktrees
+            .iter()
+            .any(|folder| repo.starts_with(folder))
+        {
+            return Err(Error::CommandFailed {
+                command: "git worktree list".to_owned(),
+                code: Some(128),
+                stderr: "fatal: scripted".to_owned(),
+            });
+        }
+        let known = self
+            .worktrees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(listed) = known.iter().find(|listed| {
             listed
                 .iter()
                 .any(|worktree| repo.starts_with(&worktree.path))
@@ -953,7 +1419,184 @@ impl Backend for FakeBackend {
         }])
     }
 
-    fn summary(&self, worktree: &Path, cancel: &CancelToken) -> Result<Summary, Error> {
+    fn facts(&self, repo: &Path, cancel: &CancelToken) -> Result<RepositoryFacts, Error> {
+        self.probe.record("facts", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.gone(repo)?;
+        let known = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, facts)) = known.iter().find(|(root, _)| repo.starts_with(root)) {
+            return Ok(facts.clone());
+        }
+        Ok(RepositoryFacts {
+            overrides: Vec::new(),
+            merge_driver: false,
+            worktree_config: false,
+            remotes: Vec::new(),
+            common_dir: repo.join(".git"),
+            branches: Vec::new(),
+            origin_head: None,
+        })
+    }
+
+    fn detect_base(
+        &self,
+        repo: &Path,
+        tip: &str,
+        _integration: &[String],
+        cancel: &CancelToken,
+    ) -> Result<Option<String>, Error> {
+        self.probe.record("detect-base", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if !self.capabilities().is_base {
+            return Ok(None);
+        }
+        if self.failing_detections.iter().any(|failing| failing == tip) {
+            return Err(Error::failed(
+                "git for-each-ref".to_owned(),
+                Some(128),
+                format!("fatal: failed to find '{tip}'\n"),
+            ));
+        }
+        Ok(self
+            .detected
+            .iter()
+            .find(|(root, detected_tip, _)| repo.starts_with(root) && detected_tip == tip)
+            .map(|(_, _, base)| base.clone()))
+    }
+
+    fn compare(
+        &self,
+        repo: &Path,
+        _facts: &RepositoryFacts,
+        request: &CompareRequest,
+        cancel: &CancelToken,
+    ) -> Result<BaseComparison, Error> {
+        self.probe.record("compare", repo);
+        self.probe.lock().base_comparisons.push(request.clone());
+        if let Some(gate) = &self.compare_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if self.failing_comparisons.contains(&request.tip) {
+            return Err(Error::failed(
+                "git merge-base".to_owned(),
+                Some(128),
+                format!("fatal: Not a valid object name {}\n", request.tip),
+            ));
+        }
+        let comparisons = self.comparisons.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, comparison)) = comparisons
+            .iter()
+            .find(|(root, tip, _)| repo.starts_with(root) && *tip == request.tip)
+        {
+            return Ok(comparison.clone());
+        }
+        Ok(BaseComparison {
+            counted: request
+                .local
+                .clone()
+                .or_else(|| request.remote.clone())
+                .unwrap_or_default(),
+            counts: Counts::default(),
+            lines: None,
+            merged: None,
+            prediction: Prediction::Unknown(Unpredicted::NotAsked),
+        })
+    }
+
+    fn since(
+        &self,
+        repo: &Path,
+        seen: &str,
+        tip: &str,
+        cancel: &CancelToken,
+    ) -> Result<Since, Error> {
+        self.probe.record("since", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let since = self.since.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(since
+            .get(&(seen.to_owned(), tip.to_owned()))
+            .copied()
+            .unwrap_or(Since::Commits(0)))
+    }
+
+    fn commit_list(
+        &self,
+        repo: &Path,
+        from: &str,
+        tip: &str,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<Vec<CommitEntry>, Error> {
+        self.probe.record("commit-list", repo);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut commits = self
+            .commit_lists
+            .get(&(from.to_owned(), tip.to_owned()))
+            .cloned()
+            .unwrap_or_default();
+        commits.truncate(limit);
+        Ok(commits)
+    }
+
+    fn uncommitted(
+        &self,
+        worktree: &Path,
+        _overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Uncommitted, Error> {
+        self.probe.record("uncommitted", worktree);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if self.failing_uncommitted.iter().any(|path| path == worktree) {
+            return Err(Error::failed(
+                "git status".to_owned(),
+                Some(128),
+                "fatal: index file corrupt\n".to_owned(),
+            ));
+        }
+        Ok(self
+            .uncommitted
+            .iter()
+            .find(|(path, _)| path == worktree)
+            .map(|(_, files)| files.clone())
+            .unwrap_or_default())
+    }
+
+    fn ai_diff(&self, request: &AiDiffRequest<'_>, cancel: &CancelToken) -> Result<AiDiff, Error> {
+        self.probe.record("ai-diff", request.worktree);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        Ok(self
+            .ai_diffs
+            .iter()
+            .find(|(path, _)| path == request.worktree)
+            .map(|(_, diff)| diff.clone())
+            .unwrap_or_default())
+    }
+
+    fn summary(
+        &self,
+        worktree: &Path,
+        _overrides: Option<&[ConfigOverride]>,
+        cancel: &CancelToken,
+    ) -> Result<Summary, Error> {
         self.probe.record("summary", worktree);
         let _running = self.probe.summary_started();
         if let Some(gate) = &self.summary_gate {
@@ -967,11 +1610,20 @@ impl Backend for FakeBackend {
             return Err(Error::Cancelled);
         }
         self.gone(worktree)?;
-        if let Some((_, summary)) = self.summaries.iter().find(|(path, _)| path == worktree) {
+        let known = self
+            .summaries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some((_, summary)) = known.iter().find(|(path, _)| path == worktree) {
             return Ok(summary.clone());
         }
-        let listed = self
+        let known = self
             .worktrees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let listed = known
             .iter()
             .flatten()
             .find(|listed| listed.path == worktree);
@@ -1540,11 +2192,19 @@ struct ProbeLog {
     calls: Vec<(String, PathBuf)>,
     requested: Vec<ObjectId>,
     compared: Vec<(ObjectId, Option<ObjectId>)>,
+    /// Every comparison with a base asked for.
+    base_comparisons: Vec<CompareRequest>,
     diffs: Vec<(ObjectId, String, Option<usize>)>,
     working_diffs: Vec<(Group, String, Option<usize>)>,
     searches: Vec<(SearchKind, String)>,
     /// File histories and blames: which, from where, and the path.
     opened: Vec<(String, String, String)>,
+    /// Every checkout asked for, in order.
+    checkouts: Vec<CheckoutTarget>,
+    /// Every branch creation asked for, in order.
+    created_branches: Vec<CreatedBranch>,
+    /// Every tag creation asked for, in order.
+    created_tags: Vec<CreatedTag>,
 }
 
 impl Probe {
@@ -1562,6 +2222,12 @@ impl Probe {
         let now = self.inner.summaries.fetch_add(1, Ordering::SeqCst) + 1;
         self.inner.most_summaries.fetch_max(now, Ordering::SeqCst);
         Running(&self.inner.summaries)
+    }
+
+    /// Every operation called, with the folder it was called for, in
+    /// order.
+    pub fn sequence(&self) -> Vec<(String, PathBuf)> {
+        self.lock().calls.clone()
     }
 
     /// The operations called on `repo`, in order, such as `"history"`.
@@ -1614,6 +2280,38 @@ impl Probe {
 
     fn record(&self, call: &str, repo: &Path) {
         self.lock().calls.push((call.to_owned(), repo.to_owned()));
+    }
+
+    fn record_checkout(&self, target: &CheckoutTarget) {
+        self.lock().checkouts.push(target.clone());
+    }
+
+    fn record_created_branch(&self, created: CreatedBranch) {
+        self.lock().created_branches.push(created);
+    }
+
+    fn record_created_tag(&self, created: CreatedTag) {
+        self.lock().created_tags.push(created);
+    }
+
+    /// Every tag creation asked for, in order.
+    pub fn created_tags(&self) -> Vec<CreatedTag> {
+        self.lock().created_tags.clone()
+    }
+
+    /// Every branch creation asked for, in order.
+    pub fn created_branches(&self) -> Vec<CreatedBranch> {
+        self.lock().created_branches.clone()
+    }
+
+    /// Every checkout asked for, in order.
+    pub fn checkouts(&self) -> Vec<CheckoutTarget> {
+        self.lock().checkouts.clone()
+    }
+
+    /// Every comparison with a base asked for, in order.
+    pub fn base_comparisons(&self) -> Vec<CompareRequest> {
+        self.lock().base_comparisons.clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ProbeLog> {
@@ -1686,7 +2384,7 @@ mod tests {
                     ..WorkingStatus::default()
                 },
             );
-        let summary = backend.summary(&root, &CancelToken::new()).unwrap();
+        let summary = backend.summary(&root, None, &CancelToken::new()).unwrap();
         assert_eq!(summary.head, Head::Branch("dev".to_owned()));
         assert_eq!(summary.changed, 1);
     }
@@ -1704,7 +2402,7 @@ mod tests {
         let threads: Vec<_> = (0..3)
             .map(|_| {
                 let (backend, root) = (Arc::clone(&backend), root.clone());
-                std::thread::spawn(move || backend.summary(&root, &CancelToken::new()))
+                std::thread::spawn(move || backend.summary(&root, None, &CancelToken::new()))
             })
             .collect();
         while probe.calls(&root).len() < 3 {
@@ -1727,5 +2425,162 @@ mod tests {
             FakeBackend::default().worktrees(&path(&["nowhere"]), &CancelToken::new()),
             Err(Error::NotARepository(_))
         ));
+    }
+
+    fn backend_with_repository() -> (FakeBackend, PathBuf) {
+        let root = path(&["work", "app"]);
+        let backend = FakeBackend::default()
+            .with_repository(root.clone())
+            .with_head(root.clone(), Head::Branch("main".to_owned()));
+        (backend, root)
+    }
+
+    #[test]
+    fn a_checkout_moves_head_and_is_recorded() {
+        let (backend, root) = backend_with_repository();
+        let target = CheckoutTarget::Branch("feature".to_owned());
+        backend
+            .checkout(&root, &target, &CancelToken::new())
+            .unwrap();
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("feature".to_owned())
+        );
+        let commit = CheckoutTarget::Commit(fake_id("c1").to_string());
+        backend
+            .checkout(&root, &commit, &CancelToken::new())
+            .unwrap();
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Detached(fake_id("c1").to_string())
+        );
+        assert_eq!(backend.probe().checkouts(), [target, commit]);
+        assert_eq!(backend.probe().calls(&root), ["checkout", "checkout"]);
+    }
+
+    #[test]
+    fn scripted_outcomes_end_a_checkout_as_told() {
+        let (backend, root) = backend_with_repository();
+        let backend = backend
+            .with_checkout(
+                CheckoutTarget::Branch("blocked".to_owned()),
+                FakeWrite::Refused(Refusal::TrackedChanges(vec!["a.txt".to_owned()])),
+            )
+            .with_checkout(
+                CheckoutTarget::Branch("broken".to_owned()),
+                FakeWrite::Failed {
+                    stderr: "boom".to_owned(),
+                },
+            )
+            .with_checkout(
+                CheckoutTarget::Branch("hook".to_owned()),
+                FakeWrite::FailedAfterDoing {
+                    stderr: "hook rejected".to_owned(),
+                },
+            );
+        let cancel = CancelToken::new();
+        let go =
+            |name: &str| backend.checkout(&root, &CheckoutTarget::Branch(name.to_owned()), &cancel);
+        assert!(matches!(
+            go("blocked"),
+            Err(WriteFailure::Refused(Refusal::TrackedChanges(_)))
+        ));
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("main".to_owned())
+        );
+        assert!(matches!(
+            go("broken"),
+            Err(WriteFailure::Failed(Error::CommandFailed { .. }))
+        ));
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("main".to_owned())
+        );
+        assert!(matches!(
+            go("hook"),
+            Err(WriteFailure::Failed(Error::CommandFailed { stderr, .. })) if stderr == "hook rejected"
+        ));
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("hook".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_gated_checkout_waits_until_the_gate_opens() {
+        let (backend, root) = backend_with_repository();
+        let gate = Gate::new();
+        let backend = Arc::new(backend.with_checkout_gate(&gate));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = {
+            let backend = Arc::clone(&backend);
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let result = backend.checkout(
+                    &root,
+                    &CheckoutTarget::Branch("feature".to_owned()),
+                    &CancelToken::new(),
+                );
+                let _ = sender.send(result.is_ok());
+            })
+        };
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "the checkout ended before the gate opened"
+        );
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("main".to_owned())
+        );
+        gate.open();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        );
+        worker.join().unwrap();
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("feature".to_owned())
+        );
+    }
+
+    #[test]
+    fn cancelling_ends_a_held_checkout() {
+        let (backend, root) = backend_with_repository();
+        let gate = Gate::new();
+        let backend = Arc::new(backend.with_checkout_gate(&gate));
+        let cancel = CancelToken::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = {
+            let (backend, root, cancel) = (Arc::clone(&backend), root.clone(), cancel.clone());
+            std::thread::spawn(move || {
+                let result = backend.checkout(
+                    &root,
+                    &CheckoutTarget::Branch("feature".to_owned()),
+                    &cancel,
+                );
+                let _ = sender.send(matches!(
+                    result,
+                    Err(WriteFailure::Failed(Error::Cancelled))
+                ));
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel.cancel();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        );
+        worker.join().unwrap();
+        assert!(gate.was_cancelled());
+        assert_eq!(
+            backend.head(&root).unwrap(),
+            Head::Branch("main".to_owned())
+        );
     }
 }

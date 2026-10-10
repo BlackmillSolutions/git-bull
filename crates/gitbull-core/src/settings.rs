@@ -123,6 +123,139 @@ pub struct Layout {
     pub path_column: Option<f32>,
 }
 
+/// A stable identity for a column in the commit History list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryColumn {
+    Graph,
+    Description,
+    Date,
+    Author,
+    Commit,
+}
+
+impl HistoryColumn {
+    pub const ALL: [Self; 5] = [
+        Self::Graph,
+        Self::Description,
+        Self::Date,
+        Self::Author,
+        Self::Commit,
+    ];
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Graph => 0,
+            Self::Description => 1,
+            Self::Date => 2,
+            Self::Author => 3,
+            Self::Commit => 4,
+        }
+    }
+
+    /// Width limits in logical points. Description may need a larger
+    /// effective minimum to reserve space for HEAD and the hidden-ref count.
+    pub const fn width_limits(self) -> (f32, f32) {
+        match self {
+            Self::Graph => (24.0, 600.0),
+            Self::Description => (120.0, 10_000.0),
+            Self::Date | Self::Author => (60.0, 400.0),
+            Self::Commit => (40.0, 240.0),
+        }
+    }
+}
+
+/// Widths are indexed by column identity, not by the current display order.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryColumnWidths {
+    pub graph: Option<f32>,
+    pub description: Option<f32>,
+    pub date: Option<f32>,
+    pub author: Option<f32>,
+    pub commit: Option<f32>,
+}
+
+impl HistoryColumnWidths {
+    pub fn get(&self, column: HistoryColumn) -> Option<f32> {
+        match column {
+            HistoryColumn::Graph => self.graph,
+            HistoryColumn::Description => self.description,
+            HistoryColumn::Date => self.date,
+            HistoryColumn::Author => self.author,
+            HistoryColumn::Commit => self.commit,
+        }
+    }
+
+    pub fn set(&mut self, column: HistoryColumn, width: Option<f32>) {
+        *match column {
+            HistoryColumn::Graph => &mut self.graph,
+            HistoryColumn::Description => &mut self.description,
+            HistoryColumn::Date => &mut self.date,
+            HistoryColumn::Author => &mut self.author,
+            HistoryColumn::Commit => &mut self.commit,
+        } = width;
+    }
+}
+
+/// A repository's saved History arrangement. File History consumes the
+/// Date, Author and Commit widths from the same entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryColumns {
+    pub repository: PathBuf,
+    pub order: Vec<HistoryColumn>,
+    pub hidden: Vec<HistoryColumn>,
+    pub widths: HistoryColumnWidths,
+}
+
+impl Default for HistoryColumns {
+    fn default() -> Self {
+        Self {
+            repository: PathBuf::new(),
+            order: HistoryColumn::ALL.to_vec(),
+            hidden: Vec::new(),
+            widths: HistoryColumnWidths::default(),
+        }
+    }
+}
+
+impl HistoryColumns {
+    /// Repairs an entry read from an older or malformed settings file.
+    pub fn normalize(&mut self) {
+        let mut seen = [false; 5];
+        self.order.retain(|column| {
+            let index = column.index();
+            let first = !seen[index];
+            seen[index] = true;
+            first
+        });
+        for column in HistoryColumn::ALL {
+            if !seen[column.index()] {
+                self.order.push(column);
+            }
+        }
+
+        seen = [false; 5];
+        self.hidden.retain(|column| {
+            let index = column.index();
+            let allowed = *column != HistoryColumn::Description && !seen[index];
+            seen[index] = true;
+            allowed
+        });
+        for column in HistoryColumn::ALL {
+            let (min, max) = column.width_limits();
+            self.widths.set(
+                column,
+                self.widths
+                    .get(column)
+                    .filter(|width| width.is_finite())
+                    .map(|width| width.clamp(min, max)),
+            );
+        }
+    }
+}
+
 /// The worktrees the home tab last found in a repository, so that it shows
 /// them before it has read them again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +263,17 @@ pub struct KnownWorktrees {
     pub repository: PathBuf,
     /// Its further worktrees, by their folders.
     pub worktrees: Vec<PathBuf>,
+}
+
+/// The base branch the user set for a repository (spec
+/// `repository-manager`, requirement "Base branch").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryBase {
+    /// The canonical path of the repository, by which the home tab tells
+    /// repositories apart, whichever of its paths lists it.
+    pub repository: PathBuf,
+    /// A local branch, by its short name such as `dev`.
+    pub branch: String,
 }
 
 /// Everything git-bull remembers between runs.
@@ -152,6 +296,10 @@ pub struct Settings {
     /// Whether file lists show a tree of folders instead of full paths.
     #[serde(deserialize_with = "or_default")]
     pub file_tree: bool,
+    /// Whether to show a notice before a tag or a commit is checked out and
+    /// HEAD no longer points to a branch. On unless the user turned it off.
+    #[serde(deserialize_with = "or_true")]
+    pub detach_notice: bool,
     /// A language tag such as `en-US`.
     pub language: String,
     /// The Git executable chosen by the user, if any.
@@ -168,9 +316,15 @@ pub struct Settings {
     pub active_tab: Option<usize>,
     pub window: Option<WindowGeometry>,
     pub layout: Layout,
+    /// One History arrangement per canonical repository path.
+    #[serde(deserialize_with = "or_default", skip_serializing_if = "Vec::is_empty")]
+    pub history_columns: Vec<HistoryColumns>,
     /// The worktrees last found in the pinned and recent repositories.
     #[serde(deserialize_with = "or_default")]
     pub worktrees: Vec<KnownWorktrees>,
+    /// The base branches the user set for repositories.
+    #[serde(deserialize_with = "or_default")]
+    pub bases: Vec<RepositoryBase>,
 }
 
 impl Settings {
@@ -195,13 +349,86 @@ impl Settings {
         self.pinned.retain(|known| known != repository);
     }
 
-    /// Forgets `paths`, a repository with every path it was known by, from
-    /// the recent and the pinned repositories and the worktrees remembered.
+    /// Forgets `paths`, a repository with every path it was known by, its
+    /// canonical path among them, from the recent and the pinned
+    /// repositories, the worktrees remembered and the base set for it.
     pub fn forget(&mut self, paths: &[PathBuf]) {
         self.recent.retain(|known| !paths.contains(known));
         self.pinned.retain(|known| !paths.contains(known));
         self.worktrees
             .retain(|known| !paths.contains(&known.repository));
+        self.bases.retain(|base| !paths.contains(&base.repository));
+        self.history_columns
+            .retain(|columns| !paths.contains(&columns.repository));
+    }
+
+    /// Returns the saved arrangement for the main repository, or the
+    /// default order and visibility with widths from the older global layout.
+    pub fn history_columns_for(&self, repository: &Path) -> HistoryColumns {
+        self.history_columns
+            .iter()
+            .find(|columns| columns.repository == repository)
+            .cloned()
+            .unwrap_or_else(|| HistoryColumns {
+                repository: repository.to_owned(),
+                widths: HistoryColumnWidths {
+                    graph: self.layout.graph_column,
+                    date: self.layout.date_column,
+                    author: self.layout.author_column,
+                    commit: self.layout.hash_column,
+                    ..HistoryColumnWidths::default()
+                },
+                ..HistoryColumns::default()
+            })
+    }
+
+    /// Saves a repository's arrangement. For a non-UTF-8 path, widths also
+    /// update the old global fields, which survive when the entry cannot.
+    pub fn set_history_columns(&mut self, mut columns: HistoryColumns) -> bool {
+        columns.normalize();
+        if self.history_columns_for(&columns.repository) == columns {
+            return false;
+        }
+        if columns.repository.to_str().is_none() {
+            self.layout.graph_column = columns.widths.graph;
+            self.layout.date_column = columns.widths.date;
+            self.layout.author_column = columns.widths.author;
+            self.layout.hash_column = columns.widths.commit;
+        }
+        if let Some(saved) = self
+            .history_columns
+            .iter_mut()
+            .find(|saved| saved.repository == columns.repository)
+        {
+            *saved = columns;
+        } else {
+            self.history_columns.push(columns);
+        }
+        true
+    }
+
+    /// The base the user set for the repository whose canonical path is
+    /// `repository`.
+    pub fn base_of(&self, repository: &Path) -> Option<&str> {
+        self.bases
+            .iter()
+            .find(|base| base.repository == repository)
+            .map(|base| base.branch.as_str())
+    }
+
+    /// Sets the base of the repository whose canonical path is
+    /// `repository` to `branch`, or lets it be detected again with `None`.
+    /// Returns whether anything changed.
+    pub fn set_base(&mut self, repository: &Path, branch: Option<String>) -> bool {
+        let before = self.bases.clone();
+        self.bases.retain(|base| base.repository != repository);
+        if let Some(branch) = branch {
+            self.bases.push(RepositoryBase {
+                repository: repository.to_owned(),
+                branch,
+            });
+        }
+        self.bases != before
     }
 
     /// Remembers that `repository` has `worktrees`, if it is pinned or
@@ -239,6 +466,7 @@ impl Default for Settings {
             system_title_bar: false,
             show_invisibles: false,
             file_tree: false,
+            detach_notice: true,
             language: "en-US".to_owned(),
             git_path: None,
             recent: Vec::new(),
@@ -247,7 +475,9 @@ impl Default for Settings {
             active_tab: None,
             window: None,
             layout: Layout::default(),
+            history_columns: Vec::new(),
             worktrees: Vec::new(),
+            bases: Vec::new(),
         }
     }
 }
@@ -287,11 +517,16 @@ impl SettingsFile {
             }
             Err(_) => return self.reset(),
         };
-        match toml::from_str(&text) {
-            Ok(settings) => Loaded {
-                settings,
-                reset: false,
-            },
+        match toml::from_str::<Settings>(&text) {
+            Ok(mut settings) => {
+                for columns in &mut settings.history_columns {
+                    columns.normalize();
+                }
+                Loaded {
+                    settings,
+                    reset: false,
+                }
+            }
             Err(_) => self.reset(),
         }
     }
@@ -362,11 +597,25 @@ fn storable(settings: &Settings) -> Settings {
             worktrees: kept(&known.worktrees),
         })
         .collect();
+    let bases = settings
+        .bases
+        .iter()
+        .filter(|base| valid(&base.repository))
+        .cloned()
+        .collect();
+    let history_columns = settings
+        .history_columns
+        .iter()
+        .filter(|columns| valid(&columns.repository))
+        .cloned()
+        .collect();
     Settings {
         git_path: settings.git_path.clone().filter(|path| valid(path)),
         recent: kept(&settings.recent),
         pinned: kept(&settings.pinned),
         worktrees,
+        bases,
+        history_columns,
         active_tab: active_tab.filter(|_| !tabs.is_empty()),
         tabs,
         ..settings.clone()
@@ -383,6 +632,16 @@ where
 {
     let value = toml::Value::deserialize(deserializer)?;
     Ok(value.try_into().unwrap_or_default())
+}
+
+/// Like [`or_default`] for a switch that is on unless the user turned it off:
+/// a value of the wrong type leaves it on.
+fn or_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(value.try_into().unwrap_or(true))
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -407,6 +666,7 @@ mod tests {
             system_title_bar: false,
             show_invisibles: false,
             file_tree: false,
+            detach_notice: true,
             language: "de-DE".to_owned(),
             git_path: Some(PathBuf::from("/opt/git/bin/git")),
             recent: vec![
@@ -426,7 +686,9 @@ mod tests {
                 details_height: Some(300.0),
                 ..Layout::default()
             },
+            history_columns: Vec::new(),
             worktrees: Vec::new(),
+            bases: Vec::new(),
         }
     }
 
@@ -486,6 +748,109 @@ mod tests {
                 settings: example(),
                 reset: false
             }
+        );
+    }
+
+    #[test]
+    fn history_columns_are_normalized_when_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(
+            &file,
+            "[[history_columns]]\n\
+             repository = \"/work/git-bull\"\n\
+             order = [\"commit\", \"commit\", \"graph\"]\n\
+             hidden = [\"description\", \"author\"]\n\
+             [history_columns.widths]\n\
+             date = -4.0\n",
+        );
+
+        let loaded = file.load();
+        assert!(!loaded.reset);
+        file.save(&loaded.settings).unwrap();
+        let saved: toml::Table =
+            toml::from_str(&std::fs::read_to_string(file.path()).unwrap()).unwrap();
+        let columns = &saved["history_columns"][0];
+        assert_eq!(
+            columns["order"].as_array().unwrap(),
+            &["commit", "graph", "description", "date", "author"]
+                .map(|name| toml::Value::String(name.to_owned()))
+        );
+        assert_eq!(
+            columns["hidden"].as_array().unwrap(),
+            &[toml::Value::String("author".to_owned())]
+        );
+        assert_eq!(columns["widths"]["date"].as_float(), Some(60.0));
+    }
+
+    #[test]
+    fn history_columns_start_from_old_widths_and_remain_per_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let mut settings = Settings::default();
+        settings.layout.author_column = Some(170.0);
+        let first = Path::new("/work/first");
+        let second = Path::new("/work/second");
+        assert_eq!(
+            settings.history_columns_for(first).widths.author,
+            Some(170.0)
+        );
+
+        let mut changed = settings.history_columns_for(first);
+        changed.widths.author = Some(220.0);
+        changed.order.swap(0, 1);
+        changed.hidden.push(HistoryColumn::Date);
+        settings.set_history_columns(changed);
+
+        assert_eq!(
+            settings.history_columns_for(first).widths.author,
+            Some(220.0)
+        );
+        assert_eq!(
+            settings.history_columns_for(second).widths.author,
+            Some(170.0)
+        );
+        assert_eq!(settings.layout.author_column, Some(170.0));
+        file.save(&settings).unwrap();
+        let loaded = file.load().settings;
+        assert_eq!(
+            loaded.history_columns_for(first).order[0],
+            HistoryColumn::Description
+        );
+        assert!(
+            loaded
+                .history_columns_for(first)
+                .hidden
+                .contains(&HistoryColumn::Date)
+        );
+        assert_eq!(
+            loaded.history_columns_for(second).widths.author,
+            Some(170.0)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_repository_widths_use_the_global_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let invalid = not_utf8("history");
+        let mut settings = Settings::default();
+        let mut changed = settings.history_columns_for(&invalid);
+        changed.widths.commit = Some(124.0);
+        settings.set_history_columns(changed);
+        assert_eq!(
+            settings.history_columns_for(&invalid).widths.commit,
+            Some(124.0)
+        );
+        file.save(&settings).unwrap();
+
+        let loaded = file.load().settings;
+        assert!(loaded.history_columns.is_empty());
+        assert_eq!(loaded.layout.hash_column, Some(124.0));
+        assert_eq!(
+            loaded.history_columns_for(&invalid).widths.commit,
+            Some(124.0)
         );
     }
 
@@ -689,6 +1054,52 @@ mod tests {
         assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
         assert!(loaded.settings.show_invisibles);
         assert_eq!(loaded.settings.tabs, [PathBuf::from("/work/git-bull")]);
+    }
+
+    #[test]
+    fn detach_notice_defaults_to_on() {
+        assert!(Settings::default().detach_notice);
+    }
+
+    #[test]
+    fn a_file_without_the_setting_loads_as_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(&file, "theme = \"dark\"\nfile_tree = true\n");
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert!(loaded.settings.detach_notice);
+        assert!(loaded.settings.file_tree);
+    }
+
+    #[test]
+    fn a_value_of_the_wrong_type_loads_as_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(&file, "detach_notice = \"maybe\"\ntheme = \"dark\"\n");
+
+        let loaded = file.load();
+
+        assert!(!loaded.reset);
+        assert!(loaded.settings.detach_notice);
+        assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
+    }
+
+    #[test]
+    fn the_setting_for_the_notice_survives_a_save_and_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let settings = Settings {
+            detach_notice: false,
+            ..example()
+        };
+        file.save(&settings).unwrap();
+
+        let text = std::fs::read_to_string(file.path()).unwrap();
+        assert!(text.contains("detach_notice = false"), "{text}");
+        assert_eq!(file.load().settings, settings);
     }
 
     #[test]
@@ -970,6 +1381,59 @@ mod tests {
         ));
         file.save(&settings).unwrap();
         assert_eq!(file.load().settings, settings);
+    }
+
+    #[test]
+    fn the_base_of_a_repository_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        let mut settings = example();
+        assert!(settings.set_base(Path::new("/work/git-bull"), Some("dev".to_owned())));
+        file.save(&settings).unwrap();
+        let loaded = file.load().settings;
+        assert_eq!(loaded, settings);
+        assert_eq!(loaded.base_of(Path::new("/work/git-bull")), Some("dev"));
+    }
+
+    #[test]
+    fn a_file_without_bases_detects_every_base_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file_in(&dir);
+        write(
+            &file,
+            "theme = \"dark\"
+recent = [\"/work/git-bull\"]
+",
+        );
+        let loaded = file.load();
+        assert!(!loaded.reset);
+        assert!(loaded.settings.bases.is_empty());
+        assert_eq!(loaded.settings.theme, ThemeSetting::Dark);
+    }
+
+    #[test]
+    fn a_base_is_kept_once_under_the_canonical_path() {
+        let mut settings = Settings::default();
+        let canonical = Path::new("/work/git-bull");
+        settings.set_base(canonical, Some("main".to_owned()));
+        assert!(settings.set_base(canonical, Some("dev".to_owned())));
+        assert!(!settings.set_base(canonical, Some("dev".to_owned())));
+        assert_eq!(settings.bases.len(), 1);
+        assert_eq!(settings.base_of(canonical), Some("dev"));
+        assert!(settings.set_base(canonical, None));
+        assert_eq!(settings.base_of(canonical), None);
+    }
+
+    #[test]
+    fn a_removed_repository_forgets_its_base() {
+        let mut settings = Settings::default();
+        settings.remember(PathBuf::from("/work/App"));
+        settings.set_base(Path::new("/work/app"), Some("dev".to_owned()));
+        settings.set_base(Path::new("/work/other"), Some("main".to_owned()));
+        // Every path of the repository, its canonical one among them.
+        settings.forget(&[PathBuf::from("/work/App"), PathBuf::from("/work/app")]);
+        assert_eq!(settings.base_of(Path::new("/work/app")), None);
+        assert_eq!(settings.base_of(Path::new("/work/other")), Some("main"));
     }
 
     #[test]

@@ -113,3 +113,27 @@ fn chosen_file_that_is_no_git_is_explained_and_not_remembered() {
     harness.get_by_label_contains(&chosen.display().to_string());
     assert_eq!(harness.state().settings().git_path, None);
 }
+
+#[test]
+fn the_backend_knows_what_the_git_of_the_check_can_do() {
+    use gitbull_app::app::App;
+    use gitbull_core::git_setup::GitCheck;
+    use gitbull_git::Git;
+    use gitbull_git::version::{Capabilities, GitVersion};
+
+    let version = GitVersion {
+        major: 2,
+        minor: 40,
+        patch: 1,
+    };
+    let check = GitCheck::Ready {
+        git: Git::new(PathBuf::from("git"), PathBuf::from("/empty-hooks")),
+        path: PathBuf::from("git"),
+        version,
+    };
+    let (_, backend) = App::git_parts(check);
+    assert_eq!(
+        backend.expect("a backend").capabilities(),
+        Capabilities::of(version)
+    );
+}
