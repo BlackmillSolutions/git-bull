@@ -243,7 +243,7 @@ pub(crate) fn find_diff(
 
 /// The output of `command`, up to `limit` lines of hunks; returns it and
 /// whether lines were left unread.
-fn read_diff(
+pub(crate) fn read_diff(
     git: &Git,
     repo: &Path,
     command: &DiffCommand<'_>,

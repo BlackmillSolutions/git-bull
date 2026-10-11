@@ -23,6 +23,7 @@ use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
 use gitbull_git::merged::{Prediction, Unpredicted};
 use gitbull_git::object_id::ObjectId;
+use gitbull_git::patch::PartRequest;
 use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::refusal::{Refusal, WriteFailure};
@@ -101,6 +102,13 @@ pub struct FakeBackend {
     stage_failure: Option<String>,
     /// What Git prints when unstaging fails; without, unstaging succeeds.
     unstage_failure: Option<String>,
+    /// How staging or unstaging a part of a file ends; without, it succeeds.
+    part_outcome: Option<FakeWrite>,
+    /// The status of a repository once a part of a file was staged or
+    /// unstaged in it.
+    status_after_part: Vec<(PathBuf, WorkingStatus)>,
+    /// Holds every reading of a working diff until it opens or is cancelled.
+    working_diff_gate: Option<Gate>,
     /// The worktrees of a repository, the main one first.
     worktrees: Mutex<Vec<Vec<Worktree>>>,
     summaries: Mutex<Vec<(PathBuf, Summary)>>,
@@ -770,6 +778,29 @@ impl FakeBackend {
     /// Unstaging fails with `stderr`, and nothing changes.
     pub fn with_unstage_failure(mut self, stderr: &str) -> FakeBackend {
         self.unstage_failure = Some(stderr.to_owned());
+        self
+    }
+
+    /// Staging or unstaging a part of a file ends as `outcome`.
+    pub fn with_part_outcome(mut self, outcome: FakeWrite) -> FakeBackend {
+        self.part_outcome = Some(outcome);
+        self
+    }
+
+    /// Once a part of a file was staged or unstaged in `root`, its status is
+    /// `status`.
+    pub fn with_status_after_part(
+        mut self,
+        root: impl Into<PathBuf>,
+        status: WorkingStatus,
+    ) -> FakeBackend {
+        self.status_after_part.push((root.into(), status));
+        self
+    }
+
+    /// Reading a working diff takes until the test opens `gate`.
+    pub fn with_working_diff_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.working_diff_gate = Some(gate.clone());
         self
     }
 
@@ -1857,6 +1888,35 @@ impl Backend for FakeBackend {
         self.index_action("unstage", repo, paths, failure, cancel, unstaged_in_memory)
     }
 
+    fn stage_part(
+        &self,
+        repo: &Path,
+        group: Group,
+        entry: &StatusEntry,
+        request: &PartRequest,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        self.probe.record("stage-part", repo);
+        self.probe.lock().parts.push((
+            group,
+            entry.path.to_string_lossy().into_owned(),
+            request.clone(),
+        ));
+        let root = self.root_of(repo);
+        self.hold_write(cancel)?;
+        let outcome = self.part_outcome.clone().unwrap_or(FakeWrite::Done);
+        self.finish_write("git apply --cached", outcome, || {
+            let after = self
+                .status_after_part
+                .iter()
+                .find(|(known, _)| *known == root)
+                .map(|(_, status)| status.clone());
+            if let Some(status) = after {
+                self.move_status(repo, root.clone(), status);
+            }
+        })
+    }
+
     fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error> {
         self.probe.record("status", repo);
         self.gone(repo)?;
@@ -2028,9 +2088,16 @@ impl Backend for FakeBackend {
         group: Group,
         entry: &StatusEntry,
         limit: Option<usize>,
-        _cancel: &CancelToken,
+        cancel: &CancelToken,
     ) -> Result<FileDiff, Error> {
         self.probe.record("working-diff", repo);
+        if let Some(gate) = &self.working_diff_gate {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
         let path = entry.path.to_string();
         self.probe
             .lock()
@@ -2413,6 +2480,9 @@ struct ProbeLog {
     checkouts: Vec<CheckoutTarget>,
     /// Every staging and unstaging asked for, with its paths.
     index_calls: Vec<(String, Vec<String>)>,
+    /// Every part of a file asked for: the group and the path of the file,
+    /// and the request.
+    parts: Vec<(Group, String, PartRequest)>,
     /// Every branch creation asked for, in order.
     created_branches: Vec<CreatedBranch>,
     /// Every tag creation asked for, in order.
@@ -2506,6 +2576,12 @@ impl Probe {
     /// with its paths.
     pub fn index_calls(&self) -> Vec<(String, Vec<String>)> {
         self.lock().index_calls.clone()
+    }
+
+    /// Every part of a file that was to be staged or unstaged, in order: the
+    /// group and the path of the file, and the request.
+    pub fn parts(&self) -> Vec<(Group, String, PartRequest)> {
+        self.lock().parts.clone()
     }
 
     fn record_checkout(&self, target: &CheckoutTarget) {
@@ -3004,5 +3080,108 @@ mod tests {
         );
         // Nor is the third.
         backend.status(&root, &cancel).unwrap();
+    }
+
+    // ---- a part of a file
+
+    fn part(hunk: usize) -> PartRequest {
+        PartRequest {
+            shown: Arc::new(FileDiff {
+                old_path: Some(RepoPath::new("a.rs")),
+                new_path: Some(RepoPath::new("a.rs")),
+                old_mode: None,
+                new_mode: None,
+                old_blob: None,
+                new_blob: None,
+                new_in_working_copy: true,
+                content: gitbull_git::diff::Content::Text(Vec::new()),
+                truncated: false,
+                filtered: false,
+            }),
+            selection: gitbull_git::patch::Selection::new().hunk(hunk),
+        }
+    }
+
+    #[test]
+    fn a_part_is_recorded_and_moves_to_the_status_given() {
+        let root = path(&["work", "app"]);
+        let after = WorkingStatus {
+            staged: vec![changed(ChangeKind::Modified, "a.rs")],
+            ..WorkingStatus::default()
+        };
+        let backend = FakeBackend::default()
+            .with_status(root.clone(), working())
+            .with_status_after_part(root.clone(), after.clone());
+        let cancel = CancelToken::new();
+        let entry = changed(ChangeKind::Modified, "a.rs");
+        backend
+            .stage_part(&root, Group::Unstaged, &entry, &part(1), &cancel)
+            .unwrap();
+        assert_eq!(
+            backend.probe().parts(),
+            [(Group::Unstaged, "a.rs".to_owned(), part(1))]
+        );
+        assert_eq!(backend.status(&root, &cancel).unwrap(), after);
+    }
+
+    #[test]
+    fn a_part_ends_as_scripted_and_then_changes_nothing() {
+        let root = path(&["work", "app"]);
+        let entry = changed(ChangeKind::Modified, "a.rs");
+        let cancel = CancelToken::new();
+        for (outcome, refused) in [
+            (FakeWrite::Refused(Refusal::DiffOutOfDate), true),
+            (
+                FakeWrite::Failed {
+                    stderr: "error: patch failed".to_owned(),
+                },
+                false,
+            ),
+        ] {
+            let backend = FakeBackend::default()
+                .with_status(root.clone(), working())
+                .with_status_after_part(root.clone(), WorkingStatus::default())
+                .with_part_outcome(outcome);
+            let result = backend.stage_part(&root, Group::Unstaged, &entry, &part(0), &cancel);
+            match (&result, refused) {
+                (Err(WriteFailure::Refused(Refusal::DiffOutOfDate)), true) => {}
+                (Err(WriteFailure::Failed(Error::CommandFailed { stderr, .. })), false) => {
+                    assert!(stderr.contains("patch failed"));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+            assert_eq!(backend.status(&root, &cancel).unwrap(), working());
+        }
+    }
+
+    #[test]
+    fn the_gate_holds_the_reading_of_a_working_diff() {
+        let root = path(&["work", "app"]);
+        let gate = Gate::new();
+        let diff = (*part(0).shown).clone();
+        let backend = Arc::new(
+            FakeBackend::default()
+                .with_working_diff(Group::Unstaged, "a.rs", diff)
+                .with_working_diff_gate(&gate),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (held, at) = (Arc::clone(&backend), root.clone());
+        std::thread::spawn(move || {
+            let entry = changed(ChangeKind::Modified, "a.rs");
+            let read = held.working_diff(&at, Group::Unstaged, &entry, None, &CancelToken::new());
+            let _ = sender.send(read.is_ok());
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the reading is held"
+        );
+        gate.open();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        );
     }
 }

@@ -28,6 +28,7 @@ use crate::invoke::{ConfigOverride, Git};
 use crate::merged::MergeCache;
 use crate::new_ref;
 use crate::object_id::ObjectId;
+use crate::patch::{self, PartRequest};
 use crate::path::RepoPath;
 use crate::refs::{self, Reference};
 use crate::refusal::WriteFailure;
@@ -166,6 +167,20 @@ pub trait Backend: Send + Sync {
         &self,
         repo: &Path,
         paths: &[RepoPath],
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure>;
+
+    /// Stages the part `request` of `entry` of the file status, or unstages
+    /// it when `group` is the staged one (spec `staging`): a hunk or chosen
+    /// lines of the diff the request was made in. Only the index changes.
+    /// Nothing is applied when Git no longer reports that diff, which comes
+    /// back as a refusal. See [`crate::patch::stage_part`].
+    fn stage_part(
+        &self,
+        repo: &Path,
+        group: Group,
+        entry: &StatusEntry,
+        request: &PartRequest,
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure>;
 
@@ -499,6 +514,17 @@ impl Backend for CliBackend {
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure> {
         index::unstage(&self.git, repo, paths, cancel)
+    }
+
+    fn stage_part(
+        &self,
+        repo: &Path,
+        group: Group,
+        entry: &StatusEntry,
+        request: &PartRequest,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        patch::stage_part(&self.git, repo, group, entry, request, cancel)
     }
 
     fn history(

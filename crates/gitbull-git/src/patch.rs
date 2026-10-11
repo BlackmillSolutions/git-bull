@@ -15,8 +15,17 @@
 //! the chosen lines give, or refused because no patch could express it.
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
 
-use crate::refusal::Refusal;
+use crate::cancel::CancelToken;
+use crate::diff::{Content, FileDiff, Hunk, LineKind, parse_diff};
+use crate::error::Error;
+use crate::invoke::Git;
+use crate::refusal::{Refusal, WriteFailure};
+use crate::status::{Group, StatusEntry};
+use crate::working_copy::raw_working_diff;
+use crate::write::WriteHooks;
 
 /// Which way a patch goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,6 +414,131 @@ impl RawDiff<'_> {
         }
         out
     }
+}
+
+/// A part of the changes of one file, as the interface asks for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartRequest {
+    /// The diff the selection was made in. Nothing is applied when the hunks
+    /// Git reports now are not these, line for line.
+    pub shown: Arc<FileDiff>,
+    pub selection: Selection,
+}
+
+impl PartRequest {
+    /// Whether the selection holds an added or a removed line of the diff
+    /// shown.
+    pub fn chooses_a_change(&self) -> bool {
+        let Content::Text(hunks) = &self.shown.content else {
+            return false;
+        };
+        hunks.iter().enumerate().any(|(index, hunk)| {
+            let changed = |line: usize| {
+                hunk.lines
+                    .get(line)
+                    .is_some_and(|line| line.kind != LineKind::Context)
+            };
+            match self.selection.of(index) {
+                Some(Chosen::All) => (0..hunk.lines.len()).any(changed),
+                Some(Chosen::Lines(lines)) => lines.iter().copied().any(changed),
+                None => false,
+            }
+        })
+    }
+}
+
+/// Stages the part `request` of `entry`, or unstages it when `group` is
+/// [`Group::Staged`], in the repository at `repo`.
+///
+/// Without a changed line chosen nothing is read and nothing runs. The diff
+/// of the file is read again as Git writes it; when its hunks are not the
+/// ones of `request.shown`, or Git reports no diff of the file any more,
+/// nothing is applied and the result is [`Refusal::DiffOutOfDate`]. A
+/// selection that would join two lines at an end without a line break is
+/// [`Refusal::EndOfFileSplit`]. The patch changes the index alone; a setting
+/// of Git that repairs or rejects whitespace does not touch it.
+pub fn stage_part(
+    git: &Git,
+    repo: &Path,
+    group: Group,
+    entry: &StatusEntry,
+    request: &PartRequest,
+    cancel: &CancelToken,
+) -> Result<(), WriteFailure> {
+    if !request.chooses_a_change() {
+        return Ok(());
+    }
+    let out_of_date = || WriteFailure::Refused(Refusal::DiffOutOfDate);
+    let Content::Text(shown) = &request.shown.content else {
+        return Ok(());
+    };
+    let raw = raw_working_diff(git, repo, group, entry, cancel)
+        .map_err(WriteFailure::Failed)?
+        .ok_or_else(out_of_date)?;
+    let unreadable = |message: String| {
+        WriteFailure::Failed(Error::Parse {
+            command: "git diff".to_owned(),
+            message,
+            bytes: raw.clone(),
+        })
+    };
+    // The parser that made the hunks shown reads the ones of now, so that
+    // both count alike, and a line edited in place is seen.
+    let now = parse_diff(&raw).map_err(unreadable)?;
+    let now: &[Hunk] = match now.first().map(|diff| &diff.content) {
+        Some(Content::Text(hunks)) => hunks,
+        _ => &[],
+    };
+    if now != shown.as_slice() {
+        return Err(out_of_date());
+    }
+    let parsed = parse(&raw).map_err(unreadable)?;
+    // The places of the selection were counted by the other parser.
+    let counted_alike = parsed.kinds().len() == now.len()
+        && parsed.kinds().iter().zip(now).all(|(kinds, hunk)| {
+            kinds.len() == hunk.lines.len()
+                && kinds.iter().zip(&hunk.lines).all(|(kind, line)| {
+                    matches!(
+                        (kind, line.kind),
+                        (Kind::Context, LineKind::Context)
+                            | (Kind::Added, LineKind::Added)
+                            | (Kind::Removed, LineKind::Removed)
+                    )
+                })
+        });
+    if !counted_alike {
+        return Err(unreadable(
+            "the two readings of the diff count its lines differently".to_owned(),
+        ));
+    }
+    let direction = match group {
+        Group::Staged => Direction::Unstage,
+        Group::Unstaged | Group::Untracked => Direction::Stage,
+    };
+    let Some(patch) = parsed
+        .patch(&request.selection, direction)
+        .map_err(WriteFailure::Refused)?
+    else {
+        return Ok(());
+    };
+    // Exact counts and its context: nothing that would let Git bend the
+    // patch, repair its whitespace, or apply a part of it.
+    let mut args = vec![
+        "-c",
+        "apply.ignoreWhitespace=no",
+        "apply",
+        "--cached",
+        "--whitespace=nowarn",
+    ];
+    if direction == Direction::Unstage {
+        args.push("--reverse");
+    }
+    args.push("-");
+    git.write(WriteHooks::Run)
+        .run(repo, args, Some(&patch), cancel)
+        // Not `WriteFailure::from_error`, which reads the refusals of a
+        // checkout out of Git's error output.
+        .map_err(WriteFailure::Failed)
 }
 
 #[cfg(test)]
