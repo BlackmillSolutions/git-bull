@@ -854,10 +854,66 @@ fn file_status_view(theme: ThemeSetting) -> Harness<'static, App> {
         truncated: false,
         filtered: false,
     };
+    // The diff of a modified file, with two hunks.
+    let line = |kind, old: Option<u32>, new: Option<u32>, text: &str| DiffLine {
+        kind,
+        old_number: old,
+        new_number: new,
+        text: text.to_owned(),
+        no_newline: false,
+        cut: false,
+        crlf: false,
+    };
+    let ui = FileDiff {
+        old_path: Some("src/ui.rs".into()),
+        new_path: Some("src/ui.rs".into()),
+        old_mode: Some("100644".to_owned()),
+        content: Content::Text(vec![
+            Hunk {
+                header: "@@ -10,3 +10,4 @@ fn show()".to_owned(),
+                old_start: 10,
+                new_start: 10,
+                lines: vec![
+                    line(
+                        LineKind::Context,
+                        Some(10),
+                        Some(10),
+                        "    let area = ui.max_rect();",
+                    ),
+                    line(
+                        LineKind::Added,
+                        None,
+                        Some(11),
+                        "    let menu = staging(ui);",
+                    ),
+                    line(LineKind::Context, Some(11), Some(12), "    draw(ui, area);"),
+                    line(LineKind::Context, Some(12), Some(13), "}"),
+                ],
+            },
+            Hunk {
+                header: "@@ -40,3 +41,3 @@ fn draw()".to_owned(),
+                old_start: 40,
+                new_start: 41,
+                lines: vec![
+                    line(
+                        LineKind::Context,
+                        Some(40),
+                        Some(41),
+                        "    let rows = rows(ui);",
+                    ),
+                    line(LineKind::Removed, Some(41), None, "    paint(rows);"),
+                    line(LineKind::Added, None, Some(42), "    paint(rows, menu);"),
+                    line(LineKind::Context, Some(42), Some(43), "}"),
+                ],
+            },
+        ]),
+        ..notes.clone()
+    };
     let mut harness = repository_window(
         dialog_backend()
             .with_status(path(&["work", "git-bull"]), status)
-            .with_working_diff(gitbull_git::status::Group::Untracked, "notes.txt", notes),
+            .with_working_diff(gitbull_git::status::Group::Untracked, "notes.txt", notes)
+            .with_working_diff(gitbull_git::status::Group::Unstaged, "src/ui.rs", ui),
         theme,
         InterfaceSize::Percent100,
         (1280.0, 800.0),
@@ -898,4 +954,47 @@ fn file_status_in_the_light_palette() {
     let mut harness = file_status_view(ThemeSetting::Light);
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "file_status_light", &options());
+}
+
+/// The diff of a modified file with two hunks, the header of the first one
+/// selected and showing the button that stages the hunk (spec `staging`).
+#[test]
+fn file_status_with_a_hunk_selected() {
+    let mut harness = file_status_view(ThemeSetting::Dark);
+    let click = |harness: &mut Harness<'static, App>, role: Role, name: &str| {
+        let at = harness
+            .query_all_by_role(role)
+            .find(|node| {
+                node.accesskit_node()
+                    .label()
+                    .is_some_and(|label| label.contains(name))
+            })
+            .unwrap_or_else(|| panic!("no {name}"))
+            .rect()
+            .center();
+        harness.hover_at(at);
+        for pressed in [true, false] {
+            harness.event(eframe::egui::Event::PointerButton {
+                pos: at,
+                button: eframe::egui::PointerButton::Primary,
+                pressed,
+                modifiers: eframe::egui::Modifiers::NONE,
+            });
+        }
+        harness.run();
+    };
+    click(&mut harness, Role::ListItem, "ui.rs");
+    let header = "@@ -10,3 +10,4 @@";
+    wait_for(&mut harness, |h| {
+        h.query_all_by_role(Role::Code).any(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.contains(header))
+        })
+    });
+    click(&mut harness, Role::Code, header);
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_hunk_selected", &options());
 }
