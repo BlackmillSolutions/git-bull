@@ -5,8 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gitbull_git::Backend;
+use gitbull_git::changes::ChangeKind;
+use gitbull_git::diff::FileDiff;
 use gitbull_git::path::RepoPath;
-use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
+use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 
 use crate::diff_document::Part;
 use crate::diff_pane::{DiffPane, DiffSource, DiffState, Highlighting};
@@ -125,6 +127,25 @@ impl ShownFiles {
             .iter()
             .filter_map(|(group, index)| Some((*group, status.group(*group).get(*index)?)))
     }
+}
+
+/// Whether hunks and lines of the diff shown can be staged, or unstaged,
+/// alone (spec `staging`, requirement "Changes that are staged whole").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Parts {
+    Available,
+    /// The file has unresolved conflicts.
+    Conflicted,
+    /// The diff was cut at its limit; all of it must be loaded first.
+    Truncated,
+    /// A filter driver rewrites the file, so the lines of the diff are not
+    /// the lines of the file.
+    Filtered,
+    /// A symbolic link, or a change of the type of the file: half of such a
+    /// change is no change Git can hold.
+    WholeOnly,
+    /// The diff is being read again, and the one shown is of before.
+    Reading,
 }
 
 /// The uncommitted changes and the diff of the file chosen.
@@ -309,6 +330,40 @@ impl FileStatus {
             .iter()
             .position(|entry| entry.path == *path)?;
         Some((*group, index))
+    }
+
+    /// Whether the diff shown can be staged or unstaged in parts; `None`
+    /// when it shows no lines, as for a binary file, a rename alone or a
+    /// submodule, where nothing is offered.
+    pub fn parts(&self) -> Option<Parts> {
+        let (_, entry, diff) = self.part_source()?;
+        let link = |mode: &Option<String>| mode.as_deref() == Some("120000");
+        let type_changed = entry.kind == StatusKind::Changed(ChangeKind::TypeChanged);
+        Some(if entry.kind == StatusKind::Conflicted {
+            Parts::Conflicted
+        } else if type_changed || link(&diff.old_mode) || link(&diff.new_mode) {
+            Parts::WholeOnly
+        } else if diff.filtered {
+            Parts::Filtered
+        } else if diff.truncated {
+            Parts::Truncated
+        } else if self.pane.is_reading() {
+            Parts::Reading
+        } else {
+            Parts::Available
+        })
+    }
+
+    /// What the diff shown was read for, and the diff, when it shows lines:
+    /// what a request to stage a part of it is made of.
+    pub(crate) fn part_source(&self) -> Option<(Group, &StatusEntry, Arc<FileDiff>)> {
+        let Some(DiffSource::WorkingCopy { group, entry }) = self.pane.source() else {
+            return None;
+        };
+        let DiffState::Loaded(document) = self.pane.diff() else {
+            return None;
+        };
+        (!document.hunks().is_empty()).then(|| (*group, entry, document.shared_diff()))
     }
 
     /// The diff of the file chosen; meaningless while none is.
@@ -675,5 +730,142 @@ mod tests {
         let highlighting = status.highlighting().expect("highlighted");
         assert!(highlighting.new.is_some());
         assert!(probe.calls(&root()).contains(&"working-file".to_owned()));
+    }
+
+    // ---- what can be staged in parts (spec `staging`)
+
+    /// The file status with `working` read, the file at the top of `group`
+    /// chosen, and its diff shown.
+    fn chosen(fake: FakeBackend, working: WorkingStatus, group: Group) -> FileStatus {
+        let (mut status, _) = file_status(fake.with_status(root(), working));
+        status.refresh();
+        wait_until(&mut status, loaded);
+        status.choose(Some((group, 0)));
+        wait_until(&mut status, |status| {
+            !matches!(status.diff(), DiffState::Loading)
+        });
+        status
+    }
+
+    fn parts_of(group: Group, entry: StatusEntry, diff: FileDiff) -> Option<Parts> {
+        let path = entry.path.to_string();
+        let mut working = WorkingStatus::default();
+        match group {
+            Group::Staged => working.staged.push(entry),
+            Group::Unstaged => working.unstaged.push(entry),
+            Group::Untracked => working.untracked.push(entry),
+        }
+        let fake = FakeBackend::default().with_working_diff(group, &path, diff);
+        chosen(fake, working, group).parts()
+    }
+
+    #[test]
+    fn a_text_diff_can_be_staged_in_parts_in_every_group() {
+        for (group, entry) in [
+            (Group::Unstaged, modified("a.rs")),
+            (Group::Staged, modified("a.rs")),
+            (Group::Untracked, entry(StatusKind::Untracked, "a.rs")),
+        ] {
+            assert_eq!(
+                parts_of(group, entry, diff_of("a.rs", "new")),
+                Some(Parts::Available),
+                "{group:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_diff_without_lines_offers_nothing() {
+        let binary = FileDiff {
+            content: Content::Binary {
+                old_size: Some(1),
+                new_size: Some(2),
+            },
+            ..diff_of("logo.png", "")
+        };
+        assert_eq!(
+            parts_of(Group::Unstaged, modified("logo.png"), binary),
+            None
+        );
+        // A rename or a mode alone has no hunk.
+        let no_lines = FileDiff {
+            content: Content::Text(Vec::new()),
+            ..diff_of("a.rs", "")
+        };
+        assert_eq!(parts_of(Group::Staged, modified("a.rs"), no_lines), None);
+    }
+
+    #[test]
+    fn the_reasons_a_diff_with_lines_is_staged_whole_only() {
+        let conflicted = entry(StatusKind::Conflicted, "a.rs");
+        assert_eq!(
+            parts_of(Group::Unstaged, conflicted, diff_of("a.rs", "new")),
+            Some(Parts::Conflicted)
+        );
+        // Under a filter driver, in both groups.
+        let filtered = || FileDiff {
+            filtered: true,
+            ..diff_of("big.dat", "new")
+        };
+        for group in [Group::Unstaged, Group::Staged] {
+            assert_eq!(
+                parts_of(group, modified("big.dat"), filtered()),
+                Some(Parts::Filtered),
+                "{group:?}"
+            );
+        }
+        // A change of type, and a symbolic link on either side.
+        let type_changed = entry(StatusKind::Changed(ChangeKind::TypeChanged), "link");
+        assert_eq!(
+            parts_of(Group::Unstaged, type_changed, diff_of("link", "target")),
+            Some(Parts::WholeOnly)
+        );
+        let link = Some("120000".to_owned());
+        for (old_mode, new_mode) in [(link.clone(), None), (None, link.clone())] {
+            let diff = FileDiff {
+                old_mode,
+                new_mode,
+                ..diff_of("link", "target")
+            };
+            assert_eq!(
+                parts_of(Group::Unstaged, modified("link"), diff),
+                Some(Parts::WholeOnly)
+            );
+        }
+    }
+
+    #[test]
+    fn a_diff_cut_at_its_limit_is_staged_in_parts_once_all_of_it_is_loaded() {
+        let cut = FileDiff {
+            truncated: true,
+            ..diff_of("a.rs", "new")
+        };
+        let fake = FakeBackend::default().with_working_diff(Group::Unstaged, "a.rs", cut);
+        let mut status = chosen(fake, unstaged(&["a.rs"]), Group::Unstaged);
+        assert_eq!(status.parts(), Some(Parts::Truncated));
+        status.load_whole_diff();
+        wait_until(&mut status, diff_loaded);
+        assert_eq!(status.parts(), Some(Parts::Available));
+    }
+
+    #[test]
+    fn a_diff_that_is_read_again_is_not_staged_in_parts_until_it_arrived() {
+        // The second reading of the diff is held: the one a refresh starts.
+        let gate = Gate::new();
+        let fake = FakeBackend::default()
+            .with_working_diff(Group::Unstaged, "a.rs", diff_of("a.rs", "new"))
+            .with_working_diff_gate_at(2, &gate);
+        let mut status = chosen(fake, unstaged(&["a.rs"]), Group::Unstaged);
+        assert_eq!(status.parts(), Some(Parts::Available));
+        let version = status.version();
+        status.refresh();
+        wait_until(&mut status, |status| status.version() > version);
+        // The status arrived, the diff of before is still shown.
+        assert!(diff_loaded(&status));
+        assert!(status.pane.is_reading());
+        assert_eq!(status.parts(), Some(Parts::Reading));
+        gate.open();
+        wait_until(&mut status, |status| !status.pane.is_reading());
+        assert_eq!(status.parts(), Some(Parts::Available));
     }
 }

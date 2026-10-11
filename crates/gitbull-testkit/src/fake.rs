@@ -107,8 +107,11 @@ pub struct FakeBackend {
     /// The status of a repository once a part of a file was staged or
     /// unstaged in it.
     status_after_part: Vec<(PathBuf, WorkingStatus)>,
-    /// Holds every reading of a working diff until it opens or is cancelled.
-    working_diff_gate: Option<Gate>,
+    /// Holds one reading of a working diff, by its number, the first being 1,
+    /// until it opens or is cancelled.
+    working_diff_gate: Option<(usize, Gate)>,
+    /// How many working diffs were read.
+    working_diff_reads: Mutex<usize>,
     /// The worktrees of a repository, the main one first.
     worktrees: Mutex<Vec<Vec<Worktree>>>,
     summaries: Mutex<Vec<(PathBuf, Summary)>>,
@@ -798,9 +801,17 @@ impl FakeBackend {
         self
     }
 
-    /// Reading a working diff takes until the test opens `gate`.
-    pub fn with_working_diff_gate(mut self, gate: &Gate) -> FakeBackend {
-        self.working_diff_gate = Some(gate.clone());
+    /// The first reading of a working diff takes until the test opens
+    /// `gate`.
+    pub fn with_working_diff_gate(self, gate: &Gate) -> FakeBackend {
+        self.with_working_diff_gate_at(1, gate)
+    }
+
+    /// The `n`-th reading of a working diff, the first being 1, takes until
+    /// the test opens `gate`; the readings before and after it are not held.
+    /// This holds the diff that is read again after a part was staged.
+    pub fn with_working_diff_gate_at(mut self, n: usize, gate: &Gate) -> FakeBackend {
+        self.working_diff_gate = Some((n, gate.clone()));
         self
     }
 
@@ -2091,7 +2102,15 @@ impl Backend for FakeBackend {
         cancel: &CancelToken,
     ) -> Result<FileDiff, Error> {
         self.probe.record("working-diff", repo);
-        if let Some(gate) = &self.working_diff_gate {
+        let read = {
+            let mut reads = self
+                .working_diff_reads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *reads += 1;
+            *reads
+        };
+        if let Some((_, gate)) = self.working_diff_gate.as_ref().filter(|(n, _)| *n == read) {
             let stop = gate.clone();
             cancel.on_cancel(move || stop.cancel());
             if !gate.wait() {

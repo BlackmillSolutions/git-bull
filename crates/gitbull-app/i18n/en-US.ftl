@@ -220,6 +220,14 @@ action-unstage = { $count ->
 }
 stage-failed-title = The files could not be staged
 unstage-failed-title = The files could not be unstaged
+action-stage-part = Staging a part of { $path }
+action-unstage-part = Unstaging a part of { $path }
+stage-part-failed-title = The part of { $path } could not be staged
+unstage-part-failed-title = The part of { $path } could not be unstaged
+diff-out-of-date-title = { $path } changed
+diff-out-of-date-body = The file changed since its diff was read, so nothing was staged or unstaged. The diff now shows the file as it is.
+end-of-file-split-title = These lines of { $path } are staged together
+end-of-file-split-body = The last line of the file gains or loses its line break. Staging or unstaging only some of its last lines would join two lines, so nothing was changed. Select the changed lines at the end of the file together.
 stage-file = Stage file
 unstage-file = Unstage file
 stage-all = Stage all

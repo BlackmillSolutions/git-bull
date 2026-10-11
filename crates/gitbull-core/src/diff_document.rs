@@ -364,6 +364,12 @@ impl DiffDocument {
         &self.diff
     }
 
+    /// The diff as Git produced it, shared: what a request to stage a part
+    /// of it names as the diff it was made in.
+    pub fn shared_diff(&self) -> Arc<FileDiff> {
+        Arc::clone(&self.diff)
+    }
+
     /// Its hunks; none for a binary file or a submodule.
     pub fn hunks(&self) -> &[Hunk] {
         match &self.diff.content {

@@ -23,6 +23,7 @@ use gitbull_git::content::CommitContent;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
 use gitbull_git::object_id::ObjectId;
+use gitbull_git::patch::{PartRequest, Selection};
 use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::refusal::{Refusal, WriteFailure};
@@ -38,7 +39,7 @@ use crate::content_cache::ContentCache;
 use crate::details::Details;
 use crate::diff_document::Part;
 use crate::file_history::FileHistory;
-use crate::file_status::{FileStatus, StatusState};
+use crate::file_status::{FileStatus, Parts, StatusState};
 use crate::graph::{Checkpoint, Graph, GraphBuilder};
 use crate::highlight::HighlightTheme;
 use crate::opening::OpenedRepository;
@@ -104,6 +105,10 @@ pub enum Action {
     Stage { files: usize },
     /// Unstaging this many files.
     Unstage { files: usize },
+    /// Staging a hunk or lines of the file at this path.
+    StagePart { path: String },
+    /// Unstaging a hunk or lines of the file at this path.
+    UnstagePart { path: String },
 }
 
 impl Action {
@@ -111,7 +116,19 @@ impl Action {
     /// queue behind each other, and only the status is read after them
     /// (ADR 0008).
     pub fn is_index(&self) -> bool {
-        matches!(self, Action::Stage { .. } | Action::Unstage { .. })
+        matches!(
+            self,
+            Action::Stage { .. }
+                | Action::Unstage { .. }
+                | Action::StagePart { .. }
+                | Action::UnstagePart { .. }
+        )
+    }
+
+    /// Staging or unstaging a part of a file, which is asked for in the diff
+    /// and not in the file list.
+    pub fn is_part(&self) -> bool {
+        matches!(self, Action::StagePart { .. } | Action::UnstagePart { .. })
     }
 }
 
@@ -301,6 +318,13 @@ pub enum ActionDialog {
     /// Git refused the name of a new branch although the dialog had checked it,
     /// as when another program created the branch meanwhile.
     NameRefused { action: Action, why: NameRefusal },
+    /// A part of the file at `path` was to be staged or unstaged, and its
+    /// diff is no longer the one Git reports: nothing was applied.
+    DiffOutOfDate { path: String },
+    /// The lines chosen of the file at `path` could only be staged by joining
+    /// two lines at its end, which changes its last line break: nothing was
+    /// applied, and the last lines are staged together.
+    EndOfFileSplit { path: String },
     /// Git failed, with its message in full.
     Failed { action: Action, message: String },
     /// Git reported a failure after it had done the action, as a failing
@@ -1372,6 +1396,7 @@ impl Session {
             Action::Checkout { target } => target.clone(),
             Action::CreateBranch { name } | Action::CreateTag { name } => name.clone(),
             Action::Stage { .. } | Action::Unstage { .. } => String::new(),
+            Action::StagePart { path } | Action::UnstagePart { path } => path.clone(),
         };
         running.ended = Some(match result {
             Ok(()) => Ended::Done,
@@ -1461,6 +1486,66 @@ impl Session {
     /// file it came from.
     pub fn unstage(&mut self, paths: Vec<RepoPath>) -> IndexStart {
         self.request_index(true, paths)
+    }
+
+    /// Stages the lines `selection` names of the diff the File status view
+    /// shows, or unstages them when it is the diff of a staged file (spec
+    /// `staging`): a hunk, or chosen lines of hunks.
+    ///
+    /// A part is made for the diff that is shown, so it is never kept to run
+    /// later: while any write action runs or is kept, and while the diff is
+    /// read again, the answer is [`IndexStart::Busy`]. Without a diff that
+    /// can be staged in parts, or without a changed line chosen, nothing
+    /// starts. When Git no longer reports the diff shown, nothing is applied
+    /// and a dialog says so.
+    pub fn stage_part(&mut self, selection: Selection) -> IndexStart {
+        if self.action.is_some() || !self.index_queue.is_empty() {
+            return IndexStart::Busy;
+        }
+        let Some(status) = &self.file_status else {
+            return IndexStart::Nothing;
+        };
+        match status.parts() {
+            Some(Parts::Available) => {}
+            Some(Parts::Reading) => return IndexStart::Busy,
+            _ => return IndexStart::Nothing,
+        }
+        let Some((group, entry, shown)) = status.part_source() else {
+            return IndexStart::Nothing;
+        };
+        let entry = entry.clone();
+        let request = PartRequest { shown, selection };
+        if !request.chooses_a_change() {
+            return IndexStart::Nothing;
+        }
+        let path = entry.path.to_string();
+        self.dialog = None;
+        let cancel = CancelToken::new();
+        let (backend, root, notify) = (
+            Arc::clone(&self.backend),
+            self.opened.root.clone(),
+            Arc::clone(&self.notify),
+        );
+        let token = cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = catch_write(|| backend.stage_part(&root, group, &entry, &request, &token));
+            if sender.send(result).is_ok() {
+                notify();
+            }
+        });
+        self.action = Some(RunningAction {
+            action: match group {
+                Group::Staged => Action::UnstagePart { path },
+                Group::Unstaged | Group::Untracked => Action::StagePart { path },
+            },
+            expected: None,
+            cancel,
+            ended: None,
+            status_at: None,
+        });
+        self.action_result = Some(receiver);
+        IndexStart::Started
     }
 
     fn request_index(&mut self, unstage: bool, paths: Vec<RepoPath>) -> IndexStart {
@@ -1593,11 +1678,23 @@ impl Session {
         let Some(running) = &mut self.action else {
             return;
         };
+        let path = match &running.action {
+            Action::StagePart { path } | Action::UnstagePart { path } => path.clone(),
+            _ => String::new(),
+        };
         running.ended = Some(match result {
             Ok(()) => Ended::Done,
             Err(WriteFailure::Failed(Error::Cancelled)) => Ended::Cancelled,
             Err(WriteFailure::Failed(error)) => Ended::Failed(failure_text(&error)),
-            // The index operations report no refusal.
+            // What git-bull finds about a part of a file before it changes
+            // anything: told in its own words, without a message of Git.
+            Err(WriteFailure::Refused(Refusal::DiffOutOfDate)) => {
+                Ended::Dialog(ActionDialog::DiffOutOfDate { path })
+            }
+            Err(WriteFailure::Refused(Refusal::EndOfFileSplit)) => {
+                Ended::Dialog(ActionDialog::EndOfFileSplit { path })
+            }
+            // The index operations report no other refusal.
             Err(WriteFailure::Refused(refusal)) => Ended::Failed(format!("{refusal:?}")),
         });
         if !matches!(running.ended, Some(Ended::Done)) {
@@ -1630,11 +1727,15 @@ impl Session {
         let Some(running) = self.action.take_if(over) else {
             return false;
         };
-        if let Some(Ended::Failed(message)) = running.ended {
-            self.dialog = Some(ActionDialog::Failed {
-                action: running.action,
-                message,
-            });
+        match running.ended {
+            Some(Ended::Failed(message)) => {
+                self.dialog = Some(ActionDialog::Failed {
+                    action: running.action,
+                    message,
+                });
+            }
+            Some(Ended::Dialog(dialog)) => self.dialog = Some(dialog),
+            Some(Ended::Done | Ended::Cancelled) | None => {}
         }
         let readable = matches!(
             self.file_status.as_ref().map(FileStatus::state),
@@ -5014,6 +5115,278 @@ mod tests {
         let gate = Gate::new();
         let mut session = staging(with_changes().with_checkout_gate(&gate));
         assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        drop(session);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gate.was_cancelled() {
+            assert!(Instant::now() < deadline, "the action was not stopped");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    // ---- write actions: a part of a file (spec `staging`)
+
+    use gitbull_git::diff::{Content, DiffLine, FileDiff, Hunk, LineKind};
+    use gitbull_git::patch::Selection;
+
+    /// A diff of `path` with one hunk: a context line and two added lines.
+    fn part_diff(path: &str) -> FileDiff {
+        let line = |kind, text: &str| DiffLine {
+            kind,
+            old_number: None,
+            new_number: None,
+            text: text.to_owned(),
+            no_newline: false,
+            cut: false,
+            crlf: false,
+        };
+        FileDiff {
+            old_path: Some(path.into()),
+            new_path: Some(path.into()),
+            old_mode: None,
+            new_mode: None,
+            old_blob: None,
+            new_blob: None,
+            new_in_working_copy: true,
+            content: Content::Text(vec![Hunk {
+                header: "@@ -1 +1,3 @@".to_owned(),
+                old_start: 1,
+                new_start: 1,
+                lines: vec![
+                    line(LineKind::Context, "one"),
+                    line(LineKind::Added, "two"),
+                    line(LineKind::Added, "three"),
+                ],
+            }]),
+            truncated: false,
+            filtered: false,
+        }
+    }
+
+    /// The files of [`working`] with a diff for `a.rs`, unstaged, and for
+    /// `staged.rs`, staged.
+    fn with_diffs() -> FakeBackend {
+        with_changes()
+            .with_working_diff(Group::Unstaged, "a.rs", part_diff("a.rs"))
+            .with_working_diff(Group::Staged, "staged.rs", part_diff("staged.rs"))
+    }
+
+    fn diff_shown(session: &mut Session) -> bool {
+        session
+            .file_status()
+            .is_some_and(|status| status.parts() == Some(Parts::Available))
+    }
+
+    /// A session with the file at `index` of `group` chosen and its diff
+    /// shown.
+    fn choosing(backend: FakeBackend, group: Group, index: usize) -> Session {
+        let mut session = staging(backend);
+        session.choose_status_file(Some((group, index)));
+        wait_until(&mut session, diff_shown);
+        session
+    }
+
+    fn second_line() -> Selection {
+        Selection::new().line(0, 1)
+    }
+
+    #[test]
+    fn a_part_of_the_chosen_file_runs_and_names_itself() {
+        let gate = Gate::new();
+        let backend = with_diffs().with_checkout_gate(&gate);
+        let probe = backend.probe();
+        let mut session = choosing(backend, Group::Unstaged, 0);
+        let (heads, statuses, diffs) = (
+            count(&probe, "head"),
+            count(&probe, "status"),
+            count(&probe, "working-diff"),
+        );
+        assert_eq!(session.stage_part(second_line()), IndexStart::Started);
+        assert_eq!(
+            session.action(),
+            Some(&Action::StagePart {
+                path: "a.rs".to_owned()
+            })
+        );
+        gate.open();
+        wait_until(&mut session, idle);
+        // The request carries the diff shown and the selection given.
+        let parts = probe.parts();
+        assert_eq!(parts.len(), 1);
+        let (group, path, request) = &parts[0];
+        assert_eq!((*group, path.as_str()), (Group::Unstaged, "a.rs"));
+        assert_eq!(*request.shown, part_diff("a.rs"));
+        assert_eq!(request.selection, second_line());
+        // Only the status is read again, and with it the diff of the file.
+        assert_eq!(count(&probe, "status"), statuses + 1);
+        assert_eq!(count(&probe, "head"), heads);
+        wait_until(&mut session, |_| count(&probe, "working-diff") > diffs);
+        assert!(session.dialog().is_none());
+    }
+
+    #[test]
+    fn a_part_of_a_staged_file_is_unstaged() {
+        let backend = with_diffs();
+        let probe = backend.probe();
+        // `staged.rs` is the third staged file of `working`.
+        let mut session = choosing(backend, Group::Staged, 2);
+        assert_eq!(
+            session.stage_part(Selection::new().hunk(0)),
+            IndexStart::Started
+        );
+        assert_eq!(
+            session.action(),
+            Some(&Action::UnstagePart {
+                path: "staged.rs".to_owned()
+            })
+        );
+        wait_until(&mut session, idle);
+        assert_eq!(probe.parts()[0].0, Group::Staged);
+    }
+
+    #[test]
+    fn a_part_is_taken_only_while_nothing_else_runs() {
+        // A staging of files runs, and one is kept behind it.
+        let gate = Gate::new();
+        let mut session = choosing(with_diffs().with_checkout_gate(&gate), Group::Unstaged, 0);
+        assert_eq!(session.stage(repo_paths(&["b.rs"])), IndexStart::Started);
+        assert_eq!(session.stage_part(second_line()), IndexStart::Busy);
+        assert_eq!(session.stage(repo_paths(&["c.rs"])), IndexStart::Kept);
+        assert_eq!(session.stage_part(second_line()), IndexStart::Busy);
+        gate.open();
+        wait_until(&mut session, idle);
+
+        // A checkout runs.
+        let gate = Gate::new();
+        let mut session = choosing(with_diffs().with_checkout_gate(&gate), Group::Unstaged, 0);
+        assert_eq!(
+            session.start_checkout(named("feature")),
+            CheckoutStart::Started
+        );
+        assert_eq!(session.stage_part(second_line()), IndexStart::Busy);
+        gate.open();
+        wait_until(&mut session, idle);
+    }
+
+    #[test]
+    fn a_part_is_not_taken_while_its_diff_is_read_again() {
+        // The first reading shows the diff; the second, after the part, is
+        // held.
+        let diff = Gate::new();
+        let backend = with_diffs().with_working_diff_gate_at(2, &diff);
+        let probe = backend.probe();
+        let mut session = choosing(backend, Group::Unstaged, 0);
+        assert_eq!(session.stage_part(second_line()), IndexStart::Started);
+        wait_until(&mut session, idle);
+        // The slot is free, and the diff of before is still shown.
+        assert_eq!(session.stage_part(second_line()), IndexStart::Busy);
+        assert!(session.dialog().is_none());
+        assert_eq!(probe.parts().len(), 1);
+        diff.open();
+        wait_until(&mut session, diff_shown);
+        assert_eq!(session.stage_part(second_line()), IndexStart::Started);
+        wait_until(&mut session, idle);
+        assert_eq!(probe.parts().len(), 2);
+    }
+
+    #[test]
+    fn files_asked_for_while_a_part_runs_are_kept_and_run_after_it() {
+        let gate = Gate::new();
+        let backend = with_diffs().with_checkout_gate(&gate);
+        let probe = backend.probe();
+        let mut session = choosing(backend, Group::Unstaged, 0);
+        assert_eq!(session.stage_part(second_line()), IndexStart::Started);
+        assert_eq!(session.stage(repo_paths(&["b.rs"])), IndexStart::Kept);
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(probe.parts().len(), 1);
+        assert_eq!(calls(&probe), [call("stage", &["b.rs"])]);
+    }
+
+    #[test]
+    fn what_cannot_be_staged_as_asked_ends_in_its_dialog_and_drops_kept_requests() {
+        let cases = [
+            (
+                FakeWrite::Refused(Refusal::DiffOutOfDate),
+                ActionDialog::DiffOutOfDate {
+                    path: "a.rs".to_owned(),
+                },
+            ),
+            (
+                FakeWrite::Refused(Refusal::EndOfFileSplit),
+                ActionDialog::EndOfFileSplit {
+                    path: "a.rs".to_owned(),
+                },
+            ),
+            (
+                FakeWrite::Failed {
+                    stderr: "error: patch failed: a.rs:1".to_owned(),
+                },
+                ActionDialog::Failed {
+                    action: Action::StagePart {
+                        path: "a.rs".to_owned(),
+                    },
+                    message: "error: patch failed: a.rs:1".to_owned(),
+                },
+            ),
+        ];
+        for (outcome, dialog) in cases {
+            let gate = Gate::new();
+            let backend = with_diffs()
+                .with_checkout_gate(&gate)
+                .with_part_outcome(outcome);
+            let probe = backend.probe();
+            let mut session = choosing(backend, Group::Unstaged, 0);
+            let statuses = count(&probe, "status");
+            assert_eq!(session.stage_part(second_line()), IndexStart::Started);
+            assert_eq!(session.stage(repo_paths(&["b.rs"])), IndexStart::Kept);
+            gate.open();
+            wait_until(&mut session, idle);
+            assert_eq!(session.dialog(), Some(&dialog));
+            // The status was read again, and the kept request did not run.
+            assert_eq!(count(&probe, "status"), statuses + 1);
+            assert!(calls(&probe).is_empty());
+        }
+    }
+
+    #[test]
+    fn nothing_starts_without_a_diff_that_can_be_staged_in_parts() {
+        // No file chosen.
+        let mut session = staging(with_diffs());
+        session.choose_status_file(None);
+        session.poll();
+        assert_eq!(session.stage_part(second_line()), IndexStart::Nothing);
+
+        // A file under a filter driver.
+        let filtered = FileDiff {
+            filtered: true,
+            ..part_diff("a.rs")
+        };
+        let backend = with_changes().with_working_diff(Group::Unstaged, "a.rs", filtered);
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        session.choose_status_file(Some((Group::Unstaged, 0)));
+        wait_until(&mut session, |session| {
+            session
+                .file_status()
+                .is_some_and(|status| status.parts() == Some(Parts::Filtered))
+        });
+        assert_eq!(session.stage_part(second_line()), IndexStart::Nothing);
+
+        // A selection of context lines.
+        let mut session = choosing(with_diffs(), Group::Unstaged, 0);
+        assert_eq!(
+            session.stage_part(Selection::new().line(0, 0)),
+            IndexStart::Nothing
+        );
+        assert!(session.action().is_none());
+        assert!(probe.parts().is_empty());
+    }
+
+    #[test]
+    fn dropping_the_session_stops_a_part() {
+        let gate = Gate::new();
+        let mut session = choosing(with_diffs().with_checkout_gate(&gate), Group::Unstaged, 0);
+        assert_eq!(session.stage_part(second_line()), IndexStart::Started);
         drop(session);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !gate.was_cancelled() {
