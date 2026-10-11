@@ -145,7 +145,8 @@ in front of an added line, and Git then joins the two lines without a word,
 staging `bc` for `b` and `c`. Such a patch is not applied. The selection is
 refused as `Refusal::EndOfFileSplit`, and a dialog says that the last lines of
 the file are staged together. Writing a patch that moves the line break with
-the next line would stage a line the user did not choose.
+the next line would stage a line the user did not choose. The owner confirmed
+the refusal on 2026-10-11.
 
 **The header of the file.** It is written, not kept, because a kept header
 makes Git do more than was chosen: a part of a staged rename moved the file
@@ -227,7 +228,8 @@ read with the filter off (ADR 0006), so a patch of it would put unfiltered
 lines into the index. With a filter of the user's own configuration, as Git
 LFS, the diff shows the output of the filter, and a part of it is half a
 pointer. In the Staged group the lines are those of the stored blob, with the
-same risk.
+same risk. The owner confirmed on 2026-10-11 that every file under a filter
+driver is staged whole only, in both groups.
 
 ### 6. A part is an index action that is never kept
 
