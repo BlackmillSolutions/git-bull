@@ -1314,6 +1314,7 @@ mod tests {
             new_in_working_copy: false,
             content: Content::Text(vec![hunk()]),
             truncated: false,
+            filtered: false,
         });
         assert_eq!(
             copied_rows(&document, &[Row::Line(0, 1), Row::Line(0, 2)]),

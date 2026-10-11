@@ -137,6 +137,7 @@ fn commit_with_everything() -> FakeBackend {
             ],
         }]),
         truncated: false,
+        filtered: false,
     };
     FakeBackend::default()
         .with_repository(root.clone())
@@ -851,6 +852,7 @@ fn file_status_view(theme: ThemeSetting) -> Harness<'static, App> {
             ],
         }]),
         truncated: false,
+        filtered: false,
     };
     let mut harness = repository_window(
         dialog_backend()

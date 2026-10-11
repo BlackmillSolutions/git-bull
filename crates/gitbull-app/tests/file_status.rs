@@ -102,6 +102,7 @@ fn diff(path: &str, lines: &[(LineKind, &str)]) -> FileDiff {
             lines,
         }]),
         truncated: false,
+        filtered: false,
     }
 }
 

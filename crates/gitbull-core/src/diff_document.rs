@@ -878,6 +878,7 @@ mod tests {
             new_in_working_copy: false,
             content: Content::Text(hunks),
             truncated: false,
+            filtered: false,
         }
     }
 

@@ -98,6 +98,7 @@ fn backend() -> FakeBackend {
                     ],
                 }]),
                 truncated: false,
+                filtered: false,
             },
         )
         // Both versions of the file, which highlighting reads whole.

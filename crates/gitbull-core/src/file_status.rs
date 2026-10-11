@@ -389,6 +389,7 @@ mod tests {
                 }],
             }]),
             truncated: false,
+            filtered: false,
         }
     }
 

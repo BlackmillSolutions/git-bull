@@ -474,6 +474,7 @@ mod tests {
                 lines,
             }]),
             truncated,
+            filtered: false,
         }
     }
 

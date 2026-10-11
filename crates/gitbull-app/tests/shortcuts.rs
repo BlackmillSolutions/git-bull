@@ -305,6 +305,7 @@ fn four_hunks() -> Setup {
         new_in_working_copy: false,
         content: Content::Text([2, 50, 100, 150].map(hunk_at).to_vec()),
         truncated: false,
+        filtered: false,
     };
     Setup {
         settings: Settings {
