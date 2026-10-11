@@ -106,11 +106,12 @@ was interface polish that did not change the order above.
 
 ## Delivered: staging of files
 
-The OpenSpec change `stage-files` delivers staging and unstaging of whole
-files, modelled on GitKraken. How its actions queue is recorded in the
-amendment of [ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and
-the behaviour is specified in the staging spec, `openspec/specs/staging`
-once the change is archived.
+On 2026-10-11, [pull request #40](https://github.com/BlackmillSolutions/git-bull/pull/40)
+delivered staging and unstaging of whole files, modelled on GitKraken. It was
+planned as the OpenSpec change `stage-files`. How its actions queue is
+recorded in the amendment of
+[ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and the behaviour
+is specified in the [staging spec](../openspec/specs/staging/spec.md).
 
 - The File status view lists two groups, Unstaged with the untracked files
   above Staged, each in the order of its paths.
