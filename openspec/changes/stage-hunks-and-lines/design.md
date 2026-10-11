@@ -18,6 +18,10 @@ See `proposal.md` for the motivation and the scope. What shapes the approach:
   `flags::DIFF`, and the filter drivers of the repository neutralised
   (`neutralised_filters`, ADR 0006). Only drivers configured in the repository
   or a worktree are neutralised; those of the user's own configuration run.
+- **A part action must not share the queue's rule.** `request_index` keeps a
+  request while an index action runs; `index_action_ended` turns every refusal
+  into a failure text, and `finish_index_action` shows a failure and drops
+  every other dialog.
 - **What the diff holds is for showing.** `DiffLine::text` has no line ending,
   replaces bytes that are not UTF-8 and is cut after `LINE_CHARS` characters.
   A patch cannot be made from it.
@@ -39,9 +43,16 @@ Tried with Git 2.53.0 in throwaway repositories on 2026-10-11:
 - With `apply.whitespace=fix`, `git apply --cached` staged a line without the
   trailing spaces it has; with `--whitespace=nowarn` it staged them.
 
-Not tried: Git 2.34, Windows and macOS, a file under a filter of the
-repository, and the rules for a missing line break at the end beyond reading
-Git's output for it. The tests of task group 1 cover the last two.
+The reviewer of this plan tried more with the same Git and found three
+errors in its first draft, each reproduced: the starts of a hunk for
+unstaging, two lines joined at an end without a line break, and the kept
+header of a new, a deleted, a renamed and a copied file. Decision 2 is written
+from those findings. Also confirmed there: `core.autocrlf=true` and `text
+eol=crlf` give the right bytes; `git apply --cached` ignores the working copy,
+takes the lock of the index, and keeps a merge and its conflicts; a filter of
+the user's configuration runs when the diff is read.
+
+Not tried: Git 2.34, Windows and macOS, and real Git LFS.
 
 ## Goals / Non-Goals
 
@@ -70,10 +81,12 @@ bytes of the diff of one file and gives back a patch for a selection.
 
 - **Reading.** `raw_working_diff(git, repo, group, entry, cancel)` in
   `working_copy.rs` runs the command `working_diff` runs, with the same
-  arguments and the same neutralised filters, without a limit, and returns the
-  bytes of the section of that file. `find_diff` already finds that section
-  among the output for a path Git cannot be given; the raw read reuses how it
-  tells the sections apart.
+  arguments and the same neutralised filters, without a limit. `find_diff`
+  returns a parsed `FileDiff` and no bytes, so the raw read has a splitter of
+  its own: it cuts the output at the lines that start with `diff --git`, and
+  picks the section that `describes` accepts once it is parsed, which also
+  holds for a staged copy read with `-C` and for a path Git cannot be given.
+  No output, or no such section, is a diff that is out of date (decision 4).
 - **Parsing.** `patch::parse(raw)` splits the section into its header lines,
   up to the first line that starts with `@@`, and its hunks, each with its
   header and its lines as byte slices that keep their line endings. A line
@@ -88,7 +101,8 @@ the memory of every diff for an action that is rare.
 
 ### 2. The rules that turn a hunk into the patch of a selection
 
-For staging, from the diff of the index against the working copy:
+**The lines.** For staging, from the diff of the index against the working
+copy:
 
 | Line of the hunk | chosen | not chosen |
 |---|---|---|
@@ -100,144 +114,211 @@ For unstaging, the patch is made of the staged diff and applied in reverse, so
 the roles turn round: an added line that is not chosen becomes context, because
 the index keeps it, and a removed line that is not chosen is left out.
 
-Then:
+A hunk in which no chosen line is left is not part of the patch, and a patch
+without a hunk is no patch: nothing runs. A hunk chosen whole goes through the
+same rules with every line chosen, so there is one code path.
 
-- A `\ No newline at end of file` line stays with its line when that line
-  stays, as `-`, `+` or context, and goes when its line is left out.
-- A hunk in which no chosen line is left is not part of the patch.
-- The header of each hunk is written again: its old start as Git gave it, the
-  old count as the context and `-` lines, the new count as the context and `+`
-  lines, and the new start as the old start plus the lines the hunks before it
-  in the patch added less those they removed.
-- The header lines of the file are kept, without the `index` line, which
-  names blobs the patch no longer leads to.
-- A patch without a hunk is no patch: nothing runs.
+**The positions.** Git finds the place of a hunk by the side the patch is
+applied to, so the starts depend on the direction. The counts are the context
+lines plus the `-` lines for the old side, and plus the `+` lines for the new
+side. With `net` as what the hunks before it in the patch add less what they
+remove:
 
-A hunk chosen whole goes through the same rules with every line chosen, so
-there is one code path.
+- **Staging** applies to the old side, the index. The old start stays as Git
+  gave it; the new start is the old start plus `net`.
+- **Unstaging** applies in reverse to the new side, which is the index with
+  every staged hunk in it, chosen or not. The new start stays as Git gave it;
+  the old start is the new start less `net`.
+
+Keeping the old start for unstaging, as a first draft of this plan did, is
+wrong by the size of the staged hunks that are not chosen: `git apply
+--reverse` then found the context at another place of a file whose lines
+repeat, reported success, and unstaged lines the user had not chosen.
+
+A side that is left without a line is written as Git writes it: with the
+number of the line before it, 0 at the top of a file, and the count 0.
+
+**The end of a file.** A line that carries `\ No newline at end of file` must
+be the last line of its side in the hunk that is written. The rules above can
+break that: a removed line with the marker that is not chosen becomes context
+in front of an added line, and Git then joins the two lines without a word,
+staging `bc` for `b` and `c`. Such a patch is not applied. The selection is
+refused as `Refusal::EndOfFileSplit`, and a dialog says that the last lines of
+the file are staged together. Writing a patch that moves the line break with
+the next line would stage a line the user did not choose.
+
+**The header of the file.** It is written, not kept, because a kept header
+makes Git do more than was chosen: a part of a staged rename moved the file
+back to its old path, a part of a staged new file and of a deleted file was
+refused, and a staged copy could not be applied at all.
+
+- `new file mode` with `--- /dev/null` is written only when the old side of
+  the patch is empty, as for an untracked file and for unstaging all of a new
+  file; `deleted file mode` with `+++ /dev/null` only when its new side is
+  empty.
+- In every other case, and always for a rename and a copy, the header is that
+  of a change to the content of the new path: `diff --git a/<path> b/<path>`,
+  `--- a/<path>`, `+++ b/<path>`, with the path as Git wrote it on the `+++`
+  line, or on the `---` line of a deleted file, its quoting and the tab after
+  a path with a space included.
+- `old mode` and `new mode` lines are kept: a change of the mode goes with any
+  part of the file, as Git applies it.
+- The `index` line is never written.
 
 ### 3. Applied with `git apply --cached`, with nothing that bends the patch
 
-`patch::apply` runs `git apply --cached --whitespace=nowarn -`, with
-`--reverse` for unstaging, through `Git::write(WriteHooks::Run)` with the patch
-on standard input. `git apply --cached` runs no filter and no hook; the write
-invocation is used because this is a requested write, and because it lets Git
-take the lock of the index.
+`patch::stage_part` runs `git -c apply.ignoreWhitespace=no apply --cached
+--whitespace=nowarn -`, with `--reverse` for unstaging, through
+`Git::write(WriteHooks::Run)` with the patch on standard input. `git apply
+--cached` runs no filter and no hook and does not look at the working copy;
+the write invocation is used because this is a requested write, and it lets
+Git take the lock of the index.
 
 - `--whitespace=nowarn` overrides `apply.whitespace`, which would otherwise
-  change (`fix`) or refuse (`error`) what the user chose to stage.
+  change (`fix`) or refuse (`error`) what the user chose to stage, and
+  `apply.ignoreWhitespace` is switched off for the same reason.
 - No `--3way`, no `--recount`, no `--unidiff-zero`, no `--reject`: the patch
   has exact counts and its context, and when it does not apply nothing must be
   applied in part.
-- A failure maps to `WriteFailure::Failed` directly, as in `index.rs`.
+- A failure of Git maps to `WriteFailure::Failed` directly, as in `index.rs`.
 
 Alternative: `git add -p` and `git checkout -p`, which are interactive and
 choose hunks by questions, not by the hunks the user sees.
 
 ### 4. Nothing is applied to a diff that is out of date
 
-The request carries the shape of the diff the view shows: for each hunk its
-old start, its new start and the kinds of its lines in order. Before the patch
-is made, the shape of the raw diff just read is compared with it. When they
-differ, the operation returns `PartOutcome::OutOfDate` and runs nothing.
+The request carries the hunks the view shows, as the `Arc<FileDiff>` of the
+diff pane. The raw section just read is parsed by the parser that made them,
+`diff::parse_diff`, and its hunks are compared with them, line for line
+(`Hunk` is `PartialEq`). When they differ, or Git reports no diff of the file
+any more, the operation returns `Refusal::DiffOutOfDate` and runs nothing.
 
-`git apply` would refuse most stale patches by itself, but not all: a file
-changed elsewhere can leave the hunk that was shown where it was and add
-another one, and line indices could then name other lines than the user saw.
-The comparison makes "what was shown is what is staged" hold without relying
-on Git's refusal.
+The same parser on both sides means that both count alike: the `\` lines, an
+empty line read as context, lines cut at `LINE_CHARS`. Comparing the texts
+too, lossy as they are, catches a line that was edited in place: the patch is
+made of the raw diff just read, so Git would apply it without a complaint, and
+the user would stage a text they did not see.
 
-The shape compares kinds and positions, not texts: the texts shown are lossy
-(context 1), and a hunk whose lines changed in text but not in number at the
-same place is then applied or refused by Git on its context.
+Alternative: comparing only the positions and kinds of the lines, which lets
+that edit through.
 
 ### 5. What can be staged in parts is known with the diff
 
-`gitbull-core` gains `Parts`, decided from the entry, its group and its
-`FileDiff`: `Available`, or why not: `Binary`, `NoLines` (a rename, a copy or
-a mode alone), `Submodule`, `Conflicted`, `Truncated`, `Filtered`. The view
-shows the entries unavailable with that reason.
+A diff without hunks draws no row, so it has no menu and no button: a binary
+file, a rename, a copy or a mode alone, a submodule. Nothing is offered there,
+and nothing needs a reason.
+
+For a diff with rows, `gitbull-core` gains `Parts`, decided from the entry,
+its group, its `FileDiff` and the state of the diff pane: `Available`, or why
+not: `Conflicted`, `Truncated`, `Filtered`, `Reading` while the diff is read
+again. The view shows the entries unavailable with that reason.
 
 `Filtered` needs one more fact. `FileDiff` gains `filtered: bool`.
-`working_diff` sets it for the groups `Unstaged` and `Untracked` when the list
-of neutralised filters is not empty and `git check-attr -z filter -- <path>`
-names one of them: an extra process only in a repository that configures
-filter drivers of its own. For the group `Staged` it stays false: the staged
-diff compares two blobs, and no filter is part of it.
+`working_diff` sets it, for every group, when `git check-attr -z filter --
+<path>` gives a value other than `unspecified`, `unset` and `set` and a
+`filter.<value>.clean`, `.smudge` or `.process` is configured in any scope.
+The configuration is listed for the neutralised filters already; the
+attribute costs one short process per diff, only in a repository that
+configures or inherits a filter driver.
 
-Why such a file is left out: its diff is read with the filter off, so it
-compares the index with the content before the filter. A patch of it would put
-unfiltered lines into the index. Reading the diff with the filter on would run
-a program of the repository on a read, which ADR 0006 rules out.
-
-A filter of the user's own configuration, such as Git LFS, is not neutralised:
-the diff shown already is the diff after the filter, and parts of it are
-staged like any other.
+Why such a file is staged whole only: under a filter the lines of the diff
+are not the lines of the file. With a filter of the repository the diff is
+read with the filter off (ADR 0006), so a patch of it would put unfiltered
+lines into the index. With a filter of the user's own configuration, as Git
+LFS, the diff shows the output of the filter, and a part of it is half a
+pointer. In the Staged group the lines are those of the stored blob, with the
+same risk.
 
 ### 6. A part is an index action that is never kept
 
-`Backend` gains `stage_part(repo, group, entry, request, cancel) ->
-Result<PartOutcome, WriteFailure>`; the group decides the direction, `Staged`
-unstages. `Session` gains `stage_part(request)`, which finds the chosen entry
-in the file status and runs the operation as an index action:
+`Backend` gains `stage_part(repo, group, entry, request, cancel) -> Result<(),
+WriteFailure>`; the group decides the direction, `Staged` unstages. What
+git-bull finds before it changes anything comes back as a refusal, in the way
+`Refusal::LocalBranchFollowsOther` does: `Refusal::DiffOutOfDate` and
+`Refusal::EndOfFileSplit`. The channel of the action therefore keeps its type.
 
+`Session` gains `stage_part(selection) -> IndexStart`, an entry point of its
+own beside `request_index`:
+
+- It builds the request from the file chosen in the file status and the diff
+  its pane shows. Without a chosen file, and unless `Parts::Available`, it
+  returns `IndexStart::Nothing`.
+- It starts only when the slot is empty and the queue is empty; otherwise it
+  returns `IndexStart::Busy`. It is never appended to the queue. A request for
+  whole files made while it runs is kept as today.
 - `Action` gains `StagePart { path }` and `UnstagePart { path }`, both index
-  actions for `is_index`, so the end of the action reads the status again and
-  frees the slot when it arrived, as for files.
-- It starts only when the slot is empty: with any action running, or an index
-  request kept, it returns `IndexStart::Busy`. It is never appended to the
-  queue, because its positions belong to the diff that is shown. Requests for
-  whole files made while it runs are kept as today.
-- `PartOutcome::OutOfDate` ends as the dialog `ActionDialog::DiffOutOfDate {
-  path }`; a failure of Git ends as `ActionDialog::Failed`. Both read the
-  status again, which reloads the diff.
+  actions for `is_index`, so their end goes through `index_action_ended` and
+  `finish_index_action`. Those two are changed for it: `index_action_ended`
+  turns the two refusals into `Ended::Dialog` with `ActionDialog::DiffOutOfDate
+  { path }` and `ActionDialog::EndOfFileSplit { path }`, where it turns every
+  refusal into a failure text today, and `finish_index_action` shows an
+  `Ended::Dialog`, which it drops today. Both refusals empty the queue, as a
+  failure does.
+- The status is read again after every outcome, which reloads the diff of the
+  chosen file (`keep_chosen`).
+
+**The diff that is read again.** `finish_index_action` frees the slot in the
+pass in which the status arrives, and `keep_chosen` starts the reload of the
+diff in that same pass. The old diff stays shown until the new one arrived, so
+there is a moment with a free slot and a diff of before. A request made then
+would be refused as out of date, with a dialog that blames the file for the
+user's own staging. So `DiffPane` gains `is_reading()`, `Parts` is `Reading`
+meanwhile, and `stage_part` returns `Busy`.
 
 ADR 0008 gains a sentence in its amendment: an index action for a part of a
 file is not kept.
 
 ### 7. Menu, button and keys in the diff
 
-Only for the diff of the File status view (`Pane::Status`), and only for
-`Parts::Available`; otherwise the entries are shown unavailable with the
-reason as their tooltip, and there is no button.
+Only for the diff of the File status view (`Pane::FileStatus`). The selection
+is `DiffView::selection` in `app.rs`.
 
-- **Context menu of a row:** after "Copy lines" and "Copy hunk", a separator,
-  then "Stage hunk" for the hunk of the row and "Stage selected lines"; in the
-  staged diff "Unstage hunk" and "Unstage selected lines". The second is
-  unavailable while the selection holds no added and no removed line.
+- **Context menu of a line of a hunk and of its header:** after "Copy lines"
+  and "Copy hunk", a separator, then "Stage hunk" for the hunk of the row and
+  "Stage selected lines"; in the staged diff "Unstage hunk" and "Unstage
+  selected lines". The second is unavailable while the selection holds no
+  added and no removed line.
+- **Context menu of a revealed line,** which belongs to no hunk: "Stage
+  selected lines" alone, beside "Copy lines".
+- **Not `Parts::Available`:** the entries are shown unavailable with the
+  reason as their tooltip, and there is no button.
 - **Header of a hunk:** a text button "Stage hunk" or "Unstage hunk" at its
   right end, shown while the pointer is over the header or the header is
   selected, taking its click itself.
 - **Keys:** S in the unstaged diff and U in the staged diff, read by the diff
-  while it has the focus, with no modifier and not on a repeat, as in the file
-  list: the selected lines when the selection holds a changed line, the hunk
-  when the selection is its header alone.
+  while it has the focus, with no modifier and not on a repeat:
+  the selected lines when the selection holds a changed line, the hunk when
+  the selection is its header alone. `plain_key_pressed` moves from
+  `file_status_view.rs` to where both can use it.
 - **Selection to request:** the rows of the selection are grouped by hunk;
   `Row::Line` of kind added or removed count, everything else is passed over.
+- **Focus:** when the dialog of a part closes, a failure included, the diff
+  takes the keyboard, not the file list, where S would stage the whole file.
+  `close_action_dialog` tells the two apart by the action of the dialog.
 
 After a request the selection of the diff is cleared: its rows name lines of a
 diff that is about to be replaced.
 
 ### 8. Tests
 
-- `gitbull-git`: unit tests of `patch.rs` for the rules of decision 2 on raw
-  fixtures, among them a missing final line break on either side, CRLF lines,
-  bytes that are not UTF-8, two hunks with a selection in each, and the shape
-  of decision 4. One integration test file with real Git, in the manner of
-  `tests/index.rs`: staging and unstaging a hunk and lines, an untracked and an
-  executable file, `apply.whitespace` as `fix` and as `error`, a path with a
-  space and a bracket, a diff out of date in both ways of the spec, the file
-  under a filter of the repository marked `filtered`, the same file under a
-  filter of the global configuration not marked, and a merge that is under way
-  left as it is.
+- `gitbull-git`: unit tests of `patch.rs` on raw fixtures for the rules of
+  decision 2: both directions, the starts with two hunks and a selection in
+  one of them, every subset of the changed lines for the four shapes of an
+  end without a line break, each either a patch with the marker last on its
+  side or a refusal, CRLF lines, bytes that are not UTF-8, and the headers
+  written for a modified, a new, a deleted, a renamed and a copied file and
+  one that changes its mode. One integration test file with real Git, in the
+  manner of `tests/index.rs`, for what decision 2 got wrong at first and for
+  the scenarios of the specs.
 - `gitbull-testkit`: the fake records the requests of parts, waits at the
-  gate of the write actions, and answers as scripted: done, out of date or a
-  failure.
+  gate of the write actions, answers as scripted, and can be given the status
+  that follows, so that a test can show the file leaving its group.
 - `gitbull-core`: `Parts` for every reason; the session's action, its refusal
-  while another runs, the dialogs, and the status read again.
+  while another runs or the diff is read, the dialogs, and the queue emptied
+  by a refusal.
 - `gitbull-app`: the menu entries and their availability with the harness, the
-  button of a header, the keys, the dialog, and a snapshot of a diff with the
-  button of a hunk.
+  button of a header, the keys, the dialogs and the focus after them, and a
+  snapshot of a diff with the button of a hunk.
 
 ## Risks / Trade-offs
 
@@ -245,16 +326,23 @@ diff that is about to be replaced.
   one, stages both the old and the new line.] → This is what Git's line
   staging does everywhere, GitKraken's included; the diff of the Staged group
   shows the result at once.
-- [The rules for a missing line break at the end are the least obvious part.]
-  → They are unit-tested on fixtures and against real Git with files that end
-  without one on the old side, the new side and both.
+- [The rules for a missing line break at the end are the least obvious part,
+  and Git applies a patch that joins two lines without a complaint.] → The
+  marker must be last on its side or the selection is refused; the unit tests
+  go through every subset of the changed lines of the four shapes, and real
+  Git is run on those that are applied.
+- [A refused selection at the end of such a file is a dead end for a user who
+  wants one of its last lines alone.] → The dialog names the way out, staging
+  the last lines together; a file without a final line break is rare.
 - [The raw diff is read a second time when the user acts, which costs a
   process for a large file.] → It is read without a limit only for that one
   file, and only on the action.
-- [A file under a filter of the repository cannot be staged in parts.] → The
-  entry says why, and the file is staged whole, where the filter runs.
-- [`git check-attr` on every diff of a repository with filter drivers.] → One
-  short process per diff shown, only there.
+- [A file under a filter driver, Git LFS included, cannot be staged in
+  parts.] → The entry says why, and the file is staged whole, where the filter
+  runs.
+- [`git check-attr` on every diff where a filter driver is configured, which
+  with Git LFS installed is every repository of that user.] → One short
+  process per diff shown.
 - [The diff of a huge file is cut at its limit, and parts are unavailable
   until all of it is loaded.] → "Load the whole diff" exists; the entry names
   it.

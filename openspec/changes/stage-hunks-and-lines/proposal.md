@@ -33,11 +33,14 @@ model, and the mechanism was tried with Git 2.53.0.
   its diff was read, nothing is staged, a dialog says so, and the diff is read
   again.
 - **Changes that cannot be staged in parts** keep the whole file as the only
-  choice, and the entries say why they are unavailable: a binary file, a
-  change without lines such as a rename or a mode alone, a submodule, a file in
-  conflict, a diff that was cut at its limit, and, for staging, a file whose
-  content a filter of the repository rewrites, because its diff is read with
-  that filter switched off.
+  choice. A diff without lines offers nothing: a binary file, a rename or a
+  mode alone, a submodule. For a diff with lines the entries say why they are
+  unavailable: a file in conflict, a diff that was cut at its limit, and a
+  file under a filter driver, Git LFS included, whose lines are not the lines
+  of the file.
+- **A selection that would join two lines** at the end of a file that changes
+  its last line break is refused, and a dialog says that the last lines are
+  staged together.
 - The working copy is never changed.
 
 Not part of this change: discarding hunks, lines or files, which comes as its
@@ -54,13 +57,19 @@ None.
 
 - `staging`: new requirements for staging and unstaging a hunk and selected
   lines, for the changes that are staged whole only, for a diff that is out of
-  date, and for requests in parts while another staging runs.
+  date, and for requests in parts while another staging runs; "Requests in
+  quick succession" and "Failures of staging" tell files from parts.
 - `git-integration`: a new requirement "Partial index operations" for how a
   part of the changes of a file reaches the index.
 - `working-copy-status`: the requirement "Actions that change the repository"
   names staging in parts, and the diff of the view as a place that offers it.
 - `application-shell`: the requirement "Keyboard operation" says that S and U
   also act in the diff of the File status view.
+- `checkout`: "One write action at a time" says that a part is taken only when
+  nothing runs, and "Outcome of a write action" gains the outcome that
+  git-bull finds before it changes anything.
+- `diff-view`: "Copying from the diff" names the entries that stage in the
+  menu of the diff of the File status view.
 
 ## Impact
 
