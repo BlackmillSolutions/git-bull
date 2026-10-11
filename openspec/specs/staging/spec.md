@@ -3,7 +3,8 @@
 ## Purpose
 
 Staging lets the user choose which uncommitted changes the next commit holds,
-by staging and unstaging whole files from the File status view.
+by staging and unstaging whole files from the File status view, and hunks
+and selected lines from the diff it shows.
 
 ## Requirements
 

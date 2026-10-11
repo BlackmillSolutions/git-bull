@@ -78,6 +78,15 @@ checkout and the creation of a branch or a tag stay as decided above.
   therefore names a running action for as long as there is work, which the
   question before closing and the Git path of the settings rely on.
 
+A hunk or chosen lines of a file (change `stage-hunks-and-lines`) are an index
+action too, with one difference: **a part of a file is never kept in the
+queue.** Its request names lines of the diff that is shown, and a staging
+before it changes that diff, so it could only be refused later as out of date.
+It is taken only while the slot and the queue are empty, and not while the
+diff it was made for is read again, which happens in the pass that frees the
+slot after another part. A request for whole files made while a part runs is
+kept as before.
+
 Dropping the session cancels a running index action, as it cancels every write
 action. Git replaces the index file in one step, so stopping it leaves the
 index as it was or as it will be; a lock file may stay behind.

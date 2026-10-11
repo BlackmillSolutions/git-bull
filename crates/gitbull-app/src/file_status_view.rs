@@ -310,7 +310,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             Shown::Unstaged => egui::Key::S,
             Shown::Staged => egui::Key::U,
         };
-        if plain_key_pressed(ui, key) {
+        if components::plain_key_pressed(ui, key) {
             wanted.push((shown == Shown::Staged.index(), entry.path.clone()));
         }
     }
@@ -454,27 +454,6 @@ fn last_commit_path(status: &WorkingStatus, group: Group, entry: &StatusEntry) -
         StatusKind::Changed(ChangeKind::Renamed) => entry.old_path.clone(),
         _ => Some(entry.path.clone()),
     }
-}
-
-/// Whether `key` was pressed in this pass alone: with no modifier held, so
-/// that Shift+S and Alt+S stay free, and not as a repeat of a key held down,
-/// which would stage file after file. The press is taken.
-fn plain_key_pressed(ui: &Ui, key: egui::Key) -> bool {
-    ui.input_mut(|input| {
-        let at = input.events.iter().position(|event| {
-            matches!(
-                event,
-                egui::Event::Key {
-                    key: pressed,
-                    pressed: true,
-                    repeat: false,
-                    modifiers,
-                    ..
-                } if *pressed == key && modifiers.is_none()
-            )
-        });
-        at.map(|at| input.events.remove(at)).is_some()
-    })
 }
 
 /// The icon of the button that stages, or unstages, a file of the group at

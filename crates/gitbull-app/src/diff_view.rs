@@ -14,13 +14,16 @@ use eframe::egui::{
 };
 use fluent_bundle::FluentArgs;
 use gitbull_core::details::{DiffState, Highlighting};
-use gitbull_core::diff_document::{DiffDocument, Gap, LineEnd, Marks, Part, Row};
+use gitbull_core::diff_document::{DiffDocument, Gap, LineEnd, Marks, Part, Row, RowKey};
+use gitbull_core::file_status::Parts;
 use gitbull_core::highlight::{HighlightTheme, Span};
-use gitbull_core::session::Session;
+use gitbull_core::session::{IndexStart, Session};
 use gitbull_core::workspace::Failure;
 use gitbull_git::Error;
 use gitbull_git::diff::{Content, FileDiff, Hunk, LINE_LIMIT, LineKind};
+use gitbull_git::patch::Selection;
 use gitbull_git::path::RepoPath;
+use gitbull_git::status::Group;
 
 use crate::app::{App, DiffKey, DiffView, HunkMove, TabView};
 use crate::commit_list::{color, take_copy};
@@ -50,6 +53,17 @@ struct Texts {
     loading: String,
     copy_lines: String,
     copy_hunk: String,
+    /// "Stage hunk" and "Unstage hunk".
+    part_hunk: [String; 2],
+    /// "Stage selected lines" and "Unstage selected lines".
+    part_lines: [String; 2],
+    /// Why a part cannot be staged, by its reason.
+    parts_conflicted: String,
+    parts_truncated: String,
+    parts_filtered: String,
+    parts_whole_only: String,
+    parts_reading: String,
+    parts_busy: String,
     too_large: String,
     show_invisibles: String,
     previous_hunk: String,
@@ -75,6 +89,17 @@ impl Texts {
             loading: text(Msg::RowLoading),
             copy_lines: text(Msg::CopyLines),
             copy_hunk: text(Msg::CopyHunk),
+            part_hunk: [text(Msg::StageHunk), text(Msg::UnstageHunk)],
+            part_lines: [
+                text(Msg::StageSelectedLines),
+                text(Msg::UnstageSelectedLines),
+            ],
+            parts_conflicted: text(Msg::PartsConflicted),
+            parts_truncated: text(Msg::PartsTruncated),
+            parts_filtered: text(Msg::PartsFiltered),
+            parts_whole_only: text(Msg::PartsWholeOnly),
+            parts_reading: text(Msg::PartsReading),
+            parts_busy: text(Msg::PartsBusy),
             too_large: text(Msg::DiffTooLarge),
             show_invisibles: text(Msg::DiffShowInvisibles),
             previous_hunk: text(Msg::DiffPreviousHunk),
@@ -346,6 +371,17 @@ fn draw(
         return false;
     };
     let mut hunk_move = view.hunk_move.take();
+    // After the dialog of a part of a file, the keyboard goes on in the
+    // diff; in the file list when the diff shows no rows that could take it.
+    let mut focus_diff = pane == Pane::FileStatus && std::mem::take(&mut view.focus_status_diff);
+    let has_rows = matches!(
+        shown(session, pane),
+        Some((DiffState::Loaded(document), ..)) if !document.hunks().is_empty()
+    );
+    if focus_diff && !has_rows {
+        view.focus_status = true;
+        focus_diff = false;
+    }
     let state = diff_view_of(view, pane);
     let reading = reading(session, pane);
     let Some((diff, highlighting, key)) = shown(session, pane) else {
@@ -442,7 +478,7 @@ fn draw(
     let area = ui.available_rect_before_wrap();
     let background = ui.interact(area, Id::new(AREA_DIFF), Sense::click());
     background.widget_info(|| WidgetInfo::labeled(WidgetType::Panel, true, &texts.title));
-    if background.clicked() {
+    if background.clicked() || focus_diff {
         background.request_focus();
     }
     let focused = background.has_focus();
@@ -451,6 +487,47 @@ fn draw(
     let selection = state
         .selection
         .and_then(|(anchor, end)| Some((document.index(anchor)?, document.index(end)?)));
+    // An added or a removed line of a hunk: what a selection stages.
+    let all_rows = document.rows();
+    let changed_line = |row: &Row| match *row {
+        Row::Line(hunk, line) => document
+            .hunks()
+            .get(hunk)
+            .and_then(|hunk| hunk.lines.get(line))
+            .is_some_and(|line| line.kind != LineKind::Context),
+        _ => false,
+    };
+    let lines_selected = selection.is_some_and(|(anchor, end)| {
+        all_rows[anchor.min(end)..=anchor.max(end)]
+            .iter()
+            .any(changed_line)
+    });
+    // In the File status view a hunk and selected lines are staged, or
+    // unstaged in the diff of a staged file, where the diff allows it and
+    // nothing else runs.
+    let status = (pane == Pane::FileStatus)
+        .then(|| session.file_status())
+        .flatten();
+    let parts = status.and_then(|status| Some((status.parts()?, status.chosen()?.0)));
+    let busy = session.action().is_some();
+    let unstage = matches!(parts, Some((_, Group::Staged)));
+    let staging = parts.map(|(parts, _)| Staging {
+        hunk: &texts.part_hunk[usize::from(unstage)],
+        lines: &texts.part_lines[usize::from(unstage)],
+        unavailable: match parts {
+            Parts::Conflicted => Some(texts.parts_conflicted.as_str()),
+            Parts::Truncated => Some(&texts.parts_truncated),
+            Parts::Filtered => Some(&texts.parts_filtered),
+            Parts::WholeOnly => Some(&texts.parts_whole_only),
+            Parts::Reading => Some(&texts.parts_reading),
+            Parts::Available if busy => Some(&texts.parts_busy),
+            Parts::Available => None,
+        },
+        lines_selected,
+    });
+    let can_stage = staging
+        .as_ref()
+        .is_some_and(|staging| staging.unavailable.is_none());
     let (outcome, shown) = draw_rows(
         ui,
         scroll_to,
@@ -464,6 +541,7 @@ fn draw(
             too_large: !document.has_text() && !reading,
             invisibles: *invisibles,
             palette,
+            staging,
         },
     );
     state.shown = shown;
@@ -505,12 +583,58 @@ fn draw(
         Some(Copy::Hunk(hunk)) => ui.ctx().copy_text(copied_hunk(&document.hunks()[hunk])),
         None => {}
     }
+    // S stages and U unstages what is selected, while the diff has the
+    // focus: the selected lines, or the hunk whose header alone is selected.
+    let mut ask = outcome.part;
+    if focused && can_stage {
+        let key = match unstage {
+            true => egui::Key::U,
+            false => egui::Key::S,
+        };
+        if components::plain_key_pressed(ui, key) {
+            ask = match state.selection {
+                _ if lines_selected => Some(PartAsk::Lines),
+                Some((RowKey::Header(hunk), end)) if end == RowKey::Header(hunk) => {
+                    Some(PartAsk::Hunk(hunk))
+                }
+                _ => None,
+            };
+        }
+    }
+    // The lines of the selection as it is now, grouped by their hunks;
+    // context lines, headers and revealed lines count for nothing.
+    let part = ask.filter(|_| can_stage).map(|ask| match ask {
+        PartAsk::Hunk(hunk) => Selection::new().hunk(hunk),
+        PartAsk::Lines => {
+            let range = state
+                .selection
+                .and_then(|(anchor, end)| Some((document.index(anchor)?, document.index(end)?)));
+            let mut chosen = Selection::new();
+            if let Some((anchor, end)) = range {
+                for row in &rows[anchor.min(end)..=anchor.max(end)] {
+                    if let Row::Line(hunk, line) = *row
+                        && changed_line(row)
+                    {
+                        chosen = chosen.line(hunk, line);
+                    }
+                }
+            }
+            chosen
+        }
+    });
     if focused {
         lock_tab(ui, background.id);
         components::area_focus_ring(ui, area, true);
     }
     if load_all {
         load_whole(session, pane);
+    }
+    // The rows of the selection name lines of a diff that is about to be
+    // replaced.
+    if let Some(part) = part
+        && session.stage_part(part) == IndexStart::Started
+    {
+        state.selection = None;
     }
     if let Some((gap, part)) = outcome.expand {
         expand(session, pane, gap, part);
@@ -555,6 +679,29 @@ enum Copy {
     Hunk(usize),
 }
 
+/// What is to be staged, or unstaged, of the diff of the File status view.
+#[derive(Clone, Copy)]
+enum PartAsk {
+    /// The hunk at this place.
+    Hunk(usize),
+    /// The added and removed lines of the selection.
+    Lines,
+}
+
+/// How the diff of the File status view offers to stage, or unstage, parts
+/// of it (spec `staging`).
+struct Staging<'a> {
+    /// The label of a hunk and of selected lines: Stage in the diff of an
+    /// unstaged file, Unstage in that of a staged one.
+    hunk: &'a str,
+    lines: &'a str,
+    /// Why nothing can be staged in parts now, to say in the entries; `None`
+    /// when it can.
+    unavailable: Option<&'a str>,
+    /// The selection holds an added or a removed line.
+    lines_selected: bool,
+}
+
 /// What happened in the rows this frame.
 #[derive(Default)]
 struct Outcome {
@@ -563,6 +710,8 @@ struct Outcome {
     /// The row whose context menu opened.
     menu: Option<usize>,
     copy: Option<Copy>,
+    /// What the user asked to stage or unstage.
+    part: Option<PartAsk>,
     /// The part of a gap to reveal.
     expand: Option<(usize, Part)>,
 }
@@ -625,6 +774,8 @@ struct Drawn<'a> {
     /// Spaces, tabs and line endings are shown.
     invisibles: bool,
     palette: &'a Palette,
+    /// In the File status view: what can be staged or unstaged of the diff.
+    staging: Option<Staging<'a>>,
 }
 
 /// Draws the rows, first scrolling so that the row `scroll_to`, if any,
@@ -672,13 +823,27 @@ fn draw_rows(ui: &mut Ui, scroll_to: Option<usize>, drawn: &Drawn<'_>) -> (Outco
                 };
                 let response = ui
                     .push_id(id, |ui| match row {
-                        Row::Header(hunk) => header_row(
-                            ui,
-                            &document.hunks()[hunk].header,
-                            is_selected,
-                            &font,
-                            palette,
-                        ),
+                        Row::Header(hunk) => {
+                            // The button of a hunk shows only where a part
+                            // can be staged.
+                            let button = drawn
+                                .staging
+                                .as_ref()
+                                .filter(|staging| staging.unavailable.is_none())
+                                .map(|staging| staging.hunk);
+                            let (response, chosen) = header_row(
+                                ui,
+                                &document.hunks()[hunk].header,
+                                is_selected,
+                                &font,
+                                palette,
+                                button,
+                            );
+                            if chosen {
+                                outcome.part = Some(PartAsk::Hunk(hunk));
+                            }
+                            response
+                        }
                         Row::Line(..) | Row::Revealed(_) => {
                             let line = line_view(document, highlighting, row);
                             line_row(
@@ -735,6 +900,33 @@ fn draw_rows(ui: &mut Ui, scroll_to: Option<usize>, drawn: &Drawn<'_>) -> (Outco
                             && components::menu_item(ui, None, &texts.copy_hunk, None).clicked()
                         {
                             outcome.copy = Some(Copy::Hunk(hunk));
+                            ui.close();
+                        }
+                        let Some(staging) = &drawn.staging else {
+                            return;
+                        };
+                        ui.separator();
+                        // An entry that cannot be chosen says why.
+                        let entry = |ui: &mut Ui, label: &str, enabled: bool| {
+                            let item = ui
+                                .add_enabled_ui(enabled, |ui| {
+                                    components::menu_item(ui, None, label, None)
+                                })
+                                .inner;
+                            match staging.unavailable {
+                                Some(reason) => item.on_disabled_hover_text(reason).clicked(),
+                                None => item.clicked(),
+                            }
+                        };
+                        let available = staging.unavailable.is_none();
+                        if let Some(hunk) = hunk
+                            && entry(ui, staging.hunk, available)
+                        {
+                            outcome.part = Some(PartAsk::Hunk(hunk));
+                            ui.close();
+                        }
+                        if entry(ui, staging.lines, available && staging.lines_selected) {
+                            outcome.part = Some(PartAsk::Lines);
                             ui.close();
                         }
                     });
@@ -840,13 +1032,18 @@ fn selection_fill(ui: &Ui, rect: egui::Rect, palette: &Palette) {
     );
 }
 
+/// The header of a hunk. With `button`, the label of a button at its right
+/// end that stages or unstages the hunk, shown while the pointer is over the
+/// header or the header is selected. Returns the response of the row and
+/// whether the button was chosen.
 fn header_row(
     ui: &mut Ui,
     header: &str,
     selected: bool,
     font: &FontId,
     palette: &Palette,
-) -> egui::Response {
+    button: Option<&str>,
+) -> (egui::Response, bool) {
     let text_color = ui.visuals().weak_text_color();
     let galley = ui
         .painter()
@@ -859,7 +1056,28 @@ fn header_row(
     }
     let at = pos2(rect.left() + 6.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(at, galley, text_color);
-    response
+    let mut chosen = false;
+    if let Some(label) = button.filter(|_| selected || ui.rect_contains_pointer(rect)) {
+        // At the right end of what is seen of the row, which may be wider
+        // than the view. The button is as high as a control, higher than a
+        // row, and stands around the middle of the row; drawn in a child of
+        // its own, it takes no room from the rows below.
+        let seen = rect.intersect(ui.clip_rect());
+        let room = egui::Rect::from_center_size(
+            seen.center(),
+            vec2(seen.width() - 12.0, SHAPE.control_height),
+        );
+        let mut over = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(room)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        chosen = components::Button::new(label)
+            .kind(components::Kind::Secondary)
+            .show(&mut over)
+            .clicked();
+    }
+    (response, chosen)
 }
 
 /// A row of hidden lines: their number, and the offers of the gap as
@@ -1314,6 +1532,7 @@ mod tests {
             new_in_working_copy: false,
             content: Content::Text(vec![hunk()]),
             truncated: false,
+            filtered: false,
         });
         assert_eq!(
             copied_rows(&document, &[Row::Line(0, 1), Row::Line(0, 2)]),

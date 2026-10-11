@@ -644,6 +644,27 @@ pub fn menu<R>(ui: &mut Ui, add_entries: impl FnOnce(&mut Ui) -> R) -> R {
     .inner
 }
 
+/// Whether `key` was pressed in this pass alone: with no modifier held, so
+/// that Shift+S and Alt+S stay free, and not as a repeat of a key held down,
+/// which would act again and again. The press is taken.
+pub(crate) fn plain_key_pressed(ui: &Ui, key: egui::Key) -> bool {
+    ui.input_mut(|input| {
+        let at = input.events.iter().position(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: pressed,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if *pressed == key && modifiers.is_none()
+            )
+        });
+        at.map(|at| input.events.remove(at)).is_some()
+    })
+}
+
 /// An entry of a menu, with an optional icon before its label and the
 /// shortcut after it.
 pub fn menu_item(

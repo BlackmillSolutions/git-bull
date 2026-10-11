@@ -334,6 +334,9 @@ pub(crate) struct TabView {
     /// The file list of the File status view takes the keyboard focus when
     /// it is drawn next, as after the dialog of a failed staging closed.
     pub(crate) focus_status: bool,
+    /// The diff of the File status view takes the keyboard focus when it is
+    /// drawn next, as after the dialog of a part of a file closed.
+    pub(crate) focus_status_diff: bool,
     /// Stage all, or unstage all, files that the File status view lists when
     /// it is drawn next: asked for with the keyboard.
     pub(crate) index_all: Option<Shown>,
@@ -1394,7 +1397,16 @@ impl App {
     }
 
     pub(crate) fn close_action_dialog(&mut self) {
+        // A part of a file is asked for in the diff, a file in the file list.
+        let mut of_part = false;
         if let Some((session, view)) = self.active_view() {
+            of_part = match session.dialog() {
+                Some(ActionDialog::DiffOutOfDate { .. } | ActionDialog::EndOfFileSplit { .. }) => {
+                    true
+                }
+                Some(ActionDialog::Failed { action, .. }) => action.is_part(),
+                _ => false,
+            };
             session.close_dialog();
             // The keyboard goes on where the user was.
             view.focus_sidebar = true;
@@ -1408,7 +1420,9 @@ impl App {
             .is_some_and(|tab| tab.view() == View::FileStatus);
         if in_status && let Some((_, view)) = self.active_view() {
             view.focus_sidebar = false;
-            view.focus_status = true;
+            // In the file list S would stage the whole file.
+            view.focus_status = !of_part;
+            view.focus_status_diff = of_part;
         }
     }
 
@@ -1419,6 +1433,7 @@ impl App {
         for view in self.views.values_mut() {
             view.index_all = None;
             view.focus_status = false;
+            view.focus_status_diff = false;
         }
     }
 

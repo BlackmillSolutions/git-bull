@@ -314,6 +314,7 @@ mod tests {
             new_in_working_copy: false,
             content: Content::Text(Vec::new()),
             truncated: false,
+            filtered: false,
         };
         let fake = FakeBackend::default()
             .with_file_history("b.rs", two_commits())

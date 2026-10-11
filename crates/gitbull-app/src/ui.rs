@@ -1740,6 +1740,16 @@ pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
             args.set("count", *files as i64);
             app.texts.text_with(Msg::ActionUnstage, Some(&args))
         }
+        WriteAction::StagePart { path } => {
+            let mut args = FluentArgs::new();
+            args.set("path", path.clone());
+            app.texts.text_with(Msg::ActionStagePart, Some(&args))
+        }
+        WriteAction::UnstagePart { path } => {
+            let mut args = FluentArgs::new();
+            args.set("path", path.clone());
+            app.texts.text_with(Msg::ActionUnstagePart, Some(&args))
+        }
     }
 }
 
@@ -1761,11 +1771,17 @@ fn action_dialog(
         // Staging and unstaging name no target; their dialog has a title of
         // its own.
         WriteAction::Stage { .. } | WriteAction::Unstage { .. } => String::new(),
+        WriteAction::StagePart { path } | WriteAction::UnstagePart { path } => path.clone(),
     };
     let named = |msg: Msg, name: &str| {
         let mut args = FluentArgs::new();
         args.set("target", name.to_owned());
         args.set("name", name.to_owned());
+        texts.text_with(msg, Some(&args))
+    };
+    let with_path = |msg: Msg, path: &str| {
+        let mut args = FluentArgs::new();
+        args.set("path", path.to_owned());
         texts.text_with(msg, Some(&args))
     };
     // A failure is told in the words of what was asked for.
@@ -1775,6 +1791,8 @@ fn action_dialog(
         WriteAction::CreateTag { name } => named(Msg::CreateTagFailedTitle, name),
         WriteAction::Stage { .. } => texts.text(Msg::StageFailedTitle),
         WriteAction::Unstage { .. } => texts.text(Msg::UnstageFailedTitle),
+        WriteAction::StagePart { path } => with_path(Msg::StagePartFailedTitle, path),
+        WriteAction::UnstagePart { path } => with_path(Msg::UnstagePartFailedTitle, path),
     };
     let (title, intro, details, close_label, copy) = match dialog {
         ActionDialog::BlockedByChanges { target, files } => (
@@ -1845,6 +1863,22 @@ fn action_dialog(
             message.clone(),
             texts.text(Msg::DialogClose),
             true,
+        ),
+        // What git-bull found before it changed anything: its own words, no
+        // message of Git to copy.
+        ActionDialog::DiffOutOfDate { path } => (
+            with_path(Msg::DiffOutOfDateTitle, path),
+            texts.text(Msg::DiffOutOfDateBody),
+            String::new(),
+            texts.text(Msg::DialogClose),
+            false,
+        ),
+        ActionDialog::EndOfFileSplit { path } => (
+            with_path(Msg::EndOfFileSplitTitle, path),
+            texts.text(Msg::EndOfFileSplitBody),
+            String::new(),
+            texts.text(Msg::DialogClose),
+            false,
         ),
         ActionDialog::HookFailed { action, output } => (
             named(Msg::CheckoutHookTitle, &target(action)),

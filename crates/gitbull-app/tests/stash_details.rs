@@ -114,6 +114,7 @@ fn backend() -> FakeBackend {
                 new_in_working_copy: false,
                 content: Content::Text(vec![hunk]),
                 truncated: false,
+                filtered: false,
             },
         )
 }

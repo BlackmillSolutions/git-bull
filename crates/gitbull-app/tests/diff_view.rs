@@ -74,6 +74,7 @@ fn diff(old: Option<&str>, new: Option<&str>, content: Content) -> FileDiff {
         new_in_working_copy: false,
         content,
         truncated: false,
+        filtered: false,
     }
 }
 

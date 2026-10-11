@@ -34,6 +34,7 @@ pub mod log;
 pub mod merged;
 pub mod new_ref;
 pub mod object_id;
+pub mod patch;
 pub mod path;
 pub mod process;
 pub mod records;
