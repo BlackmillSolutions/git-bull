@@ -1406,6 +1406,11 @@ impl Session {
                     why: NameRefusal::Invalid,
                 })
             }
+            // Refusals of a part of a file, which is an index action and does
+            // not end here.
+            Err(WriteFailure::Refused(
+                refusal @ (Refusal::DiffOutOfDate | Refusal::EndOfFileSplit),
+            )) => Ended::Failed(format!("{refusal:?}")),
             Err(WriteFailure::Failed(Error::Cancelled)) => Ended::Cancelled,
             Err(WriteFailure::Failed(error)) => Ended::Failed(failure_text(&error)),
         });

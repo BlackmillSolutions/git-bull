@@ -32,6 +32,13 @@ pub enum Refusal {
         local: String,
         upstream: Option<String>,
     },
+    /// A part of a file was to be staged or unstaged, and the hunks Git
+    /// reports for it are no longer the ones the request was made for.
+    /// Decided by git-bull before anything is applied.
+    DiffOutOfDate,
+    /// The lines chosen at an end without a line break could only be applied
+    /// by joining two lines. Decided by git-bull before anything is applied.
+    EndOfFileSplit,
 }
 
 /// How a write operation failed.
