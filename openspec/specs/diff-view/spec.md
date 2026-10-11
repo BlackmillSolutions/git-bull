@@ -140,7 +140,10 @@ selectable and copyable with their real text, also while invisible
 characters are shown. A row of hidden lines SHALL be neither selectable nor
 copied. The context menu SHALL offer to copy a whole hunk, as Git produced
 it, without revealed context lines; on a revealed context line it SHALL
-offer to copy the selected lines only.
+offer to copy the selected lines only. In the diff of the File status view
+the menu SHALL offer, after copying, to stage or unstage the hunk and the
+selected lines, as the capability `staging` describes; a revealed context
+line belongs to no hunk and SHALL offer the selected lines only.
 
 A selection SHALL belong to the diff it was made in. When the diff shown is
 replaced by one with other content, for example because a refresh read a
@@ -180,6 +183,10 @@ context SHALL keep the same lines selected.
 #### Scenario: Refresh without changes
 - **WHEN** the user has selected lines of the diff and scrolled it, and git-bull refreshes the tab while the file is unchanged, for example because the window gained focus
 - **THEN** the same lines are still selected and the diff keeps its scroll position
+
+#### Scenario: Menu of a revealed line in the File status view
+- **WHEN** the diff of an unstaged file is shown, lines between two hunks are revealed, and the user opens the context menu of one of them
+- **THEN** the menu offers to copy the selected lines and to stage the selected lines, and neither "Copy hunk" nor "Stage hunk"
 
 ### Requirement: Changed words
 In a hunk, a run of removed lines directly followed by a run of added lines

@@ -130,9 +130,10 @@ folder as one, and selecting several files.
 
 ## Delivered: staging of hunks and lines
 
-The OpenSpec change `stage-hunks-and-lines` delivered staging and unstaging
-of a part of a file from the diff of the File status view, modelled on
-GitKraken. The behaviour is specified in the
+On 2026-10-12, [pull request #41](https://github.com/BlackmillSolutions/git-bull/pull/41)
+delivered staging and unstaging of a part of a file from the diff of the File
+status view, modelled on GitKraken. It was planned as the OpenSpec change
+`stage-hunks-and-lines`. The behaviour is specified in the
 [staging spec](../openspec/specs/staging/spec.md).
 
 - The context menu of the diff offers "Stage hunk" and "Stage selected

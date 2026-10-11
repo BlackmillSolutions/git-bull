@@ -318,7 +318,7 @@ use Ctrl on every platform.
 | Ctrl+Shift+Page Up, Ctrl+Shift+Page Down | Move the current tab one place to the left or right, with Ctrl on every platform |
 | F7, Shift+F7 | Next and previous hunk in the diff |
 | F5, Ctrl+R | Refresh |
-| S, U | In the File status view, while its file list has the focus: stage, and unstage, the selected file |
+| S, U | In the File status view: while its file list has the focus, stage, and unstage, the selected file; while its diff has the focus, stage, and unstage, the selected lines, or the hunk whose header is selected |
 | Ctrl+Shift+S, Ctrl+Shift+U | In the File status view, while no text field has the focus: stage all, and unstage all, files that are listed |
 | Ctrl+C | Copy: the full hash in the commit list, the path of the file or folder in a file list, the path of a row in the home tab, the selected text in diff and blame |
 | Ctrl+Plus, Ctrl+= | Next larger interface size |
@@ -392,6 +392,10 @@ use Ctrl on every platform.
 #### Scenario: Stage all on macOS
 - **WHEN** the File status view is shown on macOS and the user presses Cmd+Shift+S
 - **THEN** every file that the Unstaged group lists is staged
+
+#### Scenario: Stage selected lines with the keyboard
+- **WHEN** the diff of an unstaged file has the focus, an added line is selected and the user presses S
+- **THEN** that line is staged
 
 ### Requirement: Responsive interface
 The interface SHALL respond to input within 100 ms at all times, including
