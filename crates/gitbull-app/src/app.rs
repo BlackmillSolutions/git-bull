@@ -11,6 +11,7 @@ use gitbull_core::diff_document::RowKey;
 
 use crate::components::RowsShown;
 use crate::diff_view::GapLabels;
+use gitbull_core::file_status::Shown;
 use gitbull_core::git_setup::GitCheck;
 use gitbull_core::overview::{Overview, Request};
 use gitbull_core::panel::Panel;
@@ -330,6 +331,15 @@ pub(crate) struct TabView {
     /// The entry of the File status view whose context menu was opened
     /// last, with the path the last commit has of it.
     pub(crate) status_menu: Option<StatusMenu>,
+    /// The file list of the File status view takes the keyboard focus when
+    /// it is drawn next, as after the dialog of a failed staging closed.
+    pub(crate) focus_status: bool,
+    /// Stage all, or unstage all, files that the File status view lists when
+    /// it is drawn next: asked for with the keyboard.
+    pub(crate) index_all: Option<Shown>,
+    /// Whether each group of the File status view lists a file that can be
+    /// staged, or unstaged, for the status and the filter it was found for.
+    pub(crate) index_available: Option<(u64, String, [bool; 2])>,
     /// The full name of the branch or remote branch whose context menu was
     /// opened last in the sidebar.
     pub(crate) sidebar_menu: Option<String>,
@@ -360,8 +370,9 @@ impl TabView {
 
 /// What the context menu of the File status view was opened for.
 pub(crate) enum StatusMenu {
-    /// An entry, with the path the last commit has of it.
-    File(StatusEntry, Option<RepoPath>),
+    /// An entry of a list of the status, with the path the last commit has
+    /// of it.
+    File(Group, StatusEntry, Option<RepoPath>),
     /// A folder of the tree, by its path.
     Folder(RepoPath),
 }
@@ -1387,6 +1398,41 @@ impl App {
             session.close_dialog();
             // The keyboard goes on where the user was.
             view.focus_sidebar = true;
+        }
+        // A staging is asked for in the File status view, whose file list
+        // takes the keys that stage and unstage.
+        let in_status = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active())
+            .is_some_and(|tab| tab.view() == View::FileStatus);
+        if in_status && let Some((_, view)) = self.active_view() {
+            view.focus_sidebar = false;
+            view.focus_status = true;
+        }
+    }
+
+    /// Drops what was asked of the File status views and not taken in the
+    /// pass that just drew: a view that was not drawn, as under the history of
+    /// a file, must not act on it when it is drawn again later.
+    pub(crate) fn forget_unanswered_status_requests(&mut self) {
+        for view in self.views.values_mut() {
+            view.index_all = None;
+            view.focus_status = false;
+        }
+    }
+
+    /// Stages, or unstages, every file that the File status view of the
+    /// active tab lists, when it is shown: the view does it when it is drawn
+    /// next, as it knows what the filter lets through.
+    pub(crate) fn index_all(&mut self, shown: Shown) {
+        let in_status = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active())
+            .is_some_and(|tab| tab.view() == View::FileStatus);
+        if in_status && let Some((_, view)) = self.active_view() {
+            view.index_all = Some(shown);
         }
     }
 

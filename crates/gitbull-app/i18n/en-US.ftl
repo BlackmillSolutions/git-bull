@@ -210,11 +210,27 @@ create-refused-taken = Git refused the name: a branch of this name exists, or th
 create-refused-invalid = Git refused the name: it is not a valid branch name.
 action-create-tag = Creating tag { $name }
 create-tag-failed-title = The tag { $name } could not be created
+action-stage = { $count ->
+    [one] Staging 1 file
+   *[other] Staging { $count } files
+}
+action-unstage = { $count ->
+    [one] Unstaging 1 file
+   *[other] Unstaging { $count } files
+}
+stage-failed-title = The files could not be staged
+unstage-failed-title = The files could not be unstaged
+stage-file = Stage file
+unstage-file = Unstage file
+stage-all = Stage all
+unstage-all = Unstage all
 create-tag-refused-taken = Git refused the name: a tag of this name exists, or the name would need one to be a folder.
 create-tag-refused-invalid = Git refused the name: it is not a valid tag name.
 close-question-title = Stop the running action?
 close-question-tab = The action "{ $action }" is still running in the tab { $tab }. Closing the tab stops it, and Git may leave the working copy half updated.
 close-question-window = The action "{ $action }" is still running in the tab { $tab }. Closing git-bull stops it, and Git may leave the working copy half updated.
+close-question-tab-index = The action "{ $action }" is still running in the tab { $tab }. Closing the tab stops it: files may stay as they were, and Git may leave a lock on the index behind.
+close-question-window-index = The action "{ $action }" is still running in the tab { $tab }. Closing git-bull stops it: files may stay as they were, and Git may leave a lock on the index behind.
 close-question-window-many = Actions are still running in { $count } tabs, among them "{ $action }" in the tab { $tab }. Closing git-bull stops them, and Git may leave the working copies half updated.
 close-keep-open = Keep open
 close-anyway = Close anyway
@@ -285,7 +301,6 @@ copied = Copied
 panel-files = FILES
 file-status-staged = Staged files ({ $count })
 file-status-unstaged = Unstaged files ({ $count })
-file-status-untracked = Untracked files ({ $count })
 file-status-loading = Reading the status of the working copy…
 file-status-clean = There are no uncommitted changes.
 
