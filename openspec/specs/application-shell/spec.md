@@ -318,6 +318,8 @@ use Ctrl on every platform.
 | Ctrl+Shift+Page Up, Ctrl+Shift+Page Down | Move the current tab one place to the left or right, with Ctrl on every platform |
 | F7, Shift+F7 | Next and previous hunk in the diff |
 | F5, Ctrl+R | Refresh |
+| S, U | In the File status view, while its file list has the focus: stage, and unstage, the selected file |
+| Ctrl+Shift+S, Ctrl+Shift+U | In the File status view, while no text field has the focus: stage all, and unstage all, files that are listed |
 | Ctrl+C | Copy: the full hash in the commit list, the path of the file or folder in a file list, the path of a row in the home tab, the selected text in diff and blame |
 | Ctrl+Plus, Ctrl+= | Next larger interface size |
 | Ctrl+Minus | Next smaller interface size |
@@ -374,6 +376,22 @@ use Ctrl on every platform.
 #### Scenario: Open a repository with the keyboard
 - **WHEN** a repository tab is shown and the user presses Ctrl+O
 - **THEN** the home tab is shown and its filter has the keyboard focus
+
+#### Scenario: Stage with the keyboard
+- **WHEN** the file list of the File status view has the focus, a file of the Unstaged group is selected and the user presses S
+- **THEN** the file is staged
+
+#### Scenario: Letter typed into the filter
+- **WHEN** the filter of the File status view has the keyboard focus and the user types `s`
+- **THEN** the filter holds `s` and nothing is staged
+
+#### Scenario: Keys while a dialog is open
+- **WHEN** the dialog of a failed staging is open and the user presses S
+- **THEN** nothing is staged
+
+#### Scenario: Stage all on macOS
+- **WHEN** the File status view is shown on macOS and the user presses Cmd+Shift+S
+- **THEN** every file that the Unstaged group lists is staged
 
 ### Requirement: Responsive interface
 The interface SHALL respond to input within 100 ms at all times, including
@@ -573,11 +591,13 @@ the tabs in a tab bar of their own below it.
 - **THEN** the home tab is still visible at the left of the tabs
 
 ### Requirement: Closing while a write action runs
-While a write action runs in a tab (checking out, creating a branch or a tag),
+While a write action runs in a tab (checking out, creating a branch or a tag,
+staging or unstaging files),
 closing that tab, with its button or with Ctrl+W, and closing the window SHALL
 first ask the user, and SHALL NOT stop the action without asking. The question
-SHALL name the action and the tab and warn that stopping it can leave the working
-copy half updated. It SHALL offer Keep open, which is the default, and Close
+SHALL name the action and the tab and warn of what stopping it can leave behind:
+a working copy that is half updated for a checkout, and files that were not
+staged or unstaged, and a lock on the index, for staging and unstaging. It SHALL offer Keep open, which is the default, and Close
 anyway. Close anyway SHALL close the tab or the window and stop the action. This
 replaces, for write actions, the stopping of all background work of a closed tab
 (requirement "Repository tabs"). Closing a tab or the window in which no write
@@ -607,3 +627,7 @@ action runs SHALL NOT ask anything.
 #### Scenario: No action runs
 - **WHEN** no write action runs and the user closes a tab
 - **THEN** the tab closes without a question
+
+#### Scenario: Closing a tab while files are staged
+- **WHEN** staging runs in a tab and the user closes the tab
+- **THEN** a question names the staging and the tab, says that files may stay as they were and that Git may leave a lock on the index, and does not mention the working copy

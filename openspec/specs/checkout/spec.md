@@ -185,9 +185,13 @@ do the same as above.
 
 ### Requirement: One write action at a time
 A tab SHALL run at most one write action at a time, where write actions are
-checking out, creating a branch and creating a tag. While one runs, every entry
-that starts a write action in that tab SHALL be unavailable, the status bar
-SHALL name what runs, such as "Checking out feature", and the other tabs SHALL
+checking out, creating a branch, creating a tag, and staging and unstaging
+files. While a checkout or the creation of a branch or a tag runs, every entry
+that starts a write action in that tab SHALL be unavailable. While staging or
+unstaging runs, or is kept to run, the entries that check out or create SHALL
+be unavailable, and further staging and unstaging SHALL be accepted and kept,
+as the capability `staging` describes. The status bar SHALL name what runs,
+such as "Checking out feature" or "Staging 3 files", and the other tabs SHALL
 stay usable. Such an action SHALL have no control to cancel it, because a
 cancelled checkout can leave the working copy half updated. Reading in the tab,
 such as the history, the file status and the search, SHALL continue.
@@ -195,6 +199,18 @@ such as the history, the file status and the search, SHALL continue.
 #### Scenario: Second action is unavailable
 - **WHEN** a checkout runs in a tab and the user opens the context menu of a branch
 - **THEN** its entries that check out or create are unavailable
+
+#### Scenario: Staging is unavailable during a checkout
+- **WHEN** a checkout runs in a tab and the user opens the File status view
+- **THEN** the buttons and entries that stage and unstage are unavailable until the checkout ended
+
+#### Scenario: Checkout is unavailable while files are staged
+- **WHEN** staging runs in a tab and the user opens the context menu of a branch
+- **THEN** its entries that check out or create are unavailable until the staging ended
+
+#### Scenario: Status bar names a staging
+- **WHEN** three files are being staged
+- **THEN** the status bar says that three files are being staged, until the status was read again
 
 #### Scenario: Status bar names the action
 - **WHEN** a checkout of `feature` runs
@@ -209,8 +225,11 @@ such as the history, the file status and the search, SHALL continue.
 - **THEN** the second tab accepts a checkout of its own
 
 ### Requirement: Outcome of a write action
-After a write action ends, whatever its outcome, git-bull SHALL read HEAD, the
-references and the status of the tab again. When the action succeeds, no
+After a write action ends, whatever its outcome, git-bull SHALL read again
+what the action can have changed: HEAD, the references and the status of the
+tab after a checkout or the creation of a branch or a tag, and the status
+after staging or unstaging. The action SHALL count as running until that was
+read. When the action succeeds, no
 dialog SHALL be shown. When Git fails, git-bull SHALL show a dialog with Git's
 message in full and a button that copies it. When Git reports a failure but HEAD
 is at the target afterwards, as when a post-checkout hook fails after the
@@ -235,8 +254,12 @@ of the hook; git-bull SHALL NOT repeat or undo the action.
 - **WHEN** another program moves a reference while the action runs
 - **THEN** after the action the sidebar and the commit list show the references as they are then
 
+#### Scenario: Staging fails
+- **WHEN** staging a file fails with a message of Git
+- **THEN** a dialog shows the message in full, with a button to copy it, and the File status view lists the files as they are
+
 ### Requirement: Dialogs of write actions
-Every dialog of checkout and of reference creation SHALL be modal in the way of
+Every dialog of a write action SHALL be modal in the way of
 the settings dialog: the main window takes no input meanwhile, except that its
 title bar and edges still move, resize, minimize, maximize and close the window.
 A dialog SHALL take Enter as its default choice where one is safe and Escape as
