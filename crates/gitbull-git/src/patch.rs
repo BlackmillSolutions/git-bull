@@ -345,14 +345,14 @@ impl RawDiff<'_> {
         if body.is_empty() {
             return Ok(None);
         }
-        let mut patch = self.header_for(old_lines == 0, new_lines == 0);
+        let mut patch = self.header_for(old_lines == 0, new_lines == 0, direction);
         patch.extend_from_slice(&body);
         Ok(Some(patch))
     }
 
     /// The header of the patch. It is written, not kept: a kept header makes
     /// Git do more than was chosen, as moving a staged rename back.
-    fn header_for(&self, old_empty: bool, new_empty: bool) -> Vec<u8> {
+    fn header_for(&self, old_empty: bool, new_empty: bool, direction: Direction) -> Vec<u8> {
         let value = |prefix: &[u8]| {
             self.header
                 .iter()
@@ -390,7 +390,12 @@ impl RawDiff<'_> {
             b" ",
             &without_tab(&new_path),
         ]);
-        if let (Some(old), Some(new)) = (value(b"old mode "), value(b"new mode ")) {
+        // A change of the mode is staged with any part of the file, as Git
+        // does it. Unstaging a part leaves it staged: what was not chosen
+        // stays in the index as it was.
+        if direction == Direction::Stage
+            && let (Some(old), Some(new)) = (value(b"old mode "), value(b"new mode "))
+        {
             line(&[b"old mode ", old]);
             line(&[b"new mode ", new]);
         }

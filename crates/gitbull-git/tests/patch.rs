@@ -56,6 +56,7 @@ fn partial_index_operations_preserve_git_behaviour() {
     #[cfg(unix)]
     {
         an_executable_file_keeps_its_mode(&git);
+        a_change_of_the_mode_is_staged_with_a_part_and_stays_when_one_is_unstaged(&git);
         a_symbolic_link_shows_its_mode(&git);
     }
 }
@@ -751,6 +752,27 @@ fn an_executable_file_keeps_its_mode(git: &Git) {
             .starts_with("100755 ")
     );
     assert_eq!(index(&repo, "run.sh"), "a\nc\n");
+}
+
+#[cfg(unix)]
+fn a_change_of_the_mode_is_staged_with_a_part_and_stays_when_one_is_unstaged(git: &Git) {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repository();
+    two_hunks(&repo);
+    let file = repo.path().join("f.txt");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    let mode = |repo: &TestRepo| repo.git(&["ls-files", "--stage", "f.txt"])[..6].to_owned();
+    // Staging one line takes the mode along, as Git applies it.
+    part(git, &repo, Group::Unstaged, "f.txt", &["+add A"]);
+    assert_eq!(mode(&repo), "100755");
+    part(git, &repo, Group::Unstaged, "f.txt", &["+add B"]);
+    // Unstaging one line leaves the mode staged, with the other line.
+    part(git, &repo, Group::Staged, "f.txt", &["+add A"]);
+    assert_eq!(mode(&repo), "100755");
+    assert_eq!(
+        index(&repo, "f.txt"),
+        numbered(1..=30).replace("l20\n", "l20\nadd B\n")
+    );
 }
 
 #[cfg(unix)]

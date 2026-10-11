@@ -185,8 +185,10 @@ refused, and a staged copy could not be applied at all.
   `"b/..."` becomes `"a/..."`. The tab Git writes after a path with a space is
   written on the `---` and `+++` lines only, never on the `diff --git` line,
   where Git rejects it.
-- `old mode` and `new mode` lines are kept: a change of the mode goes with any
-  part of the file, as Git applies it.
+- `old mode` and `new mode` lines are written when staging: a change of the
+  mode goes with any part of the file, as Git applies it. They are left out
+  when unstaging, so that a staged change of the mode stays staged while
+  other lines of the file do; it was not chosen.
 - The `index` line is never written.
 
 ### 3. Applied with `git apply --cached`, with nothing that bends the patch

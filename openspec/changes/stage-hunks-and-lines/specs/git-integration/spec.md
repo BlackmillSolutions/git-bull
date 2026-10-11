@@ -16,7 +16,8 @@ path, SHALL add or remove the path only when the lines chosen are the first
 the index holds of the file or the last, and SHALL NOT change the working
 copy, HEAD, a reference or the state of a merge. A file that is modified
 SHALL stay in the index also when the part staged leaves it empty. A change of the mode of the file that its
-diff reports goes with any part of it, as Git applies it. A selection that
+diff reports is staged with any part of it, as Git applies it; unstaging a
+part SHALL leave a staged change of the mode staged. A selection that
 could only be applied by joining two lines at the end of a file SHALL be
 refused with nothing applied. It SHALL
 NOT let a whitespace setting change or refuse the patch, SHALL NOT fall back to
