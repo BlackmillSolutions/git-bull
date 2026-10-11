@@ -64,9 +64,9 @@ x86_64-pc-windows-gnu`.
 
 ## 4. Documentation
 
-- [ ] 4.1 Correct the purpose of `openspec/specs/staging/spec.md`, which says "whole files", so that it names hunks and lines too. Update `README.md` (what git-bull does, and the next priority) and `docs/roadmap.md` (hunks and lines delivered, commit next, and discard as its own later change with a way to bring a discard back). Verify both name hunks and lines as delivered and discard as not.
+- [x] 4.1 Correct the purpose of `openspec/specs/staging/spec.md`, which says "whole files", so that it names hunks and lines too. Update `README.md` (what git-bull does, and the next priority) and `docs/roadmap.md` (hunks and lines delivered, commit next, and discard as its own later change with a way to bring a discard back). Verify both name hunks and lines as delivered and discard as not.
 
 ## 5. Integration
 
-- [ ] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` once each, and verify all three pass.
+- [x] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` once each, and verify all three pass.
 - [ ] 5.2 Stage and unstage by hand in a real repository with the built application: a hunk and single lines of a modified file, lines of a new file, a file that ends without a line break, a file edited in an editor between the diff and the click, and a file under Git LFS, whose entries must be unavailable. Verify `git diff --cached` in a terminal agrees with the Staged group after each.

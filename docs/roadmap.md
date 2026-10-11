@@ -10,9 +10,10 @@ M2 improvements to finish before M3 starts.
 The read-only viewer, the interface improvements delivered so far, the
 worktree cockpit and the trust model for write operations provide the
 starting point, and checkout and the creation of branches and tags are
-delivered. All of it is released as 0.2.0. Since then whole files can be
-staged and unstaged. This roadmap schedules new work; the current
-application still does not stage hunks or lines and does not create commits.
+delivered. All of it is released as 0.2.0. Since then whole files, hunks
+and selected lines can be staged and unstaged. This roadmap schedules new
+work; the current application still does not create commits and does not
+discard changes.
 
 ## Released: 0.2.0
 
@@ -124,25 +125,43 @@ is specified in the [staging spec](../openspec/specs/staging/spec.md).
 - Requests made in quick succession are kept and run in order, and the
   selection moves to the next file. A file in conflict is not staged.
 
-Not delivered with it: hunks and lines, discarding changes, resolving
-conflicts, staging a folder as one, and selecting several files.
+Not delivered with it: discarding changes, resolving conflicts, staging a
+folder as one, and selecting several files.
+
+## Delivered: staging of hunks and lines
+
+The OpenSpec change `stage-hunks-and-lines` delivered staging and unstaging
+of a part of a file from the diff of the File status view, modelled on
+GitKraken. The behaviour is specified in the
+[staging spec](../openspec/specs/staging/spec.md).
+
+- The context menu of the diff offers "Stage hunk" and "Stage selected
+  lines", the header of a hunk has a button, and S stages what is selected
+  while the diff has the focus. The diff of a staged file offers the same to
+  unstage, with U.
+- A part is applied to the index as a patch made from Git's own diff. When
+  the file changed since the diff was read, nothing is applied and a dialog
+  says so.
+- A file in conflict, a file a filter driver rewrites, Git LFS among them, a
+  symbolic link, a change of the file type and a diff that is not loaded in
+  full are staged whole; their entries say why.
+
+Not delivered with it: discarding changes and resolving conflicts.
 
 ## Next: the local Git workflow
 
 | Order | Priority | Work |
 |---|---|---|
-| 1 | High | Stage and unstage hunks and lines from the diff of the File status view. |
-| 2 | High | Write a commit message, commit the staged changes and amend the last commit. |
+| 1 | High | Write a commit message, commit the staged changes and amend the last commit. |
+| 2 | High | Discard changes of files, hunks and lines, with a way to bring a discard back. |
 
-The next delivery should make the commit workflow usable. Hunk staging and
-amend remain part of the planned local operations and follow their
-corresponding basic actions. The detailed OpenSpec changes will define their
-behaviour and implementation steps.
+The next delivery should make the commit workflow usable. Discarding is its
+own change after it: it is the first action that removes work from the
+working copy, so it comes with a confirmation and with a way to bring a
+discard back.
 
 Each item starts with its own Explore and Propose and builds on the write
-invocation and on the write actions of the session. Hunks need a patch that
-fits the content the index holds, while the diff shown is read with the
-repository's filters neutralised; that is the first question of its change.
+invocation and on the write actions of the session.
 
 ## After the basic actions
 
