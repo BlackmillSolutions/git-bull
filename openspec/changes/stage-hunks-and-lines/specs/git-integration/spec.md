@@ -11,9 +11,11 @@ unchanged. Before anything is applied, the hunks Git reports SHALL be compared
 with the ones the request was made for; when they differ, nothing SHALL be
 applied and the caller SHALL be told that the diff is out of date; a diff
 Git no longer reports at all is out of date too. The operation SHALL change
-the index only, and only the content of that file: it SHALL NOT add, remove or
-rename a path as a side effect, and SHALL NOT change the working copy, HEAD, a
-reference or the state of a merge. A change of the mode of the file that its
+the index only, and only the content of that file: it SHALL NOT rename a
+path, SHALL add or remove the path only when the lines chosen are the first
+the index holds of the file or the last, and SHALL NOT change the working
+copy, HEAD, a reference or the state of a merge. A file that is modified
+SHALL stay in the index also when the part staged leaves it empty. A change of the mode of the file that its
 diff reports goes with any part of it, as Git applies it. A selection that
 could only be applied by joining two lines at the end of a file SHALL be
 refused with nothing applied. It SHALL
@@ -29,6 +31,10 @@ status and message.
 #### Scenario: Diff out of date
 - **WHEN** a part is requested for hunks that Git no longer reports for the file
 - **THEN** the index is unchanged and the caller is told that the diff is out of date
+
+#### Scenario: File emptied
+- **WHEN** every line of a tracked file was removed in the working copy and all of its hunk is staged
+- **THEN** the index holds the file, empty
 
 #### Scenario: Part of a staged rename
 - **WHEN** one hunk of a file that is staged as renamed is unstaged

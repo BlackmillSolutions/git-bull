@@ -78,10 +78,12 @@ SHALL be "Unstage hunk", "Unstage selected lines" and U, and SHALL take out of
 the index what the same gesture would have put in: a staged added line that is
 unstaged is no longer in the index, and a staged removed line that is unstaged
 is in the index again. The working copy SHALL stay as it is. What stays
-staged SHALL stay as it was: unstaging a part of a file that is staged as new,
-as deleted, as renamed or as copied SHALL NOT change which paths the index
-holds, unless the last line of a new file is unstaged, which takes the file
-out of the index.
+staged SHALL stay as it was: unstaging a part SHALL NOT move a renamed file
+back to its old path and SHALL NOT drop a copy. The paths the index holds
+SHALL change only where the lines chosen require it: a staged new file leaves
+the index when its last line is unstaged, and a file staged as deleted is in
+the index again, with the lines unstaged and its mode, as soon as one of its
+lines is unstaged.
 
 #### Scenario: Unstage a hunk
 - **WHEN** `src/a.rs` has two staged hunks and the user chooses "Unstage hunk" on the first
@@ -103,6 +105,10 @@ out of the index.
 - **WHEN** `notes.txt` is staged as a new file with three lines and the user unstages its second line
 - **THEN** the index holds `notes.txt` with the first and the third line
 
+#### Scenario: A line of a staged deletion
+- **WHEN** `old.rs` with the lines `a`, `b` and `c` is staged as deleted and the user unstages the line `b`
+- **THEN** the index holds `old.rs` again with the line `b` alone, and the file is listed in both groups
+
 #### Scenario: A hunk of a staged rename
 - **WHEN** `old.txt` is staged as renamed to `new.txt` with two changed hunks and the user unstages the first hunk
 - **THEN** the Staged group still lists `new.txt` as renamed from `old.txt`, with the second hunk alone
@@ -117,6 +123,10 @@ patch is applied SHALL NOT change or refuse what is staged.
 #### Scenario: Bytes that are not UTF-8
 - **WHEN** an added line holds bytes that are not valid UTF-8, which the diff shows as replacement characters, and the user stages the line
 - **THEN** the index holds the bytes of the working copy
+
+#### Scenario: Empty context line
+- **WHEN** `diff.suppressBlankEmpty` is `true`, a hunk holds an empty context line, and the user stages an added line below it
+- **THEN** that added line is staged, and no other
 
 #### Scenario: Whitespace setting
 - **WHEN** `apply.whitespace` is `fix`, an added line ends in two spaces, and the user stages it
@@ -136,9 +146,10 @@ binary file, a change without lines such as a rename, a copy or a mode alone,
 and a submodule. For a diff that shows lines and cannot be staged in parts, the
 entries and the keys of a hunk and of selected lines SHALL be unavailable, the
 entries SHALL say why, and the header of a hunk SHALL show no button: a file
-in conflict; a diff that was cut at its limit, until all of it is loaded; and
-a file whose `filter` attribute names a filter driver that is configured,
-whoever configured it, in both groups. In every case the file SHALL still be
+in conflict; a diff that was cut at its limit, until all of it is loaded; a
+file whose `filter` attribute names a filter driver that is configured,
+whoever configured it, in both groups; and a symbolic link and a change of the
+type of a file, as from a file to a symbolic link. In every case the file SHALL still be
 staged and unstaged whole.
 
 #### Scenario: Binary file
@@ -156,6 +167,10 @@ staged and unstaged whole.
 #### Scenario: Diff cut at its limit
 - **WHEN** the diff of a file stopped at its limit of lines
 - **THEN** staging in parts is unavailable and says that the whole diff must be loaded, and after "Load the whole diff" it is available
+
+#### Scenario: Symbolic link
+- **WHEN** a symbolic link points elsewhere than in the last commit and the user opens the context menu of a line of its diff
+- **THEN** the entries that stage are unavailable and say that this change is staged whole
 
 #### Scenario: File in conflict
 - **WHEN** a file with unresolved conflicts is selected and the user opens the context menu of a line of its diff

@@ -81,16 +81,24 @@ bytes of the diff of one file and gives back a patch for a selection.
 
 - **Reading.** `raw_working_diff(git, repo, group, entry, cancel)` in
   `working_copy.rs` runs the command `working_diff` runs, with the same
-  arguments and the same neutralised filters, without a limit. `find_diff`
-  returns a parsed `FileDiff` and no bytes, so the raw read has a splitter of
-  its own: it cuts the output at the lines that start with `diff --git`, and
+  arguments and the same neutralised filters, without a limit, through
+  `diff::read_diff`, which becomes `pub(crate)` and already bears the exit
+  status 1 of `--no-index` and a cancel. `find_diff` returns a parsed
+  `FileDiff` and no bytes, so the raw read has a splitter of its own: it cuts the output at the lines that start with `diff --git`, and
   picks the section that `describes` accepts once it is parsed, which also
   holds for a staged copy read with `-C` and for a path Git cannot be given.
   No output, or no such section, is a diff that is out of date (decision 4).
 - **Parsing.** `patch::parse(raw)` splits the section into its header lines,
   up to the first line that starts with `@@`, and its hunks, each with its
   header and its lines as byte slices that keep their line endings. A line
-  that starts with `\` belongs to the line before it.
+  that starts with `\` belongs to the line before it. An empty line inside a
+  hunk is a context line, as `diff::parse_diff` reads it and as Git writes it
+  with `diff.suppressBlankEmpty`, and is written back as it was read.
+- **Two parsers must count alike.** The positions of a request are counted
+  by `diff::parse_diff`, the bytes are cut by `patch::parse`. Before a patch
+  is made, the hunks of the two are checked against each other for the same
+  section: the same number of hunks, and in each the same number of lines
+  with the same kinds. A difference is an error, and nothing is applied.
 - **The view sends positions, not text.** A request names, for each hunk it
   touches, the index of the hunk and either "all of it" or the indices of the
   chosen lines in it, as `Row::Line(hunk, line)` counts them.
@@ -124,19 +132,29 @@ lines plus the `-` lines for the old side, and plus the `+` lines for the new
 side. With `net` as what the hunks before it in the patch add less what they
 remove:
 
-- **Staging** applies to the old side, the index. The old start stays as Git
-  gave it; the new start is the old start plus `net`.
+Each start Git gave is first read as a position: the number itself, or the
+number plus one when that side has the count 0. `net` is the sum, over the
+hunks already written to the patch, of the new count less the old count as
+they were written, in both directions.
+
+- **Staging** applies to the old side, the index. The old position is kept;
+  the new position is the old position plus `net`.
 - **Unstaging** applies in reverse to the new side, which is the index with
-  every staged hunk in it, chosen or not. The new start stays as Git gave it;
-  the old start is the new start less `net`.
+  every staged hunk in it, chosen or not. The new position is kept; the old
+  position is the new position less `net`.
+
+A position is written as it is, or less one when its side has the count 0,
+which is how Git writes a side without a line: with the number of the line
+before it, 0 at the top of a file.
 
 Keeping the old start for unstaging, as a first draft of this plan did, is
 wrong by the size of the staged hunks that are not chosen: `git apply
 --reverse` then found the context at another place of a file whose lines
 repeat, reported success, and unstaged lines the user had not chosen.
 
-A side that is left without a line is written as Git writes it: with the
-number of the line before it, 0 at the top of a file, and the count 0.
+These rules hold for the three lines of context the diff is read with
+(`-U3`): without context `git apply` needs `--unidiff-zero` and misplaces a
+hunk in silence.
 
 **The end of a file.** A line that carries `\ No newline at end of file` must
 be the last line of its side in the hunk that is written. The rules above can
@@ -153,15 +171,20 @@ makes Git do more than was chosen: a part of a staged rename moved the file
 back to its old path, a part of a staged new file and of a deleted file was
 refused, and a staged copy could not be applied at all.
 
-- `new file mode` with `--- /dev/null` is written only when the old side of
-  the patch is empty, as for an untracked file and for unstaging all of a new
-  file; `deleted file mode` with `+++ /dev/null` only when its new side is
-  empty.
+- `new file mode <mode>` with `--- /dev/null` is written only when Git's
+  header has a `new file mode` line and the old side of the patch is empty,
+  as for an untracked file and for unstaging all of a new file; `deleted file
+  mode <mode>` with `+++ /dev/null` only when Git's header has a `deleted file
+  mode` line and the new side of the patch is empty. A file that Git reports
+  as modified is never written as new or deleted, also when a side of it is
+  empty: a tracked file that was emptied stays in the index, empty.
 - In every other case, and always for a rename and a copy, the header is that
   of a change to the content of the new path: `diff --git a/<path> b/<path>`,
-  `--- a/<path>`, `+++ b/<path>`, with the path as Git wrote it on the `+++`
-  line, or on the `---` line of a deleted file, its quoting and the tab after
-  a path with a space included.
+  `--- a/<path>`, `+++ b/<path>`. The path is taken from Git's `+++` line, or
+  from its `---` line for a deleted file, with its quoting; when it is quoted,
+  `"b/..."` becomes `"a/..."`. The tab Git writes after a path with a space is
+  written on the `---` and `+++` lines only, never on the `diff --git` line,
+  where Git rejects it.
 - `old mode` and `new mode` lines are kept: a change of the mode goes with any
   part of the file, as Git applies it.
 - The `index` line is never written.
@@ -188,8 +211,12 @@ choose hunks by questions, not by the hunks the user sees.
 
 ### 4. Nothing is applied to a diff that is out of date
 
+Whether the selection holds a changed line is decided from the hunks shown,
+before anything is read: without one, the operation returns `Ok(())` and
+starts no Git.
+
 The request carries the hunks the view shows, as the `Arc<FileDiff>` of the
-diff pane. The raw section just read is parsed by the parser that made them,
+diff pane, which `DiffDocument` hands out through a new `shared_diff()`. The raw section just read is parsed by the parser that made them,
 `diff::parse_diff`, and its hunks are compared with them, line for line
 (`Hunk` is `PartialEq`). When they differ, or Git reports no diff of the file
 any more, the operation returns `Refusal::DiffOutOfDate` and runs nothing.
@@ -199,6 +226,11 @@ empty line read as context, lines cut at `LINE_CHARS`. Comparing the texts
 too, lossy as they are, catches a line that was edited in place: the patch is
 made of the raw diff just read, so Git would apply it without a complaint, and
 the user would stage a text they did not see.
+
+One change the comparison cannot see: an untracked file that another program
+staged meanwhile has the same diff against nothing as before. Git then refuses
+the patch of a new file because the index has the path, nothing is applied,
+and the outcome is a failure with Git's message, not "out of date".
 
 Alternative: comparing only the positions and kinds of the lines, which lets
 that edit through.
@@ -212,15 +244,25 @@ and nothing needs a reason.
 For a diff with rows, `gitbull-core` gains `Parts`, decided from the entry,
 its group, its `FileDiff` and the state of the diff pane: `Available`, or why
 not: `Conflicted`, `Truncated`, `Filtered`, `Reading` while the diff is read
-again. The view shows the entries unavailable with that reason.
+again, and `WholeOnly` for a change of the type of a file
+(`ChangeKind::TypeChanged`) and for a diff whose old or new mode is `120000`,
+a symbolic link. The view shows the entries unavailable with that reason.
+
+A type change is two sections in Git's output, of which one is shown; a part
+of it was refused by Git or took the path out of the index. The lines of a
+symbolic link are its target, and half a change of it is a link to nothing.
 
 `Filtered` needs one more fact. `FileDiff` gains `filtered: bool`.
 `working_diff` sets it, for every group, when `git check-attr -z filter --
 <path>` gives a value other than `unspecified`, `unset` and `set` and a
-`filter.<value>.clean`, `.smudge` or `.process` is configured in any scope.
-The configuration is listed for the neutralised filters already; the
-attribute costs one short process per diff, only in a repository that
-configures or inherits a filter driver.
+`filter.<value>.clean`, `.smudge` or `.process` that is not empty is
+configured in any scope. The configuration is listed for the neutralised
+filters already, but only the overrides are kept of it: `filters.rs` gains one
+function that lists it once and returns both the overrides and the names of
+those drivers, and `working_diff` uses it. The attribute costs one short
+process per diff, only where such a driver is configured. A driver that is
+itself named `set`, `unset` or `unspecified` is not told from the attribute
+without a driver, and is read as no filter.
 
 Why such a file is staged whole only: under a filter the lines of the diff
 are not the lines of the file. With a filter of the repository the diff is
@@ -242,9 +284,10 @@ git-bull finds before it changes anything comes back as a refusal, in the way
 `Session` gains `stage_part(selection) -> IndexStart`, an entry point of its
 own beside `request_index`:
 
-- It builds the request from the file chosen in the file status and the diff
-  its pane shows. Without a chosen file, and unless `Parts::Available`, it
-  returns `IndexStart::Nothing`.
+- It builds the request from what the diff pane shows: the entry and the
+  group of `DiffPane::source()`, which the diff was read for, and the diff
+  itself. Without a diff shown, and unless `Parts::Available`, it returns
+  `IndexStart::Nothing`.
 - It starts only when the slot is empty and the queue is empty; otherwise it
   returns `IndexStart::Busy`. It is never appended to the queue. A request for
   whole files made while it runs is kept as today.
@@ -313,8 +356,11 @@ diff that is about to be replaced.
   manner of `tests/index.rs`, for what decision 2 got wrong at first and for
   the scenarios of the specs.
 - `gitbull-testkit`: the fake records the requests of parts, waits at the
-  gate of the write actions, answers as scripted, and can be given the status
-  that follows, so that a test can show the file leaving its group.
+  gate of the write actions, answers as scripted with the `FakeWrite` it has,
+  and can be given the status that follows, so that a test can show the file
+  leaving its group. It gains a gate that holds the reading of a working
+  diff: without it the tests of the moment in which the diff is read again
+  pass or fail by timing.
 - `gitbull-core`: `Parts` for every reason; the session's action, its refusal
   while another runs or the diff is read, the dialogs, and the queue emptied
   by a refusal.
