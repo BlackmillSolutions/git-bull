@@ -373,7 +373,6 @@ impl DiffPane {
         changed
     }
 
-    /// What the diff shown compares, if one is.
     /// Whether the diff is being read: the first time, again after a refresh,
     /// or whole. While it is read again the diff of before stays shown, so
     /// what is shown may no longer be what Git reports.
@@ -381,6 +380,7 @@ impl DiffPane {
         self.work.is_running()
     }
 
+    /// What the diff shown compares, if one is.
     pub fn source(&self) -> Option<&DiffSource> {
         self.source.as_ref()
     }

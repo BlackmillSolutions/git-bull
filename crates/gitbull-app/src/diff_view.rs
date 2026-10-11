@@ -371,8 +371,17 @@ fn draw(
         return false;
     };
     let mut hunk_move = view.hunk_move.take();
-    // After the dialog of a part of a file, the keyboard goes on in the diff.
-    let focus_diff = pane == Pane::FileStatus && std::mem::take(&mut view.focus_status_diff);
+    // After the dialog of a part of a file, the keyboard goes on in the
+    // diff; in the file list when the diff shows no rows that could take it.
+    let mut focus_diff = pane == Pane::FileStatus && std::mem::take(&mut view.focus_status_diff);
+    let has_rows = matches!(
+        shown(session, pane),
+        Some((DiffState::Loaded(document), ..)) if !document.hunks().is_empty()
+    );
+    if focus_diff && !has_rows {
+        view.focus_status = true;
+        focus_diff = false;
+    }
     let state = diff_view_of(view, pane);
     let reading = reading(session, pane);
     let Some((diff, highlighting, key)) = shown(session, pane) else {
@@ -1051,23 +1060,22 @@ fn header_row(
     if let Some(label) = button.filter(|_| selected || ui.rect_contains_pointer(rect)) {
         // At the right end of what is seen of the row, which may be wider
         // than the view. The button is as high as a control, higher than a
-        // row, and stands around the middle of the row.
+        // row, and stands around the middle of the row; drawn in a child of
+        // its own, it takes no room from the rows below.
         let seen = rect.intersect(ui.clip_rect());
         let room = egui::Rect::from_center_size(
             seen.center(),
             vec2(seen.width() - 12.0, SHAPE.control_height),
         );
-        ui.scope_builder(
+        let mut over = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(room)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
-            |ui| {
-                chosen = components::Button::new(label)
-                    .kind(components::Kind::Secondary)
-                    .show(ui)
-                    .clicked();
-            },
         );
+        chosen = components::Button::new(label)
+            .kind(components::Kind::Secondary)
+            .show(&mut over)
+            .clicked();
     }
     (response, chosen)
 }

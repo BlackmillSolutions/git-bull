@@ -2295,6 +2295,11 @@ fn the_header_keeps_its_button_while_it_is_selected() {
     let shown = buttons(&harness, "Stage hunk");
     assert_eq!(shown.len(), 1, "{shown:?}");
     assert!((shown[0].y - header.y).abs() < 4.0);
+    // The button, higher than a row, pushes no row down.
+    // The rows below it are as far apart as those below the other header.
+    let below = diff_row(&harness, ": one").y - header.y;
+    let other = diff_row(&harness, ": before").y - diff_row(&harness, "@@ -20,3 +22,3 @@").y;
+    assert_eq!(below, other);
 }
 
 #[test]
