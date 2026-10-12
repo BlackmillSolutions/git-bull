@@ -57,7 +57,7 @@
 
 ## 6. Documentation
 
-- [ ] 6.1 Update `README.md` (what git-bull does, line 16 about the next priority, a screenshot of the notice bar or the list) and `docs/roadmap.md`: discard delivered with its journal, the places that say there is no discard (the introduction, the checkout section, the two "not delivered" lines) and the table of next steps, where discard is removed and selecting several files moves up. Verify with `grep` that the roadmap says no longer that git-bull does not discard and names discarding with the way back as delivered.
+- [x] 6.1 Update `README.md` (what git-bull does, line 16 about the next priority, a screenshot of the notice bar or the list) and `docs/roadmap.md`: discard delivered with its journal, the places that say there is no discard (the introduction, the checkout section, the two "not delivered" lines) and the table of next steps, where discard is removed and selecting several files moves up. Verify with `grep` that the roadmap says no longer that git-bull does not discard and names discarding with the way back as delivered.
 
 ## 7. Integration
 

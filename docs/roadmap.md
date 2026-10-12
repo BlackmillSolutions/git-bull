@@ -11,9 +11,9 @@ The read-only viewer, the interface improvements delivered so far, the
 worktree cockpit and the trust model for write operations provide the
 starting point, and checkout and the creation of branches and tags are
 delivered. All of it is released as 0.2.0. Since then whole files, hunks
-and selected lines can be staged and unstaged, and the staged changes can be
-committed. This roadmap schedules new work; the current application still
-does not discard changes.
+and selected lines can be staged and unstaged, the staged changes can be
+committed, and changes can be discarded, every discard being kept so that it
+can be brought back. This roadmap schedules new work.
 
 ## Released: 0.2.0
 
@@ -70,9 +70,10 @@ is specified in the [checkout spec](../openspec/specs/checkout/spec.md) and the
   that follows it. A notice comes before HEAD is detached, and can be hidden.
 - A double click on a commit that a branch points to checks the branch out,
   so that HEAD stays on a branch; several branches are offered to choose from.
-- Local changes that would be overwritten are never discarded: the checkout is
-  refused and a dialog lists the files. There is no force, no discard and no
-  automatic stash.
+- Local changes that would be overwritten are never discarded by a checkout:
+  the checkout is refused and a dialog lists the files. There is no force and
+  no automatic stash; changes are discarded by an action of their own, see
+  [Delivered: discarding changes](#delivered-discarding-changes).
 - A branch that another worktree has checked out is marked in the sidebar, and
   checking it out opens that worktree.
 - A branch is created from a commit, a branch, a remote branch, a tag or the
@@ -125,8 +126,8 @@ is specified in the [staging spec](../openspec/specs/staging/spec.md).
 - Requests made in quick succession are kept and run in order, and the
   selection moves to the next file. A file in conflict is not staged.
 
-Not delivered with it: discarding changes, resolving conflicts, staging a
-folder as one, and selecting several files.
+Not delivered with it: resolving conflicts, staging a folder as one, and
+selecting several files. Discarding changes followed with its own delivery.
 
 ## Delivered: staging of hunks and lines
 
@@ -147,7 +148,8 @@ status view, modelled on GitKraken. It was planned as the OpenSpec change
   symbolic link, a change of the file type and a diff that is not loaded in
   full are staged whole; their entries say why.
 
-Not delivered with it: discarding changes and resolving conflicts.
+Not delivered with it: resolving conflicts. Discarding changes followed with
+its own delivery.
 
 ## Delivered: committing
 
@@ -178,16 +180,43 @@ the behaviour is specified in the
 Not delivered with it: signing off, commit templates, co-authors, changing
 the author, pushing after the commit, and the output of a hook while it runs.
 
+## Delivered: discarding changes
+
+On 2026-10-13, discarding changes was delivered from the File status view,
+modelled on GitKraken. It was planned as the OpenSpec change `discard`. Why a
+discard is kept in a journal in the Git folder of the worktree is recorded in
+[ADR 0009](adr/0009-discarded-work-is-kept-in-a-journal.md), that discarding,
+restoring and clearing cannot be stopped in the amendment of
+[ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and the
+behaviour is specified in the
+[discard spec](../openspec/specs/discard/spec.md).
+
+- The menu of an unstaged file has "Discard changes", and the title of the
+  Unstaged group has a trash button "Discard all". Both ask first, in a
+  dialog that lists the files and says they can be brought back. Hunks and
+  selected lines of a tracked file are discarded from the diff without a
+  question.
+- Nothing is lost for good: before anything changes, the files are moved, or
+  for a part copied, byte for byte into a journal in the Git folder. A bar
+  below the file list offers "Undo", Ctrl+Z does the same, and Ctrl+Shift+Z
+  discards again. The list "Recently discarded" restores older entries, puts
+  back an entry that git-bull was killed in, and clears.
+- A discard that fails puts everything back, and puts back nothing over a
+  file that appeared meanwhile. A discard cannot be stopped, and closing a
+  tab or the window waits for it.
+- A file in conflict, a submodule, a rename and a repository of its own are
+  not discarded; their entries say why.
+
+Not delivered with it: selecting several files, and discarding what is only
+staged, which is unstaged first.
+
 ## Next: the local Git workflow
 
 | Order | Priority | Work |
 |---|---|---|
-| 1 | High | Discard changes of files, hunks and lines, with a way to bring a discard back. |
-| 2 | Normal | Select several files in the File status view, for staging, unstaging and discarding. |
+| 1 | Normal | Select several files in the File status view, for staging, unstaging and discarding. |
 
-Discarding is the first action that removes work from the working copy, so
-it comes with a confirmation and with a way to bring a discard back. Selecting
-several files is its own change after it: the file list has one selection,
+Selecting several files is its own change: the file list has one selection,
 which decides the diff shown, and changing that touches staging, unstaging and
 discarding alike.
 
