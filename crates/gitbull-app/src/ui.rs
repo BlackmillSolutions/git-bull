@@ -291,6 +291,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     // Before the dialogs are drawn, so that what Git said about a name shows
     // in the dialog that asked, and not in a dialog of its own for a frame.
     app.poll_create();
+    app.poll_close_wait();
     if app.close_question.is_some() {
         close_question_dialog(app, ui, &mut actions);
     } else if app.detach_pending.is_some() {
@@ -418,7 +419,7 @@ fn apply(app: &mut App, actions: Vec<Action>) {
                 }
             }
             Action::AskCloseWindow => app.close_question = Some(CloseQuestion::Window),
-            Action::KeepOpen => app.close_question = None,
+            Action::KeepOpen => app.keep_open(),
             Action::CloseAnyway => app.close_anyway(),
             Action::CloseActionDialog => app.close_action_dialog(),
             Action::ConfirmDiscard => app.confirm_discard(),
@@ -2553,6 +2554,11 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
         return;
     };
     let texts = &app.texts;
+    // An action that cannot be stopped is the one the question names.
+    let first = relevant
+        .iter()
+        .find(|action| action.action.is_discard())
+        .unwrap_or(first);
     let mut args = FluentArgs::new();
     args.set("action", action_text(app, &first.action));
     args.set("tab", first.title.clone());
@@ -2562,7 +2568,15 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     // that goes with the tab.
     let index = first.action.is_index();
     let commit = matches!(first.action, WriteAction::Commit { .. });
+    let discard = first.action.is_discard();
     let body = match (question, relevant.len()) {
+        _ if app.close_waiting => texts.text_with(Msg::CloseWaiting, Some(&args)),
+        (CloseQuestion::Tab(_), _) if discard => {
+            texts.text_with(Msg::CloseQuestionTabDiscard, Some(&args))
+        }
+        (CloseQuestion::Window, _) if discard => {
+            texts.text_with(Msg::CloseQuestionWindowDiscard, Some(&args))
+        }
         (CloseQuestion::Tab(_), _) if commit => {
             texts.text_with(Msg::CloseQuestionTabCommit, Some(&args))
         }
@@ -2584,6 +2598,7 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     };
     let keep = texts.text(Msg::CloseKeepOpen);
     let anyway = texts.text(Msg::CloseAnyway);
+    let waiting = app.close_waiting;
     let outcome = components::dialog(
         ui.ctx(),
         Id::new("close-question"),
@@ -2603,7 +2618,8 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
                 if keep.clicked() {
                     choice = Some(Action::KeepOpen);
                 }
-                if components::Button::new(&anyway).show(ui).clicked() {
+                // While it waits, Keep open is the way out.
+                if !waiting && components::Button::new(&anyway).show(ui).clicked() {
                     choice = Some(Action::CloseAnyway);
                 }
             });
@@ -2864,6 +2880,9 @@ fn status_bar(app: &App, ui: &mut Ui) {
             ui.label(commits_text(app, session));
             if let Some(action) = session.action() {
                 ui.label(action_text(app, action));
+                if session.waiting_for_other() {
+                    ui.label(app.texts.text(Msg::StatusWaitingForOther));
+                }
             }
         } else if app.home_shown() {
             let repositories = app.home.list.repositories();

@@ -224,6 +224,10 @@ pub trait Backend: Send + Sync {
     /// [`crate::discard::journal_entries`].
     fn journal_entries(&self, repo: &Path) -> Result<Vec<Listed>, JournalError>;
 
+    /// Whether another process works on the journal, so that a discard waits
+    /// for its turn. See [`crate::discard::journal_busy`].
+    fn journal_busy(&self, repo: &Path) -> bool;
+
     /// Creates a commit of the staged changes, or replaces the last one
     /// (spec `commit`). `cancel` stops it. The result says whether the
     /// commit took place, whatever its outcome. See [`crate::commit::commit`].
@@ -620,6 +624,10 @@ impl Backend for CliBackend {
 
     fn journal_entries(&self, repo: &Path) -> Result<Vec<Listed>, JournalError> {
         discard::journal_entries(&self.git, repo)
+    }
+
+    fn journal_busy(&self, repo: &Path) -> bool {
+        discard::journal_busy(&self.git, repo)
     }
 
     fn commit(&self, repo: &Path, request: &CommitRequest, cancel: &CancelToken) -> CommitEnd {

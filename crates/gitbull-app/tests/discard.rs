@@ -1004,3 +1004,182 @@ fn what_is_disabled_while_an_action_runs_is_skipped() {
     assert_eq!(first, "Recently discarded (1)");
     gate.open();
 }
+
+// ---- while a discard runs (spec `discard`, "While a discard runs")
+
+/// "Discard all" of the three files that can be discarded, held by `gate`.
+fn discard_all_held(gate: &gitbull_testkit::Gate) -> (Harness<'static, App>, Probe) {
+    let (mut harness, probe) = open_tall(
+        backend()
+            .with_status(root(), unstaged())
+            .with_checkout_gate(gate),
+    );
+    let at = buttons(&harness, "Discard all")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    let confirm = buttons(&harness, "Discard")[0];
+    click_at(&mut harness, confirm, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.discards().is_empty());
+    harness.run();
+    (harness, probe)
+}
+
+#[test]
+fn while_a_discard_runs_every_write_entry_is_unavailable_and_the_status_bar_names_it() {
+    let gate = gitbull_testkit::Gate::new();
+    let (mut harness, _) = discard_all_held(&gate);
+    assert!(text_shown(&harness, "Discarding 3 files"));
+    for name in ["Stage all", "Discard all"] {
+        assert!(!enabled(&harness, name), "{name}");
+    }
+    assert!(
+        !enabled(&harness, "Commit changes to 1 file")
+            && !labels(&harness, Role::Button)
+                .iter()
+                .any(|label| label.starts_with("Commit changes") && enabled(&harness, label))
+    );
+    // The menu of a file offers neither staging nor discarding now.
+    open_menu(&mut harness, "Untracked: new.txt");
+    assert!(!enabled(&harness, "Discard changes"));
+    harness.key_press(Key::Escape);
+    harness.run();
+    // Nothing stops it.
+    let stoppers: Vec<String> = labels(&harness, Role::Button)
+        .into_iter()
+        .filter(|label| label.contains("Stop") || label.contains("Cancel"))
+        .collect();
+    assert!(stoppers.is_empty(), "{stoppers:?}");
+
+    gate.open();
+    wait_until(&mut harness, |h| !text_shown(h, "Discarding 3 files"));
+    // Only the file in conflict is left: nothing can be staged or discarded.
+    assert!(
+        harness
+            .state()
+            .workspace()
+            .is_some_and(|workspace| workspace.running_actions().is_empty())
+    );
+}
+
+#[test]
+fn a_second_instances_wait_is_named_in_the_status_bar() {
+    let gate = gitbull_testkit::Gate::new();
+    let (mut harness, probe) = discard_all_held(&gate);
+    assert!(!text_shown(&harness, "Waiting for another git-bull"));
+    probe.set_journal_busy(true);
+    wait_until(&mut harness, |h| {
+        text_shown(h, "Waiting for another git-bull")
+    });
+    gate.open();
+    wait_until(&mut harness, |h| {
+        !text_shown(h, "Waiting for another git-bull")
+    });
+}
+
+fn tabs_open(harness: &Harness<'_, App>) -> Vec<String> {
+    support::tab_titles(harness.state())
+}
+
+#[test]
+fn closing_a_tab_while_a_discard_runs_asks_in_its_words_and_waits_for_the_end() {
+    let gate = gitbull_testkit::Gate::new();
+    let (mut harness, _) = discard_all_held(&gate);
+    assert_eq!(tabs_open(&harness), ["git-bull"]);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::W);
+    harness.run();
+    assert!(text_shown(
+        &harness,
+        "The action \"Discarding 3 files\" is still running in the tab git-bull. \
+         It cannot be stopped: closing the tab waits until it has ended."
+    ));
+    let at = buttons(&harness, "Close anyway")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    // It waits: the tab is still open, and the way out is Keep open.
+    assert!(text_shown(
+        &harness,
+        "Waiting for the action \"Discarding 3 files\" in the tab git-bull to end, and then closing."
+    ));
+    assert_eq!(tabs_open(&harness), ["git-bull"]);
+    assert!(buttons(&harness, "Close anyway").is_empty());
+    // The discard was not stopped, and the tab closes when it ended.
+    gate.open();
+    wait_until(&mut harness, |h| tabs_open(h).is_empty());
+}
+
+#[test]
+fn keep_open_gets_out_of_the_wait() {
+    let gate = gitbull_testkit::Gate::new();
+    let (mut harness, _) = discard_all_held(&gate);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::W);
+    harness.run();
+    let at = buttons(&harness, "Close anyway")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    let keep = buttons(&harness, "Keep open")[0];
+    click_at(&mut harness, keep, PointerButton::Primary);
+    gate.open();
+    wait_until(&mut harness, |h| !text_shown(h, "Discarding 3 files"));
+    harness.run();
+    assert_eq!(tabs_open(&harness), ["git-bull"]);
+    assert!(
+        harness
+            .query_by_label_contains("Waiting for the action")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_failed_discard_shows_its_message_with_a_button_to_copy_it() {
+    let backend = backend().with_status(root(), unstaged()).with_discard_end(
+        gitbull_git::discard::DiscardEnd {
+            outcome: gitbull_git::discard::DiscardOutcome::Failed {
+                message: "a.rs: Permission denied".to_owned(),
+                left_alone: Vec::new(),
+            },
+            entry: None,
+            left_out: Vec::new(),
+        },
+    );
+    let (mut harness, _) = open_tall(backend);
+    open_menu(&mut harness, "Modified: a.rs");
+    choose_discard(&mut harness);
+    let confirm = buttons(&harness, "Discard")[0];
+    click_at(&mut harness, confirm, PointerButton::Primary);
+    wait_until(&mut harness, |h| {
+        dialogs(h) == ["The changes could not be discarded"]
+    });
+    assert!(text_shown(&harness, "a.rs: Permission denied"));
+    assert_eq!(buttons(&harness, "Copy Git's message").len(), 1);
+}
+
+#[test]
+fn closing_the_window_while_a_discard_runs_waits_and_keep_open_leaves_the_wait() {
+    let gate = gitbull_testkit::Gate::new();
+    let (mut harness, _) = discard_all_held(&gate);
+    harness
+        .get_by_role_and_label(Role::Button, "Close window")
+        .click();
+    harness.run();
+    assert!(text_shown(
+        &harness,
+        "The action \"Discarding 3 files\" is still running in the tab git-bull. \
+         It cannot be stopped: closing git-bull waits until it has ended. \
+         Actions that can be stopped are stopped at once."
+    ));
+    let at = buttons(&harness, "Close anyway")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    assert!(
+        harness
+            .query_by_label_contains("Waiting for the action")
+            .is_some()
+    );
+    // Keep open gets out of the wait; the discard goes on and ends.
+    let keep = buttons(&harness, "Keep open")[0];
+    click_at(&mut harness, keep, PointerButton::Primary);
+    assert!(
+        harness
+            .query_by_label_contains("Waiting for the action")
+            .is_none()
+    );
+    gate.open();
+    wait_until(&mut harness, |h| !text_shown(h, "Discarding 3 files"));
+    assert_eq!(tabs_open(&harness), ["git-bull"]);
+}

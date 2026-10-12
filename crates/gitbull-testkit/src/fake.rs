@@ -2196,6 +2196,11 @@ impl Backend for FakeBackend {
         })
     }
 
+    fn journal_busy(&self, repo: &Path) -> bool {
+        self.probe.record("journal-busy", repo);
+        self.probe.lock().journal_busy
+    }
+
     fn journal_entries(&self, repo: &Path) -> Result<Vec<Listed>, JournalError> {
         self.probe.record("journal-entries", repo);
         Ok(self.probe.lock().journal.clone())
@@ -2859,6 +2864,8 @@ struct ProbeLog {
     journal: Vec<Listed>,
     /// How many entries discards made, for their names.
     entries_made: usize,
+    /// Another process works on the journal, which a discard waits for.
+    journal_busy: bool,
     /// What the reads of the commit form return; a test may change them
     /// while it runs.
     last_message: Option<String>,
@@ -2998,6 +3005,11 @@ impl Probe {
     /// The journal as it is now.
     pub fn journal(&self) -> Vec<Listed> {
         self.lock().journal.clone()
+    }
+
+    /// Another process works on the journal from now on, or no longer.
+    pub fn set_journal_busy(&self, busy: bool) {
+        self.lock().journal_busy = busy;
     }
 
     /// The journal is `entries` from now on.

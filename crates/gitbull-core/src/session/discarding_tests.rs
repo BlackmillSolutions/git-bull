@@ -684,3 +684,41 @@ fn clearing_empties_the_list_and_does_nothing_for_an_empty_one() {
     assert!(session.dialog().is_none());
     assert_eq!(session.clear_discards(), DiscardStart::Nothing);
 }
+
+#[test]
+fn a_discard_that_waits_for_another_instance_says_so_until_it_ends() {
+    let gate = Gate::new();
+    let backend = with_changes().with_checkout_gate(&gate);
+    let probe = backend.probe();
+    let mut session = discarding(backend);
+    assert!(!session.waiting_for_other());
+    assert_eq!(
+        session.discard(paths(&["a.rs"]), false),
+        DiscardStart::Started
+    );
+    // Another process holds the journal; the discard waits for its turn.
+    probe.set_journal_busy(true);
+    wait_until(&mut session, |s| s.waiting_for_other());
+    // Its turn came: the answer changes at the next look.
+    probe.set_journal_busy(false);
+    wait_until(&mut session, |s| !s.waiting_for_other());
+    gate.open();
+    wait_until(&mut session, idle);
+    assert!(!session.waiting_for_other());
+}
+
+#[test]
+fn only_what_can_be_stopped_is_stopped() {
+    let gate = Gate::new();
+    let mut session = discarding(with_changes().with_checkout_gate(&gate));
+    assert_eq!(
+        session.discard(paths(&["a.rs"]), false),
+        DiscardStart::Started
+    );
+    session.stop_stoppable();
+    gate.open();
+    wait_until(&mut session, idle);
+    // The discard took place although it was asked to stop.
+    assert_eq!(session.journal().entries.len(), 1);
+    assert!(session.dialog().is_none());
+}

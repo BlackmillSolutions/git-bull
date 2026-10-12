@@ -546,6 +546,15 @@ pub struct Session {
     /// The entry of the last discard this session made, which undo and redo
     /// act on.
     last_discard: Option<String>,
+    /// When the discard, restore or clear that runs began.
+    discard_started: Option<Instant>,
+    /// When another process was last asked whether it works on the journal,
+    /// and the answer on its way.
+    waiting_checked: Option<Instant>,
+    waiting_result: Option<Receiver<bool>>,
+    /// The running action waits for another git-bull to be done with the
+    /// journal.
+    waiting_for_other: bool,
 }
 
 impl fmt::Debug for Session {
@@ -637,6 +646,10 @@ impl Session {
             journal: JournalView::default(),
             journal_result: None,
             last_discard: None,
+            discard_started: None,
+            waiting_checked: None,
+            waiting_result: None,
+            waiting_for_other: false,
         }
     }
 
@@ -889,6 +902,7 @@ impl Session {
         }
         changed |= self.finish_index_action();
         changed |= self.poll_discard();
+        changed |= self.poll_waiting(now);
         if let Some(source) = &self.content {
             while let Some(answer) = source.try_next() {
                 // A commit whose content cannot be read keeps its

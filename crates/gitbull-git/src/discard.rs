@@ -840,6 +840,12 @@ pub fn restore_entry(
         .map_err(JournalError::Exchange)
 }
 
+/// Whether another process works on the journal of the worktree at `repo`:
+/// a discard here waits for it.
+pub fn journal_busy(git: &Git, repo: &Path) -> bool {
+    Journal::locate(git, repo).is_ok_and(|journal| journal.held_by_another_process())
+}
+
 /// Removes every entry of the journal ("Clear").
 pub fn clear_journal(git: &Git, repo: &Path) -> Result<crate::journal::Cleared, JournalError> {
     let journal = locate(git, repo)?;

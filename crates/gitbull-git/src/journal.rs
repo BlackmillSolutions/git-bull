@@ -644,6 +644,32 @@ impl Journal {
         }
     }
 
+    /// Whether another process than this one holds the lock, as when another
+    /// git-bull works on the journal and a discard here waits for its turn.
+    /// Takes no lock for good.
+    pub fn held_by_another_process(&self) -> bool {
+        let Ok(mut file) = File::open(self.dir.join(LOCK)) else {
+            return false;
+        };
+        match file.try_lock_shared() {
+            Ok(()) => {
+                let _ = file.unlock();
+                false
+            }
+            Err(TryLockError::WouldBlock) => {
+                let mut text = String::new();
+                let _ = file.read_to_string(&mut text);
+                let pid = text
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|pid| pid.parse::<u32>().ok());
+                // A holder that does not say who it is counts as another.
+                pid != Some(std::process::id())
+            }
+            Err(TryLockError::Error(_)) => false,
+        }
+    }
+
     /// Every entry of the journal, newest first, and what is not an entry.
     /// Creates nothing: a worktree that never discarded has no journal.
     pub fn list(&self) -> io::Result<Vec<Listed>> {

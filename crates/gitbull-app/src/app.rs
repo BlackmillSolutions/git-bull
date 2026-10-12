@@ -500,6 +500,10 @@ pub struct App {
     pub(crate) close_question: Option<CloseQuestion>,
     /// The user chose to close the window although an action runs.
     pub(crate) close_confirmed: bool,
+    /// The user chose "Close anyway" while an action runs that cannot be
+    /// stopped: what the question names closes when no write action runs
+    /// any more.
+    pub(crate) close_waiting: bool,
     /// A checkout that waits for the notice before detaching HEAD.
     pub(crate) detach_pending: Option<PendingDetach>,
     /// The dialog that creates a branch.
@@ -555,6 +559,7 @@ impl App {
             dialog: None,
             close_question: None,
             close_confirmed: false,
+            close_waiting: false,
             detach_pending: None,
             create_dialog: None,
             branch_choice: None,
@@ -1523,18 +1528,80 @@ impl App {
     }
 
     /// The user decided to close what the question names, stopping the action.
+    /// An action that cannot be stopped, a discard, is waited for instead: the
+    /// actions of a window that can be stopped are stopped at once, and the
+    /// close follows when no write action runs.
     pub(crate) fn close_anyway(&mut self) {
-        match self.close_question.take() {
-            Some(CloseQuestion::Tab(id)) => {
+        let Some(question) = self.close_question else {
+            return;
+        };
+        let running = self.running_actions();
+        let unstoppable = |action: &TabAction| action.action.is_discard();
+        let waits = match question {
+            CloseQuestion::Tab(id) => running
+                .iter()
+                .any(|action| action.id == id && unstoppable(action)),
+            CloseQuestion::Window => running.iter().any(unstoppable),
+        };
+        if waits {
+            if question == CloseQuestion::Window
+                && let Some(workspace) = self.workspace.as_mut()
+            {
+                workspace.stop_stoppable();
+            }
+            self.close_waiting = true;
+            return;
+        }
+        self.close_question = None;
+        match question {
+            CloseQuestion::Tab(id) => {
                 if let Some(workspace) = self.workspace.as_mut() {
                     workspace.close(id);
                 }
             }
-            Some(CloseQuestion::Window) => {
+            CloseQuestion::Window => {
                 self.close_confirmed = true;
                 self.send_close = true;
             }
-            None => {}
+        }
+    }
+
+    /// The user keeps the tab or the window open: also gets out of the wait.
+    pub(crate) fn keep_open(&mut self) {
+        self.close_question = None;
+        self.close_waiting = false;
+    }
+
+    /// Closes what the user chose to close once no write action runs in it any
+    /// more. Starting another action meanwhile moves the close back.
+    pub(crate) fn poll_close_wait(&mut self) {
+        if !self.close_waiting {
+            return;
+        }
+        let Some(question) = self.close_question else {
+            self.close_waiting = false;
+            return;
+        };
+        let running = self.running_actions();
+        let done = match question {
+            CloseQuestion::Tab(id) => !running.iter().any(|action| action.id == id),
+            CloseQuestion::Window => running.is_empty(),
+        };
+        if !done {
+            return;
+        }
+        self.close_waiting = false;
+        self.close_question = None;
+        match question {
+            CloseQuestion::Tab(id) => {
+                if let Some(workspace) = self.workspace.as_mut() {
+                    workspace.close(id);
+                }
+            }
+            CloseQuestion::Window => {
+                self.close_confirmed = true;
+                self.send_close = true;
+            }
         }
     }
 

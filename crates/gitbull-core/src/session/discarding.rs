@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use gitbull_git::discard::{
     DiscardEnd, DiscardFile, DiscardOutcome, DiscardRequest, JournalError, PutBackEnd, PutBackError,
@@ -26,6 +27,11 @@ use super::{Action, ActionDialog, Ended, RunningAction, Session, failure_text, t
 use crate::discard::{DiscardOffer, PartOffer, discard_offer, part_offer};
 use crate::file_status::{FileStatus, Parts, StatusState};
 use crate::workspace::{Failure, panic_message};
+
+/// How long a discard runs before it is asked whether it waits for another
+/// git-bull, and how often it is asked then.
+const WAIT_AFTER: Duration = Duration::from_millis(500);
+const WAIT_CHECK: Duration = Duration::from_millis(500);
 
 /// What asking for a discard, an undo or another action on the journal did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -475,6 +481,14 @@ impl Session {
             status_at: None,
         });
         self.discard_result = Some(receiver);
+        self.discard_started = Some(Instant::now());
+        self.waiting_checked = None;
+        // The first look at whether it waits comes when it has run a while.
+        let notify = Arc::clone(&self.notify);
+        std::thread::spawn(move || {
+            std::thread::sleep(WAIT_AFTER);
+            notify();
+        });
         DiscardStart::Started
     }
 
@@ -542,6 +556,74 @@ impl Session {
             Some(Ended::Done | Ended::Cancelled) | None => {}
         }
         true
+    }
+
+    /// Whether the discard, restore or clear that runs waits for another
+    /// git-bull to be done with the journal of the worktree.
+    pub fn waiting_for_other(&self) -> bool {
+        self.waiting_for_other
+    }
+
+    /// While a discard runs for a while, asks now and then whether another
+    /// process holds the journal, which is what it then waits for.
+    pub(super) fn poll_waiting(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        if let Some(busy) = take(&mut self.waiting_result)
+            && busy != self.waiting_for_other
+        {
+            self.waiting_for_other = busy;
+            changed = true;
+        }
+        let running = self
+            .action
+            .as_ref()
+            .is_some_and(|running| running.action.is_discard() && running.ended.is_none());
+        if !running {
+            self.waiting_result = None;
+            if std::mem::take(&mut self.waiting_for_other) {
+                changed = true;
+            }
+            return changed;
+        }
+        let long_enough = self
+            .discard_started
+            .is_some_and(|at| now.duration_since(at) >= WAIT_AFTER);
+        let due = self
+            .waiting_checked
+            .is_none_or(|at| now.duration_since(at) >= WAIT_CHECK);
+        if long_enough && due && self.waiting_result.is_none() {
+            self.waiting_checked = Some(now);
+            let (backend, root, notify) = (
+                Arc::clone(&self.backend),
+                self.opened.root.clone(),
+                Arc::clone(&self.notify),
+            );
+            let (sender, receiver) = mpsc::channel();
+            std::thread::spawn(move || {
+                let busy = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    backend.journal_busy(&root)
+                }))
+                .unwrap_or(false);
+                if sender.send(busy).is_ok() {
+                    notify();
+                }
+                // The next look is due when this wait is over.
+                std::thread::sleep(WAIT_CHECK);
+                notify();
+            });
+            self.waiting_result = Some(receiver);
+        }
+        changed
+    }
+
+    /// Stops the action that runs if it can be stopped: a checkout, a commit
+    /// or a staging. A discard, a restore and a clear cannot (ADR 0008).
+    pub fn stop_stoppable(&mut self) {
+        if let Some(running) = &self.action
+            && !running.action.is_discard()
+        {
+            running.cancel.cancel();
+        }
     }
 
     /// Takes the finished work of a discard, if there is some.
