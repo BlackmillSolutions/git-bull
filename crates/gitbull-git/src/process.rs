@@ -142,6 +142,19 @@ impl ChildLifecycle {
         Ok(status)
     }
 
+    /// Asks the group to end, as a terminal does, so that Git removes a lock
+    /// it holds before it goes. A process may ignore the request.
+    #[cfg(unix)]
+    fn ask_to_end(&mut self) {
+        if !self.active {
+            return;
+        }
+        debug_assert!(self.pgid > 0);
+        // SAFETY: as for `stop`: the group is ours and its leader is not
+        // reaped while this lock is held.
+        unsafe { libc::killpg(self.pgid, libc::SIGTERM) };
+    }
+
     fn stop(&mut self) {
         if !self.active {
             return;
@@ -369,6 +382,42 @@ impl Canceller {
     }
 }
 
+/// How long a process that was asked to end is given before it is killed.
+#[cfg(unix)]
+const GRACE: Duration = Duration::from_secs(2);
+
+impl Canceller {
+    /// Like [`Canceller::cancel`], but asks first: where the operating
+    /// system has a request to end, the group gets it and is killed only when
+    /// it has not ended after a short while. Git removes its lock on the
+    /// index when asked and cannot when killed. Elsewhere this is `cancel`.
+    pub fn cancel_gently(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        #[cfg(unix)]
+        {
+            let child = Arc::clone(&self.child);
+            std::thread::spawn(move || {
+                child.lock().unwrap_or_else(|e| e.into_inner()).ask_to_end();
+                let asked = Instant::now();
+                // The waiter reaps the process once it and all that held its
+                // pipes have ended; then nothing is left to kill.
+                while asked.elapsed() < GRACE {
+                    std::thread::sleep(Duration::from_millis(10));
+                    if !child.lock().unwrap_or_else(|e| e.into_inner()).active {
+                        return;
+                    }
+                }
+                let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
+                if child.active {
+                    child.stop();
+                }
+            });
+        }
+        #[cfg(not(unix))]
+        stop_in_background(Arc::clone(&self.child));
+    }
+}
+
 /// Stops `child` on a thread of its own, if it still runs. The caller may be
 /// the UI thread, and on Windows stopping waits for `taskkill`, which took
 /// about 230 ms.
@@ -382,7 +431,7 @@ fn stop_in_background(child: Arc<Mutex<ChildLifecycle>>) {
 }
 
 /// How much error output is kept for messages.
-const STDERR_LIMIT: usize = 64 * 1024;
+pub(crate) const STDERR_LIMIT: usize = 64 * 1024;
 
 #[cfg(windows)]
 fn stop_tree(pid: u32) {

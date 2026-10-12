@@ -13,6 +13,7 @@ use crate::blame::{self, BlameEntry, BlameStream};
 use crate::blob;
 use crate::cancel::CancelToken;
 use crate::changes::{self, FileChange, FileLines};
+use crate::commit::{self, CommitEnd, CommitRequest, CommitState};
 use crate::commit_graph::{self, GraphProgress};
 use crate::commits::{self, CommitEntry, Since};
 use crate::compare::{self, BaseComparison, CompareRequest, Setting};
@@ -183,6 +184,21 @@ pub trait Backend: Send + Sync {
         request: &PartRequest,
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure>;
+
+    /// Creates a commit of the staged changes, or replaces the last one
+    /// (spec `commit`). `cancel` stops it. The result says whether the
+    /// commit took place, whatever its outcome. See [`crate::commit::commit`].
+    fn commit(&self, repo: &Path, request: &CommitRequest, cancel: &CancelToken) -> CommitEnd;
+
+    /// The message of the last commit; `None` in a repository without one.
+    fn last_message(&self, repo: &Path) -> Result<Option<String>, Error>;
+
+    /// Which operation is in progress, and the message Git prepared for the
+    /// next commit.
+    fn commit_state(&self, repo: &Path) -> Result<CommitState, Error>;
+
+    /// Whether the last commit is part of a branch of a remote.
+    fn on_remote_branch(&self, repo: &Path) -> Result<bool, Error>;
 
     /// The structure of the history reachable from `revisions`.
     fn history(
@@ -525,6 +541,22 @@ impl Backend for CliBackend {
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure> {
         patch::stage_part(&self.git, repo, group, entry, request, cancel)
+    }
+
+    fn commit(&self, repo: &Path, request: &CommitRequest, cancel: &CancelToken) -> CommitEnd {
+        commit::commit(&self.git, repo, request, cancel)
+    }
+
+    fn last_message(&self, repo: &Path) -> Result<Option<String>, Error> {
+        commit::last_message(&self.git, repo)
+    }
+
+    fn commit_state(&self, repo: &Path) -> Result<CommitState, Error> {
+        commit::commit_state(&self.git, repo)
+    }
+
+    fn on_remote_branch(&self, repo: &Path) -> Result<bool, Error> {
+        commit::on_remote_branch(&self.git, repo)
     }
 
     fn history(

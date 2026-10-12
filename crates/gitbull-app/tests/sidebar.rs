@@ -331,7 +331,13 @@ fn choosing_file_status_shows_it_and_history_comes_back_as_it_was() {
     assert!(commit_selected(&harness, "Third"));
 
     click(&mut harness, "File status");
-    assert!(harness.query_by_label("Description").is_none());
+    // The description of the commit is gone; the field of that name belongs
+    // to the commit form of the File status view.
+    assert!(
+        harness
+            .query_all_by_label("Description")
+            .all(|node| node.accesskit_node().role() == Role::MultilineTextInput)
+    );
     // The working copy of the fake repository is clean.
     let clean = "There are no uncommitted changes.";
     for _ in 0..500 {

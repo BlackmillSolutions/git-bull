@@ -8,6 +8,7 @@ pub mod ai_context;
 pub mod badges;
 pub mod base;
 pub mod blame;
+pub mod commit_draft;
 pub mod comparison;
 pub mod content_cache;
 pub mod details;

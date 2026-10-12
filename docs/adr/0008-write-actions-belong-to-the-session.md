@@ -103,3 +103,46 @@ replaced and cannot outlive a closed tab; a queue of write actions for the whole
 application, which would make one tab wait for another's checkout although they
 write to different working trees; and an action the user can cancel, which
 trades a wait for a damaged working copy.
+
+## Amendment of 2026-10-12: committing
+
+Committing (change `commit`) is a write action of the session. It is an
+exclusive action like a checkout: it is refused while any action runs or an
+index action is kept, and nothing else starts while it runs. Four rules are
+added for it.
+
+- **A commit can be stopped by the user.** "The action has no cancel control
+  for the user" stands for every other action. A commit waits for hooks and
+  for a signing program, which can wait without end, as a program that asks
+  for a passphrase it cannot ask for. Neither reason against a stop holds for
+  it: Git makes a commit in one step at its end, so a stopped commit is made
+  or not made and the working copy is never half updated; and Git holds the
+  lock on the index only at the start of a commit, before its hooks. `Stop` in
+  the commit form cancels the token of the action through
+  `Session::stop_commit`, which does nothing for another action.
+- **The stop of a commit asks before it kills.** For the lock at the start,
+  under which clean filters can run long, the process group is sent `SIGTERM`
+  first, so that Git removes the lock, and is killed when it has not ended
+  after two seconds. Windows has no such request: the job object is terminated
+  as for every other stop, and a lock can stay when the stop comes before the
+  hooks. The staging of "Stage all changes and commit" is part of the action
+  and is not stopped at all, because staging holds the lock throughout; a
+  stop that arrives meanwhile takes effect before the commit starts.
+- **Whether a commit took place is not read from where HEAD is.** A checkout
+  knows where HEAD will be; a commit does not, and an amend can even give the
+  commit it replaced. Git's exit status decides: success means the commit was
+  made. After a failure or a stop the commit counts as made only when HEAD
+  names another commit that follows the old one as this commit would, and
+  whose message is the message sent. A commit that a hook or another program
+  made on top of the old HEAD follows it as well, so descent alone is not
+  enough. A commit of ours whose message a hook changed is then not
+  recognised, and the form keeps what the user wrote.
+- **The history is read again after a commit.** The read of HEAD and the
+  references after the action finds the branch moved, which loads the history
+  anew; the status is read as after every action.
+
+The state the commit form shows, the operation in progress and the message
+Git prepared, is read with every read of the status rather than with HEAD and
+the references: another program can begin a merge without moving either. The
+worker reads it once more right before the commit and makes none during a
+rebase or a series of patches, and no amend during any operation.

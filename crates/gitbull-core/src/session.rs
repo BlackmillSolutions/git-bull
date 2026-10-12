@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 use gitbull_git::backend::ContentSource;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::ChangeKind;
+use gitbull_git::commit::{
+    CommitEnd, CommitOutcome, CommitRefusal, CommitRequest, CommitState, Operation,
+};
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::content::CommitContent;
 use gitbull_git::head::Head;
@@ -31,10 +34,11 @@ use gitbull_git::stashes::{Stash, Submodule};
 use gitbull_git::status::{Group, StatusEntry, StatusKind};
 use gitbull_git::switch::{CheckoutTarget, local_name_of};
 use gitbull_git::worktrees::Worktree;
-use gitbull_git::{Backend, Error};
+use gitbull_git::{Backend, Error, WriteHooks};
 
 use crate::badges::{self, Badge};
 use crate::blame::Blame;
+use crate::commit_draft::{self, AmendUnavailable, CommitDraft, CommitOffer, CommitUnavailable};
 use crate::content_cache::ContentCache;
 use crate::details::Details;
 use crate::diff_document::Part;
@@ -109,6 +113,8 @@ pub enum Action {
     StagePart { path: String },
     /// Unstaging a hunk or lines of the file at this path.
     UnstagePart { path: String },
+    /// Committing, or replacing the last commit.
+    Commit { amend: bool },
 }
 
 impl Action {
@@ -325,6 +331,9 @@ pub enum ActionDialog {
     /// two lines at its end, which changes its last line break: nothing was
     /// applied, and the last lines are staged together.
     EndOfFileSplit { path: String },
+    /// git-bull made no commit, because of the state the repository is in;
+    /// Git was not asked.
+    CommitRefused { why: CommitRefusal },
     /// Git failed, with its message in full.
     Failed { action: Action, message: String },
     /// Git reported a failure after it had done the action, as a failing
@@ -464,6 +473,21 @@ pub struct Session {
     /// Where HEAD ended after an action that moved it; taken by the interface,
     /// which shows the new state.
     checked_out: Option<Head>,
+    /// What is written in the commit form (spec `commit`).
+    draft: CommitDraft,
+    /// How the commit that runs ended; it has a result of its own, because
+    /// it tells more than done or failed.
+    commit_result: Option<Receiver<CommitEnd>>,
+    /// The operation in progress and the message Git prepared, as last read
+    /// with the status.
+    commit_state: CommitState,
+    commit_state_result: Option<Receiver<Result<CommitState, Failure>>>,
+    /// The message of the last commit, asked for "Amend last commit".
+    last_message_result: Option<Receiver<Result<Option<String>, Failure>>>,
+    /// Whether the last commit is part of a remote branch; asked while
+    /// "Amend last commit" is checked.
+    on_remote_branch: bool,
+    on_remote_result: Option<Receiver<Result<bool, Failure>>>,
 }
 
 impl fmt::Debug for Session {
@@ -544,6 +568,13 @@ impl Session {
             index_queue: VecDeque::new(),
             dialog: None,
             checked_out: None,
+            draft: CommitDraft::default(),
+            commit_result: None,
+            commit_state: CommitState::default(),
+            commit_state_result: None,
+            last_message_result: None,
+            on_remote_branch: false,
+            on_remote_result: None,
         }
     }
 
@@ -582,6 +613,7 @@ impl Session {
         if let Some(status) = &mut self.file_status {
             status.refresh();
         }
+        self.read_commit_state();
         self.start_history();
     }
 
@@ -688,6 +720,27 @@ impl Session {
         }
         if let Some(done) = take(&mut self.action_result) {
             self.action_ended(done);
+            changed = true;
+        }
+        if let Some(end) = take(&mut self.commit_result) {
+            self.commit_ended(end);
+            changed = true;
+        }
+        if let Some(state) = take(&mut self.commit_state_result) {
+            // A read that failed changes nothing in the form.
+            if let Ok(state) = state {
+                self.apply_commit_state(state);
+            }
+            changed = true;
+        }
+        if let Some(message) = take(&mut self.last_message_result) {
+            if let Ok(message) = message {
+                self.draft.last_message_read(message.as_deref());
+            }
+            changed = true;
+        }
+        if let Some(on_remote) = take(&mut self.on_remote_result) {
+            self.on_remote_branch = self.draft.amend() && on_remote.unwrap_or(false);
             changed = true;
         }
         if let Some(refreshed) = take(&mut self.refresh_result) {
@@ -931,6 +984,7 @@ impl Session {
         if let Some(status) = &mut self.file_status {
             status.refresh();
         }
+        self.read_commit_state();
         if self.refresh_result.is_some() {
             return;
         }
@@ -959,6 +1013,7 @@ impl Session {
         if let Some(status) = &mut self.file_status {
             status.refresh();
         }
+        self.read_commit_state();
         self.refresh_result = None;
         self.read_state();
     }
@@ -977,7 +1032,15 @@ impl Session {
         }
         self.opened.head = head;
         self.badges = badges::badges(&sidebar.references, &self.opened.head);
+        let last_commit = self.head_commit;
         self.head_commit = badges::head_commit(&sidebar.references, &self.opened.head);
+        if self.draft.amend() && history_changed {
+            // A push from elsewhere moves a remote branch and not HEAD.
+            self.read_on_remote_branch();
+            if self.head_commit != last_commit {
+                self.read_last_message();
+            }
+        }
         self.sidebar = Some(Ok(sidebar));
         self.sidebar_version += 1;
         if history_changed {
@@ -1071,6 +1134,216 @@ impl Session {
 
     /// The write action of the tab, from its start until the state was read
     /// again after it. Every entry that starts one is unavailable meanwhile.
+    /// What is written in the commit form.
+    pub fn draft(&self) -> &CommitDraft {
+        &self.draft
+    }
+
+    pub fn set_summary(&mut self, summary: String) {
+        self.draft.set_summary(summary);
+    }
+
+    pub fn set_description(&mut self, description: String) {
+        self.draft.set_description(description);
+    }
+
+    pub fn set_without_hooks(&mut self, without: bool) {
+        self.draft.set_without_hooks(without);
+    }
+
+    /// Checks or unchecks "Amend last commit". Checking does nothing where
+    /// [`Session::amend_unavailable`] gives a reason; it reads the message of
+    /// the last commit, which fills the form when it is empty then.
+    pub fn set_amend(&mut self, amend: bool) {
+        if amend == self.draft.amend() {
+            return;
+        }
+        if !amend {
+            self.draft.uncheck_amend();
+            self.on_remote_branch = false;
+            self.last_message_result = None;
+            self.on_remote_result = None;
+        } else if self.amend_unavailable().is_none() {
+            self.draft.check_amend();
+            self.read_last_message();
+            self.read_on_remote_branch();
+        }
+    }
+
+    /// Why "Amend last commit" cannot be checked, if it cannot: an amend
+    /// during an operation would replace a commit the operation needs, or
+    /// one that is not the user's.
+    pub fn amend_unavailable(&self) -> Option<AmendUnavailable> {
+        if let Some(operation) = self.commit_state.operation {
+            return Some(AmendUnavailable::InProgress(operation));
+        }
+        let references_known = matches!(self.sidebar, Some(Ok(_)));
+        (references_known && self.head_commit.is_none()).then_some(AmendUnavailable::NoCommit)
+    }
+
+    /// The operation of Git that is in progress, as last read.
+    pub fn operation(&self) -> Option<Operation> {
+        self.commit_state.operation
+    }
+
+    /// Whether the last commit is part of a remote branch, while "Amend last
+    /// commit" is checked: amending replaces a commit others may have.
+    pub fn amends_a_pushed_commit(&self) -> bool {
+        self.draft.amend() && self.on_remote_branch
+    }
+
+    /// What the button of the commit form does now.
+    pub fn commit_offer(&self) -> CommitOffer {
+        let status = self
+            .file_status
+            .as_ref()
+            .and_then(|status| match status.state() {
+                StatusState::Loaded(status) => Some(status),
+                _ => None,
+            });
+        let busy = self.action.is_some() || !self.index_queue.is_empty();
+        commit_draft::offer(&self.draft, status, self.commit_state.operation, busy)
+    }
+
+    /// Does what the commit form offers, in the background. `Err` says why
+    /// nothing was started.
+    pub fn commit(&mut self) -> Result<(), CommitUnavailable> {
+        let (amend, stage_all) = match self.commit_offer() {
+            CommitOffer::Unavailable(why) => return Err(why),
+            CommitOffer::Commit { .. } | CommitOffer::ConcludeMerge { .. } => (false, false),
+            CommitOffer::StageAllAndCommit => (false, true),
+            CommitOffer::Amend => (true, false),
+        };
+        let request = CommitRequest {
+            message: self.draft.message(),
+            amend,
+            hooks: match self.draft.without_hooks() {
+                true => WriteHooks::SkipCommitHooks,
+                false => WriteHooks::Run,
+            },
+            stage_all,
+        };
+        self.dialog = None;
+        let cancel = CancelToken::new();
+        let (backend, root, notify) = (
+            Arc::clone(&self.backend),
+            self.opened.root.clone(),
+            Arc::clone(&self.notify),
+        );
+        let token = cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let work = std::panic::AssertUnwindSafe(|| backend.commit(&root, &request, &token));
+            let end = std::panic::catch_unwind(work).unwrap_or_else(|payload| CommitEnd {
+                committed: false,
+                outcome: CommitOutcome::Failed(panic_message(payload.as_ref())),
+            });
+            if sender.send(end).is_ok() {
+                notify();
+            }
+        });
+        self.action = Some(RunningAction {
+            action: Action::Commit { amend },
+            expected: None,
+            cancel,
+            ended: None,
+            status_at: None,
+        });
+        self.commit_result = Some(receiver);
+        Ok(())
+    }
+
+    /// Stops the commit that runs: Git and the hooks and programs it started
+    /// are asked to end. Does nothing for another action, which cannot be
+    /// stopped (ADR 0008).
+    pub fn stop_commit(&mut self) {
+        if let Some(running) = &self.action
+            && matches!(running.action, Action::Commit { .. })
+        {
+            running.cancel.cancel();
+        }
+    }
+
+    /// The commit ended: the form is emptied when it took place, and the
+    /// state is read again whatever happened.
+    fn commit_ended(&mut self, end: CommitEnd) {
+        let Some(running) = &mut self.action else {
+            return;
+        };
+        let action = running.action.clone();
+        running.ended = Some(match end.outcome {
+            CommitOutcome::Done => Ended::Done,
+            CommitOutcome::Stopped => Ended::Cancelled,
+            CommitOutcome::Refused(why) => Ended::Dialog(ActionDialog::CommitRefused { why }),
+            // Git reported a failure and made the commit nevertheless.
+            CommitOutcome::Failed(output) if end.committed => {
+                Ended::Dialog(ActionDialog::HookFailed { action, output })
+            }
+            CommitOutcome::Failed(message) => Ended::Failed(message),
+        });
+        if end.committed {
+            self.draft.committed();
+            self.on_remote_branch = false;
+            self.last_message_result = None;
+            self.on_remote_result = None;
+        }
+        self.read_state_after_action();
+    }
+
+    /// Reads which operation is in progress and the message Git prepared;
+    /// with every read of the status, because another program can begin a
+    /// merge without moving HEAD or a reference.
+    fn read_commit_state(&mut self) {
+        if self.file_status.is_none() {
+            return;
+        }
+        let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
+        self.commit_state_result = Some(self.in_background(move || backend.commit_state(&root)));
+    }
+
+    fn read_last_message(&mut self) {
+        let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
+        self.last_message_result = Some(self.in_background(move || backend.last_message(&root)));
+    }
+
+    fn read_on_remote_branch(&mut self) {
+        let (backend, root) = (Arc::clone(&self.backend), self.opened.root.clone());
+        self.on_remote_result = Some(self.in_background(move || backend.on_remote_branch(&root)));
+    }
+
+    /// Takes over the state read: an operation closes the amend first, and
+    /// then the prepared message fills a form that is empty, so that fields
+    /// which held the last message unchanged end up with the one of a merge.
+    fn apply_commit_state(&mut self, state: CommitState) {
+        self.commit_state = state;
+        self.close_amend_where_it_is_unavailable();
+        let prepared = self.commit_state.prepared.clone();
+        self.draft.prepared_read(prepared.as_deref());
+    }
+
+    fn close_amend_where_it_is_unavailable(&mut self) {
+        if self.draft.amend() && self.amend_unavailable().is_some() {
+            self.set_amend(false);
+        }
+    }
+
+    /// The draft of this session, taken out of it, as when its workspace is
+    /// built anew for another Git executable.
+    pub fn take_draft(&mut self) -> CommitDraft {
+        std::mem::take(&mut self.draft)
+    }
+
+    /// Puts a draft of an earlier session of this repository into this one.
+    /// With "Amend last commit" checked, what the form shows of the last
+    /// commit is read as if the box had just been checked.
+    pub fn set_draft(&mut self, draft: CommitDraft) {
+        self.draft = draft;
+        if self.draft.amend() {
+            self.read_last_message();
+            self.read_on_remote_branch();
+        }
+    }
+
     pub fn action(&self) -> Option<&Action> {
         self.action.as_ref().map(|running| &running.action)
     }
@@ -1397,6 +1670,8 @@ impl Session {
             Action::CreateBranch { name } | Action::CreateTag { name } => name.clone(),
             Action::Stage { .. } | Action::Unstage { .. } => String::new(),
             Action::StagePart { path } | Action::UnstagePart { path } => path.clone(),
+            // A commit ends in `commit_ended`.
+            Action::Commit { .. } => String::new(),
         };
         running.ended = Some(match result {
             Ok(()) => Ended::Done,
@@ -1708,6 +1983,7 @@ impl Session {
             // Without a working copy nothing was staged; do not wait.
             None => running.status_at = None,
         }
+        self.read_commit_state();
     }
 
     /// Ends a staging or an unstaging whose status arrived, and starts the
@@ -2383,7 +2659,11 @@ mod tests {
         let mut session = session(backend);
         session.show();
         wait_until(&mut session, |s| {
-            loaded(s) && s.count().is_some() && s.sidebar().is_some() && status_read(s)
+            loaded(s)
+                && s.count().is_some()
+                && s.sidebar().is_some()
+                && status_read(s)
+                && s.commit_state_result.is_none()
         });
         assert_eq!(rows(&session), 5);
         assert_eq!(session.history().graph.len(), 5);
@@ -2393,6 +2673,7 @@ mod tests {
         assert_eq!(
             calls,
             [
+                "commit-state",
                 "count",
                 "history",
                 "references",
@@ -5393,5 +5674,395 @@ mod tests {
             assert!(Instant::now() < deadline, "the action was not stopped");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    // ---- committing (spec `commit`)
+
+    /// A session whose status and commit state are read, with a summary.
+    fn committing(backend: FakeBackend) -> (Session, gitbull_testkit::Probe) {
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        wait_until(&mut session, |s| s.commit_state_result.is_none());
+        session.set_summary("Summary".to_owned());
+        (session, probe)
+    }
+
+    fn only_staged() -> WorkingStatus {
+        WorkingStatus {
+            staged: vec![change(ChangeKind::Modified, "staged.rs")],
+            unstaged: vec![change(ChangeKind::Modified, "a.rs")],
+            ..WorkingStatus::default()
+        }
+    }
+
+    fn only_unstaged() -> WorkingStatus {
+        WorkingStatus {
+            unstaged: vec![change(ChangeKind::Modified, "a.rs")],
+            untracked: vec![file(StatusKind::Untracked, "new.txt")],
+            ..WorkingStatus::default()
+        }
+    }
+
+    fn with_staged() -> FakeBackend {
+        on_main().with_status(root(), only_staged())
+    }
+
+    fn ended(committed: bool, outcome: CommitOutcome) -> CommitEnd {
+        CommitEnd { committed, outcome }
+    }
+
+    #[test]
+    fn a_commit_sends_the_message_and_empties_the_form() {
+        let gate = Gate::new();
+        let (mut session, probe) = committing(with_staged().with_checkout_gate(&gate));
+        session.set_description("Body".to_owned());
+        assert_eq!(session.commit_offer(), CommitOffer::Commit { files: 1 });
+        let statuses = count(&probe, "status");
+        assert_eq!(session.commit(), Ok(()));
+        assert_eq!(session.action(), Some(&Action::Commit { amend: false }));
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(
+            probe.commits(),
+            [CommitRequest {
+                message: "Summary\n\nBody".to_owned(),
+                amend: false,
+                hooks: WriteHooks::Run,
+                stage_all: false,
+            }]
+        );
+        assert_eq!(session.draft(), &CommitDraft::default());
+        assert!(session.dialog().is_none());
+        // The state was read again, and the staged file is gone.
+        assert!(count(&probe, "status") > statuses);
+        wait_until(&mut session, |s| staged_names(s).is_empty());
+    }
+
+    #[test]
+    fn staging_everything_is_asked_of_the_commit_itself() {
+        let (mut session, probe) = committing(on_main().with_status(root(), only_unstaged()));
+        assert_eq!(session.commit_offer(), CommitOffer::StageAllAndCommit);
+        assert_eq!(session.commit(), Ok(()));
+        wait_until(&mut session, idle);
+        assert!(probe.commits()[0].stage_all);
+        // No staging of the session's own ran.
+        assert!(calls(&probe).is_empty());
+    }
+
+    #[test]
+    fn a_commit_without_hooks_is_one_commit() {
+        let failing = ended(false, CommitOutcome::Failed("refused".to_owned()));
+        let (mut session, probe) = committing(with_staged().with_commit_end(failing));
+        session.set_without_hooks(true);
+        assert_eq!(session.commit(), Ok(()));
+        wait_until(&mut session, idle);
+        assert_eq!(probe.commits()[0].hooks, WriteHooks::SkipCommitHooks);
+        // It did not take place: the box stays.
+        assert!(session.draft().without_hooks());
+
+        let (mut session, _) = committing(with_staged());
+        session.set_without_hooks(true);
+        assert_eq!(session.commit(), Ok(()));
+        wait_until(&mut session, idle);
+        assert!(!session.draft().without_hooks());
+    }
+
+    #[test]
+    fn each_end_of_a_commit_keeps_or_empties_the_form_and_shows_its_dialog() {
+        let commit = Action::Commit { amend: false };
+        let failed = |text: &str| CommitOutcome::Failed(text.to_owned());
+        let rebase = CommitRefusal::InProgress(Operation::Rebase);
+        let cases = [
+            (ended(true, CommitOutcome::Done), true, None),
+            (ended(false, CommitOutcome::Stopped), false, None),
+            (ended(true, CommitOutcome::Stopped), true, None),
+            (
+                ended(false, CommitOutcome::Refused(rebase)),
+                false,
+                Some(ActionDialog::CommitRefused { why: rebase }),
+            ),
+            (
+                ended(false, failed("refused by the hook")),
+                false,
+                Some(ActionDialog::Failed {
+                    action: commit.clone(),
+                    message: "refused by the hook".to_owned(),
+                }),
+            ),
+            (
+                ended(true, failed("failed afterwards")),
+                true,
+                Some(ActionDialog::HookFailed {
+                    action: commit.clone(),
+                    output: "failed afterwards".to_owned(),
+                }),
+            ),
+        ];
+        for (end, emptied, dialog) in cases {
+            let (mut session, _) = committing(with_staged().with_commit_end(end.clone()));
+            assert_eq!(session.commit(), Ok(()));
+            wait_until(&mut session, idle);
+            assert_eq!(session.draft().summary().is_empty(), emptied, "{end:?}");
+            assert_eq!(session.dialog(), dialog.as_ref(), "{end:?}");
+        }
+    }
+
+    #[test]
+    fn a_commit_excludes_the_other_actions_and_they_exclude_it() {
+        let gate = Gate::new();
+        let (mut session, probe) = committing(with_staged().with_checkout_gate(&gate));
+        assert_eq!(session.commit(), Ok(()));
+        // While it runs nothing else starts, and no second commit.
+        assert_eq!(session.commit(), Err(CommitUnavailable::Busy));
+        assert_eq!(
+            session.start_checkout(named("feature")),
+            CheckoutStart::Busy
+        );
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Busy);
+        gate.open();
+        wait_until(&mut session, idle);
+        assert_eq!(probe.commits().len(), 1);
+        assert!(calls(&probe).is_empty());
+
+        // A staging that runs, or is kept, closes the commit.
+        let gate = Gate::new();
+        let (mut session, probe) = committing(with_staged().with_checkout_gate(&gate));
+        assert_eq!(session.stage(repo_paths(&["a.rs"])), IndexStart::Started);
+        assert_eq!(session.commit(), Err(CommitUnavailable::Busy));
+        gate.open();
+        wait_until(&mut session, idle);
+        assert!(probe.commits().is_empty());
+
+        let gate = Gate::new();
+        let (mut session, probe) = committing(with_staged().with_checkout_gate(&gate));
+        assert_eq!(
+            session.start_checkout(named("feature")),
+            CheckoutStart::Started
+        );
+        assert_eq!(session.commit(), Err(CommitUnavailable::Busy));
+        gate.open();
+        wait_until(&mut session, idle);
+        assert!(probe.commits().is_empty());
+    }
+
+    #[test]
+    fn a_commit_is_stopped_and_no_other_action_is() {
+        let gate = Gate::new();
+        let (mut session, _) = committing(with_staged().with_checkout_gate(&gate));
+        assert_eq!(session.commit(), Ok(()));
+        session.stop_commit();
+        wait_until(&mut session, idle);
+        assert!(gate.was_cancelled());
+        assert_eq!(session.draft().summary(), "Summary");
+        assert!(session.dialog().is_none());
+
+        let gate = Gate::new();
+        let (mut session, _) = committing(with_staged().with_checkout_gate(&gate));
+        assert_eq!(
+            session.start_checkout(named("feature")),
+            CheckoutStart::Started
+        );
+        session.stop_commit();
+        session.poll();
+        assert!(!gate.was_cancelled());
+        gate.open();
+        wait_until(&mut session, idle);
+    }
+
+    #[test]
+    fn the_history_is_read_again_after_a_commit() {
+        let (mut session, live, probe) = live();
+        wait_until(&mut session, status_read);
+        live.set_status(only_staged());
+        session.refresh();
+        wait_until(&mut session, |s| !staged_names(s).is_empty());
+        session.set_summary("Summary".to_owned());
+        let (references, generation) = (count(&probe, "references"), session.history_generation());
+        assert_eq!(session.commit(), Ok(()));
+        // The commit moved the branch.
+        live.set_references(vec![branch("main", "d")]);
+        wait_until(&mut session, idle);
+        assert!(count(&probe, "references") > references);
+        wait_until(&mut session, |s| s.history_generation() > generation);
+    }
+
+    fn merge_state() -> CommitState {
+        CommitState {
+            operation: Some(Operation::Merge),
+            prepared: Some("Merge branch 'topic'".to_owned()),
+        }
+    }
+
+    #[test]
+    fn the_operation_is_read_with_the_status_and_its_message_fills_the_form() {
+        let backend = with_staged();
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        wait_until(&mut session, |s| s.commit_state_result.is_none());
+        assert_eq!(session.operation(), None);
+        // Another program begins a merge: neither HEAD nor a reference moves.
+        probe.set_commit_state(merge_state());
+        session.refresh();
+        wait_until(&mut session, |s| s.operation() == Some(Operation::Merge));
+        assert_eq!(session.draft().summary(), "Merge branch 'topic'");
+        assert_eq!(
+            session.commit_offer(),
+            CommitOffer::ConcludeMerge { files: 1 }
+        );
+        // Emptied by the user, it does not come back.
+        session.set_summary(String::new());
+        session.refresh();
+        wait_until(&mut session, |s| s.commit_state_result.is_none());
+        assert_eq!(session.draft().summary(), "");
+    }
+
+    #[test]
+    fn a_read_that_fails_changes_nothing_in_the_form() {
+        let backend = with_staged().with_commit_state(merge_state());
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        wait_until(&mut session, |s| s.operation() == Some(Operation::Merge));
+        probe.set_commit_read_failure(Some("fatal: not a repository"));
+        session.refresh();
+        wait_until(&mut session, |s| s.commit_state_result.is_none());
+        assert_eq!(session.operation(), Some(Operation::Merge));
+        assert_eq!(session.draft().summary(), "Merge branch 'topic'");
+    }
+
+    #[test]
+    fn checking_amend_reads_the_last_commit() {
+        let backend = with_staged()
+            .with_last_message("Last\n\nIts body.")
+            .with_on_remote_branch();
+        let mut session = staging(backend);
+        wait_until(&mut session, |s| s.commit_state_result.is_none());
+        assert_eq!(session.amend_unavailable(), None);
+        assert!(!session.amends_a_pushed_commit());
+        session.set_amend(true);
+        wait_until(&mut session, |s| {
+            s.last_message_result.is_none() && s.on_remote_result.is_none()
+        });
+        assert_eq!(session.draft().summary(), "Last");
+        assert_eq!(session.draft().description(), "Its body.");
+        assert!(session.amends_a_pushed_commit());
+        assert_eq!(session.commit_offer(), CommitOffer::Amend);
+        assert_eq!(session.commit(), Ok(()));
+        assert_eq!(session.action(), Some(&Action::Commit { amend: true }));
+        wait_until(&mut session, idle);
+
+        session.set_amend(true);
+        session.set_amend(false);
+        assert!(!session.amends_a_pushed_commit());
+    }
+
+    #[test]
+    fn text_typed_before_the_last_message_arrived_is_kept() {
+        let gate = Gate::new();
+        let backend = with_staged()
+            .with_last_message("Last")
+            .with_last_message_gate(&gate);
+        let mut session = staging(backend);
+        session.set_amend(true);
+        session.set_summary("Typed".to_owned());
+        gate.open();
+        wait_until(&mut session, |s| s.last_message_result.is_none());
+        assert_eq!(session.draft().summary(), "Typed");
+    }
+
+    #[test]
+    fn amend_is_closed_without_a_commit_and_during_an_operation() {
+        // No reference: the repository has no commit.
+        let unborn = backend()
+            .with_history(root(), Vec::new())
+            .with_status(root(), only_staged());
+        let mut session = staging(unborn);
+        assert_eq!(
+            session.amend_unavailable(),
+            Some(AmendUnavailable::NoCommit)
+        );
+        session.set_amend(true);
+        assert!(!session.draft().amend());
+
+        for operation in [
+            Operation::Merge,
+            Operation::CherryPick,
+            Operation::Revert,
+            Operation::Rebase,
+            Operation::ApplyingPatches,
+        ] {
+            let state = CommitState {
+                operation: Some(operation),
+                prepared: None,
+            };
+            let mut session = staging(with_staged().with_commit_state(state));
+            wait_until(&mut session, |s| s.operation().is_some());
+            assert_eq!(
+                session.amend_unavailable(),
+                Some(AmendUnavailable::InProgress(operation))
+            );
+            session.set_amend(true);
+            assert!(!session.draft().amend(), "{operation:?}");
+        }
+    }
+
+    #[test]
+    fn a_merge_that_begins_unchecks_amend_and_leaves_its_message() {
+        let backend = with_staged().with_last_message("Last");
+        let probe = backend.probe();
+        let mut session = staging(backend);
+        wait_until(&mut session, |s| s.commit_state_result.is_none());
+        session.set_amend(true);
+        wait_until(&mut session, |s| s.draft().summary() == "Last");
+        probe.set_commit_state(merge_state());
+        session.refresh();
+        wait_until(&mut session, |s| s.operation() == Some(Operation::Merge));
+        assert!(!session.draft().amend());
+        assert_eq!(session.draft().summary(), "Merge branch 'topic'");
+    }
+
+    #[test]
+    fn the_last_commit_is_asked_again_when_head_or_a_reference_moved() {
+        let (mut session, live, probe) = live();
+        wait_until(&mut session, status_read);
+        wait_until(&mut session, |s| s.commit_state_result.is_none());
+        probe.set_last_message(Some("First"));
+        session.set_amend(true);
+        wait_until(&mut session, |s| s.draft().summary() == "First");
+        let asked = count(&probe, "on-remote-branch");
+        // Another program commits: the unchanged message follows.
+        probe.set_last_message(Some("Second"));
+        probe.set_on_remote_branch(true);
+        live.set_references(vec![branch("main", "d")]);
+        session.refresh();
+        wait_until(&mut session, |s| s.draft().summary() == "Second");
+        wait_until(&mut session, |s| s.amends_a_pushed_commit());
+        assert!(count(&probe, "on-remote-branch") > asked);
+    }
+
+    #[test]
+    fn a_draft_moves_to_another_session_of_its_repository() {
+        let (mut session, _) = committing(with_staged());
+        session.set_description("Body".to_owned());
+        let draft = session.take_draft();
+        assert_eq!(session.draft(), &CommitDraft::default());
+
+        let backend = with_staged().with_last_message("Last");
+        let probe = backend.probe();
+        let mut next = staging(backend);
+        next.set_draft(draft);
+        assert_eq!(next.draft().summary(), "Summary");
+        assert_eq!(next.draft().description(), "Body");
+        assert_eq!(count(&probe, "last-message"), 0);
+
+        // With amend checked, what the form shows of the last commit is read.
+        let mut amending = CommitDraft::default();
+        amending.check_amend();
+        let backend = with_staged()
+            .with_last_message("Last")
+            .with_on_remote_branch();
+        let mut next = staging(backend);
+        next.set_draft(amending);
+        wait_until(&mut next, |s| s.amends_a_pushed_commit());
+        assert_eq!(next.draft().summary(), "Last");
     }
 }

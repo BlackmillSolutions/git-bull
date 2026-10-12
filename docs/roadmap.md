@@ -11,9 +11,9 @@ The read-only viewer, the interface improvements delivered so far, the
 worktree cockpit and the trust model for write operations provide the
 starting point, and checkout and the creation of branches and tags are
 delivered. All of it is released as 0.2.0. Since then whole files, hunks
-and selected lines can be staged and unstaged. This roadmap schedules new
-work; the current application still does not create commits and does not
-discard changes.
+and selected lines can be staged and unstaged, and the staged changes can be
+committed. This roadmap schedules new work; the current application still
+does not discard changes.
 
 ## Released: 0.2.0
 
@@ -149,17 +149,41 @@ status view, modelled on GitKraken. It was planned as the OpenSpec change
 
 Not delivered with it: discarding changes and resolving conflicts.
 
+## Delivered: committing
+
+The OpenSpec change `commit` delivered committing from the File status view,
+modelled on GitKraken. That a commit can be stopped is recorded in the
+amendment of [ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and
+the behaviour is specified in the
+[commit spec](../openspec/specs/commit/spec.md).
+
+- A commit form below the file list holds the summary, with the count of its
+  characters, and the description. Its button commits the staged changes, and
+  with nothing staged it is "Stage all changes and commit". Ctrl+Enter does
+  what the button does.
+- "Amend last commit" replaces the last commit and fills in its message; a
+  notice says when that commit is already on a remote branch. "Commit without
+  hooks" skips every hook for one commit.
+- A commit runs the hooks and the signing that are configured. While it runs
+  the form offers Stop, which asks Git to end before it ends it.
+- During a rebase or a series of patches nothing is committed, because a
+  commit there loses the author of the commit being replayed. A merge is
+  concluded with "Commit merge", and the message that was prepared for a
+  merge, a cherry-pick or a revert is offered.
+- What is written in the form belongs to its tab and stays while other views
+  and tabs are shown.
+
+Not delivered with it: signing off, commit templates, co-authors, changing
+the author, pushing after the commit, and the output of a hook while it runs.
+
 ## Next: the local Git workflow
 
 | Order | Priority | Work |
 |---|---|---|
-| 1 | High | Write a commit message, commit the staged changes and amend the last commit. |
-| 2 | High | Discard changes of files, hunks and lines, with a way to bring a discard back. |
+| 1 | High | Discard changes of files, hunks and lines, with a way to bring a discard back. |
 
-The next delivery should make the commit workflow usable. Discarding is its
-own change after it: it is the first action that removes work from the
-working copy, so it comes with a confirmation and with a way to bring a
-discard back.
+Discarding is the first action that removes work from the working copy, so
+it comes with a confirmation and with a way to bring a discard back.
 
 Each item starts with its own Explore and Propose and builds on the write
 invocation and on the write actions of the session.

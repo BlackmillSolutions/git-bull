@@ -12,6 +12,7 @@ use gitbull_git::backend::{
 use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
 use gitbull_git::changes::{ChangeKind, FileChange, FileLines};
+use gitbull_git::commit::{CommitEnd, CommitOutcome, CommitRequest, CommitState};
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::commits::{CommitEntry, Since};
 use gitbull_git::compare::{BaseComparison, CompareRequest, Counts};
@@ -107,6 +108,10 @@ pub struct FakeBackend {
     /// The status of a repository once a part of a file was staged or
     /// unstaged in it.
     status_after_part: Vec<(PathBuf, WorkingStatus)>,
+    /// How every commit ends; without, it is made.
+    commit_end: Option<CommitEnd>,
+    /// Holds every reading of the last message until it opens.
+    last_message_gate: Option<Gate>,
     /// Holds one reading of a working diff, by its number, the first being 1,
     /// until it opens or is cancelled.
     working_diff_gate: Option<(usize, Gate)>,
@@ -798,6 +803,38 @@ impl FakeBackend {
         status: WorkingStatus,
     ) -> FakeBackend {
         self.status_after_part.push((root.into(), status));
+        self
+    }
+
+    /// How every commit ends; without, it is made. A commit that is held by
+    /// the gate of the write actions and then stopped ends as stopped,
+    /// whatever is set here.
+    pub fn with_commit_end(mut self, end: CommitEnd) -> FakeBackend {
+        self.commit_end = Some(end);
+        self
+    }
+
+    /// The message of the last commit.
+    pub fn with_last_message(self, message: &str) -> FakeBackend {
+        self.probe.set_last_message(Some(message));
+        self
+    }
+
+    /// The operation in progress and the message Git prepared.
+    pub fn with_commit_state(self, state: CommitState) -> FakeBackend {
+        self.probe.set_commit_state(state);
+        self
+    }
+
+    /// The last commit is part of a remote branch.
+    pub fn with_on_remote_branch(self) -> FakeBackend {
+        self.probe.set_on_remote_branch(true);
+        self
+    }
+
+    /// Reading the last message takes until the test opens `gate`.
+    pub fn with_last_message_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.last_message_gate = Some(gate.clone());
         self
     }
 
@@ -1928,6 +1965,74 @@ impl Backend for FakeBackend {
         })
     }
 
+    fn commit(&self, repo: &Path, request: &CommitRequest, cancel: &CancelToken) -> CommitEnd {
+        self.probe.record("commit", repo);
+        self.probe.lock().commits.push(request.clone());
+        let root = self.root_of(repo);
+        if self.hold_write(cancel).is_err() {
+            return CommitEnd {
+                committed: false,
+                outcome: CommitOutcome::Stopped,
+            };
+        }
+        let end = self.commit_end.clone().unwrap_or(CommitEnd {
+            committed: true,
+            outcome: CommitOutcome::Done,
+        });
+        // Staging everything happens before the commit is tried; a refusal
+        // of git-bull's own comes before both.
+        let refused = matches!(end.outcome, CommitOutcome::Refused(_));
+        if (request.stage_all && !refused) || end.committed {
+            let mut status = self.status_now(repo, &root);
+            if request.stage_all {
+                let all = status.unstaged.drain(..).chain(status.untracked.drain(..));
+                status.staged.extend(all);
+            }
+            if end.committed {
+                status.staged.clear();
+            }
+            self.move_status(repo, root, status);
+        }
+        if end.committed {
+            self.probe.lock().last_message = Some(request.message.clone());
+        }
+        end
+    }
+
+    fn last_message(&self, repo: &Path) -> Result<Option<String>, Error> {
+        self.probe.record("last-message", repo);
+        if let Some(gate) = &self.last_message_gate {
+            gate.wait();
+        }
+        let reads = self.probe.lock();
+        match &reads.commit_read_failure {
+            Some(stderr) => Err(Error::CommandFailed {
+                command: "git log -1".to_owned(),
+                code: Some(128),
+                stderr: stderr.clone(),
+            }),
+            None => Ok(reads.last_message.clone()),
+        }
+    }
+
+    fn commit_state(&self, repo: &Path) -> Result<CommitState, Error> {
+        self.probe.record("commit-state", repo);
+        let reads = self.probe.lock();
+        match &reads.commit_read_failure {
+            Some(stderr) => Err(Error::CommandFailed {
+                command: "git rev-parse --git-path".to_owned(),
+                code: Some(128),
+                stderr: stderr.clone(),
+            }),
+            None => Ok(reads.commit_state.clone()),
+        }
+    }
+
+    fn on_remote_branch(&self, repo: &Path) -> Result<bool, Error> {
+        self.probe.record("on-remote-branch", repo);
+        Ok(self.probe.lock().on_remote_branch)
+    }
+
     fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error> {
         self.probe.record("status", repo);
         self.gone(repo)?;
@@ -2502,6 +2607,16 @@ struct ProbeLog {
     /// Every part of a file asked for: the group and the path of the file,
     /// and the request.
     parts: Vec<(Group, String, PartRequest)>,
+    /// Every commit asked for, in order.
+    commits: Vec<CommitRequest>,
+    /// What the reads of the commit form return; a test may change them
+    /// while it runs.
+    last_message: Option<String>,
+    commit_state: CommitState,
+    on_remote_branch: bool,
+    /// What Git prints when `last_message` and `commit_state` fail; without,
+    /// they succeed.
+    commit_read_failure: Option<String>,
     /// Every branch creation asked for, in order.
     created_branches: Vec<CreatedBranch>,
     /// Every tag creation asked for, in order.
@@ -2601,6 +2716,33 @@ impl Probe {
     /// group and the path of the file, and the request.
     pub fn parts(&self) -> Vec<(Group, String, PartRequest)> {
         self.lock().parts.clone()
+    }
+
+    /// Every commit that was asked for, in order.
+    pub fn commits(&self) -> Vec<CommitRequest> {
+        self.lock().commits.clone()
+    }
+
+    /// The message of the last commit, from now on; `None` for a repository
+    /// without a commit. A commit that takes place sets it too.
+    pub fn set_last_message(&self, message: Option<&str>) {
+        self.lock().last_message = message.map(str::to_owned);
+    }
+
+    /// The operation in progress and the message Git prepared, from now on.
+    pub fn set_commit_state(&self, state: CommitState) {
+        self.lock().commit_state = state;
+    }
+
+    /// Whether the last commit is part of a remote branch, from now on.
+    pub fn set_on_remote_branch(&self, on: bool) {
+        self.lock().on_remote_branch = on;
+    }
+
+    /// The reads of the last message and of the operation in progress fail
+    /// with `stderr` from now on, or succeed again with `None`.
+    pub fn set_commit_read_failure(&self, stderr: Option<&str>) {
+        self.lock().commit_read_failure = stderr.map(str::to_owned);
     }
 
     fn record_checkout(&self, target: &CheckoutTarget) {

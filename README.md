@@ -10,9 +10,11 @@ git-bull is in early development. The current release, 0.2.0, holds the
 viewer, the worktree cockpit of the home tab, and the first write actions:
 it checks out branches, tags and commits and creates branches and tags; it
 is on the releases page. Since then git-bull stages and unstages whole
-files in the File status view, and hunks and selected lines from its diff.
-The next development priority is committing; discarding changes follows as
-its own step. The commit graph's
+files in the File status view, and hunks and selected lines from its diff,
+and commits what is staged: the commit form below the file list takes the
+message, amends the last commit and can run one commit without hooks.
+The next development priority is discarding changes, with a way to bring a
+discard back. The commit graph's
 visual redesign is deferred with low priority. What git-bull does is
 specified in [`openspec/specs`](openspec/specs), the changes being planned
 or built are in [`openspec/changes`](openspec/changes), the architecture
@@ -46,6 +48,11 @@ A checkout that would overwrite local changes is refused, and the files are
 listed:
 
 ![The dialog "Cannot check out feature/graph" with the files that have local changes](crates/gitbull-app/tests/snapshots/checkout_dialog_dark.png)
+
+The File status view stages files, hunks and lines, and its commit form below
+the file list commits them:
+
+![The File status view in the dark theme: unstaged and staged files, a diff, and the commit form with a summary, a description and the button "Commit changes to 2 files"](crates/gitbull-app/tests/snapshots/commit_form_dark.png)
 
 ## Installation
 
