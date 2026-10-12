@@ -17,6 +17,12 @@ use crate::error::Error;
 use crate::invoke::Git;
 use crate::path::RepoPath;
 
+mod exchange;
+mod retention;
+
+pub use exchange::{ExchangeEnd, ExchangeError, Failpoints, Interrupt, Left, NoFailpoints};
+pub use retention::{Cleared, Limits};
+
 /// The first line of a manifest: its format and its version.
 const HEADER: &str = "gitbull-discard 1";
 /// The name of the lock file.
@@ -565,14 +571,27 @@ impl Journal {
             .and_then(|mut file| file.read_to_string(&mut text))
             .map_err(|e| e.to_string())?;
         let manifest = Manifest::parse(&text)?;
+        // A settled entry has in its slots what its manifest says. While work
+        // is under way the slots may hold what the work has moved there, so
+        // that only a folder, which no step makes, is refused.
+        let settled = !manifest.state.is_unfinished();
         for file in &manifest.files {
             let slot = folder.join(file.slot.to_string());
-            match (fs::symlink_metadata(&slot), file.held) {
-                (Err(error), _) if error.kind() == io::ErrorKind::NotFound => {}
-                (Err(error), _) => return Err(error.to_string()),
-                (Ok(m), Held::File) if m.is_file() && !is_link(&m) => {}
-                (Ok(m), Held::Link) if m.file_type().is_symlink() => {}
-                (Ok(_), _) => {
+            let fits = |m: &Metadata| {
+                if !settled {
+                    return !m.is_dir() || is_link(m);
+                }
+                match file.held {
+                    Held::File => m.is_file() && !is_link(m),
+                    Held::Link => m.file_type().is_symlink(),
+                    Held::None => false,
+                }
+            };
+            match fs::symlink_metadata(&slot) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+                Ok(m) if fits(&m) => {}
+                Ok(_) => {
                     return Err(format!("slot {} is not what the manifest says", file.slot));
                 }
             }
