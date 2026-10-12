@@ -377,6 +377,20 @@ pub(crate) struct TabView {
     /// asks again only when its selection moves to another commit, so that
     /// a stash shown from the sidebar stays.
     pub(crate) details_shown: Option<ObjectId>,
+    /// The confirmation before whole files are discarded, while it is open.
+    pub(crate) discard_dialog: Option<DiscardDialog>,
+}
+
+/// The files a discard waits to be confirmed for.
+pub(crate) struct DiscardDialog {
+    /// The files to discard, in the order of the list.
+    pub(crate) files: Vec<RepoPath>,
+    /// Whether it is "Discard all" of a group.
+    pub(crate) all: bool,
+    /// How many files the request left because they cannot be discarded.
+    pub(crate) left: usize,
+    /// The scroll position of the list of files.
+    pub(crate) list: ListState,
 }
 
 impl TabView {
@@ -1531,6 +1545,62 @@ impl App {
         let id = tab.id();
         let session = tab.session_mut()?;
         Some((session, self.views.entry(id).or_default()))
+    }
+
+    /// Asks before `files` of the active tab are discarded. Nothing is asked
+    /// for no file.
+    pub(crate) fn ask_discard(&mut self, files: Vec<RepoPath>, all: bool, left: usize) {
+        if files.is_empty() {
+            return;
+        }
+        if let Some((_, view)) = self.active_view() {
+            view.discard_dialog = Some(DiscardDialog {
+                files,
+                all,
+                left,
+                list: ListState::default(),
+            });
+        }
+    }
+
+    /// Whether the active tab waits for the answer to "Discard".
+    pub(crate) fn has_discard_dialog(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active())
+            .and_then(|tab| self.views.get(&tab.id()))
+            .is_some_and(|view| view.discard_dialog.is_some())
+    }
+
+    /// The confirmation of the active tab.
+    pub(crate) fn discard_dialog(&self) -> Option<&DiscardDialog> {
+        let id = self.workspace.as_ref()?.active()?.id();
+        self.views.get(&id)?.discard_dialog.as_ref()
+    }
+
+    /// The confirmation of the active tab, to draw its list.
+    pub(crate) fn discard_dialog_mut(&mut self) -> Option<&mut DiscardDialog> {
+        let id = self.workspace.as_ref()?.active()?.id();
+        self.views.get_mut(&id)?.discard_dialog.as_mut()
+    }
+
+    /// The user confirmed: the files of the dialog are discarded.
+    pub(crate) fn confirm_discard(&mut self) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        if let Some(dialog) = view.discard_dialog.take() {
+            session.discard(dialog.files, dialog.all);
+        }
+        view.focus_status = true;
+    }
+
+    /// The user cancelled: nothing changes.
+    pub(crate) fn cancel_discard(&mut self) {
+        if let Some((_, view)) = self.active_view() {
+            view.discard_dialog = None;
+            view.focus_status = true;
+        }
     }
 
     /// Selects the commit of the reference with the full `name`, or tells

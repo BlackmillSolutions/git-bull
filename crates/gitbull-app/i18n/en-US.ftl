@@ -337,6 +337,26 @@ stage-file = Stage file
 unstage-file = Unstage file
 stage-all = Stage all
 unstage-all = Unstage all
+discard-changes = Discard changes
+discard-all = Discard all
+discard-unavailable-conflict = The file is in conflict.
+discard-unavailable-submodule = The entry is a submodule, which has a repository of its own.
+discard-unavailable-renamed = The file is renamed or copied, which cannot be discarded in one step.
+discard-unavailable-intent-to-add = Git holds the file only as intended to be added.
+discard-unavailable-nested = The folder is a repository of its own.
+discard-unavailable-busy = Another action is running.
+discard-dialog-title-one = Discard the changes to { $name }?
+discard-dialog-title-many = { $count ->
+    [one] Discard the changes to 1 file?
+   *[other] Discard the changes to { $count } files?
+}
+discard-dialog-body = The changes are removed from the working copy and kept in the list "Recently discarded", from where they can be brought back. Untracked files are removed in the same way.
+discard-dialog-left = { $count ->
+    [one] 1 file cannot be discarded and stays as it is.
+   *[other] { $count } files cannot be discarded and stay as they are.
+}
+discard-dialog-list = Files to discard
+discard-dialog-confirm = Discard
 create-tag-refused-taken = Git refused the name: a tag of this name exists, or the name would need one to be a folder.
 create-tag-refused-invalid = Git refused the name: it is not a valid tag name.
 close-question-title = Stop the running action?

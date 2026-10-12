@@ -533,7 +533,7 @@ fn three_unstaged() -> WorkingStatus {
 }
 
 #[test]
-fn the_menu_of_an_unstaged_file_offers_to_stage_it_and_nothing_that_discards() {
+fn the_menu_of_an_unstaged_file_offers_to_stage_it_and_to_discard_its_changes() {
     let (mut harness, probe) = file_status_of(backend().with_status(root(), mixed()));
     let at = file(&harness, "Modified: edited.txt");
     click_at(&mut harness, at, PointerButton::Secondary);
@@ -542,12 +542,29 @@ fn the_menu_of_an_unstaged_file_offers_to_stage_it_and_nothing_that_discards() {
         buttons_shown.contains(&"Copy path".to_owned()),
         "{buttons_shown:?}"
     );
-    for word in ["Discard", "Remove", "Delete"] {
+    // Discarding is "Discard changes", asked about first; nothing is called
+    // removing or deleting.
+    for word in ["Remove", "Delete"] {
         assert!(
             !buttons_shown.iter().any(|label| label.contains(word)),
             "{word} in {buttons_shown:?}"
         );
     }
+    assert!(
+        buttons_shown.contains(&"Discard changes".to_owned()),
+        "{buttons_shown:?}"
+    );
+    // "Discard changes" lies after "Stage file" and before "File history".
+    let copy_at = buttons(&harness, "Copy path")[0];
+    let stage = buttons(&harness, "Stage file")
+        .into_iter()
+        .find(|button| (button.x - copy_at.x).abs() < 40.0 && button.y < copy_at.y)
+        .expect("Stage file in the menu");
+    let (discard, history) = (
+        buttons(&harness, "Discard changes")[0],
+        buttons(&harness, "File history")[0],
+    );
+    assert!(stage.y < discard.y && discard.y < history.y);
     // Committing is offered by the commit form alone, not by the menu.
     let commits: Vec<_> = buttons_shown
         .iter()
@@ -2027,7 +2044,7 @@ fn the_menu_of_a_line_offers_to_stage_its_hunk_and_the_selected_lines() {
     );
     let shown = labels(&harness, Role::Button);
     assert!(
-        !shown.iter().any(|label| label.contains("Discard")),
+        !shown.iter().any(|label| label.starts_with("Discard hunk") || label.starts_with("Discard selected")),
         "{shown:?}"
     );
     choose_entry(&mut harness, "Stage hunk");

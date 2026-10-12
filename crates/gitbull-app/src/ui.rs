@@ -135,6 +135,9 @@ enum Action {
     CloseAnyway,
     /// The user closed the dialog that the last write action asked for.
     CloseActionDialog,
+    /// Answers of the confirmation before files are discarded.
+    ConfirmDiscard,
+    CancelDiscard,
     /// Answers of the notice before detaching HEAD.
     ConfirmDetach,
     CancelDetach,
@@ -218,6 +221,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let tab_dialog = app.close_question.is_some()
         || app.detach_pending.is_some()
         || app.create_dialog.is_some()
+        || app.has_discard_dialog()
         || app.branch_choice.is_some();
     if !tab_dialog {
         actions.extend(dropped_folders(ui));
@@ -289,6 +293,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         detach_notice_dialog(app, ui, &mut actions);
     } else if app.branch_choice.is_some() {
         branch_choice_dialog(app, ui, &mut actions);
+    } else if app.has_discard_dialog() {
+        discard_dialog(app, ui, &mut actions);
     } else if app.create_dialog.is_some() {
         create_dialog(app, ui, &mut actions);
     } else if let Some(dialog) = app.action_dialog() {
@@ -409,6 +415,8 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::KeepOpen => app.close_question = None,
             Action::CloseAnyway => app.close_anyway(),
             Action::CloseActionDialog => app.close_action_dialog(),
+            Action::ConfirmDiscard => app.confirm_discard(),
+            Action::CancelDiscard => app.cancel_discard(),
             Action::ConfirmDetach => app.confirm_detach(),
             Action::CancelDetach => app.detach_pending = None,
             Action::ChooseBranch(index) => app.choose_branch(index),
@@ -2340,6 +2348,123 @@ fn detach_notice_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
         actions.push(choice);
     } else if outcome.escape {
         actions.push(Action::CancelDetach);
+    }
+}
+
+/// The rows of the list of files the confirmation of a discard shows at most
+/// before the list scrolls.
+const DISCARD_LIST_ROWS: usize = 8;
+
+/// The confirmation before files are discarded (spec `discard`, requirement
+/// "Confirmation of discarding files"): it names the file or the number of
+/// files, says that they can be brought back, and lists them, also when they
+/// are many thousands. Cancel is the default: it has the focus first, so that
+/// Enter closes the dialog, and Escape means it.
+fn discard_dialog(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let texts = &app.texts;
+    let Some((count, first, left)) = app
+        .discard_dialog()
+        .map(|dialog| (dialog.files.len(), dialog.files[0].to_string(), dialog.left))
+    else {
+        return;
+    };
+    let title = if count == 1 {
+        let mut args = FluentArgs::new();
+        args.set("name", first);
+        texts.text_with(Msg::DiscardDialogTitleOne, Some(&args))
+    } else {
+        let mut args = FluentArgs::new();
+        args.set("count", count as i64);
+        texts.text_with(Msg::DiscardDialogTitleMany, Some(&args))
+    };
+    let left = (left > 0).then(|| {
+        let mut args = FluentArgs::new();
+        args.set("count", left as i64);
+        texts.text_with(Msg::DiscardDialogLeft, Some(&args))
+    });
+    let body = texts.text(Msg::DiscardDialogBody);
+    let list_name = texts.text(Msg::DiscardDialogList);
+    let cancel = texts.text(Msg::DialogCancel);
+    let confirm = texts.text(Msg::DiscardDialogConfirm);
+    let Some(dialog) = app.discard_dialog_mut() else {
+        return;
+    };
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("discard-dialog"),
+        &title,
+        |ui| {
+            ui.label(body);
+            if let Some(left) = left {
+                ui.add_space(SHAPE.space[1]);
+                ui.label(left);
+            }
+            ui.add_space(SHAPE.space[1]);
+            // The files in a list that draws only the rows in view, so that
+            // many thousands cost no more than a few.
+            let height = count.min(DISCARD_LIST_ROWS) as f32 * crate::virtual_list::ROW_HEIGHT;
+            let width = ui.available_width();
+            ui.allocate_ui(egui::vec2(width, height), |ui| {
+                crate::virtual_list::VirtualList::new(
+                    Id::new("discard-dialog-files"),
+                    egui::accesskit::Role::List,
+                    list_name,
+                    count as u64,
+                )
+                .show(ui, &mut dialog.list, |ui, row, _| {
+                    let Some(path) = dialog.files.get(row as usize) else {
+                        return;
+                    };
+                    let label = path.to_string();
+                    let rect = ui.max_rect();
+                    // Each file is a named item for assistive technology.
+                    let item = ui.interact(rect, ui.id().with("file"), egui::Sense::hover());
+                    item.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, &label)
+                    });
+                    ui.ctx().accesskit_node_builder(item.id, |node| {
+                        node.set_role(egui::accesskit::Role::ListItem);
+                    });
+                    let mut inner = rect;
+                    inner.min.x += 6.0;
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(inner)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(path.to_string())
+                                    .truncate()
+                                    .selectable(false),
+                            );
+                        },
+                    );
+                });
+            });
+        },
+        |ui, ()| {
+            let mut choice = None;
+            ui.horizontal(|ui| {
+                let cancel = components::Button::new(&cancel)
+                    .kind(components::Kind::Primary)
+                    .show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    cancel.request_focus();
+                }
+                if cancel.clicked() {
+                    choice = Some(Action::CancelDiscard);
+                }
+                if components::Button::new(&confirm).show(ui).clicked() {
+                    choice = Some(Action::ConfirmDiscard);
+                }
+            });
+            choice
+        },
+    );
+    if let Some(choice) = outcome.inner {
+        actions.push(choice);
+    } else if outcome.escape {
+        actions.push(Action::CancelDiscard);
     }
 }
 
