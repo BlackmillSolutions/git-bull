@@ -15,14 +15,17 @@ use std::time::Duration;
 
 use crate::cancel::CancelToken;
 use crate::changes::ChangeKind;
+use crate::diff::{Content, Hunk, LineKind};
 use crate::error::Error;
 use crate::invoke::Git;
 use crate::journal::{
     Entry, ExchangeError, Failpoints, FileKind, FileRecord, Held, Journal, Kind, Limits, Listed,
     LockError, LockGuard, Manifest, PathRefusal, State, checked,
 };
+use crate::patch::{Chosen, Direction, PartRequest, Selection, prepare_part};
 use crate::path::RepoPath;
-use crate::status::{StatusKind, WorkingStatus, status};
+use crate::refusal::{Refusal, WriteFailure};
+use crate::status::{Group, StatusEntry, StatusKind, WorkingStatus, status};
 use crate::write::WriteHooks;
 
 /// How long a discard waits for another instance's turn at the journal.
@@ -61,6 +64,17 @@ pub enum DiscardRefusal {
     PathBack(RepoPath),
     /// The journal could not be taken: another instance, or no locks.
     Journal(String),
+    /// The diff the part was chosen in is not the one Git reports now, or the
+    /// file changed while it was copied.
+    DiffOutOfDate,
+    /// The selection would join two lines at an end without a line break.
+    EndOfFileSplit,
+    /// Git wrote line endings elsewhere in the file: it was put back.
+    LineEndings,
+    /// Parts of a file that is not tracked are not discarded.
+    NotTracked,
+    /// The path of the file is refused.
+    Path(PathRefusal),
 }
 
 /// How a discard ended.
@@ -736,4 +750,284 @@ pub fn put_back(
         }
         state => Err(PutBackError::State(Some(state))),
     }
+}
+
+// ---- parts of a file
+
+/// Splits bytes into lines that keep their terminators.
+fn lines_of(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes.split_inclusive(|byte| *byte == b'\n').collect()
+}
+
+/// Whether `result`, the file after the reverse patch, differs from `copy`,
+/// the file before it, in the lines the selection takes out and puts back and
+/// in no other: every line that should stay is byte for byte the same, which
+/// Git's conversion of line endings on writing would break (design decision
+/// 4). The hunks are the ones the patch was made from.
+fn unchanged_but_for_the_part(
+    copy: &[u8],
+    result: &[u8],
+    hunks: &[Hunk],
+    selection: &Selection,
+) -> bool {
+    let (before, after) = (lines_of(copy), lines_of(result));
+    let (mut i, mut j) = (0usize, 0usize);
+    let same =
+        |i: usize, j: usize| matches!((before.get(i), after.get(j)), (Some(a), Some(b)) if a == b);
+    for (index, hunk) in hunks.iter().enumerate() {
+        let first = hunk
+            .lines
+            .iter()
+            .find_map(|line| line.new_number)
+            .map(|number| number as usize - 1)
+            // A hunk with no line of the new side lies after line `new_start`.
+            .unwrap_or(hunk.new_start as usize);
+        // Lines before the hunk stay as they are.
+        while i < first {
+            if !same(i, j) {
+                return false;
+            }
+            i += 1;
+            j += 1;
+        }
+        let chosen = |line: usize| match selection.of(index) {
+            Some(Chosen::All) => true,
+            Some(Chosen::Lines(lines)) => lines.contains(&line),
+            None => false,
+        };
+        for (at, line) in hunk.lines.iter().enumerate() {
+            match line.kind {
+                LineKind::Context => {
+                    if !same(i, j) {
+                        return false;
+                    }
+                    i += 1;
+                    j += 1;
+                }
+                LineKind::Added if chosen(at) => i += 1,
+                LineKind::Added => {
+                    if !same(i, j) {
+                        return false;
+                    }
+                    i += 1;
+                    j += 1;
+                }
+                // A removed line that is put back is new in the result; one
+                // that is not chosen is in neither.
+                LineKind::Removed if chosen(at) => j += 1,
+                LineKind::Removed => {}
+            }
+        }
+    }
+    // What follows the last hunk stays, and nothing is left over.
+    while i < before.len() {
+        if !same(i, j) {
+            return false;
+        }
+        i += 1;
+        j += 1;
+    }
+    j == after.len()
+}
+
+/// Copies `path` into `slot` and sets the copy's time to the file's.
+fn copy_into(path: &Path, slot: &Path) -> io::Result<()> {
+    let mut name = slot.as_os_str().to_owned();
+    name.push(".part");
+    let part = PathBuf::from(name);
+    fs::copy(path, &part)?;
+    if let Ok(modified) = fs::metadata(path)?.modified() {
+        let times = fs::FileTimes::new().set_modified(modified);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&part)?
+            .set_times(times)?;
+    }
+    fs::rename(&part, slot)
+}
+
+fn failed(message: impl Into<String>) -> DiscardOutcome {
+    DiscardOutcome::Failed {
+        message: message.into(),
+        left_alone: Vec::new(),
+    }
+}
+
+/// Takes the hunk or the lines of `request` out of the tracked file `entry`
+/// of the Unstaged group, by a reverse patch applied to the file in the
+/// working copy. The file as it was is copied into the journal first.
+///
+/// Nothing is changed, and no entry is made, when the diff is out of date,
+/// when the file changes while it is copied, when `git apply` refuses, or when
+/// the result differs from the copy in a line that should have stayed, as
+/// where Git converts line endings while it writes; then the copy is put back.
+pub fn discard_part(
+    git: &Git,
+    repo: &Path,
+    journal: &Journal,
+    entry: &StatusEntry,
+    request: &PartRequest,
+    points: &dyn Failpoints,
+) -> DiscardEnd {
+    let end = |outcome, entry: Option<String>| DiscardEnd {
+        outcome,
+        entry,
+        left_out: Vec::new(),
+    };
+    let refuse = |why| end(DiscardOutcome::Refused(why), None);
+    if matches!(entry.kind, StatusKind::Untracked) {
+        return refuse(DiscardRefusal::NotTracked);
+    }
+    if !request.chooses_a_change() {
+        return end(DiscardOutcome::Done, None);
+    }
+    let Content::Text(hunks) = &request.shown.content else {
+        return end(DiscardOutcome::Done, None);
+    };
+    let path = match checked(repo, &entry.path) {
+        Ok(path) => path,
+        Err(why) => return refuse(DiscardRefusal::Path(why)),
+    };
+    let guard = match journal.lock("pending", WAIT) {
+        Ok(guard) => guard,
+        Err(error) => return end(lock_refusal(error), None),
+    };
+    // The diff is read again, under the lock, and the patch made from it.
+    let patch = match prepare_part(
+        git,
+        repo,
+        Group::Unstaged,
+        entry,
+        request,
+        Direction::Unstage,
+        &never(),
+    ) {
+        Ok(Some(patch)) => patch,
+        Ok(None) => return end(DiscardOutcome::Done, None),
+        Err(WriteFailure::Refused(Refusal::DiffOutOfDate)) => {
+            return refuse(DiscardRefusal::DiffOutOfDate);
+        }
+        Err(WriteFailure::Refused(Refusal::EndOfFileSplit)) => {
+            return refuse(DiscardRefusal::EndOfFileSplit);
+        }
+        Err(WriteFailure::Refused(other)) => return end(failed(format!("{other:?}")), None),
+        Err(WriteFailure::Failed(error)) => return end(failed(failure_text(&error)), None),
+    };
+
+    let size = fs::symlink_metadata(&path).map_or(0, |m| m.len());
+    let all =
+        (0..hunks.len()).all(|hunk| matches!(request.selection.of(hunk), None | Some(Chosen::All)));
+    let manifest = Manifest {
+        changed: now_secs(),
+        size,
+        kind: if all { Kind::Hunk } else { Kind::Lines },
+        state: State::Pending,
+        git: None,
+        files: vec![FileRecord {
+            slot: 0,
+            kind: FileKind::Part,
+            held: Held::File,
+            path: entry.path.clone(),
+        }],
+        idents: Vec::new(),
+    };
+    let journal_entry = match journal.create(&manifest) {
+        Ok(created) => created,
+        Err(error) => return end(failed(error.to_string()), None),
+    };
+    let _ = guard.name_entry(journal_entry.id());
+    let id = Some(journal_entry.id().to_owned());
+    let slot = journal_entry.slot(0);
+    let give_up = |outcome| {
+        let _ = journal.remove_entry_with(&journal_entry, &mut |_| {});
+        end(outcome, None)
+    };
+
+    // The copy, read again against the file: it must be the file as the
+    // diff showed it.
+    if let Err(error) = copy_into(&path, &slot) {
+        return give_up(failed(format!("{}: {error}", path.display())));
+    }
+    if points.after("copy").is_err() {
+        return end(DiscardOutcome::Interrupted, id);
+    }
+    let copy = match (fs::read(&path), fs::read(&slot)) {
+        (Ok(file), Ok(copied)) if file == copied => copied,
+        (Ok(_), Ok(_)) => return give_up(DiscardOutcome::Refused(DiscardRefusal::DiffOutOfDate)),
+        (Err(error), _) | (_, Err(error)) => return give_up(failed(error.to_string())),
+    };
+    if points.after("copied").is_err() {
+        return end(DiscardOutcome::Interrupted, id);
+    }
+
+    let permissions = fs::metadata(&path).map(|m| m.permissions()).ok();
+
+    // The reverse patch, with exact counts and context.
+    let args = [
+        "-c",
+        "apply.ignoreWhitespace=no",
+        "apply",
+        "--reverse",
+        "--whitespace=nowarn",
+        "-",
+    ];
+    let mut process = match git.write(WriteHooks::Run).spawn(repo, args, true, None) {
+        Ok(process) => process,
+        Err(error) => return give_up(failed(failure_text(&error))),
+    };
+    let mut recorded = manifest.clone();
+    recorded.git = Some(process.id());
+    let _ = journal.write_manifest(&journal_entry, &recorded);
+    if let Some(mut stdin) = process.take_stdin() {
+        let _ = stdin.write_all(&patch);
+    }
+    if points.after("apply-started").is_err() {
+        std::mem::forget(process);
+        return end(DiscardOutcome::Interrupted, id);
+    }
+    if let Some(mut stdout) = process.take_stdout() {
+        let _ = io::copy(&mut stdout, &mut io::sink());
+    }
+    if let Err(error) = process.wait() {
+        // `apply` changed nothing when it failed.
+        return give_up(failed(failure_text(&error)));
+    }
+    // Git sets the mode of a file it writes from the index and the umask; the
+    // file keeps the one it had.
+    if let Some(permissions) = permissions
+        && fs::metadata(&path).is_ok_and(|now| now.permissions() != permissions)
+    {
+        let _ = fs::set_permissions(&path, permissions);
+    }
+    if points.after("applied").is_err() {
+        return end(DiscardOutcome::Interrupted, id);
+    }
+
+    // The line check, against the copy.
+    let result = fs::read(&path).unwrap_or_default();
+    if !unchanged_but_for_the_part(&copy, &result, hunks, &request.selection) {
+        // Put the file back as it was, if nothing else wrote it meanwhile.
+        if fs::read(&path).ok().as_deref() == Some(result.as_slice())
+            && fs::rename(&slot, &path).is_ok()
+        {
+            let _ = journal.remove_entry_with(&journal_entry, &mut |_| {});
+            return end(DiscardOutcome::Refused(DiscardRefusal::LineEndings), None);
+        }
+        return end(
+            DiscardOutcome::Failed {
+                message: "the file differs from the copy in lines that should have stayed"
+                    .to_owned(),
+                left_alone: vec![entry.path.clone()],
+            },
+            id,
+        );
+    }
+    let mut done = manifest;
+    done.state = State::Discarded;
+    done.changed = now_secs();
+    if let Err(error) = journal.write_manifest(&journal_entry, &done) {
+        return end(failed(error.to_string()), id);
+    }
+    prune_after(journal, &guard, journal_entry.id());
+    end(DiscardOutcome::Done, id)
 }
