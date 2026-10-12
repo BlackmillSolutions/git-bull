@@ -472,7 +472,19 @@ impl std::error::Error for LockError {}
 /// releases it at once.
 #[derive(Debug)]
 pub struct LockGuard {
-    _file: File,
+    file: File,
+}
+
+impl LockGuard {
+    /// Says which entry the holder works on, for the list to tell running
+    /// from interrupted.
+    pub fn name_entry(&self, entry_id: &str) -> io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        writeln!(file, "{entry_id} {}", std::process::id())
+    }
 }
 
 fn is_link(metadata: &Metadata) -> bool {
@@ -775,7 +787,7 @@ impl Journal {
         let mut named = &file;
         named.set_len(0).map_err(LockError::Io)?;
         writeln!(named, "{entry_id} {}", std::process::id()).map_err(LockError::Io)?;
-        Ok(LockGuard { _file: file })
+        Ok(LockGuard { file })
     }
 }
 

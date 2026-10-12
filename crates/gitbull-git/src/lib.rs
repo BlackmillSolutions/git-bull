@@ -19,6 +19,7 @@ pub mod compare;
 pub mod config;
 pub mod content;
 pub mod diff;
+pub mod discard;
 pub mod error;
 pub mod facts;
 pub mod file_history;
