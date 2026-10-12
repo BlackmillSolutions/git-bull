@@ -49,6 +49,11 @@ listed:
 
 ![The dialog "Cannot check out feature/graph" with the files that have local changes](crates/gitbull-app/tests/snapshots/checkout_dialog_dark.png)
 
+The File status view stages files, hunks and lines, and its commit form below
+the file list commits them:
+
+![The File status view in the dark theme: unstaged and staged files, a diff, and the commit form with a summary, a description and the button "Commit changes to 2 files"](crates/gitbull-app/tests/snapshots/commit_form_dark.png)
+
 ## Installation
 
 ### Supported systems
