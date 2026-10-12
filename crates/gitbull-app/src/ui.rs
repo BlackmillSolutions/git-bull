@@ -1750,6 +1750,20 @@ pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
             args.set("path", path.clone());
             app.texts.text_with(Msg::ActionUnstagePart, Some(&args))
         }
+        WriteAction::Commit { amend: false } => app.texts.text(Msg::ActionCommit),
+        WriteAction::Commit { amend: true } => app.texts.text(Msg::ActionAmend),
+    }
+}
+
+/// What an operation of Git is called in a sentence, such as "a merge".
+pub(crate) fn operation_msg(operation: gitbull_git::commit::Operation) -> Msg {
+    use gitbull_git::commit::Operation;
+    match operation {
+        Operation::Merge => Msg::OperationMerge,
+        Operation::CherryPick => Msg::OperationCherryPick,
+        Operation::Revert => Msg::OperationRevert,
+        Operation::Rebase => Msg::OperationRebase,
+        Operation::ApplyingPatches => Msg::OperationPatches,
     }
 }
 
@@ -1772,6 +1786,8 @@ fn action_dialog(
         // its own.
         WriteAction::Stage { .. } | WriteAction::Unstage { .. } => String::new(),
         WriteAction::StagePart { path } | WriteAction::UnstagePart { path } => path.clone(),
+        // A commit names no target either.
+        WriteAction::Commit { .. } => String::new(),
     };
     let named = |msg: Msg, name: &str| {
         let mut args = FluentArgs::new();
@@ -1793,6 +1809,8 @@ fn action_dialog(
         WriteAction::Unstage { .. } => texts.text(Msg::UnstageFailedTitle),
         WriteAction::StagePart { path } => with_path(Msg::StagePartFailedTitle, path),
         WriteAction::UnstagePart { path } => with_path(Msg::UnstagePartFailedTitle, path),
+        WriteAction::Commit { amend: false } => texts.text(Msg::CommitFailedTitle),
+        WriteAction::Commit { amend: true } => texts.text(Msg::AmendFailedTitle),
     };
     let (title, intro, details, close_label, copy) = match dialog {
         ActionDialog::BlockedByChanges { target, files } => (
@@ -1879,6 +1897,39 @@ fn action_dialog(
             String::new(),
             texts.text(Msg::DialogClose),
             false,
+        ),
+        ActionDialog::CommitRefused { why } => {
+            use gitbull_git::commit::{CommitRefusal, Operation};
+            let body = match why {
+                CommitRefusal::Conflicts => texts.text(Msg::CommitRefusedConflicts),
+                CommitRefusal::InProgress(Operation::ApplyingPatches) => {
+                    texts.text(Msg::CommitRefusedPatches)
+                }
+                CommitRefusal::InProgress(_) => texts.text(Msg::CommitRefusedRebase),
+                CommitRefusal::AmendDuring(operation) => {
+                    let mut args = FluentArgs::new();
+                    args.set("operation", texts.text(operation_msg(*operation)));
+                    texts.text_with(Msg::CommitRefusedAmend, Some(&args))
+                }
+            };
+            (
+                texts.text(Msg::CommitRefusedTitle),
+                body,
+                String::new(),
+                texts.text(Msg::DialogClose),
+                false,
+            )
+        }
+        // The commit was made; a checkout or a creation took place.
+        ActionDialog::HookFailed {
+            action: WriteAction::Commit { .. },
+            output,
+        } => (
+            texts.text(Msg::CommitHookTitle),
+            texts.text(Msg::CommitHookBody),
+            output.clone(),
+            texts.text(Msg::DialogClose),
+            true,
         ),
         ActionDialog::HookFailed { action, output } => (
             named(Msg::CheckoutHookTitle, &target(action)),

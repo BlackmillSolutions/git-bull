@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use gitbull_git::{Backend, Error};
 
+use crate::commit_draft::CommitDraft;
 use crate::opening::{self, OpenedRepository};
 use crate::session::{Action, Session};
 use crate::sidebar_tree::SidebarKey;
@@ -174,6 +175,10 @@ pub struct Workspace {
     last_shown: Option<TabId>,
     events: Vec<Event>,
     next_id: u64,
+    /// Commit messages being written when the workspace before this one was
+    /// replaced, by the root of their repository; each goes to the session
+    /// that opens that repository.
+    drafts: Vec<(PathBuf, CommitDraft)>,
 }
 
 impl Workspace {
@@ -187,7 +192,27 @@ impl Workspace {
             last_shown: None,
             events: Vec::new(),
             next_id: 0,
+            drafts: Vec::new(),
         }
+    }
+
+    /// Takes what is written in the commit forms of the open repositories,
+    /// by the root of each: for the workspace that replaces this one, as when
+    /// another executable is applied in the settings.
+    pub fn take_drafts(&mut self) -> Vec<(PathBuf, CommitDraft)> {
+        self.tabs
+            .iter_mut()
+            .filter_map(Tab::session_mut)
+            .map(|session| (session.opened().root.clone(), session.take_draft()))
+            .filter(|(_, draft)| *draft != CommitDraft::default())
+            .collect()
+    }
+
+    /// Keeps `drafts` for the sessions this workspace opens. A draft whose
+    /// repository does not open again is never used.
+    pub fn with_drafts(mut self, drafts: Vec<(PathBuf, CommitDraft)>) -> Workspace {
+        self.drafts = drafts;
+        self
     }
 
     /// Opens the repository containing `path` in a new tab and activates it.
@@ -516,8 +541,16 @@ impl Workspace {
                     }
                     return false;
                 }
-                let session =
+                let draft = self
+                    .drafts
+                    .iter()
+                    .position(|(root, _)| *root == opened.root)
+                    .map(|found| self.drafts.swap_remove(found).1);
+                let mut session =
                     Session::new(opened, Arc::clone(&self.backend), Arc::clone(&self.notify));
+                if let Some(draft) = draft {
+                    session.set_draft(draft);
+                }
                 self.tabs[index].state = TabState::Ready(Box::new(session));
                 true
             }
@@ -1365,5 +1398,46 @@ mod tests {
             workspace.running_actions().is_empty()
         });
         assert_eq!(workspace.close_request(first), CloseRequest::Closed);
+    }
+
+    fn session_mut_of<'a>(workspace: &'a mut Workspace, title: &str) -> &'a mut Session {
+        workspace
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.title() == title)
+            .and_then(Tab::session_mut)
+            .unwrap_or_else(|| panic!("no ready tab {title}"))
+    }
+
+    #[test]
+    fn drafts_move_to_the_workspace_that_replaces_this_one() {
+        let mut old = workspace(two_repositories());
+        old.open(path(&["work", "git-bull"]));
+        old.open(path(&["work", "linux"]));
+        settle(&mut old);
+        session_mut_of(&mut old, "git-bull").set_summary("Kept".to_owned());
+        let drafts = old.take_drafts();
+        // Only what was written travels.
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].0, path(&["work", "git-bull"]));
+        assert_eq!(session_of(&old, "git-bull").draft().summary(), "");
+
+        let mut new = workspace(two_repositories()).with_drafts(drafts);
+        new.open(path(&["work", "linux"]));
+        new.open(path(&["work", "git-bull"]));
+        settle(&mut new);
+        assert_eq!(session_of(&new, "git-bull").draft().summary(), "Kept");
+        assert_eq!(session_of(&new, "linux").draft().summary(), "");
+    }
+
+    #[test]
+    fn a_draft_whose_repository_does_not_open_again_is_never_used() {
+        let mut draft = CommitDraft::default();
+        draft.set_summary("Lost".to_owned());
+        let drafts = vec![(path(&["work", "gone"]), draft)];
+        let mut new = workspace(two_repositories()).with_drafts(drafts);
+        new.open(path(&["work", "git-bull"]));
+        settle(&mut new);
+        assert_eq!(session_of(&new, "git-bull").draft().summary(), "");
     }
 }
