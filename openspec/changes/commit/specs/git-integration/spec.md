@@ -13,11 +13,22 @@ and several empty lines in a row become one. No editor SHALL be started.
 git-bull SHALL NOT pass an option that allows an empty commit, that skips a
 hook other than as "Commit without hooks" does, or that changes the author,
 the date or the signing. The caller SHALL be told whether the commit took
-place: it did when Git ended successfully, and git-bull SHALL NOT take a
-movement of HEAD alone for it. When Git fails, the caller SHALL receive what
-Git printed on its standard output as well as its error output. Stopping the
-commit SHALL end Git and the hooks and programs it started, and SHALL be
-reported as stopped, not as a failure.
+place. It did when Git ended successfully. After a failure or a stop it did
+only when HEAD names another commit than before, that commit follows the one
+before as this commit would (it has it as its first parent, or for an amend
+has its parents, or has no parent where there was no commit), and its message
+is the message given, cleaned as above; a movement of HEAD alone SHALL NOT be
+taken for it. When Git fails, the caller SHALL receive what Git printed on
+its standard output as well as its error output. Stopping the commit SHALL
+end Git and the hooks and programs it started and SHALL be reported as
+stopped, not as a failure: where the operating system has a request to end,
+that request is sent first, so that Git removes a lock it holds, and force
+follows after a short while.
+
+Right before the commit git-bull SHALL read which operation is in progress,
+and SHALL make no commit, and report why as a refusal of its own, during a
+rebase or a series of patches being applied, and for an amend during any
+operation.
 
 #### Scenario: Message from standard input
 - **WHEN** a commit is created with a message whose second paragraph begins with `#`
@@ -39,6 +50,22 @@ reported as stopped, not as a failure.
 - **WHEN** an amend with the unchanged message and nothing staged is made within the second of the commit it replaces
 - **THEN** the caller is told that the commit took place
 
+#### Scenario: Another program's commit is not taken for it
+- **WHEN** a pre-commit hook makes a commit of its own on HEAD and then refuses
+- **THEN** the caller is told that the commit did not take place
+
+#### Scenario: Stopped after the commit was made
+- **WHEN** a commit is stopped while its post-commit hook runs
+- **THEN** the caller is told that it was stopped and that the commit took place
+
+#### Scenario: Rebase in progress
+- **WHEN** a commit is asked for while a rebase is stopped at a conflict
+- **THEN** no commit is made and the caller receives the refusal that names the rebase
+
+#### Scenario: Stopped while Git holds the lock
+- **WHEN** a commit is stopped on Linux or macOS while a clean filter runs before its hooks
+- **THEN** no commit is created and no lock stays on the index
+
 #### Scenario: Stopped during a hook or the signing
 - **WHEN** a commit is stopped while its pre-commit hook, its commit-msg hook or its signing program runs
 - **THEN** that program ends, no commit is created, no lock stays on the index, and the caller is told that the commit was stopped
@@ -46,8 +73,10 @@ reported as stopped, not as a failure.
 ### Requirement: Staging everything before a commit
 A caller SHALL be able to ask that every change of the working copy is staged
 before the commit, as one request. git-bull SHALL read the status for it at
-that moment, SHALL stage what that status lists as unstaged or untracked, and
-SHALL make no commit and stage nothing when it lists a file in conflict. A
+that moment, SHALL stage what that status lists as unstaged or untracked,
+with both paths of a file it lists as renamed, and SHALL make no commit and
+stage nothing, and report it as a refusal of its own, when it lists a file in
+conflict. A
 stop SHALL NOT interrupt the staging: it takes effect when the staging ended,
 before the commit starts.
 
@@ -57,7 +86,11 @@ before the commit starts.
 
 #### Scenario: A conflict
 - **WHEN** staging everything and committing is asked for while a file is in conflict
-- **THEN** the caller receives a failure that says so, nothing was staged and no commit exists
+- **THEN** the caller receives the refusal for a conflict, nothing was staged and no commit exists
+
+#### Scenario: A renamed file
+- **WHEN** staging everything and committing is asked for while the status lists an unstaged rename
+- **THEN** the commit holds the rename, and the old path is not left as an unstaged deletion
 
 #### Scenario: Stopped while staging
 - **WHEN** a stop arrives while a clean filter of the staging still runs
@@ -65,11 +98,13 @@ before the commit starts.
 
 ### Requirement: Reads for committing
 git-bull SHALL read, hardened as every read: the message of the last commit,
-as UTF-8; which operation is in progress, of a merge, a cherry-pick, a revert
-and a rebase; the message Git prepared for the next commit, of a merge, a
-merge that squashes, a cherry-pick or a revert, without its comment lines as
-the configuration of the comment character defines them; and whether the last
-commit is part of a branch of a remote. A repository without a commit has no
+as UTF-8; which operation is in progress, of a merge, a cherry-pick, a
+revert, a rebase and a series of patches being applied, where a cherry-pick
+or a revert is also in progress between the commits of a series of them; the
+message Git prepared for the next commit, of a merge, a merge that squashes,
+a cherry-pick or a revert, without its comment lines as the configuration of
+the comment character defines them, and none during a rebase or a series of
+patches; and whether the last commit is part of a branch of a remote. A repository without a commit has no
 last message, and that SHALL be reported as such, not as a failure.
 
 #### Scenario: Last message
@@ -84,9 +119,21 @@ last message, and that SHALL be reported as such, not as a failure.
 - **WHEN** `core.commentChar` is `;` and a merge was stopped by a conflict
 - **THEN** the prepared message is returned without the lines that begin with `;`
 
-#### Scenario: Rebase in progress
+#### Scenario: Rebase stopped
 - **WHEN** a rebase stopped at a conflict
-- **THEN** the read reports a rebase
+- **THEN** the read reports a rebase and no prepared message
+
+#### Scenario: Series of patches
+- **WHEN** `git am` stopped at a patch that does not apply
+- **THEN** the read reports a series of patches being applied, not a rebase
+
+#### Scenario: Between two picked commits
+- **WHEN** the first of two commits being picked was committed
+- **THEN** the read still reports a cherry-pick
+
+#### Scenario: Squash that stopped at a conflict
+- **WHEN** `git merge --squash` stopped at a conflict
+- **THEN** the prepared message is the one of the squash, not an empty one
 
 #### Scenario: Merge that squashes
 - **WHEN** `git merge --squash` ended

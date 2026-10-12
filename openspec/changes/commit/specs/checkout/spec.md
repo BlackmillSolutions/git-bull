@@ -17,8 +17,8 @@ capability `staging` describes. The status bar SHALL name what runs, such as
 a staging SHALL have no control to cancel them, because a cancelled checkout
 can leave the working copy half updated and a cancelled staging a lock on the
 index. A commit SHALL have one, Stop in the commit form, because Git makes a
-commit in one step at its end and holds no lock while a hook or a signing
-program before it waits, which can be without end. Reading in the tab,
+commit in one step at its end, holds a lock on the index only before its
+hooks start, and can wait without end for a hook or a signing program. Reading in the tab,
 such as the history, the file status and the search, SHALL continue.
 
 #### Scenario: Second action is unavailable
@@ -71,7 +71,9 @@ dialog SHALL be shown. When git-bull finds, before it changes anything, that a
 part of a file cannot be staged as asked, because its diff is out of date or
 the selection cannot be staged alone, a dialog SHALL say which and why, without
 a message of Git. When Git fails, git-bull SHALL show a dialog with Git's
-message in full and a button that copies it; for a commit the message is what
+message in full and a button that copies it; a commit that git-bull itself
+refuses, for a file in conflict or an operation in progress, is such a dialog
+without a message of Git; for a commit the message is what
 Git and its hooks printed on either output, because Git says on its standard
 output why nothing was committed. A commit that the user stopped SHALL show no
 dialog. When Git reports a failure but HEAD

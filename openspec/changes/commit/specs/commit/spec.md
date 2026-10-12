@@ -16,8 +16,11 @@ summary with the count of its characters, a field of several lines for the
 description, a box "Commit without hooks", and one button. The count SHALL be
 marked, by more than its colour, once the summary is longer than 72
 characters, and a longer summary SHALL still be accepted. The file list SHALL
-keep the room above the form and scroll in it. Every control and every notice
-of the form SHALL have a name for assistive technology.
+keep the room above the form and scroll in it. While the button is
+unavailable, a line of text below it SHALL say why; that line and the notices
+of the form SHALL be text with an icon before it, not told by colour alone.
+Every control, every notice and that line SHALL have a name for assistive
+technology.
 
 #### Scenario: Form below the file list
 - **WHEN** the user opens the File status view of a repository with changes
@@ -37,23 +40,41 @@ of the form SHALL have a name for assistive technology.
 
 ### Requirement: Keyboard in the commit form
 The commit form SHALL be an area of the File status view between the file
-list and the diff: Tab from the file list SHALL reach "Amend last commit",
-Tab SHALL then move through the controls of the form in their order, and Tab
-from the button SHALL reach the diff; Shift+Tab SHALL go the other way.
-Ctrl+Enter, and Cmd+Enter on macOS, in the summary or the description SHALL
-do what the button does, and SHALL do nothing while the button is
-unavailable. Enter in the summary SHALL move to the description, and Enter in
-the description SHALL begin a new line. Escape in a field SHALL change
-nothing. The keys S and U SHALL be text while a field of the form has the
-focus.
+list and the diff: Tab from the file list SHALL reach the first control of
+the form that is available, Tab SHALL then move through its available
+controls in their order, and Tab from the last of them SHALL reach the diff;
+Shift+Tab SHALL go the other way. A control that is unavailable SHALL be
+skipped; why the button is unavailable is said by the line below it, not by
+the button. Ctrl+Enter, and Cmd+Enter on macOS, in the summary or the
+description SHALL do what the button does, and SHALL do nothing while the
+button is unavailable. Enter in the summary SHALL move to the description,
+and Enter in the description SHALL begin a new line. Escape in a field SHALL
+change nothing and SHALL leave the focus in the field. The keys S and U SHALL
+be text while a field of the form has the focus. While a commit runs, Stop
+SHALL be the one control of the form that Tab reaches, and SHALL have the
+focus when a control of the form had it as the commit started. When the
+commit ended, with or without a dialog, the focus SHALL be in the summary if
+it was in the form when the commit started.
 
 #### Scenario: Tab through the form
-- **WHEN** the file list has the focus and the user presses Tab six times
+- **WHEN** files are staged, a summary is written, the file list has the focus and the user presses Tab six times
 - **THEN** the focus was on "Amend last commit", the summary, the description, "Commit without hooks" and the button, and is on the diff
+
+#### Scenario: Unavailable button
+- **WHEN** the summary is empty, "Commit without hooks" has the focus and the user presses Tab
+- **THEN** the focus is on the diff
 
 #### Scenario: Ctrl+Enter
 - **WHEN** files are staged, a summary is written and the user presses Ctrl+Enter in the description
 - **THEN** the commit starts as with the button
+
+#### Scenario: Stop with the keyboard
+- **WHEN** the user started a commit with Ctrl+Enter and a hook waits
+- **THEN** Stop has the focus, and Space ends the commit
+
+#### Scenario: Focus after a commit
+- **WHEN** a commit that was started from the description took place
+- **THEN** the focus is in the summary, which is empty
 
 #### Scenario: S in the summary
 - **WHEN** a file is selected in the file list and the user types `Stage` into the summary
@@ -84,7 +105,7 @@ unavailable while the summary holds nothing but blanks.
 
 #### Scenario: No summary
 - **WHEN** the summary is empty and files are staged
-- **THEN** the button is unavailable and says that a summary is needed
+- **THEN** the button is unavailable and the line below it says that a summary is needed
 
 ### Requirement: Committing the staged changes
 While files are staged and none is in conflict, the button SHALL say how many
@@ -103,11 +124,12 @@ the repository and the user configure.
 
 ### Requirement: Staging all changes and committing
 While nothing is staged, files are listed as unstaged, none of them is in
-conflict and "Amend last commit" is not checked, the button SHALL be "Stage
-all changes and commit". It SHALL stage every change the working copy has at
+conflict, no merge is being concluded and "Amend last commit" is not checked,
+the button SHALL be "Stage all changes and commit". It SHALL stage every change the working copy has at
 that moment, read anew and not taken from what the view lists: untracked
-files and deleted files among them, files created since the status was last
-read too, and whatever the filter of the file list shows. It SHALL then
+files and deleted files among them, both paths of a file that was renamed,
+files created since the status was last read too, and whatever the filter of
+the file list shows. It SHALL then
 commit them, as one action. When a file is in conflict by then, nothing SHALL
 be staged and a dialog SHALL say so. When the commit does not take place after
 the staging, the files SHALL stay staged.
@@ -141,13 +163,16 @@ Checking the box SHALL fill the summary and the description with the message
 of the last commit when both are empty at the moment that message was read,
 and SHALL leave them as they are otherwise. While the fields still hold that
 message unchanged and the last commit becomes another one, they SHALL be
-filled with the message of the new last commit. Unchecking the box SHALL
+filled with the message of the new last commit. Whether the last commit is part of a remote
+branch SHALL be read again when the references changed. Unchecking the box
+SHALL
 empty the fields when they still hold that message unchanged, and SHALL leave
 them otherwise. While the last commit is part of a remote branch, the form
 SHALL say so and that amending replaces a commit others may have; the amend
 SHALL still be offered. The box SHALL be unavailable, with its reason, and
 SHALL be unchecked when it was checked, in a repository without a commit and
-while a merge, a cherry-pick, a revert or a rebase is in progress.
+while a merge, a cherry-pick, a revert, a rebase or a series of patches is in
+progress.
 
 #### Scenario: Message alone
 - **WHEN** nothing is staged, the user checks "Amend last commit", changes the summary and chooses the button
@@ -183,7 +208,7 @@ while a merge, a cherry-pick, a revert or a rebase is in progress.
 
 #### Scenario: Merge starts while the box is checked
 - **WHEN** "Amend last commit" is checked and another program starts a merge that stops at a conflict
-- **THEN** after the next read the box is unchecked and unavailable, and the button does not amend
+- **THEN** after the next read the box is unchecked and unavailable, the button does not amend, and the fields, which held the message of the last commit unchanged, hold the message Git prepared for the merge
 
 ### Requirement: Committing without hooks
 With "Commit without hooks" checked, the commit or the amend SHALL run with
@@ -205,10 +230,15 @@ A commit is a write action of its tab, as the capability `checkout`
 describes. While it runs, the form SHALL say so in place of its button and
 SHALL offer Stop; its fields and boxes, and everything that stages or
 unstages, SHALL be unavailable, and the status bar SHALL name the commit. Stop
-SHALL end Git and the hooks and programs it started. While "Stage all changes
-and commit" still stages, Stop SHALL take effect once the staging ended, so
-that no lock stays on the index: the commit is then not started and the files
-stay staged. After Stop, as after every outcome, git-bull SHALL read the
+SHALL end Git and the hooks and programs it started: it asks them to end, so
+that Git removes a lock it holds on the index, and ends them by force when
+they have not ended after a short while. Where the operating system offers no
+such request, as on Windows, they are ended at once, and a lock on the index
+can stay when Stop comes while Git still prepares the commit, before its
+hooks; the next action then fails with Git's message about the lock. While
+"Stage all changes and commit" still stages, Stop SHALL take effect once the
+staging ended, so that no lock stays on the index: the commit is then not
+started and the files stay staged. After Stop, as after every outcome, git-bull SHALL read the
 repository again and show it as it is: a commit that Git had already made
 stays.
 
@@ -224,6 +254,10 @@ stays.
 - **WHEN** the signing program waits for input that cannot be given
 - **THEN** the user can end the commit with Stop
 
+#### Scenario: Stop while Git prepares the commit
+- **WHEN** a commit is stopped on Linux or macOS while a filter of a changed file still runs before the hooks
+- **THEN** no commit is made and no lock stays on the index
+
 #### Scenario: Stop while files are staged
 - **WHEN** "Stage all changes and commit" stages files through a slow filter and the user chooses Stop
 - **THEN** the staging ends by itself, no commit is made, the files are staged, and no lock stays on the index
@@ -237,9 +271,14 @@ took place is not shown. When no commit took place because Git or a hook
 refused, a dialog SHALL show what Git and the hook printed, in full, with a
 button that copies it, and the summary, the description and the boxes SHALL
 stay as they were. A missing name or e-mail address of the user is such a
-refusal of Git: its message, which says how to set them, is shown. The form
-SHALL keep what the user wrote whenever git-bull cannot tell that the commit
-took place.
+refusal of Git: its message, which says how to set them, is shown. When Git
+reports a failure, or was stopped, and git-bull finds the commit made
+nevertheless, the form SHALL be emptied as after a commit, and after a
+failure a dialog SHALL say that the commit was made and show the output. The
+form SHALL keep what the user wrote whenever git-bull cannot tell that the
+commit took place: a commit that another program made meanwhile is not taken
+for it, and neither is a commit whose message a hook changed and that was
+stopped or failed after it was made.
 
 #### Scenario: After a commit
 - **WHEN** a commit took place
@@ -257,6 +296,10 @@ took place.
 - **WHEN** another program unstaged every file before the commit started
 - **THEN** a dialog shows what Git printed about nothing being committed, and the File status view shows the files as they are
 
+#### Scenario: Failure after the commit was made
+- **WHEN** Git reports a failure and the last commit is the one asked for, with the message of the form
+- **THEN** a dialog says that the commit was made and shows what Git printed, and the form is empty
+
 #### Scenario: Another program commits while a commit is refused
 - **WHEN** a hook refuses the commit and another program made a commit meanwhile
 - **THEN** the dialog shows the refusal and the form still holds the message
@@ -266,21 +309,27 @@ The form SHALL fit what it offers to the state of the repository.
 
 - While a file is in conflict, the button SHALL be unavailable and say that
   the conflicts have to be resolved.
-- While a rebase is in progress, the button and "Amend last commit" SHALL be
-  unavailable and the form SHALL say that the rebase has to be continued
-  outside git-bull: a commit there would lose the author of the commit being
-  replayed, and an amend would replace a commit of the branch rebased onto.
-- While a merge is being concluded and no file is in conflict, the commit
-  SHALL be offered also when nothing is staged and no file is changed, and it
-  concludes the merge.
-- While a cherry-pick or a revert is in progress, the form SHALL say so and
-  the commit SHALL be offered; Git keeps the author of a commit that is
-  picked.
-- While a merge, a merge that squashes, a cherry-pick or a revert left a
-  message prepared, the summary and the description SHALL be filled with it,
-  without its comment lines, once for that operation and only when both are
-  empty; when the operation is over and the fields still hold that message
-  unchanged, they SHALL be emptied.
+- While a rebase is in progress, or a series of patches is being applied
+  with `git am`, the button and "Amend last commit" SHALL be unavailable and
+  the form SHALL say which of the two is in progress and that it has to be
+  continued outside git-bull: a commit there would lose the author of the
+  commit being replayed, and an amend would replace a commit of the branch
+  rebased onto. The fields are not filled with a prepared message then.
+- While a merge is being concluded and no file is in conflict, the button
+  SHALL be "Commit merge" and SHALL commit what is staged, also when nothing
+  is staged; it concludes the merge. "Stage all changes and commit" SHALL NOT
+  be offered during a merge, so that files that lie in the working copy do
+  not get into the merge by one click; they are staged first.
+- While a cherry-pick or a revert is in progress, also between the commits of
+  a series of them, the form SHALL say so, and SHALL offer what it offers
+  otherwise; Git keeps the author of a commit that is picked.
+- A merge, a merge that squashes, a cherry-pick and a revert leave a message
+  prepared for the next commit. The summary and the description SHALL be
+  filled with it, without its comment lines, when both are empty and it is
+  not the prepared message that was filled in last. When the prepared message
+  is gone or has become another one and the fields still hold what was filled
+  in, unchanged, they SHALL be emptied, and filled with the other one. A
+  prepared message that the user changed or removed SHALL NOT come back.
 - In a repository without a commit the first commit SHALL be offered.
 - While HEAD is detached, the form SHALL say that the commit will belong to no
   branch, and SHALL offer it.
@@ -288,32 +337,51 @@ The form SHALL fit what it offers to the state of the repository.
   and "Amend last commit" is not checked, the button SHALL be unavailable and
   say that there is nothing to commit.
 
-git-bull does not start, continue or abort a merge, a rebase, a cherry-pick
-or a revert.
+The state SHALL be read again right before a commit is made: when a rebase or
+a series of patches has begun since the form last read it, or an operation
+that closes the amend, no commit SHALL be made and a dialog SHALL say why.
+git-bull does not start, continue or abort a merge, a rebase, a cherry-pick,
+a revert or a series of patches.
 
 #### Scenario: Conflict
 - **WHEN** a file is in conflict
-- **THEN** the button is unavailable and says that the conflicts have to be resolved
+- **THEN** the button is unavailable and the line below it says that the conflicts have to be resolved
 
 #### Scenario: Rebase in progress
 - **WHEN** a rebase stopped at a conflict and the conflict is resolved and staged
-- **THEN** the button and "Amend last commit" are unavailable, and the form says that the rebase has to be continued outside git-bull
+- **THEN** the button and "Amend last commit" are unavailable, the form says that the rebase has to be continued outside git-bull, and the summary is empty
+
+#### Scenario: Rebase began since the last read
+- **WHEN** another program began a rebase that stopped, and the user presses Ctrl+Enter before the form showed it
+- **THEN** no commit is made and a dialog says that a rebase is in progress
 
 #### Scenario: Concluding a merge
 - **WHEN** a merge was stopped by a conflict, the conflict is resolved and staged, and the form is empty
-- **THEN** the form holds the message Git prepared for the merge, and the commit has two parents
+- **THEN** the form holds the message Git prepared for the merge, the button is "Commit merge", and the commit has two parents
 
 #### Scenario: Merge without changes
 - **WHEN** a merge is being concluded whose result equals the last commit, so that no file is listed
-- **THEN** the commit is offered and concludes the merge
+- **THEN** "Commit merge" is offered and concludes the merge
 
-#### Scenario: Prepared message is offered once
+#### Scenario: Merge with an untracked file
+- **WHEN** a merge is being concluded, nothing is staged and an untracked file lies in the working copy
+- **THEN** the button is "Commit merge", and the commit that concludes the merge does not hold the file
+
+#### Scenario: Prepared message does not come back
 - **WHEN** the form was filled with the message of a merge and the user empties the summary
 - **THEN** the summary stays empty after the status is read again
+
+#### Scenario: Merge that squashes
+- **WHEN** `git merge --squash` ended and the form is empty
+- **THEN** the form holds the message Git prepared for it, and still holds it after the status is read again
 
 #### Scenario: Revert in progress
 - **WHEN** a revert stopped before its commit and the form is empty
 - **THEN** the form says that a revert is in progress and holds the message Git prepared for it
+
+#### Scenario: Between two picked commits
+- **WHEN** the first of two commits being picked was committed from the form
+- **THEN** the form still says that a cherry-pick is in progress, and "Amend last commit" is unavailable
 
 #### Scenario: First commit
 - **WHEN** the repository has no commit and a file is staged

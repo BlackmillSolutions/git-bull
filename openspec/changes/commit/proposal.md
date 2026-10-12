@@ -27,15 +27,19 @@ hooks, has been waiting since ADR 0007.
   is cleared after it.
 - A commit runs Git's hooks and the configured signing, which can take long
   or wait for a program that asks for a passphrase. While it runs the form
-  says so and offers Stop. This is the first write action a user can stop.
+  says so and offers Stop. This is the first write action a user can stop;
+  the stop asks Git to end before it ends it by force, so that no lock stays
+  on the index where the operating system allows it.
 - When Git or a hook refuses, a dialog shows what Git and the hook printed,
   and the message stays in the form. After a commit the form is emptied and
   the status, HEAD, the references and the history are read again.
 - The form knows the states that change what a commit is: files in conflict
-  (no commit), a rebase in progress (no commit and no amend, because both
-  damage it), a merge, a cherry-pick or a revert in progress (the message Git
-  prepared is offered, no amend), a repository without a commit (no amend),
-  and a detached HEAD (a notice).
+  (no commit), a rebase or a series of patches in progress (no commit and no
+  amend, because both damage it), a merge, a cherry-pick or a revert in
+  progress (the message Git prepared is offered, no amend), a merge that is
+  being concluded (the button is "Commit merge" and commits what is staged,
+  also nothing), a repository without a commit (no amend), and a detached
+  HEAD (a notice).
 - The message that is being written belongs to the tab: it survives a change
   of the view and of the tab and a change of the Git executable, and is gone
   when the tab is closed.
