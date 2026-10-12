@@ -39,19 +39,27 @@ confirmation that is clicked away by habit being the only safeguard.
   that they can be brought back. Hunks and lines do not ask: the notice bar
   with "Undo" is their safeguard.
 - A discard that does not complete leaves the working copy as it was. The
-  journal is written before the first change, and nothing deletes bytes except
-  the pruning of old entries: after 30 days, and beyond 1 GB the oldest first,
-  at the next discard, never the entry just made.
+  journal is written before the first change, in steps that leave every file
+  either at its path or in the journal when the process ends at any of them:
+  an entry that was interrupted shows in the list with "Put back". Nothing
+  deletes bytes except the pruning of old entries (after 30 days, and beyond
+  1 GB the oldest first, at the next discard, never the entry just made and
+  never an interrupted one), "Clear", and the removal of the worktree itself.
 - A discard is an exclusive write action of the tab, as a commit is, but it
-  cannot be stopped: a discard stopped half way is worse than one that ran to
-  its end.
+  cannot be stopped, not by Stop, not by closing the tab and not by dropping
+  the session: closing waits for it. A discard stopped half way is worse than
+  one that ran to its end.
+- What is discarded is what was asked: when the user confirms, the files and
+  their kinds are read again from the status, and a file that is no longer what
+  the confirmation named stops the discard.
 - Not offered, with the reason shown where the user looks for it: a file only
-  staged (unstage it first), a file in conflict, a submodule, a change of the
-  type of a file, a symbolic link, an unstaged rename or an entry that Git
-  holds only as intended to be added, and an untracked folder that is itself a
-  repository. Hunks and lines are further not offered for the diffs that cannot
-  be staged in parts (a filter driver, a cut diff), and not for an untracked
-  file, which is discarded whole.
+  staged (unstage it first), a file in conflict, a submodule, an unstaged
+  rename or an entry that Git holds only as intended to be added, and an
+  untracked folder that is itself a repository. Symbolic links and changes of
+  type are discarded whole. Hunks and lines are further not offered for the
+  diffs that cannot be staged in parts (a filter driver, a cut diff, a link),
+  for a file whose line endings are mixed, where Git would rewrite unrelated
+  lines, and for an untracked file, which is discarded whole.
 
 Not part of this change: selecting several files at once, stashing, cleaning
 ignored files, resolving conflicts, discarding what is staged, and a journal
@@ -74,19 +82,21 @@ that is shared between worktrees or machines.
   git-bull's own, as for a nested repository, is a dialog without a message of
   Git.
 - `application-shell`: closing a tab or the window while a discard runs asks
-  first; Ctrl+Z undoes the last discard.
+  first and then waits for it; Ctrl+Z undoes the last discard.
 - `app-settings`: another Git executable is not applied while a discard runs.
 - `git-integration`: discarding as a write of Git's own `restore` and `apply`,
   and the journal as a read and write of the Git folder.
 
 ## Impact
 
-- `gitbull-git`: a module for the journal (entries, manifest, moving, copying,
-  swapping, pruning) and for the discards (whole files, parts), the check of
-  paths before anything is moved, a function of `Backend` for each, and the
-  reuse of the part patch of `stage-hunks-and-lines`.
-- `gitbull-core`: `Session` gets the discard action, the list of recent
-  discards and the undo; ADR 0008 is amended again.
+- `gitbull-git`: a module for the journal (entries and their states, manifest,
+  lock, moving, copying, exchanging, resuming, pruning) and for the discards
+  (whole files, parts), the check of paths before anything is moved, a
+  function of `Backend` for each, and the reuse of the part patch of
+  `stage-hunks-and-lines`.
+- `gitbull-core`: `Session` gets the discard, restore and clear actions, the
+  list of recent discards and the undo; ADR 0008 is amended again and ADR 0009
+  records the journal.
 - `gitbull-app`: the entries, the buttons and the confirmation dialog, the
   notice bar and the list in `file_status_view.rs` and `diff_view.rs`, Ctrl+Z,
   texts in `i18n/en-US.ftl`, the name of the action in the status bar and in

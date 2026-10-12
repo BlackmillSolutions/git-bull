@@ -4,7 +4,8 @@
 
 ### Requirement: Git path while a write action runs
 While a write action runs in any tab (checking out, creating a branch or a tag,
-staging or unstaging files, committing, discarding),
+staging or unstaging files, committing, discarding, restoring a discard,
+clearing the list of discards),
 the settings dialog SHALL NOT apply another Git executable, because applying it
 opens every tab again and would stop the action. It SHALL keep the previous value
 and show a message that names the action and asks the user to wait for it. When no

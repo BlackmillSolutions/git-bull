@@ -5,19 +5,22 @@
 ### Requirement: One write action at a time
 A tab SHALL run at most one write action at a time, where write actions are
 checking out, creating a branch, creating a tag, staging and unstaging
-files, committing, and discarding files and parts of files. While a checkout,
-the creation of a branch or a tag, a commit or a discard runs, every entry
+files, committing, discarding files and parts of files, restoring a discard
+and clearing the list of discards. While a checkout, the creation of a branch
+or a tag, a commit, a discard, a restore or the clearing runs, every entry
 that starts a write action in that tab SHALL be unavailable. While staging or
 unstaging runs, or is kept to run, the entries that check out, create, commit or
 discard SHALL be unavailable, and further staging and unstaging of files SHALL be accepted
 and kept, while a part of a file is taken only when nothing runs, both as the
 capability `staging` describes. The status bar SHALL name what runs, such as
 "Checking out feature", "Staging 3 files", "Staging a part of src/a.rs",
-"Committing" or "Discarding 3 files", and the other tabs SHALL stay usable. A
-checkout, a creation, a staging and a discard SHALL have no control to cancel
+"Committing", "Discarding 3 files", "Restoring 3 files" or "Clearing the list
+of discards", and the other tabs SHALL stay usable. A checkout, a creation, a
+staging, a discard, a restore and the clearing SHALL have no control to cancel
 them, because a cancelled checkout can leave the working copy half updated, a
 cancelled staging a lock on the index, and a cancelled discard files that are
-moved away and not yet put back. A commit SHALL have one, Stop in the commit form, because Git makes a
+moved away and not yet put back; none of them is stopped by closing the tab
+or by dropping the session either. A commit SHALL have one, Stop in the commit form, because Git makes a
 commit in one step at its end, holds a lock on the index only before its
 hooks start, and can wait without end for a hook or a signing program. Reading in the tab,
 such as the history, the file status and the search, SHALL continue.
@@ -83,9 +86,10 @@ the status after staging or unstaging. The action SHALL count as running until t
 read. When the action succeeds, no
 dialog SHALL be shown. When git-bull finds, before it changes anything, that a
 part of a file cannot be staged or discarded as asked, because its diff is out
-of date or the selection cannot be staged alone, or that a discard is of a
-kind that is not offered, as a folder that is a repository of its own, a
-dialog SHALL say which and why, without a message of Git. When Git fails, or for a discard the operating system, git-bull SHALL show a
+of date, the selection cannot be staged alone or the file has mixed line
+endings, or that a discard is of a kind that is not offered, as a folder that
+is a repository of its own, or that the files to discard changed since they
+were asked for, a dialog SHALL say which and why, without a message of Git. When Git fails, or for a discard the operating system, git-bull SHALL show a
 dialog with the message in full and a button that copies it; a commit that git-bull itself
 refuses, for a file in conflict or an operation in progress, is such a dialog
 without a message of Git; for a commit the message is what

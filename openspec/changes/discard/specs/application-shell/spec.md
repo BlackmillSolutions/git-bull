@@ -114,16 +114,20 @@ use Ctrl on every platform.
 
 ### Requirement: Closing while a write action runs
 While a write action runs in a tab (checking out, creating a branch or a tag,
-staging or unstaging files, committing, discarding),
+staging or unstaging files, committing, discarding, restoring a discard,
+clearing the list of discards),
 closing that tab, with its button or with Ctrl+W, and closing the window SHALL
 first ask the user, and SHALL NOT stop the action without asking. The question
 SHALL name the action and the tab and warn of what stopping it can leave behind:
 a working copy that is half updated for a checkout, and files that were not
 staged or unstaged, and a lock on the index, for staging and unstaging, and a
 commit that was not made, with hooks that were stopped half way and a message
-that is gone with the tab, for a commit, and some files discarded and others
-not, which the list "Recently discarded" then holds, for a discard. It SHALL offer Keep open, which is the default, and Close
-anyway. Close anyway SHALL close the tab or the window and stop the action. This
+that is gone with the tab, for a commit. A discard, a restore and the
+clearing cannot be stopped; for them the question SHALL say so. It SHALL offer
+Keep open, which is the default, and Close anyway. Close anyway SHALL close the
+tab or the window and stop the action; for a discard, a restore and the
+clearing it SHALL close the tab or the window as soon as the action ended, and
+nothing SHALL be stopped. This
 replaces, for write actions, the stopping of all background work of a closed tab
 (requirement "Repository tabs"). Closing a tab or the window in which no write
 action runs SHALL NOT ask anything.
@@ -162,5 +166,5 @@ action runs SHALL NOT ask anything.
 - **THEN** a question names the commit and the tab, says that the commit may not be made, that its hooks are stopped and that its message is gone with the tab, and offers Keep open and Close anyway
 
 #### Scenario: Closing a tab while files are discarded
-- **WHEN** a discard runs in a tab and the user closes the tab
-- **THEN** a question names the discard and the tab, says that some files may be discarded and others not and that the list "Recently discarded" holds what was discarded, and offers Keep open and Close anyway
+- **WHEN** a discard runs in a tab and the user closes the tab and chooses Close anyway
+- **THEN** a question named the discard and the tab and said that it cannot be stopped, the discard runs to its end, and the tab closes then
