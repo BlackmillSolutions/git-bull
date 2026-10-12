@@ -12,6 +12,7 @@ pub mod blame;
 pub mod blob;
 pub mod cancel;
 pub mod changes;
+pub mod commit;
 pub mod commit_graph;
 pub mod commits;
 pub mod compare;
