@@ -22,7 +22,7 @@ gains focus, after files were staged or unstaged, and after a commit.
 The File status view SHALL offer staging and unstaging of files, in its file
 list, and of hunks and selected lines of a file, in its diff, as the
 capability `staging` describes, and no other action that changes the index.
-It SHALL offer committing in the commit panel below its file list, as the
+It SHALL offer committing in the commit form below its file list, as the
 capability `commit` describes, and no other action that changes the history.
 It MUST NOT offer any action that changes the working copy.
 
@@ -38,6 +38,6 @@ It MUST NOT offer any action that changes the working copy.
 - **WHEN** the user opens the context menu of a changed line in the diff of an unstaged file
 - **THEN** the menu offers to stage the hunk and the selected lines beside copying, and no action to discard
 
-#### Scenario: Commit panel
+#### Scenario: Commit form
 - **WHEN** the user opens the File status view
-- **THEN** a commit panel below the file list offers to commit, and nothing in the view discards or removes a change
+- **THEN** a commit form below the file list offers to commit, and nothing in the view discards or removes a change

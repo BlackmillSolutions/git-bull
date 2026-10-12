@@ -15,9 +15,10 @@ capability `staging` describes. The status bar SHALL name what runs, such as
 "Checking out feature", "Staging 3 files", "Staging a part of src/a.rs" or
 "Committing", and the other tabs SHALL stay usable. A checkout, a creation and
 a staging SHALL have no control to cancel them, because a cancelled checkout
-can leave the working copy half updated. A commit SHALL have one, Stop in the
-commit panel, because Git makes a commit in one step at its end and a hook or
-a signing program before it can wait without end. Reading in the tab,
+can leave the working copy half updated and a cancelled staging a lock on the
+index. A commit SHALL have one, Stop in the commit form, because Git makes a
+commit in one step at its end and holds no lock while a hook or a signing
+program before it waits, which can be without end. Reading in the tab,
 such as the history, the file status and the search, SHALL continue.
 
 #### Scenario: Second action is unavailable
@@ -50,7 +51,7 @@ such as the history, the file status and the search, SHALL continue.
 
 #### Scenario: Commit is unavailable while files are staged
 - **WHEN** staging runs in a tab
-- **THEN** the button of the commit panel is unavailable until the staging ended
+- **THEN** the button of the commit form is unavailable until the staging ended
 
 #### Scenario: Staging is unavailable during a commit
 - **WHEN** a commit runs in a tab
@@ -58,7 +59,7 @@ such as the history, the file status and the search, SHALL continue.
 
 #### Scenario: A commit can be stopped
 - **WHEN** a commit runs
-- **THEN** the commit panel offers Stop, and no other write action offers one
+- **THEN** the commit form offers Stop, and no other write action offers one
 
 ### Requirement: Outcome of a write action
 After a write action ends, whatever its outcome, git-bull SHALL read again
