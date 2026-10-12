@@ -805,6 +805,22 @@ fn create_tag_dialog_with_a_message() {
 /// one among them, above the staged ones, the titles with their buttons and
 /// the selected row with its button (spec `staging`).
 fn file_status_view(theme: ThemeSetting) -> Harness<'static, App> {
+    file_status_view_with(
+        theme,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+        |backend| backend,
+    )
+}
+
+/// Like [`file_status_view`], at another size and with a backend that
+/// `adjust` changed.
+fn file_status_view_with(
+    theme: ThemeSetting,
+    interface: InterfaceSize,
+    size: (f32, f32),
+    adjust: impl FnOnce(FakeBackend) -> FakeBackend,
+) -> Harness<'static, App> {
     use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
     let entry = |kind, name: &str| StatusEntry {
         kind,
@@ -910,28 +926,38 @@ fn file_status_view(theme: ThemeSetting) -> Harness<'static, App> {
         ..notes.clone()
     };
     let mut harness = repository_window(
-        dialog_backend()
-            .with_status(path(&["work", "git-bull"]), status)
-            .with_working_diff(gitbull_git::status::Group::Untracked, "notes.txt", notes)
-            .with_working_diff(gitbull_git::status::Group::Unstaged, "src/ui.rs", ui),
+        adjust(
+            dialog_backend()
+                .with_status(path(&["work", "git-bull"]), status)
+                .with_working_diff(gitbull_git::status::Group::Untracked, "notes.txt", notes)
+                .with_working_diff(gitbull_git::status::Group::Unstaged, "src/ui.rs", ui),
+        ),
         theme,
-        InterfaceSize::Percent100,
-        (1280.0, 800.0),
+        interface,
+        size,
     );
     let item = harness
         .query_all_by_role(Role::TreeItem)
         .find(|node| node.accesskit_node().label().as_deref() == Some("File status"))
-        .expect("File status in the sidebar")
-        .rect()
-        .center();
-    harness.hover_at(item);
-    for pressed in [true, false] {
-        harness.event(eframe::egui::Event::PointerButton {
-            pos: item,
-            button: eframe::egui::PointerButton::Primary,
-            pressed,
-            modifiers: eframe::egui::Modifiers::NONE,
-        });
+        .map(|node| node.rect().center());
+    match item {
+        Some(item) => {
+            harness.hover_at(item);
+            for pressed in [true, false] {
+                harness.event(eframe::egui::Event::PointerButton {
+                    pos: item,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                });
+            }
+        }
+        // A window too short to show the entry of the sidebar.
+        None => {
+            let workspace = harness.state_mut().workspace_mut().expect("a workspace");
+            let tab = workspace.active().expect("the tab").id();
+            workspace.set_view(tab, gitbull_core::workspace::View::FileStatus);
+        }
     }
     wait_for(&mut harness, |h| {
         h.query_all_by_role(Role::ListItem).next().is_some()
@@ -997,4 +1023,110 @@ fn file_status_with_a_hunk_selected() {
     harness.run();
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "file_status_hunk_selected", &options());
+}
+
+/// Writes a message into the commit form of `harness`.
+fn write_commit_message(harness: &mut Harness<'static, App>) {
+    harness
+        .get_by_role_and_label(Role::TextInput, "Summary")
+        .type_text("Stage and unstage files");
+    harness.run();
+    let description = harness.get_by_role_and_label(Role::MultilineTextInput, "Description");
+    description.focus();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::MultilineTextInput, "Description")
+        .type_text("The File status view lists two groups.\nA file moves with one click.");
+    harness.run();
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+}
+
+/// The commit form with a message and two staged files (spec `commit`,
+/// requirement "Commit form").
+#[test]
+fn commit_form_in_the_dark_palette() {
+    let mut harness = file_status_view(ThemeSetting::Dark);
+    write_commit_message(&mut harness);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_dark", &options());
+}
+
+#[test]
+fn commit_form_in_the_light_palette() {
+    let mut harness = file_status_view(ThemeSetting::Light);
+    write_commit_message(&mut harness);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_light", &options());
+}
+
+/// While a commit runs the form names it and offers Stop (requirement "While
+/// a commit runs").
+#[test]
+fn commit_form_while_a_commit_runs() {
+    let gate = gitbull_testkit::Gate::new();
+    let mut harness = file_status_view_with(
+        ThemeSetting::Dark,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+        |backend| backend.with_checkout_gate(&gate),
+    );
+    write_commit_message(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Button, "Commit changes to 2 files")
+        .click();
+    wait_for(&mut harness, |h| {
+        h.query_by_role_and_label(Role::Button, "Stop").is_some()
+    });
+    // The spinner keeps the window repainting: steps, not a run to rest.
+    for _ in 0..3 {
+        harness.step();
+    }
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_running", &options());
+    gate.open();
+}
+
+/// The notices of the form: a detached HEAD, and the last commit on a remote
+/// branch while "Amend last commit" is checked.
+#[test]
+fn commit_form_with_its_notices() {
+    let detached = gitbull_git::head::Head::Detached(fake_id("c").to_string());
+    let mut harness = file_status_view_with(
+        ThemeSetting::Dark,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+        |backend| {
+            backend
+                .with_head(path(&["work", "git-bull"]), detached)
+                .with_last_message("Read the status of a repository\n\nIn the background.")
+                .with_on_remote_branch()
+        },
+    );
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Amend last commit")
+        .click();
+    wait_for(&mut harness, |h| {
+        h.query_by_label_contains("already on a remote branch")
+            .is_some()
+    });
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_notices", &options());
+}
+
+/// The smallest window, 640 by 400 pixels, at 150 %: the form keeps its room
+/// and the file list scrolls in what is left.
+#[test]
+fn commit_form_in_the_smallest_window() {
+    let mut harness = file_status_view_with(
+        ThemeSetting::Light,
+        InterfaceSize::Percent150,
+        (640.0 / 1.5, 400.0 / 1.5),
+        |backend| backend,
+    );
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_smallest", &options());
 }

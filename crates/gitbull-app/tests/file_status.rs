@@ -542,12 +542,18 @@ fn the_menu_of_an_unstaged_file_offers_to_stage_it_and_nothing_that_discards() {
         buttons_shown.contains(&"Copy path".to_owned()),
         "{buttons_shown:?}"
     );
-    for word in ["Discard", "Remove", "Commit", "Delete"] {
+    for word in ["Discard", "Remove", "Delete"] {
         assert!(
             !buttons_shown.iter().any(|label| label.contains(word)),
             "{word} in {buttons_shown:?}"
         );
     }
+    // Committing is offered by the commit form alone, not by the menu.
+    let commits: Vec<_> = buttons_shown
+        .iter()
+        .filter(|label| label.contains("Commit"))
+        .collect();
+    assert_eq!(commits, ["Commit changes to 2 files"]);
     // "Stage file" is the first entry of the menu, above the others.
     let copy = buttons(&harness, "Copy path")[0];
     let entry = buttons(&harness, "Stage file")

@@ -337,6 +337,17 @@ pub(crate) struct TabView {
     /// The diff of the File status view takes the keyboard focus when it is
     /// drawn next, as after the dialog of a part of a file closed.
     pub(crate) focus_status_diff: bool,
+    /// The summary of the commit form takes the keyboard focus when the
+    /// form is drawn next, as after a commit and after its dialog closed.
+    pub(crate) focus_commit_summary: bool,
+    /// Stop takes the keyboard focus when the commit form is drawn next:
+    /// the commit was started from a control of the form, which is
+    /// unavailable while it runs.
+    pub(crate) focus_commit_stop: bool,
+    /// The commit that runs was started from the commit form.
+    pub(crate) commit_from_form: bool,
+    /// A commit ran when the commit form was drawn last.
+    pub(crate) commit_ran: bool,
     /// Stage all, or unstage all, files that the File status view lists when
     /// it is drawn next: asked for with the keyboard.
     pub(crate) index_all: Option<Shown>,
@@ -717,7 +728,13 @@ impl App {
         self.home.ai_copy = Some(AiCopy::new(Arc::clone(&backend), Arc::clone(&self.notify)));
         self.opening_branch = None;
         self.home.shown = false;
-        let mut workspace = Workspace::new(backend, Arc::clone(&self.notify));
+        // What is written in the commit forms goes on with its repository.
+        let drafts = self
+            .workspace
+            .as_mut()
+            .map(Workspace::take_drafts)
+            .unwrap_or_default();
+        let mut workspace = Workspace::new(backend, Arc::clone(&self.notify)).with_drafts(drafts);
         workspace.restore(&self.settings.tabs, self.settings.active_tab);
         self.workspace = Some(workspace);
     }
@@ -1397,8 +1414,10 @@ impl App {
     }
 
     pub(crate) fn close_action_dialog(&mut self) {
-        // A part of a file is asked for in the diff, a file in the file list.
+        // A part of a file is asked for in the diff, a file in the file list,
+        // and a commit in the commit form.
         let mut of_part = false;
+        let mut of_commit = false;
         if let Some((session, view)) = self.active_view() {
             of_part = match session.dialog() {
                 Some(ActionDialog::DiffOutOfDate { .. } | ActionDialog::EndOfFileSplit { .. }) => {
@@ -1407,6 +1426,20 @@ impl App {
                 Some(ActionDialog::Failed { action, .. }) => action.is_part(),
                 _ => false,
             };
+            of_commit = matches!(
+                session.dialog(),
+                Some(
+                    ActionDialog::CommitRefused { .. }
+                        | ActionDialog::Failed {
+                            action: WriteAction::Commit { .. },
+                            ..
+                        }
+                        | ActionDialog::HookFailed {
+                            action: WriteAction::Commit { .. },
+                            ..
+                        }
+                )
+            );
             session.close_dialog();
             // The keyboard goes on where the user was.
             view.focus_sidebar = true;
@@ -1421,8 +1454,9 @@ impl App {
         if in_status && let Some((_, view)) = self.active_view() {
             view.focus_sidebar = false;
             // In the file list S would stage the whole file.
-            view.focus_status = !of_part;
+            view.focus_status = !of_part && !of_commit;
             view.focus_status_diff = of_part;
+            view.focus_commit_summary = of_commit;
         }
     }
 
@@ -1434,6 +1468,7 @@ impl App {
             view.index_all = None;
             view.focus_status = false;
             view.focus_status_diff = false;
+            view.focus_commit_summary = false;
         }
     }
 

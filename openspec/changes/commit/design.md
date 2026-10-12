@@ -348,9 +348,9 @@ staged, and the offer is `NothingToCommit` as otherwise.
 
 `file_status_view.rs` draws the form at the bottom of the left column. Its
 height fits the controls, four lines of description, the line below the
-button and the notices that are shown, of which there can be three at once
-(operation, detached HEAD, remote branch); the file list takes the rest and
-scrolls. The existing `commit_panel.rs` is the details
+button and the notices that are shown, of which there can be two at once: an
+operation or the remote branch of an amend, which exclude each other, and a
+detached HEAD. The file list takes the rest and scrolls. The existing `commit_panel.rs` is the details
 panel of the History view; the new code and its tests are named `commit_form`.
 
 The form is an area of the view like the file list and the diff: it is added
@@ -410,9 +410,13 @@ button that copies.
 - [`for-each-ref --contains` walks history in a large repository] → It is
   read only while "Amend last commit" is checked, in the background, with
   `--count=1`; the notice appears when it arrives.
-- [The form takes room from the file list in a small window] → The list
-  scrolls and keeps at least three rows; the Windows snapshot at the smallest
-  window size shows it.
+- [The form takes room from the file list in a small window] → The form is
+  as high as what it holds. Where that leaves the list less than its title,
+  its filter and five rows (the titles of the two groups and three files),
+  the form gets what is left and scrolls. The
+  smallest window at 100 % shows both; at 150 % it is too small for either,
+  as it is for a dialog (spec `checkout`, requirement "Dialogs of write
+  actions"), and the Windows snapshot at that size records what is seen.
 - [The user checks "Commit without hooks" and forgets it] → It is cleared
   after every commit that took place.
 

@@ -244,6 +244,36 @@ operation-cherry-pick = a cherry-pick
 operation-revert = a revert
 operation-rebase = a rebase
 operation-patches = a series of patches
+commit-amend = Amend last commit
+commit-summary = Summary
+commit-description = Description
+commit-summary-length = { $count ->
+    [one] 1 character
+   *[other] { $count } characters
+}
+commit-summary-long = { $count } characters, longer than 72
+commit-without-hooks = Commit without hooks
+commit-files = { $count ->
+    [one] Commit changes to 1 file
+   *[other] Commit changes to { $count } files
+}
+commit-stage-all = Stage all changes and commit
+commit-merge = Commit merge
+commit-stop = Stop
+commit-no-summary = Write a summary to commit.
+commit-nothing = There is nothing to commit.
+commit-conflicts = Files are in conflict. Resolve the conflicts and stage the files to commit.
+commit-rebase = A rebase is in progress. Continue or abort it outside git-bull.
+commit-patches = A series of patches is being applied. Continue or abort it outside git-bull.
+commit-busy = Another action is running.
+commit-status-unknown = The status is being read.
+commit-on-remote = This commit is already on a remote branch. Amending replaces a commit that others may have.
+commit-detached = HEAD is detached: the commit will belong to no branch.
+commit-during-merge = A merge is in progress. The commit concludes it.
+commit-during-cherry-pick = A cherry-pick is in progress.
+commit-during-revert = A revert is in progress.
+amend-no-commit = There is no commit to amend.
+amend-in-progress = The last commit cannot be amended while { $operation } is in progress.
 stage-hunk = Stage hunk
 unstage-hunk = Unstage hunk
 stage-selected-lines = Stage selected lines
@@ -265,6 +295,8 @@ close-question-tab = The action "{ $action }" is still running in the tab { $tab
 close-question-window = The action "{ $action }" is still running in the tab { $tab }. Closing git-bull stops it, and Git may leave the working copy half updated.
 close-question-tab-index = The action "{ $action }" is still running in the tab { $tab }. Closing the tab stops it: files may stay as they were, and Git may leave a lock on the index behind.
 close-question-window-index = The action "{ $action }" is still running in the tab { $tab }. Closing git-bull stops it: files may stay as they were, and Git may leave a lock on the index behind.
+close-question-tab-commit = The action "{ $action }" is still running in the tab { $tab }. Closing the tab stops it: the commit may not be made, its hooks are stopped half way, and the message in the commit form is gone with the tab.
+close-question-window-commit = The action "{ $action }" is still running in the tab { $tab }. Closing git-bull stops it: the commit may not be made, its hooks are stopped half way, and the message in the commit form is gone with the tab.
 close-question-window-many = Actions are still running in { $count } tabs, among them "{ $action }" in the tab { $tab }. Closing git-bull stops them, and Git may leave the working copies half updated.
 close-keep-open = Keep open
 close-anyway = Close anyway

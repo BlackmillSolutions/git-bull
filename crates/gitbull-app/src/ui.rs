@@ -31,6 +31,7 @@ use crate::app::{
     App, CloseQuestion, GitMessage, GitStatus, HunkMove, Notice, Origin, Overlay, SettingsDialog,
 };
 use crate::blame_view;
+use crate::commit_form;
 use crate::commit_list;
 use crate::commit_panel;
 use crate::components::{self, BannerAction, BannerKind, Button, Kind, focus_ring};
@@ -2343,9 +2344,17 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     args.set("tab", first.title.clone());
     // What stopping leaves behind differs: a checkout can leave the working
     // copy half updated, a staging only files that were not staged and a lock
-    // on the index.
+    // on the index, a commit only a commit that was not made and a message
+    // that goes with the tab.
     let index = first.action.is_index();
+    let commit = matches!(first.action, WriteAction::Commit { .. });
     let body = match (question, relevant.len()) {
+        (CloseQuestion::Tab(_), _) if commit => {
+            texts.text_with(Msg::CloseQuestionTabCommit, Some(&args))
+        }
+        (CloseQuestion::Window, 1) if commit => {
+            texts.text_with(Msg::CloseQuestionWindowCommit, Some(&args))
+        }
         (CloseQuestion::Tab(_), _) if index => {
             texts.text_with(Msg::CloseQuestionTabIndex, Some(&args))
         }
@@ -2730,10 +2739,39 @@ fn history(app: &mut App, ui: &mut Ui) {
                     .size_range(200.0..=f32::INFINITY)
                     .show(ui, |ui| {
                         fill(ui);
-                        section_title(ui, files_title.clone());
-                        if !file_status_view::show(app, ui, palette) {
-                            focus_area(ui, STATUS_LIST, &files_title);
+                        // The commit form keeps its room below the file
+                        // list, which scrolls in the rest.
+                        if commit_form::shown(app) {
+                            // In a small window the form gives the list the
+                            // room for its title, its filter and five rows,
+                            // and scrolls in what is left.
+                            let most = (ui.available_height() - commit_form::LIST_ROOM)
+                                .max(SHAPE.control_height);
+                            // The form is as high as what it holds; only one
+                            // that was higher than its room when drawn last
+                            // gets that room and scrolls.
+                            if commit_form::height(ui).is_some_and(|height| height > most) {
+                                Panel::bottom("commit_form")
+                                    .resizable(false)
+                                    .exact_size(most)
+                                    .show(ui, |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("commit_form_scroll")
+                                            .auto_shrink(false)
+                                            .show(ui, |ui| commit_form::show(app, ui, palette));
+                                    });
+                            } else {
+                                Panel::bottom("commit_form")
+                                    .resizable(false)
+                                    .show(ui, |ui| commit_form::show(app, ui, palette));
+                            }
                         }
+                        CentralPanel::default().show(ui, |ui| {
+                            section_title(ui, files_title.clone());
+                            if !file_status_view::show(app, ui, palette) {
+                                focus_area(ui, STATUS_LIST, &files_title);
+                            }
+                        });
                     });
                 commit_panel_width = files.response.rect.width();
                 CentralPanel::default().show(ui, |ui| {
@@ -2877,7 +2915,19 @@ pub(crate) fn move_between_areas(ui: &Ui, areas: &[&str]) {
             None => id,
         }
     });
-    let areas: Vec<Id> = areas.iter().map(Id::new).collect();
+    let mut areas: Vec<Id> = areas.iter().map(Id::new).collect();
+    // The commit form stands between the file list and the diff. Tab enters
+    // it at its first control that is available, and with Shift at its last;
+    // inside it and out of it the form moves the focus itself.
+    let status_list = Id::new(STATUS_LIST);
+    if let Some(list) = areas.iter().position(|area| *area == status_list) {
+        let stops = commit_form::stops(ui);
+        if focused == Some(status_list) {
+            areas.splice(list + 1..list + 1, stops.first().copied());
+        } else {
+            areas.splice(list + 1..list + 1, stops.last().copied());
+        }
+    }
     let Some(position) = focused.and_then(|id| areas.iter().position(|area| *area == id)) else {
         return;
     };
