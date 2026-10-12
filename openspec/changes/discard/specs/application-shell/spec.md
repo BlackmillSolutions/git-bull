@@ -126,8 +126,12 @@ that is gone with the tab, for a commit. A discard, a restore and the
 clearing cannot be stopped; for them the question SHALL say so. It SHALL offer
 Keep open, which is the default, and Close anyway. Close anyway SHALL close the
 tab or the window and stop the action; for a discard, a restore and the
-clearing it SHALL close the tab or the window as soon as the action ended, and
-nothing SHALL be stopped. This
+clearing it SHALL close the tab or the window as soon as no write action runs
+in it, and nothing of them SHALL be stopped. When a window is closed while
+actions that can be stopped run in some tabs and a discard in another, those
+SHALL be stopped at once and the window SHALL wait for the discard; while it
+waits the user SHALL be able to keep it open. The dialogs of an action that ended
+after its tab was closed are not shown. This
 replaces, for write actions, the stopping of all background work of a closed tab
 (requirement "Repository tabs"). Closing a tab or the window in which no write
 action runs SHALL NOT ask anything.
@@ -167,4 +171,8 @@ action runs SHALL NOT ask anything.
 
 #### Scenario: Closing a tab while files are discarded
 - **WHEN** a discard runs in a tab and the user closes the tab and chooses Close anyway
-- **THEN** a question named the discard and the tab and said that it cannot be stopped, the discard runs to its end, and the tab closes then
+- **THEN** a question names the discard and the tab and says that it cannot be stopped, the discard runs to its end, and the tab closes then
+
+#### Scenario: Window closed with a checkout in another tab
+- **WHEN** a checkout runs in one tab and a discard in another and the user closes the window and chooses Close anyway
+- **THEN** the checkout is stopped at once, the window waits for the discard, and closes when it ended

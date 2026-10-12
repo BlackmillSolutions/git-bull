@@ -44,7 +44,10 @@ confirmation that is clicked away by habit being the only safeguard.
   an entry that was interrupted shows in the list with "Put back". Nothing
   deletes bytes except the pruning of old entries (after 30 days, and beyond
   1 GB the oldest first, at the next discard, never the entry just made and
-  never an interrupted one), "Clear", and the removal of the worktree itself.
+  never an interrupted one), "Clear", and the removal of the worktree itself. An
+  advisory lock of the operating system, which a process that ends releases at
+  once, lets two instances take turns, and the Git that a discard started is
+  known by its process, so that "Put back" does not race it.
 - A discard is an exclusive write action of the tab, as a commit is, but it
   cannot be stopped, not by Stop, not by closing the tab and not by dropping
   the session: closing waits for it. A discard stopped half way is worse than
@@ -58,8 +61,9 @@ confirmation that is clicked away by habit being the only safeguard.
   untracked folder that is itself a repository. Symbolic links and changes of
   type are discarded whole. Hunks and lines are further not offered for the
   diffs that cannot be staged in parts (a filter driver, a cut diff, a link),
-  for a file whose line endings are mixed, where Git would rewrite unrelated
-  lines, and for an untracked file, which is discarded whole.
+  for a file where Git would rewrite line endings elsewhere while writing it,
+  which is found exactly by comparing the result with the copy in the journal,
+  and for an untracked file, which is discarded whole.
 
 Not part of this change: selecting several files at once, stashing, cleaning
 ignored files, resolving conflicts, discarding what is staged, and a journal

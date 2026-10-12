@@ -21,17 +21,22 @@ the file system treats as its own folder `.git`, also in the forms of Windows
 symbolic link or, on Windows, a reparse point, and that it names no folder,
 which is what Git lists for a repository of its own. The last component may
 be a file or a symbolic link, which is moved as the link it is. A path that
-fails SHALL be left out before anything was changed.
+fails, and a path at which the working copy holds a folder although Git lists a
+file, SHALL be left out before anything was changed.
 
 The Git folder of the worktree SHALL be asked of Git, and a worktree whose Git
 folder cannot be written SHALL be refused with Git's or the system's message.
 A discard of a part SHALL change nothing when the diff it was made for is no
-longer the one Git reports, when the file changed while it was copied, and
-when Git reports its line endings in the working copy as mixed, which
-`ls-files --eol` says. The journal SHALL be written with the steps and the
-states of the capability `discard`, so that a process that ends at any step
-leaves every file either at its path or in the journal, and so that the entry
-can be put back.
+longer the one Git reports and when the file changed while it was copied, and
+it SHALL put the file back as it was when, after the patch, any line outside the
+hunks is not byte for byte what it was, which is what Git's conversion of line
+endings on writing causes. A tracked path SHALL be touched by a rollback or by
+putting back only where it is absent or holds what the index holds, which is
+told by hashing the file as Git would and comparing with the index. The journal
+SHALL be written with the steps and the states of the capability `discard`, so
+that a process that ends at any step leaves every file either at its path or in
+the journal, and so that the entry can be put back; Git started by a discard
+SHALL be known by its process, so that putting back is refused while it runs.
 
 #### Scenario: Restore from the index
 - **WHEN** a tracked file is modified and not staged and is discarded
@@ -57,6 +62,18 @@ can be put back.
 - **WHEN** the session of the tab is dropped while a discard runs
 - **THEN** the discard runs to its end
 
-#### Scenario: Mixed line endings
-- **WHEN** a part is to be discarded from a file whose line endings `ls-files --eol` reports as mixed in the working copy
-- **THEN** nothing is changed and the refusal says so
+#### Scenario: Line endings Git would rewrite
+- **WHEN** `core.autocrlf` is `true` and a part is discarded from a file whose lines all end in LF in the working copy
+- **THEN** the file is put back as it was and the refusal says that line endings would be rewritten
+
+#### Scenario: Mixed line endings without conversion
+- **WHEN** no conversion applies and a part is discarded from a file with mixed line endings
+- **THEN** every line outside the hunk is as it was
+
+#### Scenario: A folder at a tracked path
+- **WHEN** a tracked file was replaced by a folder with an untracked file in it
+- **THEN** the path is left out and the folder is untouched
+
+#### Scenario: A tracked file edited after Git wrote it
+- **WHEN** a rollback finds a tracked file that holds something other than the index
+- **THEN** the file is left alone and named

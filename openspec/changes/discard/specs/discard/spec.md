@@ -17,10 +17,12 @@ deleted, and remove an untracked file. A symbolic link, and a file whose type
 changed to or from a symbolic link, SHALL be discarded whole in the same way.
 A file that is staged and has further changes SHALL lose only the further
 changes: what is staged SHALL stay staged, and the Staged group SHALL list the
-file as before. The index, HEAD and every reference SHALL stay as they are. The
-files of the Staged group SHALL offer no entry that discards, because what is
-only staged is not in the working copy alone; to discard it the user unstages
-it first.
+file as before. The index, HEAD and every reference SHALL stay as they are. A
+path at which the working copy holds a folder although Git lists a file, as
+when a folder took the place of a file, SHALL be left out and named, because
+restoring the file would delete the folder and what is in it. The files of the
+Staged group SHALL offer no entry that discards, because what is only staged is
+not in the working copy alone; to discard it the user unstages it first.
 
 #### Scenario: Modified file
 - **WHEN** `src/a.rs` is modified and not staged, and the user discards it after the confirmation
@@ -42,6 +44,10 @@ it first.
 - **WHEN** a tracked symbolic link points elsewhere than the index says and the user discards it
 - **THEN** it points where the index says
 
+#### Scenario: A folder where a file is listed
+- **WHEN** the tracked file `data` was replaced by a folder `data/` with an untracked file in it, and the user discards `data`
+- **THEN** a dialog names `data` as left out, and the folder and the file in it are untouched
+
 #### Scenario: A file that is only staged
 - **WHEN** the user opens the context menu of a file of the Staged group
 - **THEN** the menu offers to unstage it and no entry to discard
@@ -53,10 +59,8 @@ discard every file the group lists under the filter of the file list and that
 can be discarded, as the requirement "Discarding a file" says for each, and it
 SHALL be unavailable when there is none. The confirmation SHALL name how many
 files it discards and, when there are some, how many it leaves because they
-cannot be discarded. A file that cannot be discarded when the work begins, as
-one whose path is no longer what the status listed, SHALL be left out, the
-rest SHALL be discarded, and a dialog afterwards SHALL name the files that were
-left.
+cannot be discarded. The title SHALL keep room for both buttons and for its own
+text in the narrowest panel.
 
 #### Scenario: Filter of the file list
 - **WHEN** the filter shows two of five unstaged files and the user chooses "Discard all"
@@ -66,9 +70,9 @@ left.
 - **WHEN** the group lists four files, one of them in conflict, and the user chooses "Discard all"
 - **THEN** the confirmation names three files and says that one cannot be discarded, and the file in conflict is not touched
 
-#### Scenario: A file left out on the way
-- **WHEN** one of three files is replaced by a symbolic link to another folder in a terminal while the confirmation is open, and the user confirms
-- **THEN** the other two are discarded and a dialog names the third as left out
+#### Scenario: Narrow panel
+- **WHEN** the file list is at its narrowest and the title of the group holds a count of four digits
+- **THEN** the text of the title and both buttons are in view and do not overlap
 
 ### Requirement: Confirmation of discarding files
 Discarding a whole file or all files of a group SHALL ask first, in a dialog
@@ -99,16 +103,29 @@ SHALL NOT ask.
 - **THEN** the hunk is discarded at once, and the notice bar offers to undo it
 
 ### Requirement: What is discarded is what was asked
-When the user confirms, the files and what kind of change each has SHALL be
-read again from the status as it is then, and not taken from the moment of the
-click. When a file listed in the confirmation is no longer one that can be
-discarded in the same way, as an untracked file that was added or committed in
-a terminal meanwhile, nothing SHALL be discarded, a dialog SHALL say that the
-files changed since they were asked for, and the status SHALL be read again.
+When the user confirms, git-bull SHALL read the status again, under the lock of
+the journal, and compare each file of the request with it: its path and its
+class, tracked or untracked, and that it is still offered. A change from
+modified to deleted or the reverse does not matter. When a file is no longer of
+the same class or is gone from the status, as an untracked file that was added
+or committed in a terminal meanwhile, nothing SHALL be discarded, a dialog SHALL
+say that the files changed since they were asked for, and the status SHALL be
+read again. This holds for one file and for "Discard all". A file whose path
+fails the check of the capability `git-integration` or is a folder at a path
+that Git lists as a file SHALL be left out instead, the rest SHALL be
+discarded, and a dialog afterwards SHALL name the files that were left out.
 
 #### Scenario: Untracked file added meanwhile
 - **WHEN** the confirmation names the untracked `notes.txt`, `git add notes.txt` runs in a terminal, and the user confirms
 - **THEN** nothing is discarded, a dialog says that the files changed, and `notes.txt` is still in the working copy
+
+#### Scenario: One of three files changed class
+- **WHEN** "Discard all" names three files and one of them is staged in a terminal as an addition before the user confirms
+- **THEN** nothing is discarded and a dialog says that the files changed
+
+#### Scenario: A folder component became a link
+- **WHEN** the folder `docs` of the file `docs/a.txt` is replaced by a symbolic link to another folder in a terminal while the confirmation is open, and the user confirms
+- **THEN** the other files are discarded and a dialog names `docs/a.txt` as left out
 
 ### Requirement: Discarding a hunk and selected lines
 In the diff of a tracked file of the Unstaged group, the File status view SHALL
@@ -118,18 +135,19 @@ in the context menu while lines are selected, after the entries that stage. It
 SHALL take every added and removed line of the hunk, or of the selection, out
 of the working copy as a reverse patch: an added line is removed, a removed
 line is put back. The other lines of the file, and what is staged, SHALL stay
-as they are. A file whose line endings are mixed in the working copy, some
-lines ending in CRLF and some in LF, SHALL be refused: Git would write
-unrelated lines of it in one ending; a dialog SHALL say so and that the file
-can be discarded whole, and nothing SHALL be changed. For every other file the
-line endings SHALL stay as the file has them, also under `core.autocrlf` and
-an `eol` attribute. There SHALL be no key for it. Hunks and lines SHALL NOT be
-offered for an untracked file, which is discarded whole, and SHALL be
-unavailable, with the reason, in the cases where the capability `staging` makes
-staging in parts unavailable: a file in conflict, a diff that was cut at its
-limit, a file under a filter driver, a symbolic link and a change of the type
-of a file. They SHALL be unavailable while another action runs or the diff is
-read again, and a request SHALL NOT be kept for later.
+as they are, byte for byte: when the file as written by Git differs from the
+file as it was in any line outside the hunks, which happens where Git converts
+line endings on writing, git-bull SHALL put the file back as it was, a dialog
+SHALL say that Git would rewrite line endings elsewhere in the file and that
+the file can be discarded whole, and the list "Recently discarded" SHALL get no
+entry. A file with mixed line endings where Git converts nothing SHALL be
+discarded in parts like any other. There SHALL be no key for it. Hunks and
+lines SHALL NOT be offered for an untracked file, which is discarded whole, and
+SHALL be unavailable, with the reason, in the cases where the capability
+`staging` makes staging in parts unavailable: a file in conflict, a diff that
+was cut at its limit, a file under a filter driver, a symbolic link and a change
+of the type of a file. They SHALL be unavailable while another action runs or
+the diff is read again, and a request SHALL NOT be kept for later.
 
 #### Scenario: One of two hunks
 - **WHEN** `src/a.rs` has two hunks in the Unstaged group and the user chooses "Discard hunk" on the first
@@ -143,13 +161,17 @@ read again, and a request SHALL NOT be kept for later.
 - **WHEN** a line was deleted in the working copy and the user discards it as a selected line
 - **THEN** the line is back in the file at its place
 
-#### Scenario: Line endings
+#### Scenario: CRLF throughout
 - **WHEN** `core.autocrlf` is `true`, every line of the file ends in CRLF in the working copy and the user discards a hunk
 - **THEN** the rest of the file keeps its CRLF line endings
 
-#### Scenario: Mixed line endings
-- **WHEN** `core.autocrlf` is `true`, some lines of the file end in CRLF and others in LF, and the user discards a hunk
-- **THEN** a dialog says that the file has mixed line endings and can be discarded whole, the file is unchanged, and the list "Recently discarded" has no new entry
+#### Scenario: Git would rewrite line endings
+- **WHEN** `core.autocrlf` is `true`, the file ends every line in LF in the working copy, and the user discards a hunk
+- **THEN** the file is as it was, a dialog says that Git would rewrite line endings elsewhere in it, and the list has no new entry
+
+#### Scenario: Mixed line endings without conversion
+- **WHEN** no line-ending conversion applies, some lines of the file end in CRLF and others in LF, and the user discards a hunk
+- **THEN** the hunk is gone and every other line is byte for byte as it was
 
 #### Scenario: Staged part stays
 - **WHEN** one hunk of a file is staged and a second one is not, and the user discards the second
@@ -211,15 +233,19 @@ references. It SHALL be created with the first entry, and showing the list SHALL
 create nothing. One discard SHALL make one entry, which holds, for each file,
 what the working copy had: its exact bytes, mode and times, or that it had
 none, and the entry SHALL name its files, the time and the kind of the
-discard. A whole file SHALL be moved into the entry, and the file that a hunk or
-lines are taken out of SHALL be copied into it, so that the entry holds the file
-as it was before. The journal belongs to the worktree: removing a linked
-worktree removes it. Two tabs or two instances of git-bull on one worktree
-SHALL take turns at the journal, the second waiting for the first for up to 30
-seconds and then refusing with a dialog that says so. Anything in the journal
-that is not what git-bull wrote, as an entry that is a symbolic link, a slot
-that is not a file, a number that is not a number or an unknown version, SHALL
-be listed as unreadable with its folder and SHALL NOT be followed.
+discard. A whole file SHALL be moved into the entry, also across volumes, where
+it SHALL be copied under a name that is not that of the entry until it is
+complete, and the file that a hunk or lines are taken out of SHALL be copied
+into it, so that the entry holds the file as it was before. The journal belongs
+to the worktree: removing a linked worktree removes it. Two instances of
+git-bull on one worktree SHALL take turns at the journal, the second waiting
+for the first and saying so in its status bar, up to 30 seconds, and then
+refusing with a dialog that says so; a process that ends SHALL release its turn
+at once, so that the entries it left are shown as interrupted without delay.
+Anything in the journal that is not what git-bull wrote, as an entry that is a
+symbolic link, a slot that is not a file, a number that is not a number or an
+unknown version, SHALL be listed as unreadable with its folder and SHALL NOT be
+followed.
 
 #### Scenario: Exact bytes
 - **WHEN** `core.autocrlf` is `true`, a file with mixed line endings is discarded and then restored
@@ -234,16 +260,24 @@ be listed as unreadable with its folder and SHALL NOT be followed.
 - **THEN** the entry lies in the folder of that worktree inside the Git folder, and the main worktree does not list it
 
 #### Scenario: A large file
-- **WHEN** an untracked file of 2 GB is discarded
+- **WHEN** an untracked file of 2 GB is discarded on the volume of the Git folder
 - **THEN** the discard ends in about the time it takes to move a file, and the entry holds the file
+
+#### Scenario: Another volume
+- **WHEN** the working copy lies on another volume than the Git folder and a large file is discarded, and git-bull ends in the middle of the copy
+- **THEN** the file is still at its path and the entry holds no incomplete file under the name of a slot
 
 #### Scenario: Listing creates nothing
 - **WHEN** nothing was ever discarded in a worktree and the File status view is shown
 - **THEN** no folder `gitbull` exists in its Git folder
 
-#### Scenario: Two tabs
-- **WHEN** two tabs show the same worktree and both discard at the same time
-- **THEN** one waits for the other, both discards take place, and neither entry is damaged
+#### Scenario: Two instances
+- **WHEN** two instances of git-bull show the same worktree and both discard at the same time
+- **THEN** one waits for the other and says so, both discards take place, and neither entry is damaged
+
+#### Scenario: A process ends
+- **WHEN** an instance is killed during a discard and another instance of the same worktree discards a file at once
+- **THEN** the second discard is not kept waiting, and the entry of the first is listed as interrupted
 
 #### Scenario: A planted link
 - **WHEN** an entry of the journal is a symbolic link to another folder
@@ -252,14 +286,23 @@ be listed as unreadable with its folder and SHALL NOT be followed.
 ### Requirement: An interrupted discard or restore
 When git-bull ends in the middle of a discard or of a restore, as when it is
 killed, the entry SHALL stay in the journal, and the list SHALL show it as
-interrupted with the files it holds and the button "Put back". "Put back" SHALL
-bring the working copy to a state in which every file of the entry is where it
-was or where the restore was putting it, and SHALL delete no byte: for an
-interrupted discard it returns each file that was moved to its path, except
-that a path at which a program created another file since SHALL be left alone
-and named in a dialog, and the entry stays; for an interrupted restore it
-completes the exchange. An interrupted entry SHALL NOT be removed by the
-retention, and the question of "Clear" SHALL say how many there are.
+interrupted with the files it holds and the button "Put back", unless another
+instance is working on it, which the list shows as running without the button.
+"Put back" SHALL delete no byte and SHALL overwrite none: it SHALL bring the
+files of the entry to where they were or where the restore was putting them, and
+it SHALL touch a path only when that is safe. For an interrupted discard it
+returns each file that was moved to its path when the path is absent, and, for a
+file that Git restores from the index, also when the file at the path is what
+the index holds; a path at which another file lies SHALL be left alone and named
+in a dialog, and the entry stays. It SHALL be refused while Git, started by the
+discard, still runs, as it can after git-bull was killed; the dialog SHALL say
+so. For an interrupted restore it completes the exchange by the identity of the
+files, and a file of another identity SHALL be left alone and named. For an
+interrupted copy of a part, an entry whose slot equals the file at the path is
+removed, and one whose path is gone has its slot moved back; otherwise the entry
+becomes discarded and keeps both files. An interrupted entry SHALL NOT be
+removed by the retention, and the question of "Clear" SHALL say how many there
+are.
 
 #### Scenario: Killed after the files were moved
 - **WHEN** git-bull is killed after two untracked files were moved into the journal and before the discard ended
@@ -273,6 +316,18 @@ retention, and the question of "Clear" SHALL say how many there are.
 - **WHEN** an interrupted discard of `notes.txt` is put back and a program created a new `notes.txt` meanwhile
 - **THEN** the new file is untouched, a dialog names `notes.txt`, and the entry stays with the old one
 
+#### Scenario: Git still runs
+- **WHEN** git-bull is killed while `git restore` runs, Git keeps running, and the user chooses "Put back" at once
+- **THEN** nothing is changed, a dialog says that Git still works on the entry, and after Git ended "Put back" works
+
+#### Scenario: A tracked file edited after the crash
+- **WHEN** a tracked file of an interrupted discard was restored by Git, and then the user edited it
+- **THEN** "Put back" leaves it alone and names it
+
+#### Scenario: Another instance works on it
+- **WHEN** an entry is being discarded by another instance of git-bull
+- **THEN** the list shows it as running and offers no "Put back"
+
 ### Requirement: Undoing a discard
 After a discard that took place, a notice bar below the file list SHALL name it,
 such as "Discarded 3 files", and offer "Undo". "Undo", and Ctrl+Z, or Cmd+Z on
@@ -283,13 +338,20 @@ before it SHALL be restored from the list. After that the bar SHALL say
 "Restored 3 files" and offer "Discard again", which, with Ctrl+Shift+Z or
 Cmd+Shift+Z, restores the entry once more, as the requirement "Restoring"
 describes. The bar SHALL stay until the user closes it or discards or restores
-something else, its buttons SHALL be reached with Tab before the list, and it
-SHALL be announced to assistive technology when it appears. When the entry was
-removed meanwhile, a dialog SHALL say so.
+something else, also when the last changed file was discarded and the File
+status view has nothing else to list, its buttons SHALL be reached with Tab
+before the list, and it SHALL be announced to assistive technology when it
+appears. When the entry was removed or is not in the state the request expects,
+as when another instance restored it meanwhile, nothing SHALL be changed and a
+dialog SHALL say so.
 
 #### Scenario: Undo
 - **WHEN** the user discards `src/a.rs` and chooses "Undo" in the bar
 - **THEN** `src/a.rs` is modified again as before and the File status view lists it
+
+#### Scenario: The last file
+- **WHEN** the only changed file is discarded
+- **THEN** the working copy is clean, and the bar with "Undo" and the list "Recently discarded" are still shown
 
 #### Scenario: Ctrl+Z
 - **WHEN** the user has discarded two files and presses Ctrl+Z with the file list focused
@@ -307,25 +369,31 @@ removed meanwhile, a dialog SHALL say so.
 - **WHEN** a discard was undone and the user chooses "Discard again"
 - **THEN** the files are discarded as before, and the bar says so
 
+#### Scenario: Restored by another instance
+- **WHEN** the entry was restored from the list of another instance after the bar was drawn, and the user chooses "Undo"
+- **THEN** nothing changes and a dialog says that the entry changed
+
 #### Scenario: Nothing to undo
 - **WHEN** no discard was made in the tab
 - **THEN** Ctrl+Z does nothing and no bar is shown
 
 ### Requirement: Recently discarded
 Below the file list the File status view SHALL show a section "Recently
-discarded" with the number of entries, while the journal has some; it SHALL be
-collapsed at first and SHALL show nothing while the journal is empty. Each
-entry SHALL show its time, how many files it holds, up to the names of the
-first ones, and its state, discarded, restored or interrupted, and a button,
-"Restore" while it is discarded, "Discard again" while it is restored and "Put
-back" while it is interrupted. The section SHALL offer "Clear", which asks first
-and says that what is cleared cannot be brought back and how many entries are
-interrupted, and which removes every entry. The list SHALL be read from the
-journal when the tab is shown and after every action, so that it survives a
-restart and shows the entries of earlier runs and of other tabs of the same
-worktree. Every control of the section SHALL be reachable with Tab, in the
-order of the page, between the notice bar and the commit form, and SHALL have a
-name for assistive technology.
+discarded" with the number of entries, while the journal has some, also when
+the working copy is clean; it SHALL be collapsed at first and SHALL show nothing
+while the journal is empty. Each entry SHALL show its time, how many files it
+holds, up to the names of the first ones, and its state, discarded, restored,
+interrupted or running, and a button, "Restore" while it is discarded, "Discard
+again" while it is restored and "Put back" while it is interrupted. The section
+SHALL offer "Clear", which asks first and says that what is cleared cannot be
+brought back and how many entries are interrupted, and which removes every
+entry, those that are unreadable too, and which is refused while an entry is
+running. The list SHALL be read from the journal when the tab is shown and after
+every action, so that it survives a restart and shows the entries of earlier
+runs and of other instances of the same worktree. Every control of the section,
+and its header, SHALL be reachable with Tab, in the order of the page, between
+the notice bar and the commit form, and SHALL have a name for assistive
+technology.
 
 #### Scenario: After a restart
 - **WHEN** a file was discarded, git-bull was closed and opened again, and the user opens "Recently discarded"
@@ -341,14 +409,16 @@ name for assistive technology.
 
 #### Scenario: Keyboard
 - **WHEN** the section is open and the user presses Tab from the file list
-- **THEN** the focus goes through the notice bar and the controls of the list before it reaches the commit form, and Shift+Tab from the commit form comes back to the last of them
+- **THEN** the focus goes through the notice bar, the header and the controls of the list before it reaches the commit form, and Shift+Tab from the commit form comes back to the last of them
 
 ### Requirement: Restoring
 "Restore" SHALL put the files of an entry back, each at its path, and SHALL
 exchange: what the working copy has at that path now SHALL go into the entry,
 in the place the restored one leaves, or the entry SHALL record that the file
 was not there. The entry SHALL then be in the state restored, and restoring it
-again SHALL exchange once more. No restore SHALL delete a byte: what is
+again SHALL exchange once more. A request to restore SHALL name the state the
+entry is expected to be in, and SHALL change nothing, and say so in a dialog,
+when the entry is in another one. No restore SHALL delete a byte: what is
 overwritten is in the entry, and a step is never taken onto a file that holds
 bytes of the entry. A restore SHALL NOT change the index, HEAD or a reference.
 Before it changes anything it SHALL check every file, and when the path of one
@@ -380,11 +450,12 @@ gone SHALL be left out, and the rest restored, and the dialog SHALL name it.
 When a discard adds an entry, git-bull SHALL remove entries whose last change
 is older than 30 days, and then the oldest ones while the journal is larger
 than 1 GB, but never the entry it just made and never an interrupted one. The
-size of an entry is what its manifest says, so that no file has to be
-measured. Nothing else SHALL remove bytes of the journal except "Clear",
-git's own removal of a linked worktree, and a restore never does. An entry
-that cannot be removed SHALL be left and SHALL NOT keep a discard from taking
-place.
+size of an entry is what its manifest says, written when the files of the entry
+are known, so that no file has to be measured and an interrupted entry counts.
+Nothing else SHALL remove bytes of the journal except "Clear", git's own removal
+of a linked worktree, and a restore never does. An entry that cannot be removed
+SHALL be left and SHALL NOT keep a discard from taking place. Folders that were
+left empty by moving a file out of them SHALL stay.
 
 #### Scenario: Old entries
 - **WHEN** an entry was last changed 31 days ago and the user discards a file
@@ -392,7 +463,7 @@ place.
 
 #### Scenario: Larger than the limit
 - **WHEN** the journal holds 900 MB and a discard adds 300 MB
-- **THEN** the oldest entries are removed until it holds at most 1 GB, or only the new entry is left
+- **THEN** the oldest entries that are not interrupted are removed until it holds at most 1 GB, or only the new entry and the interrupted ones are left
 
 #### Scenario: One entry above the limit
 - **WHEN** a single discard is larger than 1 GB
@@ -405,16 +476,20 @@ place.
 ### Requirement: A discard that does not complete
 A discard SHALL leave the working copy as it was when it cannot be done to the
 end: a failure of Git, a file that another program holds open, a path that is
-blocked, a full disk. The files that were moved into the entry SHALL be moved
-back, the entry SHALL be removed when everything is back, and a dialog SHALL
-show the message of Git or of the operating system in full, with a button that
-copies it. A file at whose path a program created another file since it was
-moved SHALL NOT be overwritten: the dialog SHALL name it, and the entry SHALL
-stay, as interrupted. A tracked file that is back at its path after it was
-moved, and before Git wrote it again, SHALL stop the discard in the same way.
-When even moving back fails, the entry SHALL stay as interrupted, and the dialog
-SHALL say so and name where the files are. The status SHALL be read again after
-every end.
+blocked, a full disk, a panic. The files that were moved into the entry SHALL be
+moved back, the entry SHALL be removed when everything is back, and a dialog
+SHALL show the message of Git or of the operating system in full, with a button
+that copies it. Moving back SHALL overwrite no file of a program: an untracked
+file goes back only where its path is absent; a file that Git restores from the
+index goes back where its path is absent or holds what the index holds, and
+where Git has not written it, which is checked by the content; a file that did
+not exist before is removed only if it holds what the index holds. A path at
+which another file lies SHALL be left alone and named in the dialog, and the
+entry SHALL stay, as interrupted. The checks that a tracked path is still absent
+before Git writes it narrow the time in which a program can write there, they
+do not close it. When even moving back fails, the entry SHALL stay as
+interrupted, and the dialog SHALL say so and name where the files are. The
+status SHALL be read again after every end.
 
 #### Scenario: A filter fails
 - **WHEN** a file is under a clean and smudge filter, the smudge filter fails while the file is restored from the index, and the user discards the file
@@ -432,6 +507,14 @@ every end.
 - **WHEN** an untracked file was moved into the entry and a program wrote a new file at its path before the discard failed
 - **THEN** the new file is untouched, a dialog names it, and the entry stays as interrupted
 
+#### Scenario: Edited after Git wrote it
+- **WHEN** a discard fails after Git restored a tracked file and an editor saved a change to that file
+- **THEN** the file with the editor's change is untouched, a dialog names it, and the entry stays
+
+#### Scenario: A panic
+- **WHEN** the work of a discard panics after files were moved
+- **THEN** the files are moved back as for any failure, and the dialog shows the message of the panic
+
 #### Scenario: Moving back fails
 - **WHEN** a discard fails after it moved a file, and the file cannot be moved back
 - **THEN** the entry stays in the list as interrupted and the dialog names the folder that holds the file
@@ -446,7 +529,9 @@ SHALL name it, such as "Discarding 3 files", and the other tabs SHALL stay
 usable. When it ended, the status and the diff shown SHALL be read again, the
 selection of the file list SHALL follow as after staging, and the list
 "Recently discarded" SHALL show the new entry. No dialog SHALL appear when it
-took place and no file was left out.
+took place and no file was left out. When the tab was closed meanwhile, the
+dialogs of its end are not shown; the list shows the entry when the worktree is
+opened again.
 
 #### Scenario: Other actions are unavailable
 - **WHEN** a discard runs and the user opens the context menu of a file
