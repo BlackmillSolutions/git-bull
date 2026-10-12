@@ -335,8 +335,10 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         egui::TextEdit::multiline(&mut description)
             .id(description_id)
             .hint_text(texts.description.as_str())
+            // The text begins where the text of the summary does.
+            .margin(egui::Margin::symmetric(SHAPE.space[1] as i8, 4))
             .desired_rows(4)
-            .desired_width(width),
+            .desired_width(width - 2.0 * SHAPE.space[1]),
     );
     ui.ctx().accesskit_node_builder(field.id, |node| {
         node.set_label(texts.description.as_str());

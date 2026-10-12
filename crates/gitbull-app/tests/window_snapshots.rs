@@ -1080,10 +1080,18 @@ fn commit_form_while_a_commit_runs() {
     harness
         .get_by_role_and_label(Role::Button, "Commit changes to 2 files")
         .click();
-    wait_for(&mut harness, |h| {
-        h.query_by_role_and_label(Role::Button, "Stop").is_some()
-    });
-    // The spinner keeps the window repainting: steps, not a run to rest.
+    // The spinner keeps the window repainting: steps, not a run to rest,
+    // which `wait_for` ends with.
+    for _ in 0..1000 {
+        if harness
+            .query_by_role_and_label(Role::Button, "Stop")
+            .is_some()
+        {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
     for _ in 0..3 {
         harness.step();
     }
