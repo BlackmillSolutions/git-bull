@@ -18,10 +18,17 @@ use gitbull_git::commits::{CommitEntry, Since};
 use gitbull_git::compare::{BaseComparison, CompareRequest, Counts};
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
+use gitbull_git::discard::{
+    Class, DiscardEnd, DiscardOutcome, DiscardRequest, JournalError, PutBackEnd, PutBackError,
+};
 use gitbull_git::facts::RepositoryFacts;
 use gitbull_git::file_history::FileCommit;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
+use gitbull_git::journal::{
+    Cleared, Entry, ExchangeEnd, ExchangeError, FileKind, FileRecord, Held, Kind, Listed, Manifest,
+    Running as EntryRunning, State,
+};
 use gitbull_git::merged::{Prediction, Unpredicted};
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::patch::PartRequest;
@@ -110,6 +117,8 @@ pub struct FakeBackend {
     status_after_part: Vec<(PathBuf, WorkingStatus)>,
     /// How every commit ends; without, it is made.
     commit_end: Option<CommitEnd>,
+    /// How every discard ends; without, it is done.
+    discard_end: Option<DiscardEnd>,
     /// Holds every reading of the last message until it opens.
     last_message_gate: Option<Gate>,
     /// Holds one reading of a working diff, by its number, the first being 1,
@@ -814,6 +823,24 @@ impl FakeBackend {
         self
     }
 
+    /// How every discard of files or of a part ends; without, it is done.
+    /// A discard that is done changes the status in memory and makes an
+    /// entry in the journal, whatever is set here; the entry is named by
+    /// `end.entry` when it is set. The gate of the write actions holds a
+    /// discard, and its token does not stop it.
+    pub fn with_discard_end(mut self, end: DiscardEnd) -> FakeBackend {
+        self.discard_end = Some(end);
+        self
+    }
+
+    /// The journal of discards: the entries a test fills it with. A test
+    /// reads and changes it while it runs through [`Probe::journal`] and
+    /// [`Probe::set_journal`].
+    pub fn with_journal(self, entries: Vec<Listed>) -> FakeBackend {
+        self.probe.set_journal(entries);
+        self
+    }
+
     /// The message of the last commit.
     pub fn with_last_message(self, message: &str) -> FakeBackend {
         self.probe.set_last_message(Some(message));
@@ -1021,6 +1048,68 @@ impl FakeBackend {
 }
 
 impl FakeBackend {
+    /// Waits for the gate of the write actions, if there is one. The token of
+    /// a discard does not reach it: nothing stops a discard.
+    fn hold_unstoppable(&self) {
+        if let Some(gate) = &self.checkout_gate {
+            gate.wait();
+        }
+    }
+
+    /// The end of a discard: as set, else done. A discard that is done takes
+    /// the files in `paths` out of the status in memory and makes an entry in
+    /// the journal.
+    fn finish_discard(
+        &self,
+        repo: &Path,
+        kind: Kind,
+        files: Vec<FileRecord>,
+        paths: &[RepoPath],
+    ) -> DiscardEnd {
+        let end = self.discard_end.clone().unwrap_or(DiscardEnd {
+            outcome: DiscardOutcome::Done,
+            entry: None,
+            left_out: Vec::new(),
+        });
+        if end.outcome != DiscardOutcome::Done {
+            return end;
+        }
+        if !paths.is_empty() {
+            let root = self.root_of(repo);
+            let mut status = self.status_now(repo, &root);
+            status.unstaged.retain(|entry| !paths.contains(&entry.path));
+            status
+                .untracked
+                .retain(|entry| !paths.contains(&entry.path));
+            self.move_status(repo, root, status);
+        }
+        let mut log = self.probe.lock();
+        log.entries_made += 1;
+        let n = log.entries_made as u64;
+        let id = end
+            .entry
+            .clone()
+            .unwrap_or_else(|| format!("{}-{n}", 1_767_268_800_000 + n));
+        let manifest = Manifest {
+            changed: 1_767_268_800 + n,
+            size: 0,
+            kind,
+            state: State::Discarded,
+            git: None,
+            files,
+            idents: Vec::new(),
+        };
+        let folder = PathBuf::from("fake-journal").join(&id);
+        log.journal.push(Listed::Entry {
+            entry: Entry::in_memory(id.clone(), folder, manifest),
+            running: EntryRunning::Settled,
+        });
+        DiscardEnd {
+            entry: Some(id),
+            ..end
+        }
+    }
+
     /// Waits for the gate of the write actions, if there is one.
     fn hold_write(&self, cancel: &CancelToken) -> Result<(), WriteFailure> {
         if let Some(gate) = &self.checkout_gate {
@@ -1965,6 +2054,149 @@ impl Backend for FakeBackend {
         })
     }
 
+    fn discard_files(&self, repo: &Path, request: &DiscardRequest) -> DiscardEnd {
+        self.probe.record("discard", repo);
+        self.probe.lock().discards.push(request.clone());
+        self.hold_unstoppable();
+        let paths: Vec<RepoPath> = request.files.iter().map(|file| file.path.clone()).collect();
+        let records = request
+            .files
+            .iter()
+            .enumerate()
+            .map(|(slot, file)| FileRecord {
+                slot: slot as u32,
+                kind: match file.class {
+                    Class::Tracked => FileKind::Tracked,
+                    Class::Untracked => FileKind::Untracked,
+                },
+                held: Held::File,
+                path: file.path.clone(),
+            })
+            .collect();
+        self.finish_discard(repo, request.kind, records, &paths)
+    }
+
+    fn discard_part(&self, repo: &Path, entry: &StatusEntry, request: &PartRequest) -> DiscardEnd {
+        self.probe.record("discard-part", repo);
+        self.probe
+            .lock()
+            .discarded_parts
+            .push((entry.path.to_string_lossy().into_owned(), request.clone()));
+        self.hold_unstoppable();
+        let records = vec![FileRecord {
+            slot: 0,
+            kind: FileKind::Part,
+            held: Held::File,
+            path: entry.path.clone(),
+        }];
+        // A part leaves the file in the status.
+        self.finish_discard(repo, Kind::Lines, records, &[])
+    }
+
+    fn restore_entry(
+        &self,
+        repo: &Path,
+        id: &str,
+        expected: State,
+    ) -> Result<ExchangeEnd, JournalError> {
+        self.probe.record("restore", repo);
+        self.probe.lock().restores.push((id.to_owned(), expected));
+        self.hold_unstoppable();
+        let mut log = self.probe.lock();
+        let at = log
+            .journal
+            .iter()
+            .position(|item| matches!(item, Listed::Entry { entry, .. } if entry.id() == id))
+            .ok_or(JournalError::Gone)?;
+        let Listed::Entry { entry, running } = &log.journal[at] else {
+            return Err(JournalError::Gone);
+        };
+        let actual = entry.manifest().state;
+        if actual != expected {
+            return Err(JournalError::Exchange(ExchangeError::State { actual }));
+        }
+        // A restore and its undo swap the state back and forth.
+        let mut manifest = entry.manifest().clone();
+        manifest.state = match actual {
+            State::Discarded | State::Redoing => State::Restored,
+            _ => State::Discarded,
+        };
+        let moved = Entry::in_memory(id.to_owned(), entry.folder().to_owned(), manifest);
+        let running = *running;
+        log.journal[at] = Listed::Entry {
+            entry: moved.clone(),
+            running,
+        };
+        Ok(ExchangeEnd {
+            entry: moved,
+            left: Vec::new(),
+            complete: true,
+        })
+    }
+
+    fn put_back(&self, repo: &Path, id: &str) -> Result<PutBackEnd, PutBackError> {
+        self.probe.record("put-back", repo);
+        self.probe.lock().put_backs.push(id.to_owned());
+        self.hold_unstoppable();
+        let mut log = self.probe.lock();
+        let at = log
+            .journal
+            .iter()
+            .position(|item| matches!(item, Listed::Entry { entry, .. } if entry.id() == id))
+            .ok_or(PutBackError::State(None))?;
+        let Listed::Entry { entry, .. } = &log.journal[at] else {
+            return Err(PutBackError::State(None));
+        };
+        let state = entry.manifest().state;
+        if !state.is_unfinished() {
+            return Err(PutBackError::State(Some(state)));
+        }
+        if state == State::Pending {
+            log.journal.remove(at);
+            return Ok(PutBackEnd {
+                entry_removed: true,
+                left_alone: Vec::new(),
+            });
+        }
+        let mut manifest = entry.manifest().clone();
+        manifest.state = if state == State::Restoring {
+            State::Restored
+        } else {
+            State::Discarded
+        };
+        let moved = Entry::in_memory(id.to_owned(), entry.folder().to_owned(), manifest);
+        log.journal[at] = Listed::Entry {
+            entry: moved,
+            running: EntryRunning::Settled,
+        };
+        Ok(PutBackEnd {
+            entry_removed: false,
+            left_alone: Vec::new(),
+        })
+    }
+
+    fn clear_journal(&self, repo: &Path) -> Result<Cleared, JournalError> {
+        self.probe.record("clear-journal", repo);
+        self.hold_unstoppable();
+        let mut log = self.probe.lock();
+        let interrupted = log
+            .journal
+            .iter()
+            .filter(|item| matches!(item, Listed::Entry { entry, .. } if entry.manifest().state.is_unfinished()))
+            .count();
+        let removed = log.journal.len();
+        log.journal.clear();
+        Ok(Cleared {
+            removed,
+            interrupted,
+        })
+    }
+
+    fn journal_entries(&self, repo: &Path) -> Result<Vec<Listed>, JournalError> {
+        self.probe.record("journal-entries", repo);
+        Ok(self.probe.lock().journal.clone())
+    }
+
     fn commit(&self, repo: &Path, request: &CommitRequest, cancel: &CancelToken) -> CommitEnd {
         self.probe.record("commit", repo);
         self.probe.lock().commits.push(request.clone());
@@ -2609,6 +2841,20 @@ struct ProbeLog {
     parts: Vec<(Group, String, PartRequest)>,
     /// Every commit asked for, in order.
     commits: Vec<CommitRequest>,
+    /// Every discard of whole files asked for, in order.
+    discards: Vec<DiscardRequest>,
+    /// Every discard of a part asked for: the path of the file and the
+    /// request.
+    discarded_parts: Vec<(String, PartRequest)>,
+    /// Every restore, undo and redo asked for: the entry and the state the
+    /// caller expected.
+    restores: Vec<(String, State)>,
+    /// Every entry asked to be put back.
+    put_backs: Vec<String>,
+    /// The journal; a test may change it while it runs.
+    journal: Vec<Listed>,
+    /// How many entries discards made, for their names.
+    entries_made: usize,
     /// What the reads of the commit form return; a test may change them
     /// while it runs.
     last_message: Option<String>,
@@ -2721,6 +2967,38 @@ impl Probe {
     /// Every commit that was asked for, in order.
     pub fn commits(&self) -> Vec<CommitRequest> {
         self.lock().commits.clone()
+    }
+
+    /// Every discard of whole files that was asked for, in order.
+    pub fn discards(&self) -> Vec<DiscardRequest> {
+        self.lock().discards.clone()
+    }
+
+    /// Every discard of a part that was asked for, in order: the path of the
+    /// file and the request.
+    pub fn discarded_parts(&self) -> Vec<(String, PartRequest)> {
+        self.lock().discarded_parts.clone()
+    }
+
+    /// Every restore, undo and redo that was asked for, in order: the entry
+    /// and the state the caller expected it in.
+    pub fn restores(&self) -> Vec<(String, State)> {
+        self.lock().restores.clone()
+    }
+
+    /// Every entry that was asked to be put back, in order.
+    pub fn put_backs(&self) -> Vec<String> {
+        self.lock().put_backs.clone()
+    }
+
+    /// The journal as it is now.
+    pub fn journal(&self) -> Vec<Listed> {
+        self.lock().journal.clone()
+    }
+
+    /// The journal is `entries` from now on.
+    pub fn set_journal(&self, entries: Vec<Listed>) {
+        self.lock().journal = entries;
     }
 
     /// The message of the last commit, from now on; `None` for a repository
@@ -3313,6 +3591,130 @@ mod tests {
             }
             assert_eq!(backend.status(&root, &cancel).unwrap(), working());
         }
+    }
+
+    #[test]
+    fn a_discard_takes_files_out_of_the_status_and_makes_an_entry() {
+        let root = path(&["work", "app"]);
+        let entry = |kind, name| StatusEntry {
+            kind,
+            path: RepoPath::new(name),
+            old_path: None,
+            submodule: false,
+        };
+        let backend = FakeBackend::default()
+            .with_repository(root.clone())
+            .with_status(
+                root.clone(),
+                WorkingStatus {
+                    unstaged: vec![entry(StatusKind::Changed(ChangeKind::Modified), "a.rs")],
+                    untracked: vec![entry(StatusKind::Untracked, "new.rs")],
+                    ..WorkingStatus::default()
+                },
+            );
+        let probe = backend.probe();
+        let request = DiscardRequest {
+            files: vec![
+                gitbull_git::discard::DiscardFile {
+                    path: RepoPath::new("a.rs"),
+                    class: Class::Tracked,
+                },
+                gitbull_git::discard::DiscardFile {
+                    path: RepoPath::new("new.rs"),
+                    class: Class::Untracked,
+                },
+            ],
+            kind: Kind::Group,
+        };
+
+        let end = backend.discard_files(&root, &request);
+
+        assert_eq!(end.outcome, DiscardOutcome::Done);
+        assert!(
+            backend
+                .status(&root, &CancelToken::new())
+                .unwrap()
+                .is_clean()
+        );
+        assert_eq!(probe.discards(), [request]);
+        let journal = probe.journal();
+        assert_eq!(journal.len(), 1);
+        let Listed::Entry { entry, running } = &journal[0] else {
+            panic!("{journal:?}");
+        };
+        assert_eq!(Some(entry.id()), end.entry.as_deref());
+        assert_eq!(entry.manifest().state, State::Discarded);
+        assert_eq!(entry.manifest().files.len(), 2);
+        assert_eq!(*running, EntryRunning::Settled);
+    }
+
+    #[test]
+    fn restoring_swaps_the_state_and_checks_the_one_expected() {
+        let root = path(&["work", "app"]);
+        let manifest = |state| Manifest {
+            changed: 1,
+            size: 0,
+            kind: Kind::Files,
+            state,
+            git: None,
+            files: Vec::new(),
+            idents: Vec::new(),
+        };
+        let listed = |id: &str, state| Listed::Entry {
+            entry: Entry::in_memory(id.to_owned(), PathBuf::from(id), manifest(state)),
+            running: EntryRunning::Settled,
+        };
+        let backend = FakeBackend::default().with_repository(root.clone());
+        backend.probe().set_journal(vec![
+            listed("1-1", State::Discarded),
+            listed("2-2", State::Pending),
+        ]);
+        let probe = backend.probe();
+        let state_of = |id: &str| {
+            probe.journal().iter().find_map(|item| match item {
+                Listed::Entry { entry, .. } if entry.id() == id => Some(entry.manifest().state),
+                _ => None,
+            })
+        };
+
+        // A restore, then its undo.
+        let end = backend
+            .restore_entry(&root, "1-1", State::Discarded)
+            .unwrap();
+        assert!(end.complete);
+        assert_eq!(state_of("1-1"), Some(State::Restored));
+        backend
+            .restore_entry(&root, "1-1", State::Restored)
+            .unwrap();
+        assert_eq!(state_of("1-1"), Some(State::Discarded));
+
+        // An entry in another state than the one expected is not touched.
+        let refused = backend.restore_entry(&root, "1-1", State::Restored);
+        assert!(matches!(
+            refused,
+            Err(JournalError::Exchange(ExchangeError::State {
+                actual: State::Discarded
+            }))
+        ));
+        assert!(matches!(
+            backend.restore_entry(&root, "9-9", State::Discarded),
+            Err(JournalError::Gone)
+        ));
+
+        // An unfinished entry is put back; a finished one is not.
+        assert!(matches!(
+            backend.put_back(&root, "1-1"),
+            Err(PutBackError::State(Some(State::Discarded)))
+        ));
+        assert!(backend.put_back(&root, "2-2").unwrap().entry_removed);
+        assert_eq!(state_of("2-2"), None);
+        assert_eq!(probe.restores().len(), 4);
+        assert_eq!(probe.put_backs(), ["1-1", "2-2"]);
+
+        // Clearing removes what is left.
+        let cleared = backend.clear_journal(&root).unwrap();
+        assert_eq!((cleared.removed, cleared.interrupted), (1, 0));
+        assert!(backend.journal_entries(&root).unwrap().is_empty());
     }
 
     #[test]

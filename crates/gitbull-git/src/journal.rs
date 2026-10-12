@@ -391,6 +391,16 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// An entry that exists only in memory, for a stand-in of the journal:
+    /// nothing is read from or written to `folder`.
+    pub fn in_memory(id: String, folder: PathBuf, manifest: Manifest) -> Entry {
+        Entry {
+            id,
+            folder,
+            manifest,
+        }
+    }
+
     /// The name of the entry: the time in milliseconds, a dash and a counter.
     pub fn id(&self) -> &str {
         &self.id

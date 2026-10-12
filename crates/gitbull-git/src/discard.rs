@@ -102,6 +102,17 @@ pub struct DiscardEnd {
     pub left_out: Vec<(RepoPath, PathRefusal)>,
 }
 
+impl DiscardEnd {
+    /// An end for a discard that was not begun.
+    pub fn refused(why: DiscardRefusal) -> DiscardEnd {
+        DiscardEnd {
+            outcome: DiscardOutcome::Refused(why),
+            entry: None,
+            left_out: Vec::new(),
+        }
+    }
+}
+
 fn exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
@@ -626,6 +637,8 @@ fn rolled_back(
 /// Why an entry could not be put back.
 #[derive(Debug)]
 pub enum PutBackError {
+    /// The place of the journal could not be found.
+    Locate(Error),
     Lock(LockError),
     /// The Git that a discard started still runs.
     GitRuns(u32),
@@ -750,6 +763,88 @@ pub fn put_back(
         }
         state => Err(PutBackError::State(Some(state))),
     }
+}
+
+// ---- the journal, as the interface uses it
+
+/// Why an operation on the journal was not done.
+#[derive(Debug)]
+pub enum JournalError {
+    /// The place of the journal could not be found.
+    Locate(Error),
+    /// Another instance works on it, or its file system has no locks.
+    Lock(LockError),
+    /// The entry is gone, or not one that git-bull wrote.
+    Gone,
+    Io(io::Error),
+    Exchange(ExchangeError),
+}
+
+impl std::fmt::Display for JournalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JournalError::Locate(error) => write!(f, "{error}"),
+            JournalError::Lock(error) => error.fmt(f),
+            JournalError::Gone => f.write_str("the entry is gone"),
+            JournalError::Io(error) => error.fmt(f),
+            JournalError::Exchange(error) => write!(f, "{error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for JournalError {}
+
+fn locate(git: &Git, repo: &Path) -> Result<Journal, JournalError> {
+    Journal::locate(git, repo).map_err(JournalError::Locate)
+}
+
+fn find_entry(journal: &Journal, id: &str) -> Result<Entry, JournalError> {
+    journal
+        .list()
+        .map_err(JournalError::Io)?
+        .into_iter()
+        .find_map(|item| match item {
+            Listed::Entry { entry, .. } if entry.id() == id => Some(entry),
+            _ => None,
+        })
+        .ok_or(JournalError::Gone)
+}
+
+/// The entries of the journal of the worktree at `repo`, newest last, with the
+/// folders that are not entries.
+pub fn journal_entries(git: &Git, repo: &Path) -> Result<Vec<Listed>, JournalError> {
+    locate(git, repo)?.list().map_err(JournalError::Io)
+}
+
+/// Exchanges the files of the entry `id` with the working copy: a restore of a
+/// discarded entry, an undo of a restore, or a redo. `expected` is the state
+/// the caller saw; when the entry is in another one, nothing is changed and
+/// the error is [`ExchangeError::State`].
+pub fn restore_entry(
+    git: &Git,
+    repo: &Path,
+    id: &str,
+    expected: State,
+) -> Result<crate::journal::ExchangeEnd, JournalError> {
+    let journal = locate(git, repo)?;
+    let guard = journal.lock(id, WAIT).map_err(JournalError::Lock)?;
+    let entry = find_entry(&journal, id)?;
+    journal
+        .exchange(
+            &guard,
+            &entry,
+            repo,
+            expected,
+            &crate::journal::NoFailpoints,
+        )
+        .map_err(JournalError::Exchange)
+}
+
+/// Removes every entry of the journal ("Clear").
+pub fn clear_journal(git: &Git, repo: &Path) -> Result<crate::journal::Cleared, JournalError> {
+    let journal = locate(git, repo)?;
+    let guard = journal.lock("clear", WAIT).map_err(JournalError::Lock)?;
+    journal.clear(&guard).map_err(JournalError::Io)
 }
 
 // ---- parts of a file

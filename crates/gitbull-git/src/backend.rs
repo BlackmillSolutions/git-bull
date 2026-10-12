@@ -19,6 +19,9 @@ use crate::commits::{self, CommitEntry, Since};
 use crate::compare::{self, BaseComparison, CompareRequest, Setting};
 use crate::content::{Content, ContentReader};
 use crate::diff::{self, FileDiff};
+use crate::discard::{
+    self, DiscardEnd, DiscardRefusal, DiscardRequest, JournalError, PutBackEnd, PutBackError,
+};
 use crate::error::Error;
 use crate::facts::{self, RepositoryFacts};
 use crate::file_history::{self, FileCommit, FileHistoryStream};
@@ -26,6 +29,7 @@ use crate::head::{self, Head};
 use crate::history::{self, CommitLine, HistoryStream, Revisions};
 use crate::index;
 use crate::invoke::{ConfigOverride, Git};
+use crate::journal::{Cleared, ExchangeEnd, Journal, Listed, NoFailpoints, State};
 use crate::merged::MergeCache;
 use crate::new_ref;
 use crate::object_id::ObjectId;
@@ -184,6 +188,41 @@ pub trait Backend: Send + Sync {
         request: &PartRequest,
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure>;
+
+    /// Discards the changes of whole files (spec `discard`): each file is
+    /// moved into the journal of the worktree before anything is changed, and
+    /// tracked files are written again from the index. Nothing stops it; it
+    /// takes no token. See [`crate::discard::discard_files`].
+    fn discard_files(&self, repo: &Path, request: &DiscardRequest) -> DiscardEnd;
+
+    /// Discards a hunk or chosen lines of `entry` of the unstaged group, the
+    /// file being copied into the journal first (spec `discard`). Nothing is
+    /// done when Git no longer reports the diff the request was made in. See
+    /// [`crate::discard::discard_part`].
+    fn discard_part(&self, repo: &Path, entry: &StatusEntry, request: &PartRequest) -> DiscardEnd;
+
+    /// Exchanges the files of the journal entry `id` with the working copy:
+    /// a restore, the undo of one, or a redo. `expected` is the state the
+    /// caller saw; the entry is left as it is when it is in another one. See
+    /// [`crate::discard::restore_entry`].
+    fn restore_entry(
+        &self,
+        repo: &Path,
+        id: &str,
+        expected: State,
+    ) -> Result<ExchangeEnd, JournalError>;
+
+    /// Puts an entry back that a process left unfinished. See
+    /// [`crate::discard::put_back`].
+    fn put_back(&self, repo: &Path, id: &str) -> Result<PutBackEnd, PutBackError>;
+
+    /// Removes every entry of the journal. See
+    /// [`crate::discard::clear_journal`].
+    fn clear_journal(&self, repo: &Path) -> Result<Cleared, JournalError>;
+
+    /// The entries of the journal of the worktree at `repo`. See
+    /// [`crate::discard::journal_entries`].
+    fn journal_entries(&self, repo: &Path) -> Result<Vec<Listed>, JournalError>;
 
     /// Creates a commit of the staged changes, or replaces the last one
     /// (spec `commit`). `cancel` stops it. The result says whether the
@@ -541,6 +580,46 @@ impl Backend for CliBackend {
         cancel: &CancelToken,
     ) -> Result<(), WriteFailure> {
         patch::stage_part(&self.git, repo, group, entry, request, cancel)
+    }
+
+    fn discard_files(&self, repo: &Path, request: &DiscardRequest) -> DiscardEnd {
+        match Journal::locate(&self.git, repo) {
+            Ok(journal) => {
+                discard::discard_files(&self.git, repo, &journal, request, &NoFailpoints)
+            }
+            Err(error) => DiscardEnd::refused(DiscardRefusal::Journal(error.to_string())),
+        }
+    }
+
+    fn discard_part(&self, repo: &Path, entry: &StatusEntry, request: &PartRequest) -> DiscardEnd {
+        match Journal::locate(&self.git, repo) {
+            Ok(journal) => {
+                discard::discard_part(&self.git, repo, &journal, entry, request, &NoFailpoints)
+            }
+            Err(error) => DiscardEnd::refused(DiscardRefusal::Journal(error.to_string())),
+        }
+    }
+
+    fn restore_entry(
+        &self,
+        repo: &Path,
+        id: &str,
+        expected: State,
+    ) -> Result<ExchangeEnd, JournalError> {
+        discard::restore_entry(&self.git, repo, id, expected)
+    }
+
+    fn put_back(&self, repo: &Path, id: &str) -> Result<PutBackEnd, PutBackError> {
+        let journal = Journal::locate(&self.git, repo).map_err(PutBackError::Locate)?;
+        discard::put_back(&self.git, repo, &journal, id, &NoFailpoints)
+    }
+
+    fn clear_journal(&self, repo: &Path) -> Result<Cleared, JournalError> {
+        discard::clear_journal(&self.git, repo)
+    }
+
+    fn journal_entries(&self, repo: &Path) -> Result<Vec<Listed>, JournalError> {
+        discard::journal_entries(&self.git, repo)
     }
 
     fn commit(&self, repo: &Path, request: &CommitRequest, cancel: &CancelToken) -> CommitEnd {
