@@ -183,9 +183,13 @@ the author, pushing after the commit, and the output of a hook while it runs.
 | Order | Priority | Work |
 |---|---|---|
 | 1 | High | Discard changes of files, hunks and lines, with a way to bring a discard back. |
+| 2 | Normal | Select several files in the File status view, for staging, unstaging and discarding. |
 
 Discarding is the first action that removes work from the working copy, so
-it comes with a confirmation and with a way to bring a discard back.
+it comes with a confirmation and with a way to bring a discard back. Selecting
+several files is its own change after it: the file list has one selection,
+which decides the diff shown, and changing that touches staging, unstaging and
+discarding alike.
 
 Each item starts with its own Explore and Propose and builds on the write
 invocation and on the write actions of the session.
