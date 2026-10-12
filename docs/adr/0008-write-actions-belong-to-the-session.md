@@ -146,3 +146,35 @@ Git prepared, is read with every read of the status rather than with HEAD and
 the references: another program can begin a merge without moving either. The
 worker reads it once more right before the commit and makes none during a
 rebase or a series of patches, and no amend during any operation.
+
+## Amendment of 2026-10-12: discarding
+
+Discarding changes, restoring them, putting an entry back and clearing the
+journal (change `discard`, [ADR 0009](0009-discarded-work-is-kept-in-a-journal.md))
+are write actions of the session. Each is exclusive like a checkout: it is
+refused while any action runs or an index action is kept, and nothing else
+starts while it runs. Three rules are added.
+
+- **They cannot be stopped, not even by dropping the session.** A discard
+  stopped half way leaves files in the journal that Git has not written again,
+  which is the one state that needs the user to finish it. The worker of these
+  actions gets no token that anything cancels; `Drop for Session` and
+  `Session::stop_commit` do not reach it. Closing the tab or the window while
+  one runs therefore asks, and "Close anyway" waits until no write action runs
+  in it. The stoppable actions of a window, a checkout or a commit, are stopped
+  at once.
+- **Only the status and the journal are read again.** A discard changes no
+  reference and moves no HEAD, so, as for an index action, a read of HEAD and
+  the references that is under way is left alone:
+
+  | Action | Read again |
+  |---|---|
+  | Discard, restore, put back, clear | the status and the journal |
+
+  The action is over when the status has arrived and the journal was read, so
+  the notice and the list the user sees are the ones the action left.
+- **Refusals are data.** What git-bull finds before it changes anything, such
+  as files that changed their class since the list was shown, a diff that is
+  out of date, or an entry that another instance changed meanwhile, is a value
+  and becomes a dialog that says that nothing was discarded; Git's message is
+  shown only for a failure of Git.

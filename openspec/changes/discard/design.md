@@ -350,12 +350,13 @@ undo, and retention and the list would have to tell them apart.
 
 ### 7. The session
 
-`gitbull-core` gets four actions, all exclusive and none stoppable:
+`gitbull-core` gets five actions, all exclusive and none stoppable:
 
 ```rust
 Action::Discard { files: usize }
 Action::DiscardPart { path: String }
-Action::Restore { files: usize }
+Action::Restore { again: bool }     // undo, "Restore"; "Discard again" with `again`
+Action::PutBack                     // completes an interrupted entry
 Action::ClearDiscards
 ```
 
@@ -386,8 +387,11 @@ them. A restore request is `RestoreRequest { entry, expect }`.
 The result is `DiscardEnd { outcome, entry }`: `Done`, `Refused(DiscardRefusal)`
 (a diff out of date, line endings, a path that is blocked, files that changed,
 the entry changed, Git still working, the journal busy) or `Failed(String)`,
-mapped to `ActionDialog::DiscardRefused { why }`, the existing dialogs for out of
-date, and `Failed`.
+mapped to `ActionDialog::DiscardRefused { why, path }` for every refusal, a diff
+that is out of date included, because the existing dialog for it says that
+nothing was staged; to `DiscardLeftOut` for files that were left out, to
+`DiscardStuck` for a failure that left files alone, to `Failed` for the rest,
+and, for an action on the journal, to `JournalRefused { why }`.
 
 The session holds `journal: Vec<JournalEntry>`, read when the tab is shown and
 after every action (the status and the journal, not HEAD or the references), and

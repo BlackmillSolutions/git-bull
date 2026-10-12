@@ -1753,6 +1753,11 @@ pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
         }
         WriteAction::Commit { amend: false } => app.texts.text(Msg::ActionCommit),
         WriteAction::Commit { amend: true } => app.texts.text(Msg::ActionAmend),
+        WriteAction::Discard { .. }
+        | WriteAction::DiscardPart { .. }
+        | WriteAction::Restore { .. }
+        | WriteAction::PutBack
+        | WriteAction::ClearDiscards => crate::discard_texts::action_text(&app.texts, action),
     }
 }
 
@@ -1787,8 +1792,13 @@ fn action_dialog(
         // its own.
         WriteAction::Stage { .. } | WriteAction::Unstage { .. } => String::new(),
         WriteAction::StagePart { path } | WriteAction::UnstagePart { path } => path.clone(),
-        // A commit names no target either.
-        WriteAction::Commit { .. } => String::new(),
+        // A commit names no target either, and neither does a discard.
+        WriteAction::Commit { .. }
+        | WriteAction::Discard { .. }
+        | WriteAction::DiscardPart { .. }
+        | WriteAction::Restore { .. }
+        | WriteAction::PutBack
+        | WriteAction::ClearDiscards => String::new(),
     };
     let named = |msg: Msg, name: &str| {
         let mut args = FluentArgs::new();
@@ -1812,6 +1822,11 @@ fn action_dialog(
         WriteAction::UnstagePart { path } => with_path(Msg::UnstagePartFailedTitle, path),
         WriteAction::Commit { amend: false } => texts.text(Msg::CommitFailedTitle),
         WriteAction::Commit { amend: true } => texts.text(Msg::AmendFailedTitle),
+        WriteAction::Discard { .. }
+        | WriteAction::DiscardPart { .. }
+        | WriteAction::Restore { .. }
+        | WriteAction::PutBack
+        | WriteAction::ClearDiscards => crate::discard_texts::failed_title(texts, action),
     };
     let (title, intro, details, close_label, copy) = match dialog {
         ActionDialog::BlockedByChanges { target, files } => (
@@ -1899,6 +1914,14 @@ fn action_dialog(
             texts.text(Msg::DialogClose),
             false,
         ),
+        ActionDialog::DiscardRefused { .. }
+        | ActionDialog::DiscardLeftOut { .. }
+        | ActionDialog::DiscardStuck { .. }
+        | ActionDialog::JournalRefused { .. } => {
+            let (title, intro, details, copy) =
+                crate::discard_texts::dialog_texts(texts, dialog).unwrap_or_default();
+            (title, intro, details, texts.text(Msg::DialogClose), copy)
+        }
         ActionDialog::CommitRefused { why } => {
             use gitbull_git::commit::{CommitRefusal, Operation};
             let body = match why {

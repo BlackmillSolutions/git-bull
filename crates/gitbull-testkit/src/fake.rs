@@ -1100,10 +1100,14 @@ impl FakeBackend {
             idents: Vec::new(),
         };
         let folder = PathBuf::from("fake-journal").join(&id);
-        log.journal.push(Listed::Entry {
-            entry: Entry::in_memory(id.clone(), folder, manifest),
-            running: EntryRunning::Settled,
-        });
+        // Newest first, as the journal lists them.
+        log.journal.insert(
+            0,
+            Listed::Entry {
+                entry: Entry::in_memory(id.clone(), folder, manifest),
+                running: EntryRunning::Settled,
+            },
+        );
         DiscardEnd {
             entry: Some(id),
             ..end
