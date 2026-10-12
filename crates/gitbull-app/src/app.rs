@@ -379,6 +379,8 @@ pub(crate) struct TabView {
     pub(crate) details_shown: Option<ObjectId>,
     /// The confirmation before whole files are discarded, while it is open.
     pub(crate) discard_dialog: Option<DiscardDialog>,
+    /// The entry and the state of the notice bar the user closed.
+    pub(crate) notice_closed: Option<(String, gitbull_git::journal::State)>,
 }
 
 /// The files a discard waits to be confirmed for.

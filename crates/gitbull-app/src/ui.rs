@@ -2880,6 +2880,7 @@ fn history(app: &mut App, ui: &mut Ui) {
                 app.texts.text(Msg::PanelFiles),
                 app.texts.text(Msg::PanelDiff),
             );
+            crate::recent_discards::keys(app, ui);
             CentralPanel::default().show(ui, |ui| {
                 // The file list shares its width with the commit panel.
                 let files = Panel::left("status_files")
@@ -2917,6 +2918,14 @@ fn history(app: &mut App, ui: &mut Ui) {
                         } else {
                             // No form is drawn: Tab must not look for one.
                             commit_form::forget(ui);
+                        }
+                        // The notice of the last discard lies between the
+                        // list and the form, also when nothing is left to
+                        // list.
+                        if crate::recent_discards::shown(app) {
+                            Panel::bottom("recent_discards")
+                                .resizable(false)
+                                .show(ui, |ui| crate::recent_discards::show(app, ui));
                         }
                         CentralPanel::default().show(ui, |ui| {
                             section_title(ui, files_title.clone());

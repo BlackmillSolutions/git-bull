@@ -21,6 +21,7 @@ pub mod i18n;
 pub mod icons;
 pub mod native;
 pub mod paths;
+pub mod recent_discards;
 pub mod search_view;
 pub mod sidebar_view;
 pub mod style;

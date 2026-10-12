@@ -340,6 +340,18 @@ unstage-all = Unstage all
 discard-changes = Discard changes
 discard-all = Discard all
 discard-hunk = Discard hunk
+notice-discarded = { $count ->
+    [one] Discarded 1 file
+   *[other] Discarded { $count } files
+}
+notice-discarded-part = Discarded part of { $name }
+notice-restored = { $count ->
+    [one] Restored 1 file
+   *[other] Restored { $count } files
+}
+notice-restored-part = Restored part of { $name }
+notice-undo = Undo
+notice-discard-again = Discard again
 discard-selected-lines = Discard selected lines
 discard-unavailable-conflict = The file is in conflict.
 discard-unavailable-submodule = The entry is a submodule, which has a repository of its own.

@@ -422,3 +422,234 @@ fn the_title_keeps_room_for_both_buttons_in_the_narrowest_panel() {
     // within it side to side.
     assert!(title.left() <= discard.left() && stage.right() <= title.right());
 }
+
+// ---- the notice bar and the keys (spec `discard`, "Undoing a discard")
+
+/// Discards the file `label` through its menu and the confirmation, and waits
+/// until the discard is over.
+fn discard_through_the_menu(harness: &mut Harness<'_, App>, probe: &Probe, label: &str) {
+    let before = probe.discards().len();
+    open_menu(harness, label);
+    choose_discard(harness);
+    let at = buttons(harness, "Discard")[0];
+    click_at(harness, at, PointerButton::Primary);
+    wait_until(harness, |h| {
+        probe.discards().len() == before + 1
+            && h.state()
+                .workspace()
+                .is_some_and(|w| w.running_actions().is_empty())
+    });
+    harness.run();
+}
+
+fn bar_text(harness: &Harness<'_, App>) -> Option<String> {
+    // The text of a label is its value.
+    harness
+        .query_all_by(|node| {
+            node.value()
+                .is_some_and(|text| text.starts_with("Discarded") || text.starts_with("Restored"))
+        })
+        .find_map(|node| node.accesskit_node().value())
+}
+
+fn restored_ids(probe: &Probe) -> Vec<String> {
+    probe.restores().into_iter().map(|(id, _)| id).collect()
+}
+
+fn entry_ids(probe: &Probe) -> Vec<String> {
+    probe
+        .journal()
+        .into_iter()
+        .filter_map(|item| match item {
+            gitbull_git::journal::Listed::Entry { entry, .. } => Some(entry.id().to_owned()),
+            gitbull_git::journal::Listed::Unreadable { .. } => None,
+        })
+        .collect()
+}
+
+#[test]
+fn after_a_discard_the_bar_names_it_and_offers_undo() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    assert_eq!(bar_text(&harness), None);
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    assert_eq!(bar_text(&harness).as_deref(), Some("Discarded 1 file"));
+    assert_eq!(buttons(&harness, "Undo").len(), 1);
+    assert_eq!(buttons(&harness, "Dismiss").len(), 1);
+}
+
+#[test]
+fn undo_restores_it_and_the_bar_offers_to_discard_again() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    let id = entry_ids(&probe)[0].clone();
+    let at = buttons(&harness, "Undo")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.restores().is_empty());
+    assert_eq!(
+        probe.restores(),
+        [(id.clone(), gitbull_git::journal::State::Discarded)]
+    );
+    wait_until(&mut harness, |h| {
+        bar_text(h).as_deref() == Some("Restored 1 file")
+    });
+    assert_eq!(buttons(&harness, "Discard again").len(), 1);
+
+    let at = buttons(&harness, "Discard again")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |_| probe.restores().len() == 2);
+    assert_eq!(
+        probe.restores()[1],
+        (id, gitbull_git::journal::State::Restored)
+    );
+    wait_until(&mut harness, |h| {
+        bar_text(h).as_deref() == Some("Discarded 1 file")
+    });
+}
+
+#[test]
+fn the_keys_undo_and_redo_with_the_shift_form_consumed_first() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    wait_until(&mut harness, |_| probe.restores().len() == 1);
+    wait_until(&mut harness, |h| {
+        bar_text(h).as_deref() == Some("Restored 1 file")
+    });
+    harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    wait_until(&mut harness, |_| probe.restores().len() == 2);
+    // The Shift form redid it; it was not undone a second time.
+    assert_eq!(probe.restores()[1].1, gitbull_git::journal::State::Restored);
+    wait_until(&mut harness, |h| {
+        bar_text(h).as_deref() == Some("Discarded 1 file")
+    });
+}
+
+#[test]
+fn the_bar_and_the_keys_stay_when_the_last_changed_file_was_discarded() {
+    let status = WorkingStatus {
+        unstaged: vec![changed(ChangeKind::Modified, "only.rs")],
+        ..WorkingStatus::default()
+    };
+    let (mut harness, probe) = open_with(backend().with_status(root(), status));
+    discard_through_the_menu(&mut harness, &probe, "Modified: only.rs");
+    wait_until(&mut harness, |h| {
+        text_shown(h, "There are no uncommitted changes.")
+    });
+    assert_eq!(bar_text(&harness).as_deref(), Some("Discarded 1 file"));
+    assert_eq!(buttons(&harness, "Undo").len(), 1);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    wait_until(&mut harness, |_| probe.restores().len() == 1);
+}
+
+#[test]
+fn a_text_field_keeps_its_own_undo() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    harness
+        .get_by_role_and_label(Role::TextInput, "Summary")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, "Summary")
+        .type_text("hello");
+    harness.run();
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    for _ in 0..10 {
+        harness.step();
+    }
+    assert!(probe.restores().is_empty());
+}
+
+#[test]
+fn with_nothing_discarded_the_key_does_nothing_and_no_bar_is_shown() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    for _ in 0..10 {
+        harness.step();
+    }
+    assert!(probe.restores().is_empty());
+    assert_eq!(bar_text(&harness), None);
+    assert!(buttons(&harness, "Undo").is_empty());
+}
+
+#[test]
+fn only_the_last_discard_is_undone() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    discard_through_the_menu(&mut harness, &probe, "Deleted: b.rs");
+    let ids = entry_ids(&probe);
+    // Newest first.
+    assert_eq!(ids.len(), 2);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    wait_until(&mut harness, |_| restored_ids(&probe).len() == 1);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    for _ in 0..10 {
+        harness.step();
+    }
+    assert_eq!(restored_ids(&probe), [ids[0].clone()]);
+}
+
+#[test]
+fn undo_after_another_instance_restored_the_entry_changes_nothing_and_says_so() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    let journal = probe
+        .journal()
+        .into_iter()
+        .map(|item| match item {
+            gitbull_git::journal::Listed::Entry { entry, running } => {
+                let mut manifest = entry.manifest().clone();
+                manifest.state = gitbull_git::journal::State::Restored;
+                gitbull_git::journal::Listed::Entry {
+                    entry: gitbull_git::journal::Entry::in_memory(
+                        entry.id().to_owned(),
+                        entry.folder().to_owned(),
+                        manifest,
+                    ),
+                    running,
+                }
+            }
+            other => other,
+        })
+        .collect();
+    probe.set_journal(journal);
+    let at = buttons(&harness, "Undo")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |h| !dialogs(h).is_empty());
+    assert_eq!(dialogs(&harness), ["Nothing was changed"]);
+    assert!(text_shown(
+        &harness,
+        "The entry was changed meanwhile, as by another git-bull, so nothing was done. \
+         The list shows it as it is."
+    ));
+}
+
+#[test]
+fn the_bar_can_be_closed_and_the_key_still_undoes() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    let at = buttons(&harness, "Dismiss")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    assert_eq!(bar_text(&harness), None);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    wait_until(&mut harness, |_| probe.restores().len() == 1);
+    // The state changed, so the bar shows again.
+    wait_until(&mut harness, |h| {
+        bar_text(h).as_deref() == Some("Restored 1 file")
+    });
+}
+
+#[test]
+fn the_bar_is_announced_and_its_buttons_are_named() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    let announced = harness
+        .query_all_by(|node| node.value().is_some_and(|text| text == "Discarded 1 file"))
+        .next()
+        .map(|node| node.accesskit_node().live());
+    assert_eq!(announced, Some(eframe::egui::accesskit::Live::Polite));
+    for name in ["Undo", "Dismiss"] {
+        assert_eq!(buttons(&harness, name).len(), 1, "{name}");
+    }
+}

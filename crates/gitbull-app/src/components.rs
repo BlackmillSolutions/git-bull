@@ -793,7 +793,11 @@ pub fn banner(
                 ui.scope(|ui| {
                     ui.set_max_width((ui.available_width() - buttons).max(0.0));
                     let text = RichText::new(text).size(TYPE.body).color(color(foreground));
-                    ui.add(Label::new(text).wrap());
+                    let label = ui.add(Label::new(text).wrap());
+                    // A notice is announced when it appears.
+                    ui.ctx().accesskit_node_builder(label.id, |node| {
+                        node.set_live(egui::accesskit::Live::Polite);
+                    });
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if icon_button(ui, icons::CLOSE, dismiss, None).clicked() {
