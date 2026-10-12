@@ -243,7 +243,12 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         // Shift first: a plain Tab pattern also matches Tab with Shift.
         if ui.input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::Tab)) {
             go = Some(match at {
-                0 => Id::new(STATUS_LIST),
+                // The last stop of the group before the form: the notice bar
+                // and the list of discards, if they are drawn.
+                0 => crate::recent_discards::stops(ui)
+                    .last()
+                    .copied()
+                    .unwrap_or(Id::new(STATUS_LIST)),
                 _ => known[at - 1],
             });
         } else if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Tab)) {

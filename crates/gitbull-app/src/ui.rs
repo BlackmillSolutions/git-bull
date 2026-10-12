@@ -799,7 +799,7 @@ fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>
         _ => &[],
     };
     let dismiss = app.texts.text(Msg::NoticeDismiss);
-    match components::banner(ui, notice_kind(notice), &text, offered, &dismiss) {
+    match components::banner(ui, notice_kind(notice), &text, offered, &dismiss).0 {
         Some(BannerAction::Action(_)) => {
             if let Notice::HiddenByFilter(reference) = notice {
                 actions.push(Action::ShowAllBranches(reference.clone()));
@@ -2991,6 +2991,9 @@ fn history(app: &mut App, ui: &mut Ui) {
                             Panel::bottom("recent_discards")
                                 .resizable(false)
                                 .show(ui, |ui| crate::recent_discards::show(app, ui));
+                        } else {
+                            // Nothing is drawn: Tab must not look for it.
+                            crate::recent_discards::forget(ui);
                         }
                         CentralPanel::default().show(ui, |ui| {
                             section_title(ui, files_title.clone());
@@ -3142,16 +3145,19 @@ pub(crate) fn move_between_areas(ui: &Ui, areas: &[&str]) {
         }
     });
     let mut areas: Vec<Id> = areas.iter().map(Id::new).collect();
-    // The commit form stands between the file list and the diff. Tab enters
-    // it at its first control that is available, and with Shift at its last;
-    // inside it and out of it the form moves the focus itself.
+    // The notice bar and the list of discards, then the commit form, stand
+    // between the file list and the diff, each a group of stops. Tab enters
+    // them at the first control that is available, and with Shift at the
+    // last; inside a group, and out of it, the group moves the focus itself.
     let status_list = Id::new(STATUS_LIST);
     if let Some(list) = areas.iter().position(|area| *area == status_list) {
-        let stops = commit_form::stops(ui);
+        let groups = [crate::recent_discards::stops(ui), commit_form::stops(ui)];
+        let first = groups.iter().find_map(|stops| stops.first().copied());
+        let last = groups.iter().rev().find_map(|stops| stops.last().copied());
         if focused == Some(status_list) {
-            areas.splice(list + 1..list + 1, stops.first().copied());
+            areas.splice(list + 1..list + 1, first);
         } else {
-            areas.splice(list + 1..list + 1, stops.last().copied());
+            areas.splice(list + 1..list + 1, last);
         }
     }
     let Some(position) = focused.and_then(|id| areas.iter().position(|area| *area == id)) else {

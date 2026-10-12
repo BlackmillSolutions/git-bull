@@ -3,15 +3,35 @@
 //! (spec `discard`, requirement "Undoing a discard"), and the keys that undo
 //! and redo.
 
-use eframe::egui::{self, Align, Key, Label, Layout, Modifiers, Ui};
+use eframe::egui::{self, Align, EventFilter, Id, Key, Label, Layout, Modifiers, Ui};
 use fluent_bundle::FluentArgs;
 use gitbull_core::session::{DiscardRecord, Session};
 use gitbull_git::journal::{Kind, Running, State};
 
 use crate::app::{App, TabView};
+use crate::commit_form;
 use crate::commit_list::local_date;
 use crate::components::{self, BannerAction, BannerKind};
+use crate::file_status_view::STATUS_LIST;
 use crate::i18n::Msg;
+use crate::ui::AREA_DIFF;
+
+/// Where the group keeps the controls Tab stops at, in their order, from
+/// one pass to the next.
+const STOPS: &str = "recent-discards-stops";
+
+/// The controls of the notice bar and the list that Tab stops at, in the
+/// order of the page, as drawn last: those that are available. Empty while
+/// nothing is drawn.
+pub(crate) fn stops(ui: &Ui) -> Vec<Id> {
+    ui.data(|data| data.get_temp(Id::new(STOPS)))
+        .unwrap_or_default()
+}
+
+/// Nothing is drawn in this pass: what the last one left for Tab is gone.
+pub(crate) fn forget(ui: &Ui) {
+    ui.data_mut(|data| data.remove_temp::<Vec<Id>>(Id::new(STOPS)));
+}
 
 /// The record the notice bar is drawn for: the last discard of the tab, while
 /// the user has not closed the bar for it in its state.
@@ -57,14 +77,56 @@ fn bar_text(app: &App, record: &DiscardRecord) -> String {
 /// Draws what the discards show beside the file list: the notice bar and the
 /// list "Recently discarded".
 pub(crate) fn show(app: &mut App, ui: &mut Ui) {
-    bar(app, ui);
-    list(app, ui);
+    let mut now: Vec<Id> = Vec::new();
+    bar(app, ui, &mut now);
+    list(app, ui, &mut now);
+    tab(ui, &now);
+    ui.data_mut(|data| data.insert_temp(Id::new(STOPS), now));
+}
+
+/// Tab moves through the controls that are available, from the file list to
+/// the first and on from the last to the commit form, or to the diff when
+/// there is none; Shift+Tab goes back, from the first to the file list. It
+/// is taken before egui moves the focus itself.
+fn tab(ui: &Ui, now: &[Id]) {
+    let focused = ui.memory(|memory| memory.focused());
+    let Some(at) = focused.and_then(|id| now.iter().position(|stop| *stop == id)) else {
+        return;
+    };
+    ui.memory_mut(|memory| {
+        memory.set_focus_lock_filter(
+            now[at],
+            EventFilter {
+                tab: true,
+                ..EventFilter::default()
+            },
+        );
+    });
+    // Shift first: a plain Tab pattern also matches Tab with Shift.
+    let target = if ui.input_mut(|input| input.consume_key(Modifiers::SHIFT, Key::Tab)) {
+        Some(match at {
+            0 => Id::new(STATUS_LIST),
+            _ => now[at - 1],
+        })
+    } else if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Tab)) {
+        Some(
+            now.get(at + 1)
+                .copied()
+                .or_else(|| commit_form::stops(ui).first().copied())
+                .unwrap_or(Id::new(AREA_DIFF)),
+        )
+    } else {
+        None
+    };
+    if let Some(target) = target {
+        ui.memory_mut(|memory| memory.request_focus(target));
+    }
 }
 
 /// Draws the notice bar: the last discard of the tab, with "Undo" while it is
 /// discarded and "Discard again" once it was undone, and a button that closes
 /// the bar.
-fn bar(app: &mut App, ui: &mut Ui) {
+fn bar(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>) {
     let Some(record) = app
         .active_view()
         .and_then(|(session, view)| bar_record(session, view).cloned())
@@ -82,11 +144,12 @@ fn bar(app: &mut App, ui: &mut Ui) {
     };
     // Nothing is asked while an action runs.
     let busy = session.action().is_some();
-    let chosen = ui
+    let (chosen, stops) = ui
         .add_enabled_ui(!busy, |ui| {
             components::banner(ui, BannerKind::Information, &text, &[&action], &dismiss)
         })
         .inner;
+    now.extend(stops);
     match chosen {
         Some(BannerAction::Action(_)) => {
             match record.state {
@@ -214,7 +277,7 @@ fn entry_of(app: &App, record: &DiscardRecord) -> Entry {
 /// Draws the section "Recently discarded": a header that opens and closes it
 /// and, while it is open, "Clear" and the entries of the journal, each with
 /// its time, what it holds, its state and the button that fits the state.
-fn list(app: &mut App, ui: &mut Ui) {
+fn list(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>) {
     let Some((open, busy)) = app
         .active_view()
         .map(|(session, view)| (view.discards_open, session.action().is_some()))
@@ -267,12 +330,17 @@ fn list(app: &mut App, ui: &mut Ui) {
             node.set_expanded(open);
         });
         toggle = header.clicked();
+        now.push(header.id);
         if open {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // Refused while an entry is being worked on by another
                 // instance, and while an action runs.
                 ui.add_enabled_ui(!running && !busy, |ui| {
-                    ask_clear = components::Button::new(&clear).show(ui).clicked();
+                    let button = components::Button::new(&clear).show(ui);
+                    ask_clear = button.clicked();
+                    if ui.is_enabled() {
+                        now.push(button.id);
+                    }
                 });
             });
         }
@@ -295,8 +363,12 @@ fn list(app: &mut App, ui: &mut Ui) {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if let Some((label, action)) = &entry.button {
                                     ui.add_enabled_ui(!busy, |ui| {
-                                        if components::Button::new(label).show(ui).clicked() {
+                                        let button = components::Button::new(label).show(ui);
+                                        if button.clicked() {
                                             chosen = Some((entry.id.clone(), *action));
+                                        }
+                                        if ui.is_enabled() {
+                                            now.push(button.id);
                                         }
                                     });
                                 }

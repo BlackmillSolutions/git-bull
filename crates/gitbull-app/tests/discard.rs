@@ -876,3 +876,131 @@ fn backend_with(journal: Vec<Listed>) -> FakeBackend {
         .with_status(root(), unstaged())
         .with_journal(journal)
 }
+
+// ---- the keyboard (spec `discard`, "Recently discarded", scenario Keyboard)
+
+fn focused_label(harness: &Harness<'_, App>) -> String {
+    let node = harness.get_by(|node| node.is_focused_in_tree());
+    node.accesskit_node().label().unwrap_or_default()
+}
+
+/// Presses `key` with `modifiers` and names what has the focus then.
+fn tab_to(harness: &mut Harness<'_, App>, modifiers: Modifiers) -> String {
+    harness.key_press_modifiers(modifiers, Key::Tab);
+    harness.run();
+    focused_label(harness)
+}
+
+/// The file list has the focus.
+fn focus_the_file_list(harness: &mut Harness<'_, App>) {
+    let at = file(harness, "Untracked: new.txt");
+    click_at(harness, at, PointerButton::Primary);
+}
+
+#[test]
+fn tab_goes_through_the_bar_the_header_and_the_list_to_the_commit_form_and_back() {
+    let (mut harness, probe) = open_tall(backend().with_status(root(), unstaged()).with_journal(
+        vec![recorded(
+            "1-1",
+            State::Discarded,
+            EntryRunning::Settled,
+            &["old.rs"],
+        )],
+    ));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    let at = buttons(&harness, "Recently discarded (2)")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+
+    focus_the_file_list(&mut harness);
+    let forward: Vec<String> = (0..7)
+        .map(|_| tab_to(&mut harness, Modifiers::NONE))
+        .collect();
+    assert_eq!(
+        forward,
+        [
+            "Undo",
+            "Dismiss",
+            "Recently discarded (2)",
+            "Clear",
+            "Restore",
+            "Restore",
+            "Amend last commit"
+        ]
+    );
+
+    // Shift+Tab from the first control of the commit form comes back to the
+    // last control of the list, and on to the file list.
+    let back: Vec<String> = (0..7)
+        .map(|_| tab_to(&mut harness, Modifiers::SHIFT))
+        .collect();
+    assert_eq!(
+        back,
+        [
+            "Restore",
+            "Restore",
+            "Clear",
+            "Recently discarded (2)",
+            "Dismiss",
+            "Undo",
+            "FILES"
+        ]
+    );
+}
+
+#[test]
+fn clear_is_a_stop_only_while_the_section_is_open() {
+    let (mut harness, _) =
+        open_tall(
+            backend()
+                .with_status(root(), unstaged())
+                .with_journal(vec![recorded(
+                    "1-1",
+                    State::Discarded,
+                    EntryRunning::Settled,
+                    &["old.rs"],
+                )]),
+        );
+    focus_the_file_list(&mut harness);
+    // Closed: the header, then the commit form.
+    assert_eq!(
+        tab_to(&mut harness, Modifiers::NONE),
+        "Recently discarded (1)"
+    );
+    assert_eq!(tab_to(&mut harness, Modifiers::NONE), "Amend last commit");
+}
+
+#[test]
+fn with_nothing_of_the_bar_or_the_list_shown_the_order_is_as_it_was() {
+    let (mut harness, _) = open_tall(backend().with_status(root(), unstaged()));
+    focus_the_file_list(&mut harness);
+    assert_eq!(tab_to(&mut harness, Modifiers::NONE), "Amend last commit");
+    assert_eq!(tab_to(&mut harness, Modifiers::SHIFT), "FILES");
+}
+
+#[test]
+fn what_is_disabled_while_an_action_runs_is_skipped() {
+    let gate = gitbull_testkit::Gate::new();
+    let (mut harness, probe) = open_tall(
+        backend()
+            .with_status(root(), unstaged())
+            .with_journal(vec![recorded(
+                "1-1",
+                State::Discarded,
+                EntryRunning::Settled,
+                &["old.rs"],
+            )])
+            .with_checkout_gate(&gate),
+    );
+    open_menu(&mut harness, "Modified: a.rs");
+    choose_discard(&mut harness);
+    let at = buttons(&harness, "Discard")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.discards().is_empty());
+    harness.run();
+
+    focus_the_file_list(&mut harness);
+    // The header is still there; "Restore" and "Clear" wait for the action.
+    let first = tab_to(&mut harness, Modifiers::NONE);
+    assert_eq!(first, "Recently discarded (1)");
+    gate.open();
+}
