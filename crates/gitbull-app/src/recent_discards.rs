@@ -3,12 +3,13 @@
 //! (spec `discard`, requirement "Undoing a discard"), and the keys that undo
 //! and redo.
 
-use eframe::egui::{Key, Modifiers, Ui};
+use eframe::egui::{self, Align, Key, Label, Layout, Modifiers, Ui};
 use fluent_bundle::FluentArgs;
 use gitbull_core::session::{DiscardRecord, Session};
-use gitbull_git::journal::{Kind, State};
+use gitbull_git::journal::{Kind, Running, State};
 
 use crate::app::{App, TabView};
+use crate::commit_list::local_date;
 use crate::components::{self, BannerAction, BannerKind};
 use crate::i18n::Msg;
 
@@ -20,10 +21,12 @@ fn bar_record<'a>(session: &'a Session, view: &TabView) -> Option<&'a DiscardRec
         .filter(|record| view.notice_closed.as_ref() != Some(&(record.id.clone(), record.state)))
 }
 
-/// Whether anything of the discards is drawn beside the file list.
+/// Whether anything of the discards is drawn beside the file list: the notice
+/// bar, or the list while the journal has entries.
 pub(crate) fn shown(app: &mut App) -> bool {
-    app.active_view()
-        .is_some_and(|(session, view)| bar_record(session, view).is_some())
+    app.active_view().is_some_and(|(session, view)| {
+        bar_record(session, view).is_some() || !session.journal().is_empty()
+    })
 }
 
 /// What the bar says: "Discarded 3 files", "Restored 3 files", and for a part
@@ -51,10 +54,17 @@ fn bar_text(app: &App, record: &DiscardRecord) -> String {
     app.texts.text_with(msg, Some(&args))
 }
 
+/// Draws what the discards show beside the file list: the notice bar and the
+/// list "Recently discarded".
+pub(crate) fn show(app: &mut App, ui: &mut Ui) {
+    bar(app, ui);
+    list(app, ui);
+}
+
 /// Draws the notice bar: the last discard of the tab, with "Undo" while it is
 /// discarded and "Discard again" once it was undone, and a button that closes
 /// the bar.
-pub(crate) fn show(app: &mut App, ui: &mut Ui) {
+fn bar(app: &mut App, ui: &mut Ui) {
     let Some(record) = app
         .active_view()
         .and_then(|(session, view)| bar_record(session, view).cloned())
@@ -118,5 +128,203 @@ pub(crate) fn keys(app: &mut App, ui: &Ui) {
         } else if undo {
             session.undo_discard();
         }
+    }
+}
+
+/// How many rows of entries the list shows before it scrolls.
+const LIST_ROWS: usize = 5;
+
+/// How many file names an entry of the list gives before it counts the rest.
+const NAMES: usize = 3;
+
+/// What an entry of the list draws.
+struct Entry {
+    id: String,
+    /// When it last changed, such as `2026-10-12 09:30`.
+    time: String,
+    /// What it holds, such as `2 files: a.rs, b.rs`.
+    what: String,
+    /// Its state: discarded, restored, interrupted or running.
+    state: String,
+    /// The button of the entry: its label and what it does.
+    button: Option<(String, EntryAction)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryAction {
+    Restore,
+    PutBack,
+}
+
+fn entry_of(app: &App, record: &DiscardRecord) -> Entry {
+    let texts = &app.texts;
+    let what = match record.kind {
+        Kind::Hunk | Kind::Lines => {
+            let mut args = FluentArgs::new();
+            args.set(
+                "name",
+                record
+                    .files
+                    .first()
+                    .map(|(path, _)| path.to_string())
+                    .unwrap_or_default(),
+            );
+            texts.text_with(Msg::RecentEntryPart, Some(&args))
+        }
+        Kind::Files | Kind::Group => {
+            let mut names: Vec<String> = record
+                .files
+                .iter()
+                .take(NAMES)
+                .map(|(path, _)| path.to_string())
+                .collect();
+            if record.files.len() > NAMES {
+                names.push("…".to_owned());
+            }
+            let mut args = FluentArgs::new();
+            args.set("count", record.files.len() as i64);
+            args.set("names", names.join(", "));
+            texts.text_with(Msg::RecentEntryFiles, Some(&args))
+        }
+    };
+    let (state, button) = match (record.running, record.state) {
+        (Running::Running, _) => (Msg::RecentStateRunning, None),
+        (Running::Interrupted, _) => (
+            Msg::RecentStateInterrupted,
+            Some((Msg::RecentPutBack, EntryAction::PutBack)),
+        ),
+        (Running::Settled, State::Restored) => (
+            Msg::RecentStateRestored,
+            Some((Msg::NoticeDiscardAgain, EntryAction::Restore)),
+        ),
+        (Running::Settled, _) => (
+            Msg::RecentStateDiscarded,
+            Some((Msg::RecentRestore, EntryAction::Restore)),
+        ),
+    };
+    Entry {
+        id: record.id.clone(),
+        time: local_date(record.changed as i64, &app.time_zone),
+        what,
+        state: texts.text(state),
+        button: button.map(|(label, action)| (texts.text(label), action)),
+    }
+}
+
+/// Draws the section "Recently discarded": a header that opens and closes it
+/// and, while it is open, "Clear" and the entries of the journal, each with
+/// its time, what it holds, its state and the button that fits the state.
+fn list(app: &mut App, ui: &mut Ui) {
+    let Some((open, busy)) = app
+        .active_view()
+        .map(|(session, view)| (view.discards_open, session.action().is_some()))
+    else {
+        return;
+    };
+    let Some((count, running)) = app.active_view().map(|(session, _)| {
+        let journal = session.journal();
+        let running = journal
+            .entries
+            .iter()
+            .any(|record| record.running == Running::Running);
+        (journal.entries.len() + journal.unreadable, running)
+    }) else {
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    let entries: Vec<Entry> = if open {
+        match app
+            .workspace()
+            .and_then(|w| w.active())
+            .and_then(|t| t.session())
+        {
+            Some(session) => session
+                .journal()
+                .entries
+                .iter()
+                .map(|record| entry_of(app, record))
+                .collect(),
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let mut args = FluentArgs::new();
+    args.set("count", count as i64);
+    let title = app.texts.text_with(Msg::RecentTitle, Some(&args));
+    let clear = app.texts.text(Msg::RecentClear);
+
+    let mut toggle = false;
+    let mut ask_clear = false;
+    let mut chosen: Option<(String, EntryAction)> = None;
+    ui.horizontal(|ui| {
+        let header = components::Button::new(&title)
+            .kind(components::Kind::Ghost)
+            .show(ui);
+        ui.ctx().accesskit_node_builder(header.id, |node| {
+            node.set_expanded(open);
+        });
+        toggle = header.clicked();
+        if open {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Refused while an entry is being worked on by another
+                // instance, and while an action runs.
+                ui.add_enabled_ui(!running && !busy, |ui| {
+                    ask_clear = components::Button::new(&clear).show(ui).clicked();
+                });
+            });
+        }
+    });
+    if open {
+        // The list has the height of its rows, up to a few, and scrolls
+        // beyond; the panel it lies in does not give it a height of its own.
+        let row = crate::theme::SHAPE.control_height + ui.spacing().item_spacing.y;
+        let height = entries.len().min(LIST_ROWS) as f32 * row;
+        let width = ui.available_width();
+        ui.allocate_ui(egui::vec2(width, height), |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("recent-discards")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for entry in &entries {
+                        ui.horizontal(|ui| {
+                            ui.weak(&entry.time);
+                            ui.label(&entry.state);
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if let Some((label, action)) = &entry.button {
+                                    ui.add_enabled_ui(!busy, |ui| {
+                                        if components::Button::new(label).show(ui).clicked() {
+                                            chosen = Some((entry.id.clone(), *action));
+                                        }
+                                    });
+                                }
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    ui.add(Label::new(&entry.what).truncate().selectable(false));
+                                });
+                            });
+                        });
+                    }
+                });
+        });
+    }
+    let Some((session, view)) = app.active_view() else {
+        return;
+    };
+    if toggle {
+        view.discards_open = !view.discards_open;
+    }
+    if ask_clear {
+        view.clear_question = true;
+    }
+    match chosen {
+        Some((id, EntryAction::Restore)) => {
+            session.restore(&id);
+        }
+        Some((id, EntryAction::PutBack)) => {
+            session.put_back(&id);
+        }
+        None => {}
     }
 }

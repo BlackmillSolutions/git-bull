@@ -351,6 +351,26 @@ notice-restored = { $count ->
 }
 notice-restored-part = Restored part of { $name }
 notice-undo = Undo
+recent-title = Recently discarded ({ $count })
+recent-clear = Clear
+recent-restore = Restore
+recent-put-back = Put back
+recent-state-discarded = Discarded
+recent-state-restored = Restored
+recent-state-interrupted = Interrupted
+recent-state-running = Running
+recent-entry-files = { $count ->
+    [one] 1 file: { $names }
+   *[other] { $count } files: { $names }
+}
+recent-entry-part = Part of { $name }
+clear-dialog-title = Clear the discarded changes?
+clear-dialog-body = Every entry is removed, and what the entries hold cannot be brought back.
+clear-dialog-interrupted = { $count ->
+    [one] 1 entry is interrupted: its files may still be in the list and not in the working copy.
+   *[other] { $count } entries are interrupted: their files may still be in the list and not in the working copy.
+}
+clear-dialog-confirm = Clear
 notice-discard-again = Discard again
 discard-selected-lines = Discard selected lines
 discard-unavailable-conflict = The file is in conflict.

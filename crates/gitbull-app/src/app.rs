@@ -381,6 +381,10 @@ pub(crate) struct TabView {
     pub(crate) discard_dialog: Option<DiscardDialog>,
     /// The entry and the state of the notice bar the user closed.
     pub(crate) notice_closed: Option<(String, gitbull_git::journal::State)>,
+    /// The list "Recently discarded" is open.
+    pub(crate) discards_open: bool,
+    /// The question before the list is cleared is open.
+    pub(crate) clear_question: bool,
 }
 
 /// The files a discard waits to be confirmed for.
@@ -1564,6 +1568,26 @@ impl App {
                 left,
                 list: ListState::default(),
             });
+        }
+    }
+
+    /// Whether the active tab asks before the list of discards is cleared.
+    pub(crate) fn has_clear_question(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active())
+            .and_then(|tab| self.views.get(&tab.id()))
+            .is_some_and(|view| view.clear_question)
+    }
+
+    /// The user answered the question before the list is cleared.
+    pub(crate) fn answer_clear(&mut self, clear: bool) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        view.clear_question = false;
+        if clear {
+            session.clear_discards();
         }
     }
 

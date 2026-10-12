@@ -138,6 +138,9 @@ enum Action {
     /// Answers of the confirmation before files are discarded.
     ConfirmDiscard,
     CancelDiscard,
+    /// Answers of the question before the list of discards is cleared.
+    ConfirmClear,
+    CancelClear,
     /// Answers of the notice before detaching HEAD.
     ConfirmDetach,
     CancelDetach,
@@ -222,6 +225,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         || app.detach_pending.is_some()
         || app.create_dialog.is_some()
         || app.has_discard_dialog()
+        || app.has_clear_question()
         || app.branch_choice.is_some();
     if !tab_dialog {
         actions.extend(dropped_folders(ui));
@@ -295,6 +299,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         branch_choice_dialog(app, ui, &mut actions);
     } else if app.has_discard_dialog() {
         discard_dialog(app, ui, &mut actions);
+    } else if app.has_clear_question() {
+        clear_question_dialog(app, ui, &mut actions);
     } else if app.create_dialog.is_some() {
         create_dialog(app, ui, &mut actions);
     } else if let Some(dialog) = app.action_dialog() {
@@ -417,6 +423,8 @@ fn apply(app: &mut App, actions: Vec<Action>) {
             Action::CloseActionDialog => app.close_action_dialog(),
             Action::ConfirmDiscard => app.confirm_discard(),
             Action::CancelDiscard => app.cancel_discard(),
+            Action::ConfirmClear => app.answer_clear(true),
+            Action::CancelClear => app.answer_clear(false),
             Action::ConfirmDetach => app.confirm_detach(),
             Action::CancelDetach => app.detach_pending = None,
             Action::ChooseBranch(index) => app.choose_branch(index),
@@ -2465,6 +2473,63 @@ fn discard_dialog(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
         actions.push(choice);
     } else if outcome.escape {
         actions.push(Action::CancelDiscard);
+    }
+}
+
+/// The question before the list of discards is cleared: what is cleared
+/// cannot be brought back, and how many entries are interrupted, whose files
+/// may still lie in the list and not in the working copy. Cancel is the
+/// default.
+fn clear_question_dialog(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let interrupted = app
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .map_or(0, |session| session.journal().interrupted());
+    let texts = &app.texts;
+    let title = texts.text(Msg::ClearDialogTitle);
+    let body = texts.text(Msg::ClearDialogBody);
+    let warning = (interrupted > 0).then(|| {
+        let mut args = FluentArgs::new();
+        args.set("count", interrupted as i64);
+        texts.text_with(Msg::ClearDialogInterrupted, Some(&args))
+    });
+    let cancel = texts.text(Msg::DialogCancel);
+    let confirm = texts.text(Msg::ClearDialogConfirm);
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("clear-question"),
+        &title,
+        |ui| {
+            ui.label(body);
+            if let Some(warning) = warning {
+                ui.add_space(SHAPE.space[1]);
+                ui.label(warning);
+            }
+        },
+        |ui, ()| {
+            let mut choice = None;
+            ui.horizontal(|ui| {
+                let cancel = components::Button::new(&cancel)
+                    .kind(components::Kind::Primary)
+                    .show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    cancel.request_focus();
+                }
+                if cancel.clicked() {
+                    choice = Some(Action::CancelClear);
+                }
+                if components::Button::new(&confirm).show(ui).clicked() {
+                    choice = Some(Action::ConfirmClear);
+                }
+            });
+            choice
+        },
+    );
+    if let Some(choice) = outcome.inner {
+        actions.push(choice);
+    } else if outcome.escape {
+        actions.push(Action::CancelClear);
     }
 }
 

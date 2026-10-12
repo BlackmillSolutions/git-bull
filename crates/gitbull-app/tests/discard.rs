@@ -19,9 +19,12 @@ use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, Probe, commit_line, fake_id};
-use support::{Setup, build, path, settle_window, window};
+use support::{Setup, build, path, settle_window, sized_window, window};
 
 const FILTER: &str = "Filter files";
+
+/// A window with room for the rows of the list "Recently discarded".
+const TALL: (f32, f32) = (1000.0, 1000.0);
 
 fn root() -> std::path::PathBuf {
     path(&["work", "git-bull"])
@@ -95,6 +98,11 @@ fn click_at(harness: &mut Harness<'_, App>, at: Pos2, button: PointerButton) {
 }
 
 fn open_with(backend: FakeBackend) -> (Harness<'static, App>, Probe) {
+    open_sized(backend, None)
+}
+
+/// Like [`open_with`], in a window of `size`.
+fn open_sized(backend: FakeBackend, size: Option<(f32, f32)>) -> (Harness<'static, App>, Probe) {
     let probe = backend.probe();
     let test = build(Setup {
         settings: Settings {
@@ -105,7 +113,10 @@ fn open_with(backend: FakeBackend) -> (Harness<'static, App>, Probe) {
         backend,
         ..Setup::default()
     });
-    let mut harness = window(test.app);
+    let mut harness = match size {
+        Some(size) => sized_window(size, test.app),
+        None => window(test.app),
+    };
     settle_window(&mut harness);
     wait_until(&mut harness, |h| {
         h.query_all_by_role(Role::Row).any(|node| {
@@ -652,4 +663,216 @@ fn the_bar_is_announced_and_its_buttons_are_named() {
     for name in ["Undo", "Dismiss"] {
         assert_eq!(buttons(&harness, name).len(), 1, "{name}");
     }
+}
+
+// ---- the list "Recently discarded" (spec `discard`)
+
+/// Opens the File status view in a window with room for the list.
+fn open_tall(backend: FakeBackend) -> (Harness<'static, App>, Probe) {
+    open_sized(backend, Some(TALL))
+}
+
+use gitbull_git::journal::{
+    Entry, FileKind, FileRecord, Held, Listed, Manifest, Running as EntryRunning, State,
+};
+
+fn recorded(id: &str, state: State, running: EntryRunning, files: &[&str]) -> Listed {
+    let manifest = Manifest {
+        changed: 1_767_268_800,
+        size: 10,
+        kind: Kind::Files,
+        state,
+        git: None,
+        files: files
+            .iter()
+            .enumerate()
+            .map(|(slot, path)| FileRecord {
+                slot: slot as u32,
+                kind: FileKind::Tracked,
+                held: Held::File,
+                path: RepoPath::new(*path),
+            })
+            .collect(),
+        idents: Vec::new(),
+    };
+    Listed::Entry {
+        entry: Entry::in_memory(id.to_owned(), id.into(), manifest),
+        running,
+    }
+}
+
+/// A journal of earlier runs: newest first.
+fn earlier_runs() -> Vec<Listed> {
+    vec![
+        recorded(
+            "3-3",
+            State::Pending,
+            EntryRunning::Interrupted,
+            &["x.rs", "y.rs"],
+        ),
+        recorded("2-2", State::Restored, EntryRunning::Settled, &["r.rs"]),
+        recorded(
+            "1-1",
+            State::Discarded,
+            EntryRunning::Settled,
+            &["a.rs", "b.rs", "c.rs", "d.rs"],
+        ),
+    ]
+}
+
+fn open_list(harness: &mut Harness<'_, App>) {
+    let at = buttons(harness, "Recently discarded (3)")[0];
+    click_at(harness, at, PointerButton::Primary);
+}
+
+#[test]
+fn the_section_is_absent_while_the_journal_is_empty() {
+    let (harness, _) = open_tall(backend().with_status(root(), unstaged()));
+    assert!(
+        harness
+            .query_all_by_label_contains("Recently discarded")
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn the_section_is_closed_at_first_and_lists_each_entry_when_opened() {
+    let (mut harness, _) = open_tall(
+        backend()
+            .with_status(root(), unstaged())
+            .with_journal(earlier_runs()),
+    );
+    // Closed: the header with the number of entries, and no entry.
+    assert_eq!(buttons(&harness, "Recently discarded (3)").len(), 1);
+    assert!(buttons(&harness, "Put back").is_empty());
+    assert!(buttons(&harness, "Clear").is_empty());
+
+    open_list(&mut harness);
+    // Each entry: its time, its state, what it holds, and the button of its
+    // state.
+    for text in [
+        "2 files: x.rs, y.rs",
+        "1 file: r.rs",
+        "4 files: a.rs, b.rs, c.rs, …",
+        "Interrupted",
+        "Restored",
+        "Discarded",
+        "2026-01-01 12:00",
+    ] {
+        assert!(text_shown(&harness, text), "{text}");
+    }
+    assert_eq!(buttons(&harness, "Put back").len(), 1);
+    assert_eq!(buttons(&harness, "Discard again").len(), 1);
+    assert_eq!(buttons(&harness, "Restore").len(), 1);
+    assert_eq!(buttons(&harness, "Clear").len(), 1);
+}
+
+#[test]
+fn a_running_entry_has_no_put_back_and_no_clear_is_offered_meanwhile() {
+    let journal = vec![
+        recorded("2-2", State::Pending, EntryRunning::Running, &["x.rs"]),
+        recorded("1-1", State::Discarded, EntryRunning::Settled, &["a.rs"]),
+    ];
+    let (mut harness, _) = open_tall(
+        backend()
+            .with_status(root(), unstaged())
+            .with_journal(journal),
+    );
+    let at = buttons(&harness, "Recently discarded (2)")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    assert!(text_shown(&harness, "Running"));
+    assert!(buttons(&harness, "Put back").is_empty());
+    assert_eq!(buttons(&harness, "Restore").len(), 1);
+    // Refused while one runs: the button is unavailable.
+    assert!(!enabled(&harness, "Clear"));
+}
+
+#[test]
+fn the_buttons_restore_discard_again_and_put_back() {
+    let (mut harness, probe) = open_tall(
+        backend()
+            .with_status(root(), unstaged())
+            .with_journal(earlier_runs()),
+    );
+    open_list(&mut harness);
+    let at = buttons(&harness, "Restore")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |_| probe.restores().len() == 1);
+    assert_eq!(probe.restores()[0], ("1-1".to_owned(), State::Discarded));
+
+    wait_until(&mut harness, |h| enabled(h, "Discard again"));
+    let at = buttons(&harness, "Discard again")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |_| probe.restores().len() == 2);
+    assert_eq!(probe.restores()[1], ("2-2".to_owned(), State::Restored));
+
+    wait_until(&mut harness, |h| enabled(h, "Put back"));
+    let at = buttons(&harness, "Put back")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.put_backs().is_empty());
+    assert_eq!(probe.put_backs(), ["3-3"]);
+}
+
+#[test]
+fn clear_asks_says_it_cannot_be_undone_and_how_many_are_interrupted() {
+    let (mut harness, probe) = open_tall(
+        backend()
+            .with_status(root(), unstaged())
+            .with_journal(earlier_runs()),
+    );
+    open_list(&mut harness);
+    let at = buttons(&harness, "Clear")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    assert_eq!(dialogs(&harness), ["Clear the discarded changes?"]);
+    assert!(text_shown(
+        &harness,
+        "Every entry is removed, and what the entries hold cannot be brought back."
+    ));
+    assert!(text_shown(
+        &harness,
+        "1 entry is interrupted: its files may still be in the list and not in the working copy."
+    ));
+    // Enter is Cancel: nothing is cleared.
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert!(dialogs(&harness).is_empty());
+    assert_eq!(probe.journal().len(), 3);
+
+    let at = buttons(&harness, "Clear")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    let confirm = buttons(&harness, "Clear")
+        .into_iter()
+        .last()
+        .expect("the button of the dialog");
+    click_at(&mut harness, confirm, PointerButton::Primary);
+    wait_until(&mut harness, |_| probe.journal().is_empty());
+    wait_until(&mut harness, |h| {
+        h.query_all_by_label_contains("Recently discarded")
+            .next()
+            .is_none()
+    });
+}
+
+#[test]
+fn the_list_survives_a_restart_by_the_journal() {
+    // A new session on the same journal lists the entry of the earlier run.
+    let backend = backend().with_status(root(), unstaged());
+    let probe = backend.probe();
+    let (mut harness, _) = open_tall(backend);
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    let journal = probe.journal();
+    drop(harness);
+
+    let (mut again, _) = open_tall(backend_with(journal));
+    let at = buttons(&again, "Recently discarded (1)")[0];
+    click_at(&mut again, at, PointerButton::Primary);
+    assert!(text_shown(&again, "1 file: a.rs"));
+    assert_eq!(buttons(&again, "Restore").len(), 1);
+}
+
+fn backend_with(journal: Vec<Listed>) -> FakeBackend {
+    backend()
+        .with_status(root(), unstaged())
+        .with_journal(journal)
 }
