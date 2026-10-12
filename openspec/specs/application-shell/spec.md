@@ -308,7 +308,8 @@ use Ctrl on every platform.
 | Up, Down, Page Up, Page Down, Home, End | Move in the focused list |
 | Left, Right | In a file tree, collapse and expand a folder, or move to the folder above or into it; the focus stays in the list |
 | Enter, Space | Collapse or expand the folder selected in a file tree |
-| Tab, Shift+Tab | Move focus between areas |
+| Tab, Shift+Tab | Move focus between areas; in the commit form of the File status view, between its controls first |
+| Ctrl+Enter | In the summary or the description of the commit form: commit, as its button does |
 | Ctrl+F | Focus the search field |
 | Ctrl+L | Focus the filter of the file list shown |
 | Ctrl+O | Show the home tab with the focus in its filter |
@@ -396,6 +397,10 @@ use Ctrl on every platform.
 #### Scenario: Stage selected lines with the keyboard
 - **WHEN** the diff of an unstaged file has the focus, an added line is selected and the user presses S
 - **THEN** that line is staged
+
+#### Scenario: Ctrl+Enter in the commit form
+- **WHEN** files are staged, a summary is written and the user presses Ctrl+Enter in the summary
+- **THEN** the commit starts
 
 ### Requirement: Responsive interface
 The interface SHALL respond to input within 100 ms at all times, including
@@ -596,12 +601,14 @@ the tabs in a tab bar of their own below it.
 
 ### Requirement: Closing while a write action runs
 While a write action runs in a tab (checking out, creating a branch or a tag,
-staging or unstaging files),
+staging or unstaging files, committing),
 closing that tab, with its button or with Ctrl+W, and closing the window SHALL
 first ask the user, and SHALL NOT stop the action without asking. The question
 SHALL name the action and the tab and warn of what stopping it can leave behind:
 a working copy that is half updated for a checkout, and files that were not
-staged or unstaged, and a lock on the index, for staging and unstaging. It SHALL offer Keep open, which is the default, and Close
+staged or unstaged, and a lock on the index, for staging and unstaging, and a
+commit that was not made, with hooks that were stopped half way and a message
+that is gone with the tab, for a commit. It SHALL offer Keep open, which is the default, and Close
 anyway. Close anyway SHALL close the tab or the window and stop the action. This
 replaces, for write actions, the stopping of all background work of a closed tab
 (requirement "Repository tabs"). Closing a tab or the window in which no write
@@ -635,3 +642,7 @@ action runs SHALL NOT ask anything.
 #### Scenario: Closing a tab while files are staged
 - **WHEN** staging runs in a tab and the user closes the tab
 - **THEN** a question names the staging and the tab, says that files may stay as they were and that Git may leave a lock on the index, and does not mention the working copy
+
+#### Scenario: Closing a tab while a commit runs
+- **WHEN** a commit runs in a tab and the user closes the tab
+- **THEN** a question names the commit and the tab, says that the commit may not be made, that its hooks are stopped and that its message is gone with the tab, and offers Keep open and Close anyway

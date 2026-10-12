@@ -151,8 +151,10 @@ Not delivered with it: discarding changes and resolving conflicts.
 
 ## Delivered: committing
 
-The OpenSpec change `commit` delivered committing from the File status view,
-modelled on GitKraken. That a commit can be stopped is recorded in the
+On 2026-10-12, [pull request #42](https://github.com/BlackmillSolutions/git-bull/pull/42)
+delivered committing from the File status view, modelled on GitKraken. It was
+planned as the OpenSpec change `commit`. That a commit can be stopped is
+recorded in the
 amendment of [ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and
 the behaviour is specified in the
 [commit spec](../openspec/specs/commit/spec.md).
