@@ -1906,6 +1906,7 @@ fn action_dialog(
                 CommitRefusal::InProgress(Operation::ApplyingPatches) => {
                     texts.text(Msg::CommitRefusedPatches)
                 }
+                CommitRefusal::InProgress(Operation::Merge) => texts.text(Msg::CommitRefusedMerge),
                 CommitRefusal::InProgress(_) => texts.text(Msg::CommitRefusedRebase),
                 CommitRefusal::AmendDuring(operation) => {
                     let mut args = FluentArgs::new();
@@ -2765,6 +2766,9 @@ fn history(app: &mut App, ui: &mut Ui) {
                                     .resizable(false)
                                     .show(ui, |ui| commit_form::show(app, ui, palette));
                             }
+                        } else {
+                            // No form is drawn: Tab must not look for one.
+                            commit_form::forget(ui);
                         }
                         CentralPanel::default().show(ui, |ui| {
                             section_title(ui, files_title.clone());

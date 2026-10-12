@@ -1027,6 +1027,11 @@ fn file_status_with_a_hunk_selected() {
 
 /// Writes a message into the commit form of `harness`.
 fn write_commit_message(harness: &mut Harness<'static, App>) {
+    // A field takes text once it has the focus.
+    harness
+        .get_by_role_and_label(Role::TextInput, "Summary")
+        .focus();
+    harness.run();
     harness
         .get_by_role_and_label(Role::TextInput, "Summary")
         .type_text("Stage and unstage files");
@@ -1116,14 +1121,15 @@ fn commit_form_with_its_notices() {
     image_snapshot_options(&image, "commit_form_notices", &options());
 }
 
-/// The smallest window, 640 by 400 pixels, at 150 %: the form keeps its room
-/// and the file list scrolls in what is left.
+/// The smallest window, 640 by 400 points: the file list keeps the room for
+/// its rows, and the form scrolls in what is left. At 150 % this window is
+/// too small for either, as it is for a dialog.
 #[test]
 fn commit_form_in_the_smallest_window() {
     let mut harness = file_status_view_with(
         ThemeSetting::Light,
-        InterfaceSize::Percent150,
-        (640.0 / 1.5, 400.0 / 1.5),
+        InterfaceSize::Percent100,
+        (640.0, 400.0),
         |backend| backend,
     );
     harness.run();

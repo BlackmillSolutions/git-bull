@@ -758,3 +758,94 @@ fn the_file_list_keeps_rows_above_the_form_in_the_smallest_window() {
     }
     assert!(window.contains(amend), "{amend:?} in {window:?}");
 }
+
+#[test]
+fn undoing_does_not_bring_back_a_message_that_was_committed() {
+    let (mut harness, probe) = written(backend(staged()));
+    press_with(&mut harness, Modifiers::COMMAND, Key::Enter);
+    wait_until(&mut harness, |h| {
+        !probe.commits().is_empty() && running(h).is_empty()
+    });
+    harness.run();
+    assert_eq!(focused(&harness).as_deref(), Some(SUMMARY));
+    assert_eq!(summary(&harness), "");
+    press_with(&mut harness, Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(summary(&harness), "");
+}
+
+#[test]
+fn each_tab_has_a_form_of_its_own() {
+    let other = path(&["work", "linux"]);
+    let two = backend(staged())
+        .with_repository(other.clone())
+        .with_history(other.clone(), history())
+        .with_references(other.clone(), vec![branch("main", "c")])
+        .with_status(other.clone(), staged());
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root(), other],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: two,
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    let form = |harness: &mut Harness<'static, App>| {
+        wait_until(harness, |h| {
+            node_at(h, Role::TreeItem, "File status").is_some()
+        });
+        click(harness, Role::TreeItem, "File status");
+        wait_until(harness, |h| node_at(h, Role::TextInput, SUMMARY).is_some());
+        harness.run();
+    };
+    form(&mut harness);
+    type_into(&mut harness, Role::TextInput, SUMMARY, "In the first tab");
+
+    click(&mut harness, Role::Button, "linux");
+    form(&mut harness);
+    assert_eq!(summary(&harness), "");
+    // Undoing in the field of this tab does not reach into the other one.
+    click(&mut harness, Role::TextInput, SUMMARY);
+    press_with(&mut harness, Modifiers::COMMAND, Key::Z);
+    harness.run();
+    assert_eq!(summary(&harness), "");
+
+    click(&mut harness, Role::Button, "git-bull");
+    wait_until(&mut harness, |h| {
+        node_at(h, Role::TextInput, SUMMARY).is_some()
+    });
+    assert_eq!(summary(&harness), "In the first tab");
+}
+
+#[test]
+fn tab_from_the_file_list_passes_a_form_that_is_not_drawn() {
+    // The status is never read: no form.
+    let gate = Gate::new();
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: backend(staged()).with_status_gate(root(), &gate),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    wait_until(&mut harness, |h| {
+        node_at(h, Role::TreeItem, "File status").is_some()
+    });
+    click(&mut harness, Role::TreeItem, "File status");
+    for _ in 0..3 {
+        harness.step();
+    }
+    assert!(node_at(&harness, Role::TextInput, SUMMARY).is_none());
+    click(&mut harness, Role::Pane, "FILES");
+    assert_eq!(focused(&harness).as_deref(), Some("FILES"));
+    press(&mut harness, Key::Tab);
+    assert_eq!(focused(&harness).as_deref(), Some("DIFF"));
+    gate.open();
+}

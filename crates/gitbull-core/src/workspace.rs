@@ -200,12 +200,20 @@ impl Workspace {
     /// by the root of each: for the workspace that replaces this one, as when
     /// another executable is applied in the settings.
     pub fn take_drafts(&mut self) -> Vec<(PathBuf, CommitDraft)> {
-        self.tabs
+        // Those whose repository has not opened yet in this workspace are
+        // still waiting here.
+        let mut drafts = std::mem::take(&mut self.drafts);
+        let open = self
+            .tabs
             .iter_mut()
             .filter_map(Tab::session_mut)
             .map(|session| (session.opened().root.clone(), session.take_draft()))
-            .filter(|(_, draft)| *draft != CommitDraft::default())
-            .collect()
+            .filter(|(_, draft)| *draft != CommitDraft::default());
+        for (root, draft) in open {
+            drafts.retain(|(known, _)| *known != root);
+            drafts.push((root, draft));
+        }
+        drafts
     }
 
     /// Keeps `drafts` for the sessions this workspace opens. A draft whose
@@ -1439,5 +1447,30 @@ mod tests {
         new.open(path(&["work", "git-bull"]));
         settle(&mut new);
         assert_eq!(session_of(&new, "git-bull").draft().summary(), "");
+    }
+
+    #[test]
+    fn a_draft_that_still_waits_moves_on_with_the_others() {
+        let mut waiting = CommitDraft::default();
+        waiting.set_summary("Waiting".to_owned());
+        let mut old =
+            workspace(two_repositories()).with_drafts(vec![(path(&["work", "linux"]), waiting)]);
+        // Only the other repository has opened when the workspace is replaced.
+        old.open(path(&["work", "git-bull"]));
+        settle(&mut old);
+        session_mut_of(&mut old, "git-bull").set_summary("Kept".to_owned());
+        let mut drafts = old.take_drafts();
+        drafts.sort_by(|a, b| a.0.cmp(&b.0));
+        let summaries: Vec<_> = drafts
+            .iter()
+            .map(|(root, draft)| (root.clone(), draft.summary().to_owned()))
+            .collect();
+        assert_eq!(
+            summaries,
+            [
+                (path(&["work", "git-bull"]), "Kept".to_owned()),
+                (path(&["work", "linux"]), "Waiting".to_owned()),
+            ]
+        );
     }
 }

@@ -348,6 +348,10 @@ pub(crate) struct TabView {
     pub(crate) commit_from_form: bool,
     /// A commit ran when the commit form was drawn last.
     pub(crate) commit_ran: bool,
+    /// The summary and the description as the fields of the commit form
+    /// left them when it was drawn last; a draft that differs was changed
+    /// from outside the fields.
+    pub(crate) commit_form_seen: Option<(String, String)>,
     /// Stage all, or unstage all, files that the File status view lists when
     /// it is drawn next: asked for with the keyboard.
     pub(crate) index_all: Option<Shown>,

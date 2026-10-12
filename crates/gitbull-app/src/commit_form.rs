@@ -167,15 +167,35 @@ fn notice(ui: &mut Ui, icon: &str, text: &str, colour: egui::Color32) {
     });
 }
 
+/// No form is drawn in this pass: what the last one left for Tab and for
+/// the layout is gone, so that Tab from the file list does not look for a
+/// control that is not there.
+pub(crate) fn forget(ui: &Ui) {
+    ui.data_mut(|data| {
+        data.remove_temp::<Vec<Id>>(Id::new(STOPS));
+        data.remove_temp::<f32>(Id::new(HEIGHT));
+    });
+}
+
+/// Forgets what a text field keeps to undo: its text was replaced from
+/// outside, and undoing would bring back what is no longer the draft.
+fn forget_undo(ui: &Ui, field: Id) {
+    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), field) {
+        state.clear_undoer();
+        state.store(ui.ctx(), field);
+    }
+}
+
 /// Draws the commit form of the active tab.
 pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let Some(texts) = texts(app) else {
-        ui.data_mut(|data| {
-            data.remove_temp::<Vec<Id>>(Id::new(STOPS));
-            data.remove_temp::<f32>(Id::new(HEIGHT));
-        });
+        forget(ui);
         return;
     };
+    let tab = app
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .map(|tab| tab.id());
     let count_name = |app: &App, count: usize| {
         let mut args = FluentArgs::new();
         args.set("count", count as i64);
@@ -196,7 +216,20 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
     let Some((session, view)) = app.active_view() else {
         return;
     };
-    let (summary_id, description_id) = (Id::new(SUMMARY), Id::new(DESCRIPTION));
+    // Each tab has fields of its own: a field keeps its cursor and what it
+    // can undo by its id, and another tab holds another message.
+    let (summary_id, description_id) = (Id::new((SUMMARY, tab)), Id::new((DESCRIPTION, tab)));
+    // The draft is not what the fields left in the last pass: a commit
+    // emptied it, or a message was filled in.
+    let written = (draft.summary().to_owned(), draft.description().to_owned());
+    if view
+        .commit_form_seen
+        .as_ref()
+        .is_some_and(|seen| *seen != written)
+    {
+        forget_undo(ui, summary_id);
+        forget_undo(ui, description_id);
+    }
 
     // Tab moves through the controls that are available and on to the
     // areas beside the form. It is taken before the fields see it, so that
@@ -292,7 +325,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         shown.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &count_name));
     });
     if summary != draft.summary() {
-        session.set_summary(summary);
+        session.set_summary(summary.clone());
     }
 
     // The description.
@@ -312,8 +345,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) {
         now.push(field.id);
     }
     if description != draft.description() {
-        session.set_description(description);
+        session.set_description(description.clone());
     }
+    view.commit_form_seen = Some((summary, description));
 
     // "Commit without hooks".
     let mut without_hooks = draft.without_hooks();

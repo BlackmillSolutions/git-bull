@@ -214,6 +214,7 @@ messages! {
     CommitRefusedConflicts => "commit-refused-conflicts",
     CommitRefusedRebase => "commit-refused-rebase",
     CommitRefusedPatches => "commit-refused-patches",
+    CommitRefusedMerge => "commit-refused-merge",
     CommitRefusedAmend => "commit-refused-amend",
     OperationMerge => "operation-merge",
     OperationCherryPick => "operation-cherry-pick",

@@ -413,7 +413,12 @@ fn a_stop_during_a_hook_or_the_signing_leaves_nothing(git: &Git) {
     for waiting in ["pre-commit", "commit-msg", "signing"] {
         let repo = repository();
         let started = git_dir(&repo).join("started");
-        let wait = format!("touch '{}'\nsleep 30", shell(&started));
+        let pid = git_dir(&repo).join("waiting.pid");
+        let wait = format!(
+            "echo $$ > '{}'\ntouch '{}'\nsleep 30",
+            shell(&pid),
+            shell(&started)
+        );
         if waiting == "signing" {
             let signer = repo.path().join("signer.sh");
             fs::write(&signer, format!("#!/bin/sh\n{wait}\n")).unwrap();
@@ -439,6 +444,18 @@ fn a_stop_during_a_hook_or_the_signing_leaves_nothing(git: &Git) {
         assert!(asked.elapsed() < Duration::from_secs(15), "{waiting}");
         assert_eq!(head(&repo), before, "{waiting}");
         assert!(!locked(&repo), "{waiting}");
+        // The program that waited is gone.
+        #[cfg(unix)]
+        {
+            let pid = fs::read_to_string(&pid).unwrap();
+            let alive = std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(!alive, "{waiting}: process {pid} still runs");
+        }
         // The file is still staged.
         assert!(porcelain(&repo).contains("A  a.txt"), "{waiting}");
     }
@@ -641,15 +658,51 @@ fn everything_is_staged_and_committed(git: &Git) {
 }
 
 fn a_conflict_refuses_to_stage_everything(git: &Git) {
-    let repo = conflicting();
-    assert!(repo.try_git(&["merge", "topic"]).is_err());
-    repo.write("other.txt", "other\n");
-    let before = porcelain(&repo);
     let all = CommitRequest {
         stage_all: true,
         ..request("Everything")
     };
+    // A pick that stopped at a conflict.
+    let repo = conflicting();
+    assert!(repo.try_git(&["cherry-pick", "topic"]).is_err());
+    repo.write("other.txt", "other\n");
+    let before = porcelain(&repo);
     assert_eq!(run(git, &repo, &all), refused(CommitRefusal::Conflicts));
+    assert_eq!(porcelain(&repo), before);
+
+    // A merge that began since the form was read is not concluded with
+    // every file that lies in the working copy: nothing is staged.
+    let mut repo = repository();
+    repo.git(&["checkout", "-q", "-b", "topic"]);
+    repo.write("t.txt", "t\n");
+    repo.commit("On topic");
+    repo.git(&["checkout", "-q", "-"]);
+    repo.git(&["merge", "--no-commit", "--no-ff", "topic"]);
+    repo.write("notes.txt", "scratch\n");
+    let before = porcelain(&repo);
+    assert_eq!(
+        run(git, &repo, &all),
+        refused(CommitRefusal::InProgress(Operation::Merge))
+    );
+    assert_eq!(porcelain(&repo), before);
+
+    // Neither is a rebase that stopped for an edit.
+    let mut repo = repository();
+    repo.write("a.txt", "a\n");
+    repo.commit("Second");
+    repo.git(&[
+        "-c",
+        "sequence.editor=sed -i.bak s/^pick/edit/",
+        "rebase",
+        "-i",
+        "HEAD~1",
+    ]);
+    repo.write("notes.txt", "scratch\n");
+    let before = porcelain(&repo);
+    assert_eq!(
+        run(git, &repo, &all),
+        refused(CommitRefusal::InProgress(Operation::Rebase))
+    );
     assert_eq!(porcelain(&repo), before);
 }
 

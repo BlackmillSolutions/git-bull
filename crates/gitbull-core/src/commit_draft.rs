@@ -76,6 +76,14 @@ impl CommitDraft {
     /// The message of the commit: the summary, and when there is a
     /// description, an empty line and the description.
     pub fn message(&self) -> String {
+        // What was filled in and not touched is the message as it was:
+        // splitting it and joining it again would put an empty line after a
+        // first line that had none.
+        if let Some((_, text)) = &self.filled
+            && self.holds(text)
+        {
+            return text.trim_end().to_owned();
+        }
         let summary = self.summary.trim_end();
         if self.description.trim().is_empty() {
             summary.to_owned()
@@ -107,6 +115,8 @@ impl CommitDraft {
     }
 
     fn fill(&mut self, source: Source, message: &str) {
+        // The fields hold lines that end as the form writes them.
+        let message = &message.replace("\r\n", "\n");
         let (summary, description) = split(message);
         self.summary = summary;
         self.description = description;
@@ -314,6 +324,28 @@ mod tests {
         assert_eq!(draft.message(), "Add the form\n\nIt sits below the list.");
         draft.set_description("  \n".to_owned());
         assert_eq!(draft.message(), "Add the form");
+    }
+
+    #[test]
+    fn a_filled_message_that_is_not_touched_is_sent_as_it_was() {
+        let mut draft = CommitDraft::default();
+        draft.check_amend();
+        // No empty line after the first: it must not gain one.
+        draft.last_message_read(Some("Subject\nsecond line\n"));
+        assert_eq!(fields(&draft), ("Subject", "second line"));
+        assert_eq!(draft.message(), "Subject\nsecond line");
+        // Touched, it is the summary and the description.
+        draft.set_summary("Subject, edited".to_owned());
+        assert_eq!(draft.message(), "Subject, edited\n\nsecond line");
+
+        // Line breaks of Windows do not get into the fields.
+        let mut draft = CommitDraft::default();
+        draft.check_amend();
+        draft.last_message_read(Some("Subject\r\n\r\nBody\r\nmore\r\n"));
+        assert_eq!(fields(&draft), ("Subject", "Body\nmore"));
+        // And it still counts as untouched.
+        draft.uncheck_amend();
+        assert_eq!(fields(&draft), ("", ""));
     }
 
     #[test]

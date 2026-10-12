@@ -416,7 +416,7 @@ button that copies.
   the form gets what is left and scrolls. The
   smallest window at 100 % shows both; at 150 % it is too small for either,
   as it is for a dialog (spec `checkout`, requirement "Dialogs of write
-  actions"), and the Windows snapshot at that size records what is seen.
+  actions"). The Windows snapshot is taken of the smallest window at 100 %.
 - [The user checks "Commit without hooks" and forgets it] → It is cleared
   after every commit that took place.
 

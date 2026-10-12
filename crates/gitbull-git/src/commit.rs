@@ -59,7 +59,8 @@ pub enum CommitRefusal {
     /// A file is in conflict, so that not every change can be staged.
     Conflicts,
     /// A rebase, or a series of patches, is in progress: a commit there loses
-    /// the author of the commit being replayed.
+    /// the author of the commit being replayed. Or a merge is, and every
+    /// change was to be staged for it, which is not how a merge is concluded.
     InProgress(Operation),
     /// An amend while an operation is in progress would replace a commit
     /// that is not the user's last one, or one the operation still needs.
@@ -112,6 +113,29 @@ pub fn commit(git: &Git, repo: &Path, request: &CommitRequest, cancel: &CancelTo
     let failed = |error: Error| not_made(CommitOutcome::Failed(message_of(error, &[])));
     // Reads and the staging are not stopped.
     let steady = CancelToken::new();
+    // The form closes these, but only as fresh as its last read. They are
+    // read before anything is staged: a refusal leaves the index alone.
+    match commit_state(git, repo) {
+        Ok(state) => match state.operation {
+            Some(operation @ (Operation::Rebase | Operation::ApplyingPatches)) => {
+                return not_made(CommitOutcome::Refused(CommitRefusal::InProgress(operation)));
+            }
+            Some(operation) if request.amend => {
+                return not_made(CommitOutcome::Refused(CommitRefusal::AmendDuring(
+                    operation,
+                )));
+            }
+            // A merge is concluded with what the user staged for it, not
+            // with every file that lies in the working copy.
+            Some(Operation::Merge) if request.stage_all => {
+                return not_made(CommitOutcome::Refused(CommitRefusal::InProgress(
+                    Operation::Merge,
+                )));
+            }
+            _ => {}
+        },
+        Err(error) => return failed(error),
+    }
     if request.stage_all {
         let status = match status(git, repo, &steady) {
             Ok(status) => status,
@@ -136,21 +160,6 @@ pub fn commit(git: &Git, repo: &Path, request: &CommitRequest, cancel: &CancelTo
     }
     if cancel.is_cancelled() {
         return not_made(CommitOutcome::Stopped);
-    }
-    // The form closes these, but only as fresh as its last read.
-    match commit_state(git, repo) {
-        Ok(state) => match state.operation {
-            Some(operation @ (Operation::Rebase | Operation::ApplyingPatches)) => {
-                return not_made(CommitOutcome::Refused(CommitRefusal::InProgress(operation)));
-            }
-            Some(operation) if request.amend => {
-                return not_made(CommitOutcome::Refused(CommitRefusal::AmendDuring(
-                    operation,
-                )));
-            }
-            _ => {}
-        },
-        Err(error) => return failed(error),
     }
 
     let before = head_commit(git, repo);

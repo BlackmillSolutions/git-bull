@@ -238,6 +238,7 @@ commit-refused-title = No commit was made
 commit-refused-conflicts = Files are in conflict, so not every change can be staged. Resolve the conflicts and stage the files, then commit.
 commit-refused-rebase = A rebase is in progress. A commit made now would lose the author of the commit that is being replayed. Continue or abort the rebase outside git-bull.
 commit-refused-patches = A series of patches is being applied. A commit made now would lose the author of the patch. Continue or abort it outside git-bull.
+commit-refused-merge = A merge has begun. It is concluded with what you stage for it, not with every change of the working copy. Stage what belongs to the merge, then commit it.
 commit-refused-amend = The last commit cannot be amended while { $operation } is in progress: the commit that would be replaced is not the one you made last, or is still needed.
 operation-merge = a merge
 operation-cherry-pick = a cherry-pick
