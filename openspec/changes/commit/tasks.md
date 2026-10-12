@@ -31,5 +31,5 @@
 
 ## 5. Integration
 
-- [ ] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` once each, and verify all three pass.
+- [x] 5.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` once each, and verify all three pass.
 - [ ] 5.2 Commit by hand in a real repository with the built application: a commit of staged files, "Stage all changes and commit", an amend of the message and one with a staged file, a commit with a pre-commit hook that refuses and the same without hooks, a hook that sleeps and is stopped, a signed commit with a key that asks for its passphrase, the conclusion of a merge with an untracked file beside it, a rebase stopped at a conflict, where the form must offer neither commit nor amend, and a cherry-pick stopped at a conflict, whose commit must keep its author. On Windows also stop a commit while a slow filter runs before the hooks, and note whether a lock stays. Verify `git log` and `git status` in a terminal agree with the views after each.
