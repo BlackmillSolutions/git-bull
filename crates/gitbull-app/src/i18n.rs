@@ -306,6 +306,8 @@ messages! {
     UnstageAll => "unstage-all",
     DiscardChanges => "discard-changes",
     DiscardAll => "discard-all",
+    DiscardHunk => "discard-hunk",
+    DiscardSelectedLines => "discard-selected-lines",
     DiscardUnavailableConflict => "discard-unavailable-conflict",
     DiscardUnavailableSubmodule => "discard-unavailable-submodule",
     DiscardUnavailableRenamed => "discard-unavailable-renamed",

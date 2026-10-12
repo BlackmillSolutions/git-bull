@@ -1967,6 +1967,8 @@ fn menu_entries(harness: &Harness<'_, App>) -> Vec<String> {
         "Stage selected lines",
         "Unstage hunk",
         "Unstage selected lines",
+        "Discard hunk",
+        "Discard selected lines",
     ];
     let copy = buttons(harness, "Copy lines");
     let Some(copy) = copy.first() else {
@@ -2039,13 +2041,10 @@ fn the_menu_of_a_line_offers_to_stage_its_hunk_and_the_selected_lines() {
             "Copy lines",
             "Copy hunk",
             "Stage hunk",
-            "Stage selected lines"
+            "Stage selected lines",
+            "Discard hunk",
+            "Discard selected lines"
         ]
-    );
-    let shown = labels(&harness, Role::Button);
-    assert!(
-        !shown.iter().any(|label| label.starts_with("Discard hunk") || label.starts_with("Discard selected")),
-        "{shown:?}"
     );
     choose_entry(&mut harness, "Stage hunk");
     wait_until(&mut harness, |_| !probe.parts().is_empty());
@@ -2370,7 +2369,11 @@ fn a_revealed_line_belongs_to_no_hunk_and_is_staged_with_the_selection() {
     click_at(&mut harness, at, PointerButton::Secondary);
     assert_eq!(
         menu_entries(&harness),
-        ["Copy lines", "Stage selected lines"]
+        [
+            "Copy lines",
+            "Stage selected lines",
+            "Discard selected lines"
+        ]
     );
     // It is no change.
     assert!(!enabled(&harness, "Stage selected lines"));
@@ -2519,4 +2522,213 @@ fn the_keyboard_is_in_the_diff_right_after_the_dialog_of_a_part() {
     }
     assert!(running(&harness).is_empty());
     assert!(index_calls(&probe).is_empty(), "S staged the whole file");
+}
+
+// ---- discarding parts (spec `discard`)
+
+/// A discard of a part that was asked for: the path and what is chosen of
+/// each hunk.
+fn discarded(probe: &Probe) -> Vec<(String, Vec<(usize, Chosen)>)> {
+    probe
+        .discarded_parts()
+        .into_iter()
+        .map(|(path, request)| {
+            let chosen = (0..4)
+                .filter_map(|hunk| Some((hunk, request.selection.of(hunk)?.clone())))
+                .collect();
+            (path, chosen)
+        })
+        .collect()
+}
+
+#[test]
+fn the_menu_of_a_line_offers_to_discard_the_hunk_after_the_entries_that_stage() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    let at = diff_row(&harness, ": new");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    let entries = menu_entries(&harness);
+    assert_eq!(
+        entries[2..],
+        [
+            "Stage hunk",
+            "Stage selected lines",
+            "Discard hunk",
+            "Discard selected lines"
+        ]
+    );
+    // No line is selected beyond the one clicked, which is added: both apply.
+    choose_entry(&mut harness, "Discard hunk");
+    wait_until(&mut harness, |_| !probe.discarded_parts().is_empty());
+    // The hunk of the row, the second; no dialog asks first.
+    assert_eq!(
+        discarded(&probe),
+        [("a.rs".to_owned(), vec![(1, Chosen::All)])]
+    );
+    wait_until(&mut harness, |h| running(h).is_empty());
+    assert!(!text_shown(&harness, "Nothing was discarded"));
+    assert!(dialogs_open(&harness).is_empty());
+}
+
+fn dialogs_open(harness: &Harness<'_, App>) -> Vec<String> {
+    labels(harness, Role::Dialog)
+}
+
+#[test]
+fn selected_lines_are_discarded_by_the_entry_of_the_menu() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Primary);
+    click_at(&mut harness, at, PointerButton::Secondary);
+    choose_entry(&mut harness, "Discard selected lines");
+    wait_until(&mut harness, |_| !probe.discarded_parts().is_empty());
+    assert_eq!(
+        discarded(&probe),
+        [("a.rs".to_owned(), vec![(0, Chosen::Lines(vec![1]))])]
+    );
+}
+
+#[test]
+fn the_header_of_a_hunk_has_a_button_that_discards_it_beside_the_one_that_stages() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    assert!(buttons(&harness, "Discard hunk").is_empty());
+    let header = diff_row(&harness, "@@ -20,3 +22,3 @@");
+    harness.hover_at(header);
+    harness.run();
+    let on_header = |harness: &Harness<'_, App>, label: &str| {
+        buttons(harness, label)
+            .into_iter()
+            .find(|button| (button.y - header.y).abs() < 4.0)
+            .unwrap_or_else(|| panic!("no {label} on the header"))
+    };
+    let (stage, discard) = (
+        on_header(&harness, "Stage hunk"),
+        on_header(&harness, "Discard hunk"),
+    );
+    assert!(discard.x < stage.x);
+    click_at(&mut harness, discard, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.discarded_parts().is_empty());
+    assert_eq!(
+        discarded(&probe),
+        [("a.rs".to_owned(), vec![(1, Chosen::All)])]
+    );
+    // Nothing was staged.
+    assert!(probe.parts().is_empty());
+}
+
+#[test]
+fn no_key_discards_a_part() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Primary);
+    for key in [Key::D, Key::Delete, Key::Backspace, Key::X] {
+        press(&mut harness, key);
+    }
+    for _ in 0..5 {
+        harness.step();
+    }
+    assert!(running(&harness).is_empty());
+    assert!(probe.discarded_parts().is_empty());
+}
+
+#[test]
+fn parts_cannot_be_discarded_where_they_cannot_be_staged_and_say_why() {
+    let filtered = FileDiff {
+        filtered: true,
+        ..two_hunks("a.rs")
+    };
+    let backend = with_two_hunks().with_working_diff(Group::Unstaged, "a.rs", filtered);
+    let (mut harness, probe) = diff_of_file(backend, "Modified: a.rs");
+    let header = diff_row(&harness, "@@ -1,2 +1,4 @@");
+    click_at(&mut harness, header, PointerButton::Primary);
+    assert!(buttons(&harness, "Discard hunk").is_empty());
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(!enabled(&harness, "Discard hunk"));
+    assert!(!enabled(&harness, "Discard selected lines"));
+    let entry = buttons(&harness, "Discard hunk")[0];
+    harness.hover_at(entry);
+    wait_until(&mut harness, |h| {
+        text_shown(
+            h,
+            "A filter rewrites this file, so the lines shown are not the lines of the file. \
+             Stage the whole file.",
+        )
+    });
+    assert!(probe.discarded_parts().is_empty());
+}
+
+#[test]
+fn a_staged_file_and_an_untracked_file_offer_no_part_to_discard() {
+    let backend = backend()
+        .with_status(
+            root(),
+            WorkingStatus {
+                staged: vec![changed(MODIFIED, "s.rs")],
+                untracked: vec![entry(StatusKind::Untracked, "n.rs")],
+                ..WorkingStatus::default()
+            },
+        )
+        .with_working_diff(Group::Staged, "s.rs", two_hunks("s.rs"))
+        .with_working_diff(Group::Untracked, "n.rs", two_hunks("n.rs"));
+    let (mut harness, _) = diff_of_file(backend, "Modified: s.rs");
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(buttons(&harness, "Discard hunk").is_empty());
+    assert!(buttons(&harness, "Discard selected lines").is_empty());
+    harness.key_press(Key::Escape);
+    harness.run();
+
+    chosen(&mut harness, "Untracked: n.rs");
+    wait_until(&mut harness, |h| !diff_lines(h).is_empty());
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(buttons(&harness, "Discard hunk").is_empty());
+}
+
+fn refused_part(why: gitbull_git::discard::DiscardRefusal) -> (Harness<'static, App>, Probe) {
+    let backend = with_two_hunks().with_discard_end(gitbull_git::discard::DiscardEnd {
+        outcome: gitbull_git::discard::DiscardOutcome::Refused(why),
+        entry: None,
+        left_out: Vec::new(),
+    });
+    let (mut harness, probe) = diff_of_file(backend, "Modified: a.rs");
+    let at = diff_row(&harness, ": new");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    choose_entry(&mut harness, "Discard hunk");
+    (harness, probe)
+}
+
+#[test]
+fn a_diff_out_of_date_says_that_nothing_was_discarded_and_the_keyboard_goes_to_the_diff() {
+    let (mut harness, probe) = refused_part(gitbull_git::discard::DiscardRefusal::DiffOutOfDate);
+    wait_until(&mut harness, |h| text_shown(h, "a.rs changed"));
+    assert!(text_shown(
+        &harness,
+        "The file changed since its diff was read, so nothing was discarded. \
+         The diff now shows the file as it is."
+    ));
+    harness.run();
+    harness.get_by_role_and_label(Role::Button, "Close").click();
+    harness.run();
+    assert!(dialogs_open(&harness).is_empty());
+    // S acts on the lines of the diff, not on the file of the list.
+    press(&mut harness, Key::S);
+    for _ in 0..5 {
+        harness.step();
+    }
+    assert!(running(&harness).is_empty());
+    assert!(index_calls(&probe).is_empty(), "S staged the whole file");
+}
+
+#[test]
+fn a_refusal_for_line_endings_says_that_the_file_can_be_discarded_whole() {
+    let (mut harness, _) = refused_part(gitbull_git::discard::DiscardRefusal::LineEndings);
+    wait_until(&mut harness, |h| {
+        text_shown(h, "The part of a.rs was not discarded")
+    });
+    assert!(text_shown(
+        &harness,
+        "Git would have changed the line endings of other lines of the file, so the file \
+         was put back as it was. The whole file can be discarded instead."
+    ));
 }

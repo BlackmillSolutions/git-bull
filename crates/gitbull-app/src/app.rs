@@ -1442,6 +1442,8 @@ impl App {
                     true
                 }
                 Some(ActionDialog::Failed { action, .. }) => action.is_part(),
+                // A part of a file that was refused is asked for in the diff.
+                Some(ActionDialog::DiscardRefused { path: Some(_), .. }) => true,
                 _ => false,
             };
             of_commit = matches!(

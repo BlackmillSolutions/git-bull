@@ -163,10 +163,13 @@ impl Action {
         )
     }
 
-    /// Staging or unstaging a part of a file, which is asked for in the diff
-    /// and not in the file list.
+    /// Staging, unstaging or discarding a part of a file, which is asked for
+    /// in the diff and not in the file list.
     pub fn is_part(&self) -> bool {
-        matches!(self, Action::StagePart { .. } | Action::UnstagePart { .. })
+        matches!(
+            self,
+            Action::StagePart { .. } | Action::UnstagePart { .. } | Action::DiscardPart { .. }
+        )
     }
 }
 
