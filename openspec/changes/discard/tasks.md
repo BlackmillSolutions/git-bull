@@ -61,5 +61,5 @@
 
 ## 7. Integration
 
-- [ ] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` once each, and verify all three pass.
+- [x] 7.1 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo test --workspace --locked` once each, and verify all three pass.
 - [ ] 7.2 Discard by hand in a real repository with the built application: a modified file, a staged and further changed file, a deleted file, an untracked file and an untracked folder with many files, a symbolic link, a hunk and single lines of a file with CRLF line endings and of one with mixed endings, and "Discard all"; undo each with the bar and with Ctrl+Z; close git-bull, open it and restore from the list; do it in a linked worktree and with two instances on one worktree; end git-bull with `kill -9` during a discard of many files and put the entry back after the restart, and once while `git restore` runs on a slow filter; on Windows with a file that another program holds open and with a smudge filter that fails. Verify `git status` and the files agree with the views after each, and that no file of the journal appears in the status.
