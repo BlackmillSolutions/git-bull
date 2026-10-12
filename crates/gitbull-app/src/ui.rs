@@ -2979,8 +2979,12 @@ fn history(app: &mut App, ui: &mut Ui) {
                             // In a small window the form gives the list the
                             // room for its title, its filter and five rows,
                             // and scrolls in what is left.
-                            let most = (ui.available_height() - commit_form::LIST_ROOM)
-                                .max(SHAPE.control_height);
+                            // The bar and the header of the discards keep
+                            // their room too.
+                            let most = (ui.available_height()
+                                - commit_form::LIST_ROOM
+                                - crate::recent_discards::base_height(ui))
+                            .max(SHAPE.control_height);
                             // The form is as high as what it holds; only one
                             // that was higher than its room when drawn last
                             // gets that room and scrolls.
@@ -3007,9 +3011,13 @@ fn history(app: &mut App, ui: &mut Ui) {
                         // list and the form, also when nothing is left to
                         // list.
                         if crate::recent_discards::shown(app) {
+                            // What the file list and the form leave: the file
+                            // list keeps the room for its title, its filter and
+                            // five rows.
+                            let room = (ui.available_height() - commit_form::LIST_ROOM).max(0.0);
                             Panel::bottom("recent_discards")
                                 .resizable(false)
-                                .show(ui, |ui| crate::recent_discards::show(app, ui));
+                                .show(ui, |ui| crate::recent_discards::show(app, ui, room));
                         } else {
                             // Nothing is drawn: Tab must not look for it.
                             crate::recent_discards::forget(ui);

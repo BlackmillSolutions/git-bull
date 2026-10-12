@@ -28,9 +28,23 @@ pub(crate) fn stops(ui: &Ui) -> Vec<Id> {
         .unwrap_or_default()
 }
 
-/// Nothing is drawn in this pass: what the last one left for Tab is gone.
+/// Where the group keeps the height of the bar and the header, which it
+/// needs whatever room it gets.
+const BASE: &str = "recent-discards-base";
+
+/// How high the bar and the header were when they were drawn last: the room
+/// the commit form leaves them. Zero while they are not drawn.
+pub(crate) fn base_height(ui: &Ui) -> f32 {
+    ui.data(|data| data.get_temp(Id::new(BASE))).unwrap_or(0.0)
+}
+
+/// Nothing is drawn in this pass: what the last one left for Tab and for the
+/// layout is gone.
 pub(crate) fn forget(ui: &Ui) {
-    ui.data_mut(|data| data.remove_temp::<Vec<Id>>(Id::new(STOPS)));
+    ui.data_mut(|data| {
+        data.remove_temp::<Vec<Id>>(Id::new(STOPS));
+        data.remove_temp::<f32>(Id::new(BASE));
+    });
 }
 
 /// The record the notice bar is drawn for: the last discard of the tab, while
@@ -75,11 +89,13 @@ fn bar_text(app: &App, record: &DiscardRecord) -> String {
 }
 
 /// Draws what the discards show beside the file list: the notice bar and the
-/// list "Recently discarded".
-pub(crate) fn show(app: &mut App, ui: &mut Ui) {
+/// list "Recently discarded". `room` is the height the file list leaves them
+/// and the commit form: the bar and the header always show, and the rows of
+/// the list as many as fit in what is left.
+pub(crate) fn show(app: &mut App, ui: &mut Ui, room: f32) {
     let mut now: Vec<Id> = Vec::new();
     bar(app, ui, &mut now);
-    list(app, ui, &mut now);
+    list(app, ui, &mut now, room);
     tab(ui, &now);
     ui.data_mut(|data| data.insert_temp(Id::new(STOPS), now));
 }
@@ -277,7 +293,7 @@ fn entry_of(app: &App, record: &DiscardRecord) -> Entry {
 /// Draws the section "Recently discarded": a header that opens and closes it
 /// and, while it is open, "Clear" and the entries of the journal, each with
 /// its time, what it holds, its state and the button that fits the state.
-fn list(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>) {
+fn list(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>, room: f32) {
     let Some((open, busy)) = app
         .active_view()
         .map(|(session, view)| (view.discards_open, session.action().is_some()))
@@ -345,11 +361,19 @@ fn list(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>) {
             });
         }
     });
-    if open {
-        // The list has the height of its rows, up to a few, and scrolls
-        // beyond; the panel it lies in does not give it a height of its own.
-        let row = crate::theme::SHAPE.control_height + ui.spacing().item_spacing.y;
-        let height = entries.len().min(LIST_ROWS) as f32 * row;
+    let base = ui.min_rect().height();
+    ui.data_mut(|data| data.insert_temp(Id::new(BASE), base));
+    // The list has the height of its rows, up to a few, and scrolls beyond;
+    // the panel it lies in does not give it a height of its own. In a small
+    // window it gets what the bar and the header leave of the room.
+    let row = crate::theme::SHAPE.control_height + ui.spacing().item_spacing.y;
+    let free = room - ui.min_rect().height() - ui.spacing().item_spacing.y;
+    let rows = entries
+        .len()
+        .min(LIST_ROWS)
+        .min((free.max(0.0) / row).floor() as usize);
+    if open && rows > 0 {
+        let height = rows as f32 * row;
         let width = ui.available_width();
         ui.allocate_ui(egui::vec2(width, height), |ui| {
             egui::ScrollArea::vertical()

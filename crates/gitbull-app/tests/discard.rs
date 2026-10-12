@@ -118,12 +118,11 @@ fn open_sized(backend: FakeBackend, size: Option<(f32, f32)>) -> (Harness<'stati
         None => window(test.app),
     };
     settle_window(&mut harness);
+    // The sidebar is there once the repository is open; a small window may show
+    // no row of the history.
     wait_until(&mut harness, |h| {
-        h.query_all_by_role(Role::Row).any(|node| {
-            node.accesskit_node()
-                .label()
-                .is_some_and(|l| l.starts_with("Base"))
-        })
+        h.query_all_by_role(Role::TreeItem)
+            .any(|node| node.accesskit_node().label().as_deref() == Some("File status"))
     });
     let at = harness
         .query_all_by_role(Role::TreeItem)
@@ -1182,4 +1181,41 @@ fn closing_the_window_while_a_discard_runs_waits_and_keep_open_leaves_the_wait()
     gate.open();
     wait_until(&mut harness, |h| !text_shown(h, "Discarding 3 files"));
     assert_eq!(tabs_open(&harness), ["git-bull"]);
+}
+
+#[test]
+fn the_smallest_window_keeps_the_file_list_and_shows_the_bar_and_the_header() {
+    let (mut harness, probe) = open_sized(
+        backend()
+            .with_status(root(), unstaged())
+            .with_journal(earlier_runs()),
+        Some((640.0, 400.0)),
+    );
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    let at = buttons(&harness, "Recently discarded (4)")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+
+    // The bar and the header are in view, below the rows of the file list.
+    let rect = |label: &str| {
+        harness
+            .query_all_by_role(Role::Button)
+            .find(|node| node.accesskit_node().label().as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("no button {label}"))
+            .rect()
+    };
+    let (undo, header) = (rect("Undo"), rect("Recently discarded (4)"));
+    let last_file = harness
+        .query_all_by_role(Role::ListItem)
+        .map(|node| node.rect())
+        .fold(0.0_f32, |bottom, rect| bottom.max(rect.bottom()));
+    assert!(last_file <= undo.top() + 1.0, "{last_file} {undo:?}");
+    assert!(undo.bottom() <= header.top() + 1.0, "{undo:?} {header:?}");
+    // The file list keeps its rows: the titles and a few files.
+    assert!(
+        harness.query_all_by_role(Role::ListItem).count() >= 3,
+        "{:?}",
+        labels(&harness, Role::ListItem)
+    );
+    // Both lie within the window, which is 400 points high.
+    assert!(header.bottom() <= 400.0, "{header:?}");
 }
