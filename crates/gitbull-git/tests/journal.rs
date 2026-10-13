@@ -112,7 +112,9 @@ fn the_folder_is_where_git_says(git: &Git) {
         "{:?}",
         own.dir()
     );
-    assert!(own.dir().starts_with(repo.path().join(".git")));
+    // Git reports real paths: on macOS `/private/var` for `/var`.
+    let git_folder = repo.path().join(".git").canonicalize().unwrap();
+    assert!(own.dir().starts_with(&git_folder), "{:?}", own.dir());
     assert_ne!(own.dir(), main.dir());
 
     // A `.git` file that points elsewhere.
