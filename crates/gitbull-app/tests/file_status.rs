@@ -2175,8 +2175,14 @@ fn the_keys_stage_the_selected_lines_or_the_hunk_of_a_selected_header() {
         )]
     );
 
-    // A header alone: its hunk.
+    // A header alone: its hunk. The diff is read again after the part; a key
+    // pressed while it is read finds no part to take.
+    wait_until(&mut harness, |_| {
+        let reads = probe.calls(&root());
+        reads.iter().filter(|call| *call == "working-diff").count() == 2
+    });
     wait_until(&mut harness, |h| !diff_lines(h).is_empty());
+    harness.run();
     let header = diff_row(&harness, "@@ -1,2 +1,4 @@");
     click_at(&mut harness, header, PointerButton::Primary);
     press(&mut harness, Key::S);
