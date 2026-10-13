@@ -96,6 +96,11 @@ pub struct FileDiff {
     pub content: Content,
     /// Lines beyond the limit asked for were not read.
     pub truncated: bool,
+    /// A filter driver that is configured rewrites the content of the file,
+    /// so that the lines of this diff are not the lines of the file: such a
+    /// file is staged whole only (spec `staging`, requirement "Changes that
+    /// are staged whole"). Set for the diffs of the file status alone.
+    pub filtered: bool,
 }
 
 /// The arguments of `git diff-tree` for the diff of the paths of `change`
@@ -238,7 +243,7 @@ pub(crate) fn find_diff(
 
 /// The output of `command`, up to `limit` lines of hunks; returns it and
 /// whether lines were left unread.
-fn read_diff(
+pub(crate) fn read_diff(
     git: &Git,
     repo: &Path,
     command: &DiffCommand<'_>,
@@ -524,6 +529,7 @@ impl Section {
             new_in_working_copy: false,
             content,
             truncated: false,
+            filtered: false,
         }
     }
 }

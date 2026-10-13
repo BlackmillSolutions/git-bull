@@ -90,6 +90,7 @@ fn diff(path: &str, added: &str) -> FileDiff {
             }],
         }]),
         truncated: false,
+        filtered: false,
     }
 }
 

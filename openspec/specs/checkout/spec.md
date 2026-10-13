@@ -185,16 +185,42 @@ do the same as above.
 
 ### Requirement: One write action at a time
 A tab SHALL run at most one write action at a time, where write actions are
-checking out, creating a branch and creating a tag. While one runs, every entry
-that starts a write action in that tab SHALL be unavailable, the status bar
-SHALL name what runs, such as "Checking out feature", and the other tabs SHALL
-stay usable. Such an action SHALL have no control to cancel it, because a
-cancelled checkout can leave the working copy half updated. Reading in the tab,
+checking out, creating a branch, creating a tag, staging and unstaging
+files, committing, discarding files and parts of files, restoring a discard
+and clearing the list of discards. While a checkout, the creation of a branch
+or a tag, a commit, a discard, a restore or the clearing runs, every entry
+that starts a write action in that tab SHALL be unavailable. While staging or
+unstaging runs, or is kept to run, the entries that check out, create, commit or
+discard SHALL be unavailable, and further staging and unstaging of files SHALL be accepted
+and kept, while a part of a file is taken only when nothing runs, both as the
+capability `staging` describes. The status bar SHALL name what runs, such as
+"Checking out feature", "Staging 3 files", "Staging a part of src/a.rs",
+"Committing", "Discarding 3 files", "Restoring 3 files" or "Clearing the list
+of discards", and the other tabs SHALL stay usable. A checkout, a creation, a
+staging, a discard, a restore and the clearing SHALL have no control to cancel
+them, because a cancelled checkout can leave the working copy half updated, a
+cancelled staging a lock on the index, and a cancelled discard files that are
+moved away and not yet put back; none of them is stopped by closing the tab
+or by dropping the session either. A commit SHALL have one, Stop in the commit form, because Git makes a
+commit in one step at its end, holds a lock on the index only before its
+hooks start, and can wait without end for a hook or a signing program. Reading in the tab,
 such as the history, the file status and the search, SHALL continue.
 
 #### Scenario: Second action is unavailable
 - **WHEN** a checkout runs in a tab and the user opens the context menu of a branch
 - **THEN** its entries that check out or create are unavailable
+
+#### Scenario: Staging is unavailable during a checkout
+- **WHEN** a checkout runs in a tab and the user opens the File status view
+- **THEN** the buttons and entries that stage and unstage are unavailable until the checkout ended
+
+#### Scenario: Checkout is unavailable while files are staged
+- **WHEN** staging runs in a tab and the user opens the context menu of a branch
+- **THEN** its entries that check out or create are unavailable until the staging ended
+
+#### Scenario: Status bar names a staging
+- **WHEN** three files are being staged
+- **THEN** the status bar says that three files are being staged, until the status was read again
 
 #### Scenario: Status bar names the action
 - **WHEN** a checkout of `feature` runs
@@ -208,11 +234,49 @@ such as the history, the file status and the search, SHALL continue.
 - **WHEN** a checkout runs in the first tab and the user switches to the second tab
 - **THEN** the second tab accepts a checkout of its own
 
+#### Scenario: Commit is unavailable while files are staged
+- **WHEN** staging runs in a tab
+- **THEN** the button of the commit form is unavailable until the staging ended
+
+#### Scenario: Staging is unavailable during a commit
+- **WHEN** a commit runs in a tab
+- **THEN** the buttons, entries and keys that stage and unstage are unavailable until the commit ended
+
+#### Scenario: A commit can be stopped
+- **WHEN** a commit runs
+- **THEN** the commit form offers Stop, and no other write action offers one
+
+#### Scenario: Discarding is unavailable during a checkout
+- **WHEN** a checkout runs in a tab
+- **THEN** the entries and buttons that discard are unavailable until it ended
+
+#### Scenario: Staging is unavailable during a discard
+- **WHEN** a discard runs in a tab
+- **THEN** the buttons, entries and keys that stage, unstage, commit and discard are unavailable until it ended
+
+#### Scenario: A discard cannot be stopped
+- **WHEN** a discard runs
+- **THEN** no control stops it
+
 ### Requirement: Outcome of a write action
-After a write action ends, whatever its outcome, git-bull SHALL read HEAD, the
-references and the status of the tab again. When the action succeeds, no
-dialog SHALL be shown. When Git fails, git-bull SHALL show a dialog with Git's
-message in full and a button that copies it. When Git reports a failure but HEAD
+After a write action ends, whatever its outcome, git-bull SHALL read again
+what the action can have changed: HEAD, the references and the status of the
+tab after a checkout or the creation of a branch or a tag, the same and the
+history after a commit, the status and the diff shown after a discard, and
+the status after staging or unstaging. The action SHALL count as running until that was
+read. When the action succeeds, no
+dialog SHALL be shown. When git-bull finds, before it changes anything, that a
+part of a file cannot be staged or discarded as asked, because its diff is out
+of date, the selection cannot be staged alone or the file has mixed line
+endings, or that a discard is of a kind that is not offered, as a folder that
+is a repository of its own, or that the files to discard changed since they
+were asked for, a dialog SHALL say which and why, without a message of Git. When Git fails, or for a discard the operating system, git-bull SHALL show a
+dialog with the message in full and a button that copies it; a commit that git-bull itself
+refuses, for a file in conflict or an operation in progress, is such a dialog
+without a message of Git; for a commit the message is what
+Git and its hooks printed on either output, because Git says on its standard
+output why nothing was committed. A commit that the user stopped SHALL show no
+dialog. When Git reports a failure but HEAD
 is at the target afterwards, as when a post-checkout hook fails after the
 switch, the dialog SHALL say that the checkout took place and show the output
 of the hook; git-bull SHALL NOT repeat or undo the action.
@@ -235,8 +299,28 @@ of the hook; git-bull SHALL NOT repeat or undo the action.
 - **WHEN** another program moves a reference while the action runs
 - **THEN** after the action the sidebar and the commit list show the references as they are then
 
+#### Scenario: Staging fails
+- **WHEN** staging a file fails with a message of Git
+- **THEN** a dialog shows the message in full, with a button to copy it, and the File status view lists the files as they are
+
+#### Scenario: Diff out of date
+- **WHEN** a hunk is staged whose diff no longer is the one Git reports
+- **THEN** a dialog says that the file changed and that nothing was staged, and the File status view shows the file as it is
+
+#### Scenario: Commit fails
+- **WHEN** a commit is refused because nothing is staged any more
+- **THEN** a dialog shows what Git printed about it, with a button to copy it
+
+#### Scenario: Commit was stopped
+- **WHEN** the user stops a commit
+- **THEN** no dialog appears and the views show the repository as it is
+
+#### Scenario: Discard fails
+- **WHEN** a discard fails because a file cannot be moved
+- **THEN** a dialog names the file with the message of the operating system, with a button to copy it, and the File status view shows the files as they are
+
 ### Requirement: Dialogs of write actions
-Every dialog of checkout and of reference creation SHALL be modal in the way of
+Every dialog of a write action SHALL be modal in the way of
 the settings dialog: the main window takes no input meanwhile, except that its
 title bar and edges still move, resize, minimize, maximize and close the window.
 A dialog SHALL take Enter as its default choice where one is safe and Escape as

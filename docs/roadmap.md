@@ -10,8 +10,10 @@ M2 improvements to finish before M3 starts.
 The read-only viewer, the interface improvements delivered so far, the
 worktree cockpit and the trust model for write operations provide the
 starting point, and checkout and the creation of branches and tags are
-delivered. All of it is released as 0.2.0. This roadmap schedules new work;
-the current application still does not offer staging or commit creation.
+delivered. All of it is released as 0.2.0. Since then whole files, hunks
+and selected lines can be staged and unstaged, the staged changes can be
+committed, and changes can be discarded, every discard being kept so that it
+can be brought back. This roadmap schedules new work.
 
 ## Released: 0.2.0
 
@@ -68,9 +70,10 @@ is specified in the [checkout spec](../openspec/specs/checkout/spec.md) and the
   that follows it. A notice comes before HEAD is detached, and can be hidden.
 - A double click on a commit that a branch points to checks the branch out,
   so that HEAD stays on a branch; several branches are offered to choose from.
-- Local changes that would be overwritten are never discarded: the checkout is
-  refused and a dialog lists the files. There is no force, no discard and no
-  automatic stash.
+- Local changes that would be overwritten are never discarded by a checkout:
+  the checkout is refused and a dialog lists the files. There is no force and
+  no automatic stash; changes are discarded by an action of their own, see
+  [Delivered: discarding changes](#delivered-discarding-changes).
 - A branch that another worktree has checked out is marked in the sidebar, and
   checking it out opens that worktree.
 - A branch is created from a commit, a branch, a remote branch, a tag or the
@@ -103,23 +106,122 @@ was interface polish that did not change the order above.
   widest branches first, then tags, behind a `+N` count that lists every hidden
   reference on hover.
 
+## Delivered: staging of files
+
+On 2026-10-11, [pull request #40](https://github.com/BlackmillSolutions/git-bull/pull/40)
+delivered staging and unstaging of whole files, modelled on GitKraken. It was
+planned as the OpenSpec change `stage-files`. How its actions queue is
+recorded in the amendment of
+[ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and the behaviour
+is specified in the [staging spec](../openspec/specs/staging/spec.md).
+
+- The File status view lists two groups, Unstaged with the untracked files
+  above Staged, each in the order of its paths.
+- A file is staged or unstaged with the button on its row, the first entry of
+  its context menu, or S and U. Stage all and Unstage all, also
+  Ctrl+Shift+S and Ctrl+Shift+U, act on the files the filter lists.
+- Staging runs the clean filters of the repository, as `git add` does.
+  Unstaging works without a commit and during a merge, and never changes the
+  working copy.
+- Requests made in quick succession are kept and run in order, and the
+  selection moves to the next file. A file in conflict is not staged.
+
+Not delivered with it: resolving conflicts, staging a folder as one, and
+selecting several files. Discarding changes followed with its own delivery.
+
+## Delivered: staging of hunks and lines
+
+On 2026-10-12, [pull request #41](https://github.com/BlackmillSolutions/git-bull/pull/41)
+delivered staging and unstaging of a part of a file from the diff of the File
+status view, modelled on GitKraken. It was planned as the OpenSpec change
+`stage-hunks-and-lines`. The behaviour is specified in the
+[staging spec](../openspec/specs/staging/spec.md).
+
+- The context menu of the diff offers "Stage hunk" and "Stage selected
+  lines", the header of a hunk has a button, and S stages what is selected
+  while the diff has the focus. The diff of a staged file offers the same to
+  unstage, with U.
+- A part is applied to the index as a patch made from Git's own diff. When
+  the file changed since the diff was read, nothing is applied and a dialog
+  says so.
+- A file in conflict, a file a filter driver rewrites, Git LFS among them, a
+  symbolic link, a change of the file type and a diff that is not loaded in
+  full are staged whole; their entries say why.
+
+Not delivered with it: resolving conflicts. Discarding changes followed with
+its own delivery.
+
+## Delivered: committing
+
+On 2026-10-12, [pull request #42](https://github.com/BlackmillSolutions/git-bull/pull/42)
+delivered committing from the File status view, modelled on GitKraken. It was
+planned as the OpenSpec change `commit`. That a commit can be stopped is
+recorded in the
+amendment of [ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and
+the behaviour is specified in the
+[commit spec](../openspec/specs/commit/spec.md).
+
+- A commit form below the file list holds the summary, with the count of its
+  characters, and the description. Its button commits the staged changes, and
+  with nothing staged it is "Stage all changes and commit". Ctrl+Enter does
+  what the button does.
+- "Amend last commit" replaces the last commit and fills in its message; a
+  notice says when that commit is already on a remote branch. "Commit without
+  hooks" skips every hook for one commit.
+- A commit runs the hooks and the signing that are configured. While it runs
+  the form offers Stop, which asks Git to end before it ends it.
+- During a rebase or a series of patches nothing is committed, because a
+  commit there loses the author of the commit being replayed. A merge is
+  concluded with "Commit merge", and the message that was prepared for a
+  merge, a cherry-pick or a revert is offered.
+- What is written in the form belongs to its tab and stays while other views
+  and tabs are shown.
+
+Not delivered with it: signing off, commit templates, co-authors, changing
+the author, pushing after the commit, and the output of a hook while it runs.
+
+## Delivered: discarding changes
+
+On 2026-10-13, discarding changes was delivered from the File status view,
+modelled on GitKraken. It was planned as the OpenSpec change `discard`. Why a
+discard is kept in a journal in the Git folder of the worktree is recorded in
+[ADR 0009](adr/0009-discarded-work-is-kept-in-a-journal.md), that discarding,
+restoring and clearing cannot be stopped in the amendment of
+[ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and the
+behaviour is specified in the
+[discard spec](../openspec/specs/discard/spec.md).
+
+- The menu of an unstaged file has "Discard changes", and the title of the
+  Unstaged group has a trash button "Discard all". Both ask first, in a
+  dialog that lists the files and says they can be brought back. Hunks and
+  selected lines of a tracked file are discarded from the diff without a
+  question.
+- Nothing is lost for good: before anything changes, the files are moved, or
+  for a part copied, byte for byte into a journal in the Git folder. A bar
+  below the file list offers "Undo", Ctrl+Z does the same, and Ctrl+Shift+Z
+  discards again. The list "Recently discarded" restores older entries, puts
+  back an entry that git-bull was killed in, and clears.
+- A discard that fails puts everything back, and puts back nothing over a
+  file that appeared meanwhile. A discard cannot be stopped, and closing a
+  tab or the window waits for it.
+- A file in conflict, a submodule, a rename and a repository of its own are
+  not discarded; their entries say why.
+
+Not delivered with it: selecting several files, and discarding what is only
+staged, which is unstaged first.
+
 ## Next: the local Git workflow
 
 | Order | Priority | Work |
 |---|---|---|
-| 1 | High | Stage and unstage files and hunks from the File status view. |
-| 2 | High | Write a commit message, commit the staged changes and amend the last commit. |
+| 1 | Normal | Select several files in the File status view, for staging, unstaging and discarding. |
 
-The next delivery should make file staging and the commit workflow usable.
-Hunk staging and amend remain part of the planned local operations and follow
-their corresponding basic actions. The detailed OpenSpec changes will define
-their behaviour and implementation steps.
+Selecting several files is its own change: the file list has one selection,
+which decides the diff shown, and changing that touches staging, unstaging and
+discarding alike.
 
 Each item starts with its own Explore and Propose and builds on the write
-invocation and on the write actions of the session. The
-[working-copy status spec](../openspec/specs/working-copy-status/spec.md)
-still requires that the File status view offers no action that changes the
-index, so the staging change must revise it.
+invocation and on the write actions of the session.
 
 ## After the basic actions
 

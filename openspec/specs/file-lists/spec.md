@@ -9,7 +9,9 @@ commit panel and the groups of the File status view share this behaviour.
 
 ### Requirement: Flat list and tree of folders
 A file list SHALL show its files either as a flat list of full paths, in
-the order Git reports them, or as a tree of folders. A toggle above each
+the order Git reports them, or as a tree of folders. The Unstaged group of
+the File status view, which holds files of two reports of Git, SHALL be in
+the order of their paths. A toggle above each
 file list SHALL switch between the two; the choice SHALL hold for every
 file list of every tab, SHALL be saved, and SHALL be the flat list until
 the user chooses the tree. In the tree, each folder SHALL be a row with

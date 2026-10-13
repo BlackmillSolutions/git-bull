@@ -137,6 +137,7 @@ fn commit_with_everything() -> FakeBackend {
             ],
         }]),
         truncated: false,
+        filtered: false,
     };
     FakeBackend::default()
         .with_repository(root.clone())
@@ -798,4 +799,486 @@ fn create_tag_dialog_with_a_message() {
     harness.run();
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "create_tag_message", &options());
+}
+
+/// The File status view with its two groups: unstaged files, an untracked
+/// one among them, above the staged ones, the titles with their buttons and
+/// the selected row with its button (spec `staging`).
+fn file_status_view(theme: ThemeSetting) -> Harness<'static, App> {
+    file_status_view_with(
+        theme,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+        |backend| backend,
+    )
+}
+
+/// Like [`file_status_view`], at another size and with a backend that
+/// `adjust` changed.
+fn file_status_view_with(
+    theme: ThemeSetting,
+    interface: InterfaceSize,
+    size: (f32, f32),
+    adjust: impl FnOnce(FakeBackend) -> FakeBackend,
+) -> Harness<'static, App> {
+    use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
+    let entry = |kind, name: &str| StatusEntry {
+        kind,
+        path: name.into(),
+        old_path: None,
+        submodule: false,
+    };
+    let changed = |kind, name: &str| entry(StatusKind::Changed(kind), name);
+    let status = WorkingStatus {
+        staged: vec![
+            changed(ChangeKind::Added, "docs/staging.md"),
+            changed(ChangeKind::Modified, "src/session.rs"),
+        ],
+        unstaged: vec![
+            changed(ChangeKind::Deleted, "src/old.rs"),
+            changed(ChangeKind::Modified, "src/ui.rs"),
+        ],
+        untracked: vec![entry(StatusKind::Untracked, "notes.txt")],
+    };
+    // The diff of the file that is selected first, an untracked one.
+    let added = |number: u32, text: &str| DiffLine {
+        kind: LineKind::Added,
+        old_number: None,
+        new_number: Some(number),
+        text: text.to_owned(),
+        no_newline: false,
+        cut: false,
+        crlf: false,
+    };
+    let notes = FileDiff {
+        old_path: None,
+        new_path: Some("notes.txt".into()),
+        old_mode: None,
+        new_mode: Some("100644".to_owned()),
+        old_blob: None,
+        new_blob: None,
+        new_in_working_copy: true,
+        content: Content::Text(vec![Hunk {
+            header: "@@ -0,0 +1,2 @@".to_owned(),
+            old_start: 0,
+            new_start: 1,
+            lines: vec![
+                added(1, "Stage files one by one,"),
+                added(2, "or all of a group."),
+            ],
+        }]),
+        truncated: false,
+        filtered: false,
+    };
+    // The diff of a modified file, with two hunks.
+    let line = |kind, old: Option<u32>, new: Option<u32>, text: &str| DiffLine {
+        kind,
+        old_number: old,
+        new_number: new,
+        text: text.to_owned(),
+        no_newline: false,
+        cut: false,
+        crlf: false,
+    };
+    let ui = FileDiff {
+        old_path: Some("src/ui.rs".into()),
+        new_path: Some("src/ui.rs".into()),
+        old_mode: Some("100644".to_owned()),
+        content: Content::Text(vec![
+            Hunk {
+                header: "@@ -10,3 +10,4 @@ fn show()".to_owned(),
+                old_start: 10,
+                new_start: 10,
+                lines: vec![
+                    line(
+                        LineKind::Context,
+                        Some(10),
+                        Some(10),
+                        "    let area = ui.max_rect();",
+                    ),
+                    line(
+                        LineKind::Added,
+                        None,
+                        Some(11),
+                        "    let menu = staging(ui);",
+                    ),
+                    line(LineKind::Context, Some(11), Some(12), "    draw(ui, area);"),
+                    line(LineKind::Context, Some(12), Some(13), "}"),
+                ],
+            },
+            Hunk {
+                header: "@@ -40,3 +41,3 @@ fn draw()".to_owned(),
+                old_start: 40,
+                new_start: 41,
+                lines: vec![
+                    line(
+                        LineKind::Context,
+                        Some(40),
+                        Some(41),
+                        "    let rows = rows(ui);",
+                    ),
+                    line(LineKind::Removed, Some(41), None, "    paint(rows);"),
+                    line(LineKind::Added, None, Some(42), "    paint(rows, menu);"),
+                    line(LineKind::Context, Some(42), Some(43), "}"),
+                ],
+            },
+        ]),
+        ..notes.clone()
+    };
+    let mut harness = repository_window(
+        adjust(
+            dialog_backend()
+                .with_status(path(&["work", "git-bull"]), status)
+                .with_working_diff(gitbull_git::status::Group::Untracked, "notes.txt", notes)
+                .with_working_diff(gitbull_git::status::Group::Unstaged, "src/ui.rs", ui),
+        ),
+        theme,
+        interface,
+        size,
+    );
+    let item = harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| node.accesskit_node().label().as_deref() == Some("File status"))
+        .map(|node| node.rect().center());
+    match item {
+        Some(item) => {
+            harness.hover_at(item);
+            for pressed in [true, false] {
+                harness.event(eframe::egui::Event::PointerButton {
+                    pos: item,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                });
+            }
+        }
+        // A window too short to show the entry of the sidebar.
+        None => {
+            let workspace = harness.state_mut().workspace_mut().expect("a workspace");
+            let tab = workspace.active().expect("the tab").id();
+            workspace.set_view(tab, gitbull_core::workspace::View::FileStatus);
+        }
+    }
+    wait_for(&mut harness, |h| {
+        h.query_all_by_role(Role::ListItem).next().is_some()
+            && h.query_all_by_role(Role::Code).next().is_some()
+    });
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+#[test]
+fn file_status_in_the_dark_palette() {
+    let mut harness = file_status_view(ThemeSetting::Dark);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_dark", &options());
+}
+
+#[test]
+fn file_status_in_the_light_palette() {
+    let mut harness = file_status_view(ThemeSetting::Light);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_light", &options());
+}
+
+/// The diff of a modified file with two hunks, the header of the first one
+/// selected and showing the button that stages the hunk (spec `staging`).
+#[test]
+fn file_status_with_a_hunk_selected() {
+    let mut harness = file_status_view(ThemeSetting::Dark);
+    let click = |harness: &mut Harness<'static, App>, role: Role, name: &str| {
+        let at = harness
+            .query_all_by_role(role)
+            .find(|node| {
+                node.accesskit_node()
+                    .label()
+                    .is_some_and(|label| label.contains(name))
+            })
+            .unwrap_or_else(|| panic!("no {name}"))
+            .rect()
+            .center();
+        harness.hover_at(at);
+        for pressed in [true, false] {
+            harness.event(eframe::egui::Event::PointerButton {
+                pos: at,
+                button: eframe::egui::PointerButton::Primary,
+                pressed,
+                modifiers: eframe::egui::Modifiers::NONE,
+            });
+        }
+        harness.run();
+    };
+    click(&mut harness, Role::ListItem, "ui.rs");
+    let header = "@@ -10,3 +10,4 @@";
+    wait_for(&mut harness, |h| {
+        h.query_all_by_role(Role::Code).any(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.contains(header))
+        })
+    });
+    click(&mut harness, Role::Code, header);
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_hunk_selected", &options());
+}
+
+/// Writes a message into the commit form of `harness`.
+fn write_commit_message(harness: &mut Harness<'static, App>) {
+    // A field takes text once it has the focus.
+    harness
+        .get_by_role_and_label(Role::TextInput, "Summary")
+        .focus();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, "Summary")
+        .type_text("Stage and unstage files");
+    harness.run();
+    let description = harness.get_by_role_and_label(Role::MultilineTextInput, "Description");
+    description.focus();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::MultilineTextInput, "Description")
+        .type_text("The File status view lists two groups.\nA file moves with one click.");
+    harness.run();
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+}
+
+/// The commit form with a message and two staged files (spec `commit`,
+/// requirement "Commit form").
+#[test]
+fn commit_form_in_the_dark_palette() {
+    let mut harness = file_status_view(ThemeSetting::Dark);
+    write_commit_message(&mut harness);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_dark", &options());
+}
+
+#[test]
+fn commit_form_in_the_light_palette() {
+    let mut harness = file_status_view(ThemeSetting::Light);
+    write_commit_message(&mut harness);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_light", &options());
+}
+
+/// While a commit runs the form names it and offers Stop (requirement "While
+/// a commit runs").
+#[test]
+fn commit_form_while_a_commit_runs() {
+    let gate = gitbull_testkit::Gate::new();
+    let mut harness = file_status_view_with(
+        ThemeSetting::Dark,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+        |backend| backend.with_checkout_gate(&gate),
+    );
+    write_commit_message(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Button, "Commit changes to 2 files")
+        .click();
+    // The spinner keeps the window repainting: steps, not a run to rest,
+    // which `wait_for` ends with.
+    for _ in 0..1000 {
+        if harness
+            .query_by_role_and_label(Role::Button, "Stop")
+            .is_some()
+        {
+            break;
+        }
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    for _ in 0..3 {
+        harness.step();
+    }
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_running", &options());
+    gate.open();
+}
+
+/// The notices of the form: a detached HEAD, and the last commit on a remote
+/// branch while "Amend last commit" is checked.
+#[test]
+fn commit_form_with_its_notices() {
+    let detached = gitbull_git::head::Head::Detached(fake_id("c").to_string());
+    let mut harness = file_status_view_with(
+        ThemeSetting::Dark,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+        |backend| {
+            backend
+                .with_head(path(&["work", "git-bull"]), detached)
+                .with_last_message("Read the status of a repository\n\nIn the background.")
+                .with_on_remote_branch()
+        },
+    );
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Amend last commit")
+        .click();
+    wait_for(&mut harness, |h| {
+        h.query_by_label_contains("already on a remote branch")
+            .is_some()
+    });
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_notices", &options());
+}
+
+/// The smallest window, 640 by 400 points: the file list keeps the room for
+/// its rows, and the form scrolls in what is left. At 150 % this window is
+/// too small for either, as it is for a dialog.
+#[test]
+fn commit_form_in_the_smallest_window() {
+    let mut harness = file_status_view_with(
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (640.0, 400.0),
+        |backend| backend,
+    );
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "commit_form_smallest", &options());
+}
+
+// ---- discarding (spec `discard`)
+
+/// The journal of an earlier run: an interrupted entry and a discarded one,
+/// newest first.
+fn earlier_discards() -> Vec<gitbull_git::journal::Listed> {
+    use gitbull_git::journal::{
+        Entry, FileKind, FileRecord, Held, Kind, Listed, Manifest, Running, State,
+    };
+    let entry = |id: &str, state, running, files: &[&str], changed| {
+        let manifest = Manifest {
+            changed,
+            size: 1024,
+            kind: Kind::Files,
+            state,
+            git: None,
+            files: files
+                .iter()
+                .enumerate()
+                .map(|(slot, path)| FileRecord {
+                    slot: slot as u32,
+                    kind: FileKind::Tracked,
+                    held: Held::File,
+                    path: (*path).into(),
+                })
+                .collect(),
+            idents: Vec::new(),
+        };
+        Listed::Entry {
+            entry: Entry::in_memory(id.to_owned(), id.into(), manifest),
+            running,
+        }
+    };
+    vec![
+        entry(
+            "1790000000000-2",
+            State::Pending,
+            Running::Interrupted,
+            &["src/session.rs", "src/ui.rs"],
+            1_790_000_000,
+        ),
+        entry(
+            "1789990000000-1",
+            State::Discarded,
+            Running::Settled,
+            &["notes.txt"],
+            1_789_990_000,
+        ),
+    ]
+}
+
+/// The confirmation before the files of the Unstaged group are discarded.
+fn discard_dialog(theme: ThemeSetting) -> Harness<'static, App> {
+    let mut harness = file_status_view(theme);
+    harness
+        .get_by_role_and_label(Role::Button, "Discard all")
+        .click();
+    harness.run();
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+#[test]
+fn discard_dialog_in_the_dark_palette() {
+    let mut harness = discard_dialog(ThemeSetting::Dark);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_dialog_dark", &options());
+}
+
+#[test]
+fn discard_dialog_in_the_light_palette() {
+    let mut harness = discard_dialog(ThemeSetting::Light);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_dialog_light", &options());
+}
+
+/// Discards `src/old.rs` and waits for the notice bar.
+fn discarded(harness: &mut Harness<'static, App>) {
+    harness
+        .state_mut()
+        .workspace_mut()
+        .and_then(|workspace| workspace.active_mut())
+        .and_then(|tab| tab.session_mut())
+        .map(|session| session.discard(vec!["src/old.rs".into()], false));
+    wait_for(harness, |h| {
+        h.query_by_role_and_label(Role::Button, "Undo").is_some()
+    });
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+}
+
+/// The bar that names the last discard and offers to undo it, above the
+/// commit form.
+#[test]
+fn discard_notice_bar() {
+    let mut harness = file_status_view(ThemeSetting::Dark);
+    discarded(&mut harness);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_notice_bar", &options());
+}
+
+/// The list "Recently discarded" opened, with an interrupted entry and a
+/// discarded one, below the bar.
+#[test]
+fn discard_list_open() {
+    let mut harness = file_status_view_with(
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+        |backend| backend.with_journal(earlier_discards()),
+    );
+    discarded(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Button, "Recently discarded (3)")
+        .click();
+    harness.run();
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_list_open", &options());
+}
+
+/// The smallest window with the bar and the list shown: the file list keeps
+/// its rows, and the list gives way.
+#[test]
+fn discard_bar_and_list_in_the_smallest_window() {
+    let mut harness = file_status_view_with(
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (640.0, 400.0),
+        |backend| backend.with_journal(earlier_discards()),
+    );
+    discarded(&mut harness);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_smallest_window", &options());
 }

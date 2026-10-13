@@ -435,6 +435,7 @@ mod tests {
             new_in_working_copy: false,
             content: Content::Text(Vec::new()),
             truncated,
+            filtered: false,
         }
     }
 
@@ -661,6 +662,7 @@ mod tests {
                 ],
             }]),
             truncated: false,
+            filtered: false,
         }
     }
 

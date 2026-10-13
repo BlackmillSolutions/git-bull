@@ -644,6 +644,27 @@ pub fn menu<R>(ui: &mut Ui, add_entries: impl FnOnce(&mut Ui) -> R) -> R {
     .inner
 }
 
+/// Whether `key` was pressed in this pass alone: with no modifier held, so
+/// that Shift+S and Alt+S stay free, and not as a repeat of a key held down,
+/// which would act again and again. The press is taken.
+pub(crate) fn plain_key_pressed(ui: &Ui, key: egui::Key) -> bool {
+    ui.input_mut(|input| {
+        let at = input.events.iter().position(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: pressed,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if *pressed == key && modifiers.is_none()
+            )
+        });
+        at.map(|at| input.events.remove(at)).is_some()
+    })
+}
+
 /// An entry of a menu, with an optional icon before its label and the
 /// shortcut after it.
 pub fn menu_item(
@@ -738,13 +759,16 @@ pub enum BannerAction {
 
 /// A notice across the width of `ui`, in the colours and with the icon of
 /// `kind`, with `actions` and a button named `dismiss` that dismisses it.
+/// Returns what the user did and the controls of the notice that are
+/// available, in the order of the page: the actions, then the button that
+/// dismisses it.
 pub fn banner(
     ui: &mut Ui,
     kind: BannerKind,
     text: &str,
     actions: &[&str],
     dismiss: &str,
-) -> Option<BannerAction> {
+) -> (Option<BannerAction>, Vec<Id>) {
     let palette = active_palette(ui.ctx());
     let (background, foreground, icon) = match kind {
         BannerKind::Information => (palette.info_bg, palette.info_fg, icons::INFO),
@@ -753,6 +777,7 @@ pub fn banner(
     };
     let [small, medium, _, _] = SHAPE.space;
     let mut clicked = None;
+    let mut stops: Vec<Id> = Vec::new();
     Frame::new()
         .fill(color(background))
         .corner_radius(radius())
@@ -772,21 +797,36 @@ pub fn banner(
                 ui.scope(|ui| {
                     ui.set_max_width((ui.available_width() - buttons).max(0.0));
                     let text = RichText::new(text).size(TYPE.body).color(color(foreground));
-                    ui.add(Label::new(text).wrap());
+                    let label = ui.add(Label::new(text).wrap());
+                    // A notice is announced when it appears.
+                    ui.ctx().accesskit_node_builder(label.id, |node| {
+                        node.set_live(egui::accesskit::Live::Polite);
+                    });
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, icons::CLOSE, dismiss, None).clicked() {
+                    let closer = icon_button(ui, icons::CLOSE, dismiss, None);
+                    if closer.clicked() {
                         clicked = Some(BannerAction::Dismiss);
                     }
+                    let mut ids = Vec::new();
                     for (index, action) in actions.iter().enumerate().rev() {
-                        if Button::new(action).show(ui).clicked() {
+                        let button = Button::new(action).show(ui);
+                        if button.clicked() {
                             clicked = Some(BannerAction::Action(index));
                         }
+                        ids.push(button.id);
+                    }
+                    // The page reads the actions first, then the button that
+                    // closes.
+                    ids.reverse();
+                    ids.push(closer.id);
+                    if ui.is_enabled() {
+                        stops = ids;
                     }
                 });
             });
         });
-    clicked
+    (clicked, stops)
 }
 
 /// Where the pass that last looked at the input, and whether focus rings

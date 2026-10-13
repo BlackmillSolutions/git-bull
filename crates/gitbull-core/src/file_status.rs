@@ -5,8 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gitbull_git::Backend;
+use gitbull_git::changes::ChangeKind;
+use gitbull_git::diff::FileDiff;
 use gitbull_git::path::RepoPath;
-use gitbull_git::status::{Group, WorkingStatus};
+use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 
 use crate::diff_document::Part;
 use crate::diff_pane::{DiffPane, DiffSource, DiffState, Highlighting};
@@ -23,9 +25,128 @@ pub enum StatusState {
     Failed(Failure),
 }
 
-/// The groups, in the order the file list shows them and its
-/// [`FileOrder`] holds them.
-pub const GROUPS: [Group; 3] = [Group::Staged, Group::Unstaged, Group::Untracked];
+/// A group of the file list, in the order it shows them and its
+/// [`FileOrder`] holds them (spec `working-copy-status`, requirement "File
+/// status view"). The status has three lists; the view shows two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Shown {
+    /// The unstaged and the untracked files together, in the order of their
+    /// paths.
+    Unstaged,
+    Staged,
+}
+
+impl Shown {
+    pub const ALL: [Shown; 2] = [Shown::Unstaged, Shown::Staged];
+
+    /// The place of the group in the list.
+    pub fn index(self) -> usize {
+        match self {
+            Shown::Unstaged => 0,
+            Shown::Staged => 1,
+        }
+    }
+
+    /// The shown group that lists the files of `group`.
+    pub fn of(group: Group) -> Shown {
+        match group {
+            Group::Unstaged | Group::Untracked => Shown::Unstaged,
+            Group::Staged => Shown::Staged,
+        }
+    }
+}
+
+/// Where each file of each shown group is in the status: its list and its
+/// place there.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShownFiles {
+    groups: [Vec<(Group, usize)>; 2],
+}
+
+impl ShownFiles {
+    /// The files of `status` as the list shows them. Git reports each of its
+    /// lists in the order of the paths, so the Unstaged group is a merge of
+    /// two of them.
+    pub fn of(status: &WorkingStatus) -> ShownFiles {
+        let (tracked, untracked) = (&status.unstaged, &status.untracked);
+        let mut unstaged = Vec::with_capacity(tracked.len() + untracked.len());
+        let (mut a, mut b) = (0, 0);
+        while a < tracked.len() || b < untracked.len() {
+            let tracked_first = match (tracked.get(a), untracked.get(b)) {
+                (Some(one), Some(other)) => one.path.as_bytes() <= other.path.as_bytes(),
+                (one, _) => one.is_some(),
+            };
+            if tracked_first {
+                unstaged.push((Group::Unstaged, a));
+                a += 1;
+            } else {
+                unstaged.push((Group::Untracked, b));
+                b += 1;
+            }
+        }
+        let staged = (0..status.staged.len())
+            .map(|index| (Group::Staged, index))
+            .collect();
+        ShownFiles {
+            groups: [unstaged, staged],
+        }
+    }
+
+    /// How many files `shown` lists.
+    pub fn len(&self, shown: Shown) -> usize {
+        self.groups[shown.index()].len()
+    }
+
+    pub fn is_empty(&self, shown: Shown) -> bool {
+        self.groups[shown.index()].is_empty()
+    }
+
+    /// The list and the place in it of the file at `index` of the group at
+    /// `shown` of the file list.
+    pub fn file(&self, shown: usize, index: usize) -> Option<(Group, usize)> {
+        self.groups.get(shown)?.get(index).copied()
+    }
+
+    /// The group of the file list and the place in it of the file at `index`
+    /// of `group` of the status.
+    pub fn place(&self, group: Group, index: usize) -> Option<(usize, usize)> {
+        let shown = Shown::of(group).index();
+        let place = self.groups[shown]
+            .iter()
+            .position(|known| *known == (group, index))?;
+        Some((shown, place))
+    }
+
+    /// The files of `shown` in `status`, in the order of the list.
+    pub fn entries<'a>(
+        &'a self,
+        status: &'a WorkingStatus,
+        shown: Shown,
+    ) -> impl Iterator<Item = (Group, &'a StatusEntry)> {
+        self.groups[shown.index()]
+            .iter()
+            .filter_map(|(group, index)| Some((*group, status.group(*group).get(*index)?)))
+    }
+}
+
+/// Whether hunks and lines of the diff shown can be staged, or unstaged,
+/// alone (spec `staging`, requirement "Changes that are staged whole").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Parts {
+    Available,
+    /// The file has unresolved conflicts.
+    Conflicted,
+    /// The diff was cut at its limit; all of it must be loaded first.
+    Truncated,
+    /// A filter driver rewrites the file, so the lines of the diff are not
+    /// the lines of the file.
+    Filtered,
+    /// A symbolic link, or a change of the type of the file: half of such a
+    /// change is no change Git can hold.
+    WholeOnly,
+    /// The diff is being read again, and the one shown is of before.
+    Reading,
+}
 
 /// The uncommitted changes and the diff of the file chosen.
 pub struct FileStatus {
@@ -33,9 +154,11 @@ pub struct FileStatus {
     root: PathBuf,
     notify: Notify,
     state: StatusState,
-    work: Pending<(WorkingStatus, Arc<FileOrder>)>,
+    work: Pending<(WorkingStatus, Arc<FileOrder>, Arc<ShownFiles>)>,
     /// The prepared order of the files of the status shown.
     order: Option<Arc<FileOrder>>,
+    /// Where the files of that order are in the status.
+    shown: Option<Arc<ShownFiles>>,
     /// The file chosen, by its path, so that it stays chosen when the
     /// status is read again.
     chosen: Option<(Group, RepoPath)>,
@@ -54,6 +177,7 @@ impl FileStatus {
             state: StatusState::Loading,
             work: Pending::none(),
             order: None,
+            shown: None,
             chosen: None,
             pane,
             version: 0,
@@ -66,16 +190,16 @@ impl FileStatus {
         let (backend, root) = (Arc::clone(&self.backend), self.root.clone());
         self.work.start(&self.notify, move |cancel| {
             let status = backend.status(&root, cancel)?;
+            let shown = ShownFiles::of(&status);
             let order = FileOrder::new(
-                GROUPS.map(|group| {
-                    status
-                        .group(group)
-                        .iter()
-                        .map(|entry| (&entry.path, entry.old_path.as_ref()))
+                Shown::ALL.map(|group| {
+                    shown
+                        .entries(&status, group)
+                        .map(|(_, entry)| (&entry.path, entry.old_path.as_ref()))
                 }),
                 true,
             );
-            Ok((status, Arc::new(order)))
+            Ok((status, Arc::new(order), Arc::new(shown)))
         });
     }
 
@@ -120,12 +244,14 @@ impl FileStatus {
         let mut changed = false;
         if let Some(status) = self.work.take() {
             self.state = match status {
-                Ok((status, order)) => {
+                Ok((status, order, shown)) => {
                     self.order = Some(order);
+                    self.shown = Some(shown);
                     StatusState::Loaded(status)
                 }
                 Err(failure) => {
                     self.order = None;
+                    self.shown = None;
                     StatusState::Failed(failure)
                 }
             };
@@ -183,6 +309,11 @@ impl FileStatus {
         self.order.as_ref()
     }
 
+    /// Where the files of [`FileStatus::file_order`] are in the status.
+    pub fn shown_files(&self) -> Option<&Arc<ShownFiles>> {
+        self.shown.as_ref()
+    }
+
     /// Whether the status is known and has uncommitted changes.
     pub fn has_changes(&self) -> bool {
         matches!(&self.state, StatusState::Loaded(status) if !status.is_clean())
@@ -199,6 +330,48 @@ impl FileStatus {
             .iter()
             .position(|entry| entry.path == *path)?;
         Some((*group, index))
+    }
+
+    /// Whether the diff shown can be staged or unstaged in parts; `None`
+    /// when it shows no lines, as for a binary file, a rename alone or a
+    /// submodule, where nothing is offered.
+    pub fn parts(&self) -> Option<Parts> {
+        let (_, entry, diff) = self.part_source()?;
+        let link = |mode: &Option<String>| mode.as_deref() == Some("120000");
+        let type_changed = entry.kind == StatusKind::Changed(ChangeKind::TypeChanged);
+        Some(if entry.kind == StatusKind::Conflicted {
+            Parts::Conflicted
+        } else if type_changed || link(&diff.old_mode) || link(&diff.new_mode) {
+            Parts::WholeOnly
+        } else if diff.filtered {
+            Parts::Filtered
+        } else if diff.truncated {
+            Parts::Truncated
+        } else if self.pane.is_reading() {
+            Parts::Reading
+        } else {
+            Parts::Available
+        })
+    }
+
+    /// What the diff shown offers to discard in parts: for a tracked file of
+    /// the Unstaged group, whether that is available now or why not; `None`
+    /// where nothing is offered, such as for an untracked file.
+    pub fn discard_parts(&self) -> Option<crate::discard::PartOffer> {
+        let (group, entry, _) = self.part_source()?;
+        crate::discard::part_offer(group, entry, self.parts())
+    }
+
+    /// What the diff shown was read for, and the diff, when it shows lines:
+    /// what a request to stage a part of it is made of.
+    pub(crate) fn part_source(&self) -> Option<(Group, &StatusEntry, Arc<FileDiff>)> {
+        let Some(DiffSource::WorkingCopy { group, entry }) = self.pane.source() else {
+            return None;
+        };
+        let DiffState::Loaded(document) = self.pane.diff() else {
+            return None;
+        };
+        (!document.hunks().is_empty()).then(|| (*group, entry, document.shared_diff()))
     }
 
     /// The diff of the file chosen; meaningless while none is.
@@ -279,6 +452,7 @@ mod tests {
                 }],
             }]),
             truncated: false,
+            filtered: false,
         }
     }
 
@@ -345,11 +519,74 @@ mod tests {
         status.refresh();
         wait_until(&mut status, loaded);
         let order = status.file_order().expect("the order of the files");
-        assert_eq!(order.groups(), GROUPS.len());
-        for (group, path) in ["s.rs", "src/a.rs", "n.txt"].into_iter().enumerate() {
-            assert_eq!(order.file_path(group, 0), &RepoPath::new(path));
-        }
-        assert_eq!(GROUPS, [Group::Staged, Group::Unstaged, Group::Untracked]);
+        assert_eq!(order.groups(), Shown::ALL.len());
+        // Unstaged first, with the untracked file among the others by path.
+        assert_eq!(order.file_path(0, 0), &RepoPath::new("n.txt"));
+        assert_eq!(order.file_path(0, 1), &RepoPath::new("src/a.rs"));
+        assert_eq!(order.file_path(1, 0), &RepoPath::new("s.rs"));
+        assert_eq!(Shown::ALL, [Shown::Unstaged, Shown::Staged]);
+    }
+
+    #[test]
+    fn the_unstaged_group_holds_untracked_files_in_the_order_of_the_paths() {
+        let working = WorkingStatus {
+            staged: vec![modified("s.rs")],
+            unstaged: vec![modified("b.rs"), modified("d.rs")],
+            untracked: vec![
+                entry(StatusKind::Untracked, "a.txt"),
+                entry(StatusKind::Untracked, "c.txt"),
+                entry(StatusKind::Untracked, "e.txt"),
+            ],
+        };
+        let shown = ShownFiles::of(&working);
+        let listed: Vec<(Group, String)> = shown
+            .entries(&working, Shown::Unstaged)
+            .map(|(group, entry)| (group, entry.path.to_string()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (Group::Untracked, "a.txt".to_owned()),
+                (Group::Unstaged, "b.rs".to_owned()),
+                (Group::Untracked, "c.txt".to_owned()),
+                (Group::Unstaged, "d.rs".to_owned()),
+                (Group::Untracked, "e.txt".to_owned()),
+            ]
+        );
+        assert_eq!(shown.len(Shown::Unstaged), 5);
+        assert_eq!(shown.len(Shown::Staged), 1);
+        // Each file is found in the data by its place, and back.
+        assert_eq!(shown.file(0, 2), Some((Group::Untracked, 1)));
+        assert_eq!(shown.file(1, 0), Some((Group::Staged, 0)));
+        assert_eq!(shown.file(0, 5), None);
+        assert_eq!(shown.place(Group::Unstaged, 1), Some((0, 3)));
+        assert_eq!(shown.place(Group::Staged, 0), Some((1, 0)));
+    }
+
+    #[test]
+    fn the_diff_of_an_untracked_file_is_asked_for_as_untracked() {
+        let working = WorkingStatus {
+            unstaged: vec![modified("b.rs")],
+            untracked: vec![entry(StatusKind::Untracked, "a.txt")],
+            ..WorkingStatus::default()
+        };
+        let fake = FakeBackend::default()
+            .with_status(root(), working)
+            .with_working_diff(Group::Untracked, "a.txt", diff_of("a.txt", "new"));
+        let (mut status, probe) = file_status(fake);
+        status.refresh();
+        wait_until(&mut status, loaded);
+        // The first file of the Unstaged group is the untracked one.
+        let first = status.shown_files().and_then(|shown| shown.file(0, 0));
+        assert_eq!(first, Some((Group::Untracked, 0)));
+        status.choose(first);
+        wait_until(&mut status, diff_loaded);
+        let asked: Vec<(Group, String)> = probe
+            .working_diffs()
+            .into_iter()
+            .map(|(group, path, _)| (group, path))
+            .collect();
+        assert_eq!(asked, [(Group::Untracked, "a.txt".to_owned())]);
     }
 
     #[test]
@@ -501,5 +738,142 @@ mod tests {
         let highlighting = status.highlighting().expect("highlighted");
         assert!(highlighting.new.is_some());
         assert!(probe.calls(&root()).contains(&"working-file".to_owned()));
+    }
+
+    // ---- what can be staged in parts (spec `staging`)
+
+    /// The file status with `working` read, the file at the top of `group`
+    /// chosen, and its diff shown.
+    fn chosen(fake: FakeBackend, working: WorkingStatus, group: Group) -> FileStatus {
+        let (mut status, _) = file_status(fake.with_status(root(), working));
+        status.refresh();
+        wait_until(&mut status, loaded);
+        status.choose(Some((group, 0)));
+        wait_until(&mut status, |status| {
+            !matches!(status.diff(), DiffState::Loading)
+        });
+        status
+    }
+
+    fn parts_of(group: Group, entry: StatusEntry, diff: FileDiff) -> Option<Parts> {
+        let path = entry.path.to_string();
+        let mut working = WorkingStatus::default();
+        match group {
+            Group::Staged => working.staged.push(entry),
+            Group::Unstaged => working.unstaged.push(entry),
+            Group::Untracked => working.untracked.push(entry),
+        }
+        let fake = FakeBackend::default().with_working_diff(group, &path, diff);
+        chosen(fake, working, group).parts()
+    }
+
+    #[test]
+    fn a_text_diff_can_be_staged_in_parts_in_every_group() {
+        for (group, entry) in [
+            (Group::Unstaged, modified("a.rs")),
+            (Group::Staged, modified("a.rs")),
+            (Group::Untracked, entry(StatusKind::Untracked, "a.rs")),
+        ] {
+            assert_eq!(
+                parts_of(group, entry, diff_of("a.rs", "new")),
+                Some(Parts::Available),
+                "{group:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_diff_without_lines_offers_nothing() {
+        let binary = FileDiff {
+            content: Content::Binary {
+                old_size: Some(1),
+                new_size: Some(2),
+            },
+            ..diff_of("logo.png", "")
+        };
+        assert_eq!(
+            parts_of(Group::Unstaged, modified("logo.png"), binary),
+            None
+        );
+        // A rename or a mode alone has no hunk.
+        let no_lines = FileDiff {
+            content: Content::Text(Vec::new()),
+            ..diff_of("a.rs", "")
+        };
+        assert_eq!(parts_of(Group::Staged, modified("a.rs"), no_lines), None);
+    }
+
+    #[test]
+    fn the_reasons_a_diff_with_lines_is_staged_whole_only() {
+        let conflicted = entry(StatusKind::Conflicted, "a.rs");
+        assert_eq!(
+            parts_of(Group::Unstaged, conflicted, diff_of("a.rs", "new")),
+            Some(Parts::Conflicted)
+        );
+        // Under a filter driver, in both groups.
+        let filtered = || FileDiff {
+            filtered: true,
+            ..diff_of("big.dat", "new")
+        };
+        for group in [Group::Unstaged, Group::Staged] {
+            assert_eq!(
+                parts_of(group, modified("big.dat"), filtered()),
+                Some(Parts::Filtered),
+                "{group:?}"
+            );
+        }
+        // A change of type, and a symbolic link on either side.
+        let type_changed = entry(StatusKind::Changed(ChangeKind::TypeChanged), "link");
+        assert_eq!(
+            parts_of(Group::Unstaged, type_changed, diff_of("link", "target")),
+            Some(Parts::WholeOnly)
+        );
+        let link = Some("120000".to_owned());
+        for (old_mode, new_mode) in [(link.clone(), None), (None, link.clone())] {
+            let diff = FileDiff {
+                old_mode,
+                new_mode,
+                ..diff_of("link", "target")
+            };
+            assert_eq!(
+                parts_of(Group::Unstaged, modified("link"), diff),
+                Some(Parts::WholeOnly)
+            );
+        }
+    }
+
+    #[test]
+    fn a_diff_cut_at_its_limit_is_staged_in_parts_once_all_of_it_is_loaded() {
+        let cut = FileDiff {
+            truncated: true,
+            ..diff_of("a.rs", "new")
+        };
+        let fake = FakeBackend::default().with_working_diff(Group::Unstaged, "a.rs", cut);
+        let mut status = chosen(fake, unstaged(&["a.rs"]), Group::Unstaged);
+        assert_eq!(status.parts(), Some(Parts::Truncated));
+        status.load_whole_diff();
+        wait_until(&mut status, diff_loaded);
+        assert_eq!(status.parts(), Some(Parts::Available));
+    }
+
+    #[test]
+    fn a_diff_that_is_read_again_is_not_staged_in_parts_until_it_arrived() {
+        // The second reading of the diff is held: the one a refresh starts.
+        let gate = Gate::new();
+        let fake = FakeBackend::default()
+            .with_working_diff(Group::Unstaged, "a.rs", diff_of("a.rs", "new"))
+            .with_working_diff_gate_at(2, &gate);
+        let mut status = chosen(fake, unstaged(&["a.rs"]), Group::Unstaged);
+        assert_eq!(status.parts(), Some(Parts::Available));
+        let version = status.version();
+        status.refresh();
+        wait_until(&mut status, |status| status.version() > version);
+        // The status arrived, the diff of before is still shown.
+        assert!(diff_loaded(&status));
+        assert!(status.pane.is_reading());
+        assert_eq!(status.parts(), Some(Parts::Reading));
+        gate.open();
+        wait_until(&mut status, |status| !status.pane.is_reading());
+        assert_eq!(status.parts(), Some(Parts::Available));
     }
 }

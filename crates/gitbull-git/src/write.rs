@@ -1,14 +1,14 @@
 //! Explicit user actions honour ordinary Git hooks, filters and signing.
 
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::Command;
 
 use crate::cancel::CancelToken;
 use crate::invoke::{ExecutionPolicy, command_line};
-use crate::process::{FailurePolicy, StderrWatcher};
-use crate::{Error, Git, Process};
+use crate::process::{FailurePolicy, STDERR_LIMIT, StderrWatcher};
+use crate::{ConfigOverride, Error, Git, Process};
 
 /// Hook policy for a single explicit write invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +46,22 @@ impl<'a> WriteInvocation<'a> {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.command_with(repo, &[], args)
+    }
+
+    /// Like [`WriteInvocation::command`], with configuration values for this
+    /// invocation alone. They are not arguments, so that the first argument
+    /// stays the command, which SkipCommitHooks checks.
+    fn command_with<I, S>(
+        &self,
+        repo: &Path,
+        overrides: &[ConfigOverride],
+        args: I,
+    ) -> Result<Command, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let args: Vec<OsString> = args
             .into_iter()
             .map(|arg| arg.as_ref().to_owned())
@@ -63,7 +79,7 @@ impl<'a> WriteInvocation<'a> {
         }
         Ok(self
             .git
-            .command_with_policy(repo, &[], &args, ExecutionPolicy::Write(self.hooks)))
+            .command_with_policy(repo, overrides, &args, ExecutionPolicy::Write(self.hooks)))
     }
 
     /// Starts an explicit write using the shared process streams and log.
@@ -132,5 +148,65 @@ impl<'a> WriteInvocation<'a> {
         let result = process.wait();
         cancel.forget(registration);
         result
+    }
+
+    /// Runs `git <args>` to its end for a commit: `input` goes to its
+    /// standard input, and what it prints on its standard output is returned
+    /// beside the result, bounded like the error output, because Git says
+    /// there why nothing was committed.
+    ///
+    /// `cancel` stops Git and what it started, asking first where the
+    /// operating system can ([`crate::Canceller::cancel_gently`]): at its
+    /// start a commit holds the lock on the index, which Git removes when
+    /// asked to end.
+    pub(crate) fn run_keeping_output<I, S>(
+        &self,
+        repo: &Path,
+        overrides: &[ConfigOverride],
+        args: I,
+        input: &[u8],
+        cancel: &CancelToken,
+    ) -> (Vec<u8>, Result<(), Error>)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args: Vec<OsString> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_owned())
+            .collect();
+        let spawned = self
+            .command_with(repo, overrides, &args)
+            .and_then(|command| {
+                self.git
+                    .spawn_prepared(command, &args, true, None, FailurePolicy::Write)
+            });
+        let mut process = match spawned {
+            Ok(process) => process,
+            Err(error) => return (Vec::new(), Err(error)),
+        };
+        let canceller = process.canceller();
+        let registration = cancel.on_cancel(move || canceller.cancel_gently());
+        if let Some(mut stdin) = process.take_stdin() {
+            // A Git that has failed already has closed the pipe; `wait`
+            // returns its message.
+            let _ = stdin.write_all(input);
+        }
+        // Read to its end before waiting, so that Git cannot block on a full
+        // pipe; only the first part is kept.
+        let mut kept = Vec::new();
+        if let Some(mut stdout) = process.take_stdout() {
+            let mut chunk = [0u8; 8192];
+            while let Ok(read) = stdout.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                let room = STDERR_LIMIT.saturating_sub(kept.len());
+                kept.extend_from_slice(&chunk[..read.min(room)]);
+            }
+        }
+        let result = process.wait();
+        cancel.forget(registration);
+        (kept, result)
     }
 }

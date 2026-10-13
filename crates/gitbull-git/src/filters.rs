@@ -28,6 +28,57 @@ pub fn neutralised_filters_cancellable(
     overrides_from(git.run_cancellable(repo, &[], config::LIST, cancel)?)
 }
 
+/// What one listing of the configuration says about filter drivers.
+pub(crate) struct Filters {
+    /// The overrides that neutralise the drivers of the repository.
+    pub(crate) overrides: Vec<ConfigOverride>,
+    /// The names of the drivers of every scope that have a command: a
+    /// `clean`, a `smudge` or a `process` that is not empty. A file whose
+    /// `filter` attribute names one of them has content that a filter
+    /// rewrites.
+    pub(crate) drivers: BTreeSet<String>,
+}
+
+/// The overrides of [`neutralised_filters_cancellable`] and the drivers that
+/// are configured, from one listing of the configuration.
+pub(crate) fn filters_cancellable(
+    git: &Git,
+    repo: &Path,
+    cancel: &CancelToken,
+) -> Result<Filters, Error> {
+    let output = git.run_cancellable(repo, &[], config::LIST, cancel)?;
+    let drivers = configured_drivers(&output);
+    Ok(Filters {
+        overrides: overrides_from(output)?,
+        drivers,
+    })
+}
+
+/// Names of filter drivers with a command in any scope, from a listing of
+/// [`config::LIST`]. A name that is not valid UTF-8 cannot be the value of an
+/// attribute this code compares with, and is left out.
+fn configured_drivers(output: &[u8]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for (_, key, value) in config::entries(output) {
+        let Some(rest) = key.strip_prefix(b"filter.") else {
+            continue;
+        };
+        let Some(end) = rest.iter().rposition(|&b| b == b'.') else {
+            continue;
+        };
+        let (name, variable) = (&rest[..end], &rest[end + 1..]);
+        let command = matches!(variable, b"clean" | b"smudge" | b"process");
+        // Git takes an empty command for no filter.
+        if !command || name.is_empty() || value.is_empty() {
+            continue;
+        }
+        if let Ok(name) = std::str::from_utf8(name) {
+            names.insert(name.to_owned());
+        }
+    }
+    names
+}
+
 fn overrides_from(output: Vec<u8>) -> Result<Vec<ConfigOverride>, Error> {
     overrides_from_listing(&output).map_err(|message| Error::Parse {
         command: format!("git {}", config::LIST.join(" ")),
@@ -104,6 +155,22 @@ local\0file:.git/extra.cfg\0filter.inc.required\0\
 worktree\0file:.git/config.worktree\0filter.wt.clean\ncat\0\
 command\0command line:\0filter.cmd.clean\ncat\0\
 local\0file:.git/config\0filter.noname\ntrue\0";
+
+    #[test]
+    fn drivers_with_a_command_are_found_in_every_scope() {
+        let names = configured_drivers(LISTING);
+        // `inc` has `required` alone, and `noname` is no driver.
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            ["My.Filter", "a=b", "cmd", "evil", "lfs", "userfilter", "wt"]
+        );
+    }
+
+    #[test]
+    fn a_driver_with_an_empty_command_is_not_configured() {
+        let listing = b"global\0file:~/.gitconfig\0filter.off.clean\n\0";
+        assert!(configured_drivers(listing).is_empty());
+    }
 
     #[test]
     fn filters_of_the_local_and_worktree_scope_are_found() {

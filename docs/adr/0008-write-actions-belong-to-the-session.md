@@ -45,6 +45,54 @@ A write action belongs to the `Session` of its tab, not to a view.
   means the action happened and the hook is to blame, which the dialog says;
   unequal means it did not.
 
+## Amendment of 2026-10-10: staging and unstaging
+
+Staging and unstaging files (change `stage-files`) are write actions of the
+session and use its slot, its worker thread and its token. A user stages file
+after file faster than a read of the whole state ends, so three rules are
+added. They hold for index actions, the actions that change the index alone;
+checkout and the creation of a branch or a tag stay as decided above.
+
+- **Index actions queue behind each other.** A staging or an unstaging that is
+  asked for while one runs, or waits for its status, is kept and runs after it,
+  in the order it was asked for. A request of the same kind as the last one
+  kept is merged into it, so that several presses of a key become one call of
+  Git. Index actions and the other write actions still exclude each other: a
+  checkout is refused while the slot or the queue holds an index action, and an
+  index action is refused while a checkout or a creation runs. A failure
+  empties the queue.
+- **An action reads again what it can have changed.** "The state is read again
+  after every outcome" stands, fitted to the action:
+
+  | Action | Read again |
+  |---|---|
+  | Checkout, creating a branch, creating a tag | HEAD, the references, the stashes, the submodules, the worktrees and the status |
+  | Staging, unstaging | the status |
+
+  An index action leaves a read of HEAD and the references that is under way
+  alone; the other actions drop one that began before they ended.
+- **An index action is over when its status arrived.** The slot is freed by
+  the first status that arrives after Git ended, not by a read of HEAD and the
+  references, and the next request that is kept starts in the same pass. What
+  a kept request may act on is decided then, on that status. The session
+  therefore names a running action for as long as there is work, which the
+  question before closing and the Git path of the settings rely on.
+
+A hunk or chosen lines of a file (change `stage-hunks-and-lines`) are an index
+action too, with one difference: **a part of a file is never kept in the
+queue.** Its request names lines of the diff that is shown, and a staging
+before it changes that diff, so it could only be refused later as out of date.
+It is taken only while the slot and the queue are empty, and not while the
+diff it was made for is read again, which happens in the pass that frees the
+slot after another part. A request for whole files made while a part runs is
+kept as before.
+
+Dropping the session cancels a running index action, as it cancels every write
+action. Git replaces the index file in one step, so stopping it leaves the
+index as it was or as it will be; a lock file may stay behind.
+
+## Later actions
+
 Each later action adds a variant to `Action`, a request that the interface
 makes, and an operation on `Backend`; it reuses the slot, the token, the read
 after the outcome and the dialogs. Tests run an action behind a gate, so that a
@@ -55,3 +103,78 @@ replaced and cannot outlive a closed tab; a queue of write actions for the whole
 application, which would make one tab wait for another's checkout although they
 write to different working trees; and an action the user can cancel, which
 trades a wait for a damaged working copy.
+
+## Amendment of 2026-10-12: committing
+
+Committing (change `commit`) is a write action of the session. It is an
+exclusive action like a checkout: it is refused while any action runs or an
+index action is kept, and nothing else starts while it runs. Four rules are
+added for it.
+
+- **A commit can be stopped by the user.** "The action has no cancel control
+  for the user" stands for every other action. A commit waits for hooks and
+  for a signing program, which can wait without end, as a program that asks
+  for a passphrase it cannot ask for. Neither reason against a stop holds for
+  it: Git makes a commit in one step at its end, so a stopped commit is made
+  or not made and the working copy is never half updated; and Git holds the
+  lock on the index only at the start of a commit, before its hooks. `Stop` in
+  the commit form cancels the token of the action through
+  `Session::stop_commit`, which does nothing for another action.
+- **The stop of a commit asks before it kills.** For the lock at the start,
+  under which clean filters can run long, the process group is sent `SIGTERM`
+  first, so that Git removes the lock, and is killed when it has not ended
+  after two seconds. Windows has no such request: the job object is terminated
+  as for every other stop, and a lock can stay when the stop comes before the
+  hooks. The staging of "Stage all changes and commit" is part of the action
+  and is not stopped at all, because staging holds the lock throughout; a
+  stop that arrives meanwhile takes effect before the commit starts.
+- **Whether a commit took place is not read from where HEAD is.** A checkout
+  knows where HEAD will be; a commit does not, and an amend can even give the
+  commit it replaced. Git's exit status decides: success means the commit was
+  made. After a failure or a stop the commit counts as made only when HEAD
+  names another commit that follows the old one as this commit would, and
+  whose message is the message sent. A commit that a hook or another program
+  made on top of the old HEAD follows it as well, so descent alone is not
+  enough. A commit of ours whose message a hook changed is then not
+  recognised, and the form keeps what the user wrote.
+- **The history is read again after a commit.** The read of HEAD and the
+  references after the action finds the branch moved, which loads the history
+  anew; the status is read as after every action.
+
+The state the commit form shows, the operation in progress and the message
+Git prepared, is read with every read of the status rather than with HEAD and
+the references: another program can begin a merge without moving either. The
+worker reads it once more right before the commit and makes none during a
+rebase or a series of patches, and no amend during any operation.
+
+## Amendment of 2026-10-12: discarding
+
+Discarding changes, restoring them, putting an entry back and clearing the
+journal (change `discard`, [ADR 0009](0009-discarded-work-is-kept-in-a-journal.md))
+are write actions of the session. Each is exclusive like a checkout: it is
+refused while any action runs or an index action is kept, and nothing else
+starts while it runs. Three rules are added.
+
+- **They cannot be stopped, not even by dropping the session.** A discard
+  stopped half way leaves files in the journal that Git has not written again,
+  which is the one state that needs the user to finish it. The worker of these
+  actions gets no token that anything cancels; `Drop for Session` and
+  `Session::stop_commit` do not reach it. Closing the tab or the window while
+  one runs therefore asks, and "Close anyway" waits until no write action runs
+  in it. The stoppable actions of a window, a checkout or a commit, are stopped
+  at once.
+- **Only the status and the journal are read again.** A discard changes no
+  reference and moves no HEAD, so, as for an index action, a read of HEAD and
+  the references that is under way is left alone:
+
+  | Action | Read again |
+  |---|---|
+  | Discard, restore, put back, clear | the status and the journal |
+
+  The action is over when the status has arrived and the journal was read, so
+  the notice and the list the user sees are the ones the action left.
+- **Refusals are data.** What git-bull finds before it changes anything, such
+  as files that changed their class since the list was shown, a diff that is
+  out of date, or an entry that another instance changed meanwhile, is a value
+  and becomes a dialog that says that nothing was discarded; Git's message is
+  shown only for a failure of Git.

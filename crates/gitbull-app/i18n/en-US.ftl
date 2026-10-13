@@ -210,12 +210,203 @@ create-refused-taken = Git refused the name: a branch of this name exists, or th
 create-refused-invalid = Git refused the name: it is not a valid branch name.
 action-create-tag = Creating tag { $name }
 create-tag-failed-title = The tag { $name } could not be created
+action-stage = { $count ->
+    [one] Staging 1 file
+   *[other] Staging { $count } files
+}
+action-unstage = { $count ->
+    [one] Unstaging 1 file
+   *[other] Unstaging { $count } files
+}
+stage-failed-title = The files could not be staged
+unstage-failed-title = The files could not be unstaged
+action-stage-part = Staging a part of { $path }
+action-unstage-part = Unstaging a part of { $path }
+stage-part-failed-title = The part of { $path } could not be staged
+unstage-part-failed-title = The part of { $path } could not be unstaged
+diff-out-of-date-title = { $path } changed
+diff-out-of-date-body = The file changed since its diff was read, so nothing was staged or unstaged. The diff now shows the file as it is.
+end-of-file-split-title = These lines of { $path } are staged together
+end-of-file-split-body = The last line of the file gains or loses its line break. Staging or unstaging only some of its last lines would join two lines, so nothing was changed. Select the changed lines at the end of the file together.
+action-commit = Committing
+action-amend = Amending the last commit
+commit-failed-title = The commit could not be made
+amend-failed-title = The last commit could not be amended
+action-discard = { $count ->
+    [one] Discarding 1 file
+   *[other] Discarding { $count } files
+}
+action-discard-part = Discarding a part of { $path }
+action-restore = Bringing discarded changes back
+action-discard-again = Discarding again
+action-put-back = Putting discarded changes back
+action-clear-discards = Clearing the discarded changes
+discard-failed-title = The changes could not be discarded
+discard-part-failed-title = The part of { $path } could not be discarded
+restore-failed-title = The discarded changes could not be brought back
+restore-failed-body = A file may be left in the entry of the list "Recently discarded" and not in the working copy. "Put back" there completes the exchange. The message:
+discard-again-failed-title = The changes could not be discarded again
+put-back-failed-title = The discarded changes could not be put back
+clear-discards-failed-title = The discarded changes could not be cleared
+discard-refused-title = Nothing was discarded
+discard-refused-files-changed = The files changed since the list was shown, so nothing was discarded. The list now shows them as they are.
+discard-refused-path-back = { $path } appeared again while the changes were discarded, so everything was put back as it was.
+discard-refused-journal = The discarded changes could not be kept safe, so nothing was discarded: { $message }
+discard-refused-diff-body = The file changed since its diff was read, so nothing was discarded. The diff now shows the file as it is.
+discard-refused-split-title = These lines of { $path } are discarded together
+discard-refused-split-body = The last line of the file gains or loses its line break. Discarding only some of its last lines would join two lines, so nothing was changed. Select the changed lines at the end of the file together.
+discard-refused-line-endings-title = The part of { $path } was not discarded
+discard-refused-line-endings-body = Git would have changed the line endings of other lines of the file, so the file was put back as it was. The whole file can be discarded instead.
+discard-refused-not-tracked = Parts of a file that Git does not track cannot be discarded.
+discard-refused-path = The path of the file is not one git-bull changes: { $reason }.
+discard-left-out-title = Some files were left out
+discard-left-out-body = The other changes were discarded. These files were not:
+discard-stuck-title = Some files could not be put back
+discard-stuck-body = The discard failed, and these files could not be put back without overwriting what lies at their path. They and their copies were left alone.
+journal-refused-title = Nothing was changed
+journal-gone = The entry is gone: another git-bull removed it, or it is not one that git-bull wrote.
+journal-changed = The entry was changed meanwhile, as by another git-bull, so nothing was done. The list shows it as it is.
+journal-busy = Another git-bull works on the discarded changes. Try again when it is done.
+journal-no-locks = The Git folder is on a file system without locks, where discarded changes cannot be kept safely: { $message }
+journal-git-runs = The Git that this discard started still runs, as process { $pid }. Put the changes back when it has ended.
+journal-blocked = The path { $path } is not one git-bull changes: { $reason }.
+journal-left-alone-body = Some files were left alone. They and their copies stay in the entry:
+journal-paths-taken-body = Another file lies where these files belong. They and their copies were not touched:
+path-odd = it is empty or has a part no file can have
+path-absolute = it lies outside the working copy
+path-dot-git = it lies inside the Git folder
+path-nested = it is a repository of its own
+path-folder = a folder lies at the path
+path-link = a symbolic link lies on the way to it
+path-parent-file = a file lies where a folder is expected
+slot-missing = its copy is gone
+slot-foreign = another file lies where it belongs
+commit-hook-title = The commit was made
+commit-hook-body = The commit exists, but Git reported an error afterwards, usually from a hook of the repository:
+commit-refused-title = No commit was made
+commit-refused-conflicts = Files are in conflict, so not every change can be staged. Resolve the conflicts and stage the files, then commit.
+commit-refused-rebase = A rebase is in progress. A commit made now would lose the author of the commit that is being replayed. Continue or abort the rebase outside git-bull.
+commit-refused-patches = A series of patches is being applied. A commit made now would lose the author of the patch. Continue or abort it outside git-bull.
+commit-refused-merge = A merge has begun. It is concluded with what you stage for it, not with every change of the working copy. Stage what belongs to the merge, then commit it.
+commit-refused-amend = The last commit cannot be amended while { $operation } is in progress: the commit that would be replaced is not the one you made last, or is still needed.
+operation-merge = a merge
+operation-cherry-pick = a cherry-pick
+operation-revert = a revert
+operation-rebase = a rebase
+operation-patches = a series of patches
+commit-amend = Amend last commit
+commit-summary = Summary
+commit-description = Description
+commit-summary-length = { $count ->
+    [one] 1 character
+   *[other] { $count } characters
+}
+commit-summary-long = { $count } characters, longer than 72
+commit-without-hooks = Commit without hooks
+commit-files = { $count ->
+    [one] Commit changes to 1 file
+   *[other] Commit changes to { $count } files
+}
+commit-stage-all = Stage all changes and commit
+commit-merge = Commit merge
+commit-stop = Stop
+commit-no-summary = Write a summary to commit.
+commit-nothing = There is nothing to commit.
+commit-conflicts = Files are in conflict. Resolve the conflicts and stage the files to commit.
+commit-rebase = A rebase is in progress. Continue or abort it outside git-bull.
+commit-patches = A series of patches is being applied. Continue or abort it outside git-bull.
+commit-busy = Another action is running.
+commit-status-unknown = The status is being read.
+commit-on-remote = This commit is already on a remote branch. Amending replaces a commit that others may have.
+commit-detached = HEAD is detached: the commit will belong to no branch.
+commit-during-merge = A merge is in progress. The commit concludes it.
+commit-during-cherry-pick = A cherry-pick is in progress.
+commit-during-revert = A revert is in progress.
+amend-no-commit = There is no commit to amend.
+amend-in-progress = The last commit cannot be amended while { $operation } is in progress.
+stage-hunk = Stage hunk
+unstage-hunk = Unstage hunk
+stage-selected-lines = Stage selected lines
+unstage-selected-lines = Unstage selected lines
+parts-conflicted = The file is in conflict. Resolve it, then stage the whole file.
+parts-truncated = Load the whole diff to stage parts of it.
+parts-filtered = A filter rewrites this file, so the lines shown are not the lines of the file. Stage the whole file.
+parts-whole-only = This change is staged whole.
+parts-reading = The diff is being read again.
+parts-busy = Another action is running.
+stage-file = Stage file
+unstage-file = Unstage file
+stage-all = Stage all
+unstage-all = Unstage all
+discard-changes = Discard changes
+discard-all = Discard all
+discard-hunk = Discard hunk
+notice-discarded = { $count ->
+    [one] Discarded 1 file
+   *[other] Discarded { $count } files
+}
+notice-discarded-part = Discarded part of { $name }
+notice-restored = { $count ->
+    [one] Restored 1 file
+   *[other] Restored { $count } files
+}
+notice-restored-part = Restored part of { $name }
+notice-undo = Undo
+recent-title = Recently discarded ({ $count })
+recent-clear = Clear
+recent-restore = Restore
+recent-put-back = Put back
+recent-state-discarded = Discarded
+recent-state-restored = Restored
+recent-state-interrupted = Interrupted
+recent-state-running = Running
+recent-entry-files = { $count ->
+    [one] 1 file: { $names }
+   *[other] { $count } files: { $names }
+}
+recent-entry-part = Part of { $name }
+recent-unreadable = Not an entry of git-bull: { $folder } ({ $why }). Clear removes it.
+clear-dialog-title = Clear the discarded changes?
+clear-dialog-body = Every entry is removed, and what the entries hold cannot be brought back.
+clear-dialog-interrupted = { $count ->
+    [one] 1 entry is interrupted: its files may still be in the list and not in the working copy.
+   *[other] { $count } entries are interrupted: their files may still be in the list and not in the working copy.
+}
+clear-dialog-confirm = Clear
+notice-discard-again = Discard again
+discard-selected-lines = Discard selected lines
+discard-unavailable-conflict = The file is in conflict.
+discard-unavailable-submodule = The entry is a submodule, which has a repository of its own.
+discard-unavailable-renamed = The file is renamed or copied, which cannot be discarded in one step.
+discard-unavailable-intent-to-add = Git holds the file only as intended to be added.
+discard-unavailable-nested = The folder is a repository of its own.
+discard-unavailable-busy = Another action is running.
+discard-dialog-title-one = Discard the changes to { $name }?
+discard-dialog-title-many = { $count ->
+    [one] Discard the changes to 1 file?
+   *[other] Discard the changes to { $count } files?
+}
+discard-dialog-body = The changes are removed from the working copy and kept in the list "Recently discarded", from where they can be brought back. Untracked files are removed in the same way.
+discard-dialog-left = { $count ->
+    [one] 1 file cannot be discarded and stays as it is.
+   *[other] { $count } files cannot be discarded and stay as they are.
+}
+discard-dialog-list = Files to discard
+discard-dialog-confirm = Discard
 create-tag-refused-taken = Git refused the name: a tag of this name exists, or the name would need one to be a folder.
 create-tag-refused-invalid = Git refused the name: it is not a valid tag name.
 close-question-title = Stop the running action?
 close-question-tab = The action "{ $action }" is still running in the tab { $tab }. Closing the tab stops it, and Git may leave the working copy half updated.
 close-question-window = The action "{ $action }" is still running in the tab { $tab }. Closing git-bull stops it, and Git may leave the working copy half updated.
+close-question-tab-index = The action "{ $action }" is still running in the tab { $tab }. Closing the tab stops it: files may stay as they were, and Git may leave a lock on the index behind.
+close-question-window-index = The action "{ $action }" is still running in the tab { $tab }. Closing git-bull stops it: files may stay as they were, and Git may leave a lock on the index behind.
+close-question-tab-commit = The action "{ $action }" is still running in the tab { $tab }. Closing the tab stops it: the commit may not be made, its hooks are stopped half way, and the message in the commit form is gone with the tab.
+close-question-window-commit = The action "{ $action }" is still running in the tab { $tab }. Closing git-bull stops it: the commit may not be made, its hooks are stopped half way, and the message in the commit form is gone with the tab.
 close-question-window-many = Actions are still running in { $count } tabs, among them "{ $action }" in the tab { $tab }. Closing git-bull stops them, and Git may leave the working copies half updated.
+close-question-tab-discard = The action "{ $action }" is still running in the tab { $tab }. It cannot be stopped: closing the tab waits until it has ended.
+close-question-window-discard = The action "{ $action }" is still running in the tab { $tab }. It cannot be stopped: closing git-bull waits until it has ended. Actions that can be stopped are stopped at once.
+close-waiting = Waiting for the action "{ $action }" in the tab { $tab } to end, and then closing.
+status-waiting-for-other = Waiting for another git-bull
 close-keep-open = Keep open
 close-anyway = Close anyway
 settings-behaviour = Behaviour
@@ -285,7 +476,6 @@ copied = Copied
 panel-files = FILES
 file-status-staged = Staged files ({ $count })
 file-status-unstaged = Unstaged files ({ $count })
-file-status-untracked = Untracked files ({ $count })
 file-status-loading = Reading the status of the working copy…
 file-status-clean = There are no uncommitted changes.
 

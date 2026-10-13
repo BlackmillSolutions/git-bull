@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use gitbull_git::{Backend, Error};
 
+use crate::commit_draft::CommitDraft;
 use crate::opening::{self, OpenedRepository};
 use crate::session::{Action, Session};
 use crate::sidebar_tree::SidebarKey;
@@ -174,6 +175,10 @@ pub struct Workspace {
     last_shown: Option<TabId>,
     events: Vec<Event>,
     next_id: u64,
+    /// Commit messages being written when the workspace before this one was
+    /// replaced, by the root of their repository; each goes to the session
+    /// that opens that repository.
+    drafts: Vec<(PathBuf, CommitDraft)>,
 }
 
 impl Workspace {
@@ -187,7 +192,35 @@ impl Workspace {
             last_shown: None,
             events: Vec::new(),
             next_id: 0,
+            drafts: Vec::new(),
         }
+    }
+
+    /// Takes what is written in the commit forms of the open repositories,
+    /// by the root of each: for the workspace that replaces this one, as when
+    /// another executable is applied in the settings.
+    pub fn take_drafts(&mut self) -> Vec<(PathBuf, CommitDraft)> {
+        // Those whose repository has not opened yet in this workspace are
+        // still waiting here.
+        let mut drafts = std::mem::take(&mut self.drafts);
+        let open = self
+            .tabs
+            .iter_mut()
+            .filter_map(Tab::session_mut)
+            .map(|session| (session.opened().root.clone(), session.take_draft()))
+            .filter(|(_, draft)| *draft != CommitDraft::default());
+        for (root, draft) in open {
+            drafts.retain(|(known, _)| *known != root);
+            drafts.push((root, draft));
+        }
+        drafts
+    }
+
+    /// Keeps `drafts` for the sessions this workspace opens. A draft whose
+    /// repository does not open again is never used.
+    pub fn with_drafts(mut self, drafts: Vec<(PathBuf, CommitDraft)>) -> Workspace {
+        self.drafts = drafts;
+        self
     }
 
     /// Opens the repository containing `path` in a new tab and activates it.
@@ -315,6 +348,16 @@ impl Workspace {
         };
         let id = self.tabs[position].id;
         self.move_tab(id, index);
+    }
+
+    /// Stops the write action of every tab that can be stopped; a discard
+    /// cannot (ADR 0008).
+    pub fn stop_stoppable(&mut self) {
+        for tab in &mut self.tabs {
+            if let Some(session) = tab.session_mut() {
+                session.stop_stoppable();
+            }
+        }
     }
 
     /// The write actions that run now, one per tab at most (ADR 0008).
@@ -516,8 +559,16 @@ impl Workspace {
                     }
                     return false;
                 }
-                let session =
+                let draft = self
+                    .drafts
+                    .iter()
+                    .position(|(root, _)| *root == opened.root)
+                    .map(|found| self.drafts.swap_remove(found).1);
+                let mut session =
                     Session::new(opened, Arc::clone(&self.backend), Arc::clone(&self.notify));
+                if let Some(draft) = draft {
+                    session.set_draft(draft);
+                }
                 self.tabs[index].state = TabState::Ready(Box::new(session));
                 true
             }
@@ -1365,5 +1416,71 @@ mod tests {
             workspace.running_actions().is_empty()
         });
         assert_eq!(workspace.close_request(first), CloseRequest::Closed);
+    }
+
+    fn session_mut_of<'a>(workspace: &'a mut Workspace, title: &str) -> &'a mut Session {
+        workspace
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.title() == title)
+            .and_then(Tab::session_mut)
+            .unwrap_or_else(|| panic!("no ready tab {title}"))
+    }
+
+    #[test]
+    fn drafts_move_to_the_workspace_that_replaces_this_one() {
+        let mut old = workspace(two_repositories());
+        old.open(path(&["work", "git-bull"]));
+        old.open(path(&["work", "linux"]));
+        settle(&mut old);
+        session_mut_of(&mut old, "git-bull").set_summary("Kept".to_owned());
+        let drafts = old.take_drafts();
+        // Only what was written travels.
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].0, path(&["work", "git-bull"]));
+        assert_eq!(session_of(&old, "git-bull").draft().summary(), "");
+
+        let mut new = workspace(two_repositories()).with_drafts(drafts);
+        new.open(path(&["work", "linux"]));
+        new.open(path(&["work", "git-bull"]));
+        settle(&mut new);
+        assert_eq!(session_of(&new, "git-bull").draft().summary(), "Kept");
+        assert_eq!(session_of(&new, "linux").draft().summary(), "");
+    }
+
+    #[test]
+    fn a_draft_whose_repository_does_not_open_again_is_never_used() {
+        let mut draft = CommitDraft::default();
+        draft.set_summary("Lost".to_owned());
+        let drafts = vec![(path(&["work", "gone"]), draft)];
+        let mut new = workspace(two_repositories()).with_drafts(drafts);
+        new.open(path(&["work", "git-bull"]));
+        settle(&mut new);
+        assert_eq!(session_of(&new, "git-bull").draft().summary(), "");
+    }
+
+    #[test]
+    fn a_draft_that_still_waits_moves_on_with_the_others() {
+        let mut waiting = CommitDraft::default();
+        waiting.set_summary("Waiting".to_owned());
+        let mut old =
+            workspace(two_repositories()).with_drafts(vec![(path(&["work", "linux"]), waiting)]);
+        // Only the other repository has opened when the workspace is replaced.
+        old.open(path(&["work", "git-bull"]));
+        settle(&mut old);
+        session_mut_of(&mut old, "git-bull").set_summary("Kept".to_owned());
+        let mut drafts = old.take_drafts();
+        drafts.sort_by(|a, b| a.0.cmp(&b.0));
+        let summaries: Vec<_> = drafts
+            .iter()
+            .map(|(root, draft)| (root.clone(), draft.summary().to_owned()))
+            .collect();
+        assert_eq!(
+            summaries,
+            [
+                (path(&["work", "git-bull"]), "Kept".to_owned()),
+                (path(&["work", "linux"]), "Waiting".to_owned()),
+            ]
+        );
     }
 }

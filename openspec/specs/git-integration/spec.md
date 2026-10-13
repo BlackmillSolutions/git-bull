@@ -312,8 +312,8 @@ A caller SHALL be able to request that all hooks triggered by one commit
 invocation, including amend, are disabled. This choice MUST NOT disable
 filters or signing, persist to another invocation, or be accepted for a
 non-commit command. It SHALL also disable a configured fsmonitor hook for
-that invocation. The future commit interface SHALL expose the choice;
-this foundation change SHALL provide the execution support only.
+that invocation. The commit form of the File status view exposes the choice,
+as the capability `commit` describes.
 
 #### Scenario: All commit hooks are skipped
 - **WHEN** a commit requests skipping hooks and all four standard commit hooks are installed
@@ -431,3 +431,324 @@ cannot tell apart SHALL reach the interface with Git's message unchanged.
 #### Scenario: Read again afterwards
 - **WHEN** an operation fails after Git moved HEAD, as a failing post-checkout hook can cause
 - **THEN** git-bull reads HEAD again and reports the repository as it is
+
+### Requirement: Index operations
+Staging and unstaging files SHALL run through the explicit write invocation
+(requirement "Explicit write execution"). Every path SHALL be taken literally,
+never as a pattern, and SHALL reach Git in a way that does not depend on the
+length a command line may have. These operations SHALL change the index only,
+and only for the paths they are given: they SHALL NOT change the working
+copy, HEAD, a reference or the state of a merge that is under way, and SHALL
+NOT use an option that forces. An operation without a path SHALL run nothing.
+Unstaging SHALL work the same way in a repository with and without a commit,
+without git-bull having to know which it is. After each operation git-bull
+SHALL read the status again. A failure SHALL keep Git's exit status and
+message, and what a filter printed SHALL NOT be read as a refusal.
+
+#### Scenario: Path with a pattern character
+- **WHEN** `a*.txt` is staged and `ab.txt` is modified too
+- **THEN** the index changes for `a*.txt` only
+
+#### Scenario: Thousands of paths
+- **WHEN** 5,000 files with long paths are staged in one operation on Windows
+- **THEN** Git stages all of them
+
+#### Scenario: Unstaging during a merge
+- **WHEN** a merge stopped with conflicts, a file without a conflict is staged, and the user unstages it
+- **THEN** the merge is still under way, and the files in conflict are still in conflict
+
+#### Scenario: No path
+- **WHEN** an unstaging is asked for with no path while a merge stopped with conflicts and other files are staged
+- **THEN** Git is not started, the merge is still under way, and the staged files are still staged
+
+#### Scenario: Unstaging without a commit
+- **WHEN** a repository has no commit, a file is staged and then edited, and it is unstaged
+- **THEN** the index no longer holds the file, and the file still exists with its edited content
+
+#### Scenario: Submodule at another commit
+- **WHEN** a submodule has checked out a commit other than the one recorded, and it is staged
+- **THEN** the index records the commit that is checked out
+
+#### Scenario: Reads stay protected
+- **WHEN** a file was staged with the repository's clean filter and git-bull reads the status afterwards
+- **THEN** that read runs no filter and no hook of the repository
+
+### Requirement: Partial index operations
+Staging and unstaging a part of the changes of a file SHALL apply a patch to
+the index through the explicit write invocation (requirement "Explicit write
+execution"). The patch SHALL be made of Git's own output for that file, read
+at the moment of the operation, and SHALL hold the bytes of that output
+unchanged. Before anything is applied, the hunks Git reports SHALL be compared
+with the ones the request was made for; when they differ, nothing SHALL be
+applied and the caller SHALL be told that the diff is out of date; a diff
+Git no longer reports at all is out of date too. The operation SHALL change
+the index only, and only the content of that file: it SHALL NOT rename a
+path, SHALL add or remove the path only when the lines chosen are the first
+the index holds of the file or the last, and SHALL NOT change the working
+copy, HEAD, a reference or the state of a merge. A file that is modified
+SHALL stay in the index also when the part staged leaves it empty. A change of the mode of the file that its
+diff reports is staged with any part of it, as Git applies it; unstaging a
+part SHALL leave a staged change of the mode staged. A selection that
+could only be applied by joining two lines at the end of a file SHALL be
+refused with nothing applied. It SHALL
+NOT let a whitespace setting change or refuse the patch, SHALL NOT fall back to
+a merge when the patch does not apply, and SHALL NOT be retried. A request
+without a change to stage SHALL run nothing. A failure SHALL keep Git's exit
+status and message.
+
+#### Scenario: Only the file named
+- **WHEN** two files are modified and a hunk of the first is staged
+- **THEN** the index changes for the first file only
+
+#### Scenario: Diff out of date
+- **WHEN** a part is requested for hunks that Git no longer reports for the file
+- **THEN** the index is unchanged and the caller is told that the diff is out of date
+
+#### Scenario: File emptied
+- **WHEN** every line of a tracked file was removed in the working copy and all of its hunk is staged
+- **THEN** the index holds the file, empty
+
+#### Scenario: Part of a staged rename
+- **WHEN** one hunk of a file that is staged as renamed is unstaged
+- **THEN** the index still holds the file under its new path and not under its old one
+
+#### Scenario: Unstaging below a staged hunk
+- **WHEN** a later hunk is unstaged while an earlier hunk that added lines stays staged, in a file whose lines repeat
+- **THEN** exactly the lines of the later hunk leave the index
+
+#### Scenario: Lines at an end without a line break
+- **WHEN** a selection would leave a line without a line break in front of another line
+- **THEN** nothing is applied and the caller is told that the selection cannot be staged alone
+
+#### Scenario: Whitespace setting of the user
+- **WHEN** `apply.whitespace` is `error` and a staged line ends in a space
+- **THEN** the line is staged with its space
+
+#### Scenario: Path with a space and a pattern character
+- **WHEN** a hunk of `my notes [1].txt` is staged
+- **THEN** the index changes for that file
+
+#### Scenario: Reads stay protected
+- **WHEN** the diff of a file is read to make the patch
+- **THEN** that read runs no filter and no hook of the repository
+
+### Requirement: Creating a commit
+git-bull SHALL create a commit, and amend the last one, with Git's own commit
+command run as a write, so that hooks, filters and signing apply as
+configured. The message SHALL be given on standard input and stored as UTF-8,
+whatever `i18n.commitEncoding` is set to. It SHALL be cleaned as Git cleans
+a message given to it and no further, whatever `commit.cleanup` is set to:
+empty lines at its start and end and spaces at the end of lines are removed
+and several empty lines in a row become one. No editor SHALL be started.
+git-bull SHALL NOT pass an option that allows an empty commit, that skips a
+hook other than as "Commit without hooks" does, or that changes the author,
+the date or the signing. The caller SHALL be told whether the commit took
+place. It did when Git ended successfully. After a failure or a stop it did
+only when HEAD names another commit than before, that commit follows the one
+before as this commit would (it has it as its first parent, or for an amend
+has its parents, or has no parent where there was no commit), and its message
+is the message given, cleaned as above; a movement of HEAD alone SHALL NOT be
+taken for it. When Git fails, the caller SHALL receive what Git printed on
+its standard output as well as its error output. Stopping the commit SHALL
+end Git and the hooks and programs it started and SHALL be reported as
+stopped, not as a failure: where the operating system has a request to end,
+that request is sent first, so that Git removes a lock it holds, and force
+follows after a short while.
+
+Right before the commit git-bull SHALL read which operation is in progress,
+and SHALL make no commit, and report why as a refusal of its own, during a
+rebase or a series of patches being applied, and for an amend during any
+operation.
+
+#### Scenario: Message from standard input
+- **WHEN** a commit is created with a message whose second paragraph begins with `#`
+- **THEN** the commit has that message with the line kept, also when `commit.cleanup` is `strip`
+
+#### Scenario: Another commit encoding is configured
+- **WHEN** `i18n.commitEncoding` is `ISO-8859-1` and the message is `Grüße`
+- **THEN** `git log --encoding=UTF-8` prints `Grüße` for the commit
+
+#### Scenario: Nothing to commit
+- **WHEN** a commit is asked for while the index equals the last commit
+- **THEN** the caller receives a failure with Git's explanation, which Git prints on its standard output, and no commit is created
+
+#### Scenario: Amend
+- **WHEN** an amend is asked for with a new message and a staged file
+- **THEN** the last commit is replaced by one with that message, its parents and its changes with the staged file added
+
+#### Scenario: Amend that gives the same commit
+- **WHEN** an amend with the unchanged message and nothing staged is made within the second of the commit it replaces
+- **THEN** the caller is told that the commit took place
+
+#### Scenario: Another program's commit is not taken for it
+- **WHEN** a pre-commit hook makes a commit of its own on HEAD and then refuses
+- **THEN** the caller is told that the commit did not take place
+
+#### Scenario: Stopped after the commit was made
+- **WHEN** a commit is stopped while its post-commit hook runs
+- **THEN** the caller is told that it was stopped and that the commit took place
+
+#### Scenario: Rebase in progress
+- **WHEN** a commit is asked for while a rebase is stopped at a conflict
+- **THEN** no commit is made and the caller receives the refusal that names the rebase
+
+#### Scenario: Stopped while Git holds the lock
+- **WHEN** a commit is stopped on Linux or macOS while a clean filter runs before its hooks
+- **THEN** no commit is created and no lock stays on the index
+
+#### Scenario: Stopped during a hook or the signing
+- **WHEN** a commit is stopped while its pre-commit hook, its commit-msg hook or its signing program runs
+- **THEN** that program ends, no commit is created, no lock stays on the index, and the caller is told that the commit was stopped
+
+### Requirement: Staging everything before a commit
+A caller SHALL be able to ask that every change of the working copy is staged
+before the commit, as one request. git-bull SHALL read the status for it at
+that moment, SHALL stage what that status lists as unstaged or untracked,
+with both paths of a file it lists as renamed, and SHALL make no commit and
+stage nothing, and report it as a refusal of its own, when it lists a file in
+conflict. A
+stop SHALL NOT interrupt the staging: it takes effect when the staging ended,
+before the commit starts.
+
+#### Scenario: A file created just before
+- **WHEN** staging everything and committing is asked for right after a file was created
+- **THEN** the commit holds that file
+
+#### Scenario: A conflict
+- **WHEN** staging everything and committing is asked for while a file is in conflict
+- **THEN** the caller receives the refusal for a conflict, nothing was staged and no commit exists
+
+#### Scenario: A renamed file
+- **WHEN** staging everything and committing is asked for while the status lists an unstaged rename
+- **THEN** the commit holds the rename, and the old path is not left as an unstaged deletion
+
+#### Scenario: Stopped while staging
+- **WHEN** a stop arrives while a clean filter of the staging still runs
+- **THEN** the staging ends by itself, no commit is started, and no lock stays on the index
+
+### Requirement: Reads for committing
+git-bull SHALL read, hardened as every read: the message of the last commit,
+as UTF-8; which operation is in progress, of a merge, a cherry-pick, a
+revert, a rebase and a series of patches being applied, where a cherry-pick
+or a revert is also in progress between the commits of a series of them; the
+message Git prepared for the next commit, of a merge, a merge that squashes,
+a cherry-pick or a revert, without its comment lines as the configuration of
+the comment character defines them, and none during a rebase or a series of
+patches; and whether the last commit is part of a branch of a remote. A repository without a commit has no
+last message, and that SHALL be reported as such, not as a failure.
+
+#### Scenario: Last message
+- **WHEN** the last commit has a summary and a description of two paragraphs
+- **THEN** the read returns them as written
+
+#### Scenario: Merge being concluded
+- **WHEN** a merge was stopped by a conflict
+- **THEN** the read reports the merge and the message `Merge branch 'topic'`, without the lines that list the conflicts
+
+#### Scenario: Another comment character
+- **WHEN** `core.commentChar` is `;` and a merge was stopped by a conflict
+- **THEN** the prepared message is returned without the lines that begin with `;`
+
+#### Scenario: Rebase stopped
+- **WHEN** a rebase stopped at a conflict
+- **THEN** the read reports a rebase and no prepared message
+
+#### Scenario: Series of patches
+- **WHEN** `git am` stopped at a patch that does not apply
+- **THEN** the read reports a series of patches being applied, not a rebase
+
+#### Scenario: Between two picked commits
+- **WHEN** the first of two commits being picked was committed
+- **THEN** the read still reports a cherry-pick
+
+#### Scenario: Squash that stopped at a conflict
+- **WHEN** `git merge --squash` stopped at a conflict
+- **THEN** the prepared message is the one of the squash, not an empty one
+
+#### Scenario: Merge that squashes
+- **WHEN** `git merge --squash` ended
+- **THEN** the read reports no operation and the message Git prepared for the squash
+
+#### Scenario: Commit on a remote branch
+- **WHEN** the last commit is an ancestor of `origin/main`
+- **THEN** the read reports that it is part of a remote branch
+
+#### Scenario: No commit
+- **WHEN** the repository has no commit
+- **THEN** the read reports no last message and no error
+
+### Requirement: Discarding changes
+git-bull SHALL discard with Git's own commands run as a write, so that the
+filters of the repository run as for a checkout: `restore` of the working copy
+alone for a tracked file, from the index, with the paths on standard input; and
+a reverse `apply` of a patch that was made from the diff shown, without
+`--cached`, with exact counts and context and without a whitespace setting
+changing it or letting it apply in part, for hunks and lines. It SHALL NOT use
+`clean`, `reset`, a forced checkout or `stash`, and it SHALL NOT change the
+index, HEAD or a reference. An untracked file is discarded by moving it into
+the journal. Neither Git nor the move SHALL be stopped: the commands run with a
+token that is never cancelled, also when the session is dropped.
+
+Before git-bull moves, copies or writes a path of the working copy, it SHALL
+check that the path is relative, holds no `..` and no component that Git or
+the file system treats as its own folder `.git`, also in the forms of Windows
+(`GIT~1`, trailing dots and blanks), that no component above the last is a
+symbolic link or, on Windows, a reparse point, and that it names no folder,
+which is what Git lists for a repository of its own. The last component may
+be a file or a symbolic link, which is moved as the link it is. A path that
+fails, and a path at which the working copy holds a folder although Git lists a
+file, SHALL be left out before anything was changed.
+
+The Git folder of the worktree SHALL be asked of Git, and a worktree whose Git
+folder cannot be written SHALL be refused with Git's or the system's message.
+A discard of a part SHALL change nothing when the diff it was made for is no
+longer the one Git reports and when the file changed while it was copied, and
+it SHALL put the file back as it was when, after the patch, any line outside the
+hunks is not byte for byte what it was, which is what Git's conversion of line
+endings on writing causes. A tracked path SHALL be touched by a rollback or by
+putting back only where it is absent or holds what the index holds, which is
+told by hashing the file as Git would and comparing with the index. The journal
+SHALL be written with the steps and the states of the capability `discard`, so
+that a process that ends at any step leaves every file either at its path or in
+the journal, and so that the entry can be put back; Git started by a discard
+SHALL be known by its process, so that putting back is refused while it runs.
+
+#### Scenario: Restore from the index
+- **WHEN** a tracked file is modified and not staged and is discarded
+- **THEN** it holds what the index holds, and `git diff --cached` is unchanged
+
+#### Scenario: Filters run
+- **WHEN** a file is under a smudge filter and is discarded
+- **THEN** the filter runs, as for a checkout
+
+#### Scenario: Reverse patch
+- **WHEN** one hunk of a modified file is discarded
+- **THEN** the other hunks and the staged changes are unchanged, and no whitespace setting of the user changed the result
+
+#### Scenario: A path through a symbolic link
+- **WHEN** a path to discard has a symbolic link as a component above the last that points out of the working copy
+- **THEN** it is left out and nothing is moved or written
+
+#### Scenario: A repository of its own
+- **WHEN** the entry to discard is a folder that is a repository of its own
+- **THEN** it is left out and the folder is untouched
+
+#### Scenario: The session is dropped
+- **WHEN** the session of the tab is dropped while a discard runs
+- **THEN** the discard runs to its end
+
+#### Scenario: Line endings Git would rewrite
+- **WHEN** `core.autocrlf` is `true` and a part is discarded from a file whose lines all end in LF in the working copy
+- **THEN** the file is put back as it was and the refusal says that line endings would be rewritten
+
+#### Scenario: Mixed line endings without conversion
+- **WHEN** no conversion applies and a part is discarded from a file with mixed line endings
+- **THEN** every line outside the hunk is as it was
+
+#### Scenario: A folder at a tracked path
+- **WHEN** a tracked file was replaced by a folder with an untracked file in it
+- **THEN** the path is left out and the folder is untouched
+
+#### Scenario: A tracked file edited after Git wrote it
+- **WHEN** a rollback finds a tracked file that holds something other than the index
+- **THEN** the file is left alone and named

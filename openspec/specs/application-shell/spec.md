@@ -308,7 +308,8 @@ use Ctrl on every platform.
 | Up, Down, Page Up, Page Down, Home, End | Move in the focused list |
 | Left, Right | In a file tree, collapse and expand a folder, or move to the folder above or into it; the focus stays in the list |
 | Enter, Space | Collapse or expand the folder selected in a file tree |
-| Tab, Shift+Tab | Move focus between areas |
+| Tab, Shift+Tab | Move focus between areas; in the commit form of the File status view, between its controls first |
+| Ctrl+Enter | In the summary or the description of the commit form: commit, as its button does |
 | Ctrl+F | Focus the search field |
 | Ctrl+L | Focus the filter of the file list shown |
 | Ctrl+O | Show the home tab with the focus in its filter |
@@ -318,6 +319,9 @@ use Ctrl on every platform.
 | Ctrl+Shift+Page Up, Ctrl+Shift+Page Down | Move the current tab one place to the left or right, with Ctrl on every platform |
 | F7, Shift+F7 | Next and previous hunk in the diff |
 | F5, Ctrl+R | Refresh |
+| S, U | In the File status view: while its file list has the focus, stage, and unstage, the selected file; while its diff has the focus, stage, and unstage, the selected lines, or the hunk whose header is selected |
+| Ctrl+Z, Ctrl+Shift+Z | In the File status view, while no text field has the focus: undo the last discard, and discard again what was undone |
+| Ctrl+Shift+S, Ctrl+Shift+U | In the File status view, while no text field has the focus: stage all, and unstage all, files that are listed |
 | Ctrl+C | Copy: the full hash in the commit list, the path of the file or folder in a file list, the path of a row in the home tab, the selected text in diff and blame |
 | Ctrl+Plus, Ctrl+= | Next larger interface size |
 | Ctrl+Minus | Next smaller interface size |
@@ -374,6 +378,34 @@ use Ctrl on every platform.
 #### Scenario: Open a repository with the keyboard
 - **WHEN** a repository tab is shown and the user presses Ctrl+O
 - **THEN** the home tab is shown and its filter has the keyboard focus
+
+#### Scenario: Stage with the keyboard
+- **WHEN** the file list of the File status view has the focus, a file of the Unstaged group is selected and the user presses S
+- **THEN** the file is staged
+
+#### Scenario: Letter typed into the filter
+- **WHEN** the filter of the File status view has the keyboard focus and the user types `s`
+- **THEN** the filter holds `s` and nothing is staged
+
+#### Scenario: Keys while a dialog is open
+- **WHEN** the dialog of a failed staging is open and the user presses S
+- **THEN** nothing is staged
+
+#### Scenario: Stage all on macOS
+- **WHEN** the File status view is shown on macOS and the user presses Cmd+Shift+S
+- **THEN** every file that the Unstaged group lists is staged
+
+#### Scenario: Stage selected lines with the keyboard
+- **WHEN** the diff of an unstaged file has the focus, an added line is selected and the user presses S
+- **THEN** that line is staged
+
+#### Scenario: Ctrl+Enter in the commit form
+- **WHEN** files are staged, a summary is written and the user presses Ctrl+Enter in the summary
+- **THEN** the commit starts
+
+#### Scenario: Ctrl+Z in the File status view
+- **WHEN** a file was discarded, no text field has the focus and the user presses Ctrl+Z
+- **THEN** the file is back as before
 
 ### Requirement: Responsive interface
 The interface SHALL respond to input within 100 ms at all times, including
@@ -573,12 +605,25 @@ the tabs in a tab bar of their own below it.
 - **THEN** the home tab is still visible at the left of the tabs
 
 ### Requirement: Closing while a write action runs
-While a write action runs in a tab (checking out, creating a branch or a tag),
+While a write action runs in a tab (checking out, creating a branch or a tag,
+staging or unstaging files, committing, discarding, restoring a discard,
+clearing the list of discards),
 closing that tab, with its button or with Ctrl+W, and closing the window SHALL
 first ask the user, and SHALL NOT stop the action without asking. The question
-SHALL name the action and the tab and warn that stopping it can leave the working
-copy half updated. It SHALL offer Keep open, which is the default, and Close
-anyway. Close anyway SHALL close the tab or the window and stop the action. This
+SHALL name the action and the tab and warn of what stopping it can leave behind:
+a working copy that is half updated for a checkout, and files that were not
+staged or unstaged, and a lock on the index, for staging and unstaging, and a
+commit that was not made, with hooks that were stopped half way and a message
+that is gone with the tab, for a commit. A discard, a restore and the
+clearing cannot be stopped; for them the question SHALL say so. It SHALL offer
+Keep open, which is the default, and Close anyway. Close anyway SHALL close the
+tab or the window and stop the action; for a discard, a restore and the
+clearing it SHALL close the tab or the window as soon as no write action runs
+in it, and nothing of them SHALL be stopped. When a window is closed while
+actions that can be stopped run in some tabs and a discard in another, those
+SHALL be stopped at once and the window SHALL wait for the discard; while it
+waits the user SHALL be able to keep it open. The dialogs of an action that ended
+after its tab was closed are not shown. This
 replaces, for write actions, the stopping of all background work of a closed tab
 (requirement "Repository tabs"). Closing a tab or the window in which no write
 action runs SHALL NOT ask anything.
@@ -607,3 +652,20 @@ action runs SHALL NOT ask anything.
 #### Scenario: No action runs
 - **WHEN** no write action runs and the user closes a tab
 - **THEN** the tab closes without a question
+
+#### Scenario: Closing a tab while files are staged
+- **WHEN** staging runs in a tab and the user closes the tab
+- **THEN** a question names the staging and the tab, says that files may stay as they were and that Git may leave a lock on the index, and does not mention the working copy
+
+#### Scenario: Closing a tab while a commit runs
+- **WHEN** a commit runs in a tab and the user closes the tab
+- **THEN** a question names the commit and the tab, says that the commit may not be made, that its hooks are stopped and that its message is gone with the tab, and offers Keep open and Close anyway
+
+#### Scenario: Closing a tab while files are discarded
+- **WHEN** a discard runs in a tab and the user closes the tab and chooses Close anyway
+- **THEN** a question names the discard and the tab and says that it cannot be stopped, the discard runs to its end, and the tab closes then
+
+#### Scenario: Window closed with a checkout in another tab
+- **WHEN** a checkout runs in one tab and a discard in another and the user closes the window and chooses Close anyway
+- **THEN** the checkout is stopped at once, the window waits for the discard, and closes when it ended
+

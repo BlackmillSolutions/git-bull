@@ -11,25 +11,34 @@ use gitbull_git::backend::{
 };
 use gitbull_git::blame::BlameEntry;
 use gitbull_git::cancel::CancelToken;
-use gitbull_git::changes::{FileChange, FileLines};
+use gitbull_git::changes::{ChangeKind, FileChange, FileLines};
+use gitbull_git::commit::{CommitEnd, CommitOutcome, CommitRequest, CommitState};
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::commits::{CommitEntry, Since};
 use gitbull_git::compare::{BaseComparison, CompareRequest, Counts};
 use gitbull_git::content::{CommitContent, Content};
 use gitbull_git::diff::FileDiff;
+use gitbull_git::discard::{
+    Class, DiscardEnd, DiscardOutcome, DiscardRequest, JournalError, PutBackEnd, PutBackError,
+};
 use gitbull_git::facts::RepositoryFacts;
 use gitbull_git::file_history::FileCommit;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
+use gitbull_git::journal::{
+    Cleared, Entry, ExchangeEnd, ExchangeError, FileKind, FileRecord, Held, Kind, Listed, Manifest,
+    Running as EntryRunning, State,
+};
 use gitbull_git::merged::{Prediction, Unpredicted};
 use gitbull_git::object_id::ObjectId;
+use gitbull_git::patch::PartRequest;
 use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::refusal::{Refusal, WriteFailure};
 use gitbull_git::repository::{ObjectFormat, RepositoryInfo};
 use gitbull_git::search::{HashMatch, Location, SearchKind};
 use gitbull_git::stashes::{Stash, Submodule};
-use gitbull_git::status::{Group, StatusEntry, WorkingStatus};
+use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 use gitbull_git::summary::Summary;
 use gitbull_git::switch::{CheckoutTarget, local_name_of};
 use gitbull_git::uncommitted::Uncommitted;
@@ -89,6 +98,34 @@ pub struct FakeBackend {
     statuses: Vec<(PathBuf, WorkingStatus)>,
     failing_statuses: Vec<PathBuf>,
     status_gates: Vec<(PathBuf, Gate)>,
+    /// Gates that hold one read of the status of a repository, by its number,
+    /// the first read being 1.
+    status_gates_at: Vec<(PathBuf, usize, Gate)>,
+    /// How often the status of each repository was read.
+    status_reads: Mutex<HashMap<PathBuf, usize>>,
+    /// The status after staging and unstaging, by repository; it takes the
+    /// place of the status given.
+    moved_statuses: Mutex<Vec<(PathBuf, WorkingStatus)>>,
+    /// What Git prints when staging fails; without, staging succeeds.
+    stage_failure: Option<String>,
+    /// What Git prints when unstaging fails; without, unstaging succeeds.
+    unstage_failure: Option<String>,
+    /// How staging or unstaging a part of a file ends; without, it succeeds.
+    part_outcome: Option<FakeWrite>,
+    /// The status of a repository once a part of a file was staged or
+    /// unstaged in it.
+    status_after_part: Vec<(PathBuf, WorkingStatus)>,
+    /// How every commit ends; without, it is made.
+    commit_end: Option<CommitEnd>,
+    /// How every discard ends; without, it is done.
+    discard_end: Option<DiscardEnd>,
+    /// Holds every reading of the last message until it opens.
+    last_message_gate: Option<Gate>,
+    /// Holds one reading of a working diff, by its number, the first being 1,
+    /// until it opens or is cancelled.
+    working_diff_gate: Option<(usize, Gate)>,
+    /// How many working diffs were read.
+    working_diff_reads: Mutex<usize>,
     /// The worktrees of a repository, the main one first.
     worktrees: Mutex<Vec<Vec<Worktree>>>,
     summaries: Mutex<Vec<(PathBuf, Summary)>>,
@@ -150,6 +187,76 @@ pub struct FakeBackend {
     /// others from then on.
     created_references: Mutex<Vec<(PathBuf, Reference)>>,
     probe: Probe,
+}
+
+/// What staging `paths` does to `status`: an untracked file becomes added, a
+/// changed file moves to the staged list, where a file listed in both merges.
+fn staged_in_memory(status: &mut WorkingStatus, paths: &[RepoPath]) {
+    for path in paths {
+        let found = |list: &mut Vec<StatusEntry>| {
+            let at = list.iter().position(|entry| entry.path == *path)?;
+            Some(list.remove(at))
+        };
+        let entry = match found(&mut status.untracked) {
+            Some(mut untracked) => {
+                untracked.kind = StatusKind::Changed(ChangeKind::Added);
+                Some(untracked)
+            }
+            None => found(&mut status.unstaged).map(|mut changed| {
+                if changed.kind == StatusKind::Conflicted {
+                    changed.kind = StatusKind::Changed(ChangeKind::Modified);
+                }
+                changed
+            }),
+        };
+        if let Some(entry) = entry
+            && !status.staged.iter().any(|known| known.path == *path)
+        {
+            status.staged.push(entry);
+        }
+    }
+}
+
+/// What unstaging `paths` does to `status`: an added or copied file becomes
+/// untracked, a changed file moves to the unstaged list, and a rename comes
+/// apart into the new file, untracked, and the old one, deleted, which is
+/// unstaged only when its path is among `paths` too.
+fn unstaged_in_memory(status: &mut WorkingStatus, paths: &[RepoPath]) {
+    for path in paths {
+        let Some(at) = status.staged.iter().position(|entry| entry.path == *path) else {
+            continue;
+        };
+        let mut entry = status.staged.remove(at);
+        let from = entry.old_path.take();
+        let renamed = entry.kind == StatusKind::Changed(ChangeKind::Renamed);
+        let new_file = matches!(
+            entry.kind,
+            StatusKind::Changed(ChangeKind::Added | ChangeKind::Copied | ChangeKind::Renamed)
+        );
+        if renamed && let Some(old) = from {
+            let deleted = StatusEntry {
+                kind: StatusKind::Changed(ChangeKind::Deleted),
+                path: old.clone(),
+                old_path: None,
+                submodule: false,
+            };
+            if paths.contains(&old) {
+                status.unstaged.push(deleted);
+            } else {
+                status.staged.push(deleted);
+            }
+        }
+        let listed = |list: &[StatusEntry]| list.iter().any(|known| known.path == *path);
+        if listed(&status.unstaged) || listed(&status.untracked) {
+            continue;
+        }
+        if new_file {
+            entry.kind = StatusKind::Untracked;
+            status.untracked.push(entry);
+        } else {
+            status.unstaged.push(entry);
+        }
+    }
 }
 
 /// How a scripted write ends.
@@ -667,6 +774,111 @@ impl FakeBackend {
         self
     }
 
+    /// The `n`-th read of the status of `root`, the first being 1, takes until
+    /// the test opens `gate`; the reads before and after it are not held.
+    pub fn with_status_gate_at(
+        mut self,
+        root: impl Into<PathBuf>,
+        n: usize,
+        gate: &Gate,
+    ) -> FakeBackend {
+        self.status_gates_at.push((root.into(), n, gate.clone()));
+        self
+    }
+
+    /// Staging fails with `stderr`, and nothing changes.
+    pub fn with_stage_failure(mut self, stderr: &str) -> FakeBackend {
+        self.stage_failure = Some(stderr.to_owned());
+        self
+    }
+
+    /// Unstaging fails with `stderr`, and nothing changes.
+    pub fn with_unstage_failure(mut self, stderr: &str) -> FakeBackend {
+        self.unstage_failure = Some(stderr.to_owned());
+        self
+    }
+
+    /// Staging or unstaging a part of a file ends as `outcome`.
+    pub fn with_part_outcome(mut self, outcome: FakeWrite) -> FakeBackend {
+        self.part_outcome = Some(outcome);
+        self
+    }
+
+    /// Once a part of a file was staged or unstaged in `root`, its status is
+    /// `status`.
+    pub fn with_status_after_part(
+        mut self,
+        root: impl Into<PathBuf>,
+        status: WorkingStatus,
+    ) -> FakeBackend {
+        self.status_after_part.push((root.into(), status));
+        self
+    }
+
+    /// How every commit ends; without, it is made. A commit that is held by
+    /// the gate of the write actions and then stopped ends as stopped,
+    /// whatever is set here.
+    pub fn with_commit_end(mut self, end: CommitEnd) -> FakeBackend {
+        self.commit_end = Some(end);
+        self
+    }
+
+    /// How every discard of files or of a part ends; without, it is done.
+    /// A discard that is done changes the status in memory and makes an
+    /// entry in the journal, whatever is set here; the entry is named by
+    /// `end.entry` when it is set. The gate of the write actions holds a
+    /// discard, and its token does not stop it.
+    pub fn with_discard_end(mut self, end: DiscardEnd) -> FakeBackend {
+        self.discard_end = Some(end);
+        self
+    }
+
+    /// The journal of discards: the entries a test fills it with. A test
+    /// reads and changes it while it runs through [`Probe::journal`] and
+    /// [`Probe::set_journal`].
+    pub fn with_journal(self, entries: Vec<Listed>) -> FakeBackend {
+        self.probe.set_journal(entries);
+        self
+    }
+
+    /// The message of the last commit.
+    pub fn with_last_message(self, message: &str) -> FakeBackend {
+        self.probe.set_last_message(Some(message));
+        self
+    }
+
+    /// The operation in progress and the message Git prepared.
+    pub fn with_commit_state(self, state: CommitState) -> FakeBackend {
+        self.probe.set_commit_state(state);
+        self
+    }
+
+    /// The last commit is part of a remote branch.
+    pub fn with_on_remote_branch(self) -> FakeBackend {
+        self.probe.set_on_remote_branch(true);
+        self
+    }
+
+    /// Reading the last message takes until the test opens `gate`.
+    pub fn with_last_message_gate(mut self, gate: &Gate) -> FakeBackend {
+        self.last_message_gate = Some(gate.clone());
+        self
+    }
+
+    /// The first reading of a working diff takes until the test opens
+    /// `gate`.
+    pub fn with_working_diff_gate(self, gate: &Gate) -> FakeBackend {
+        self.with_working_diff_gate_at(1, gate)
+    }
+
+    /// The `n`-th reading of a working diff, the first being 1, takes until
+    /// the test opens `gate`; the readings before and after it are not held.
+    /// This holds the diff that is read again after a part was staged.
+    pub fn with_working_diff_gate_at(mut self, n: usize, gate: &Gate) -> FakeBackend {
+        self.working_diff_gate = Some((n, gate.clone()));
+        self
+    }
+
     /// The diff of `path` in `group` of the file status.
     pub fn with_working_diff(mut self, group: Group, path: &str, diff: FileDiff) -> FakeBackend {
         self.working_diffs.insert((group, path.to_owned()), diff);
@@ -836,6 +1048,72 @@ impl FakeBackend {
 }
 
 impl FakeBackend {
+    /// Waits for the gate of the write actions, if there is one. The token of
+    /// a discard does not reach it: nothing stops a discard.
+    fn hold_unstoppable(&self) {
+        if let Some(gate) = &self.checkout_gate {
+            gate.wait();
+        }
+    }
+
+    /// The end of a discard: as set, else done. A discard that is done takes
+    /// the files in `paths` out of the status in memory and makes an entry in
+    /// the journal.
+    fn finish_discard(
+        &self,
+        repo: &Path,
+        kind: Kind,
+        files: Vec<FileRecord>,
+        paths: &[RepoPath],
+    ) -> DiscardEnd {
+        let end = self.discard_end.clone().unwrap_or(DiscardEnd {
+            outcome: DiscardOutcome::Done,
+            entry: None,
+            left_out: Vec::new(),
+        });
+        if end.outcome != DiscardOutcome::Done {
+            return end;
+        }
+        if !paths.is_empty() {
+            let root = self.root_of(repo);
+            let mut status = self.status_now(repo, &root);
+            status.unstaged.retain(|entry| !paths.contains(&entry.path));
+            status
+                .untracked
+                .retain(|entry| !paths.contains(&entry.path));
+            self.move_status(repo, root, status);
+        }
+        let mut log = self.probe.lock();
+        log.entries_made += 1;
+        let n = log.entries_made as u64;
+        let id = end
+            .entry
+            .clone()
+            .unwrap_or_else(|| format!("{}-{n}", 1_767_268_800_000 + n));
+        let manifest = Manifest {
+            changed: 1_767_268_800 + n,
+            size: 0,
+            kind,
+            state: State::Discarded,
+            git: None,
+            files,
+            idents: Vec::new(),
+        };
+        let folder = PathBuf::from("fake-journal").join(&id);
+        // Newest first, as the journal lists them.
+        log.journal.insert(
+            0,
+            Listed::Entry {
+                entry: Entry::in_memory(id.clone(), folder, manifest),
+                running: EntryRunning::Settled,
+            },
+        );
+        DiscardEnd {
+            entry: Some(id),
+            ..end
+        }
+    }
+
     /// Waits for the gate of the write actions, if there is one.
     fn hold_write(&self, cancel: &CancelToken) -> Result<(), WriteFailure> {
         if let Some(gate) = &self.checkout_gate {
@@ -845,6 +1123,81 @@ impl FakeBackend {
                 return Err(WriteFailure::Failed(Error::Cancelled));
             }
         }
+        Ok(())
+    }
+
+    /// The status of `root` as it is now: as the test set it while the
+    /// repository is open, else as staging and unstaging left it, else as
+    /// given.
+    fn status_now(&self, repo: &Path, root: &Path) -> WorkingStatus {
+        if let Some(status) = self.live_of(repo).and_then(|live| live.status.clone()) {
+            return status;
+        }
+        let moved = self
+            .moved_statuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((_, status)) = moved.iter().find(|(known, _)| known == root) {
+            return status.clone();
+        }
+        self.statuses
+            .iter()
+            .find(|(known, _)| known == root)
+            .map(|(_, status)| status.clone())
+            .unwrap_or_default()
+    }
+
+    /// The status of `root` is `status` from now on.
+    fn move_status(&self, repo: &Path, root: PathBuf, status: WorkingStatus) {
+        if let Some(mut live) = self.live_of(repo)
+            && live.status.is_some()
+        {
+            live.status = Some(status);
+            return;
+        }
+        let mut moved = self
+            .moved_statuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        moved.retain(|(known, _)| *known != root);
+        moved.push((root, status));
+    }
+
+    /// Runs a staging or an unstaging: recorded, held by the gate of the
+    /// write actions, failing as scripted, else changing the status in memory.
+    fn index_action(
+        &self,
+        call: &str,
+        repo: &Path,
+        paths: &[RepoPath],
+        failure: Option<&String>,
+        cancel: &CancelToken,
+        change: impl FnOnce(&mut WorkingStatus, &[RepoPath]),
+    ) -> Result<(), WriteFailure> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        self.probe.record(call, repo);
+        self.probe.record_index(call, paths);
+        let root = self.root_of(repo);
+        self.hold_write(cancel)?;
+        if let Some(stderr) = failure {
+            return Err(WriteFailure::Failed(Error::CommandFailed {
+                command: format!("git {call}"),
+                code: Some(128),
+                stderr: stderr.clone(),
+            }));
+        }
+        let mut status = self.status_now(repo, &root);
+        change(&mut status, paths);
+        for list in [
+            &mut status.staged,
+            &mut status.unstaged,
+            &mut status.untracked,
+        ] {
+            list.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        }
+        self.move_status(repo, root, status);
         Ok(())
     }
 
@@ -1656,10 +2009,292 @@ impl Backend for FakeBackend {
         })
     }
 
+    fn stage(
+        &self,
+        repo: &Path,
+        paths: &[RepoPath],
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        let failure = self.stage_failure.as_ref();
+        self.index_action("stage", repo, paths, failure, cancel, staged_in_memory)
+    }
+
+    fn unstage(
+        &self,
+        repo: &Path,
+        paths: &[RepoPath],
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        let failure = self.unstage_failure.as_ref();
+        self.index_action("unstage", repo, paths, failure, cancel, unstaged_in_memory)
+    }
+
+    fn stage_part(
+        &self,
+        repo: &Path,
+        group: Group,
+        entry: &StatusEntry,
+        request: &PartRequest,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteFailure> {
+        self.probe.record("stage-part", repo);
+        self.probe.lock().parts.push((
+            group,
+            entry.path.to_string_lossy().into_owned(),
+            request.clone(),
+        ));
+        let root = self.root_of(repo);
+        self.hold_write(cancel)?;
+        let outcome = self.part_outcome.clone().unwrap_or(FakeWrite::Done);
+        self.finish_write("git apply --cached", outcome, || {
+            let after = self
+                .status_after_part
+                .iter()
+                .find(|(known, _)| *known == root)
+                .map(|(_, status)| status.clone());
+            if let Some(status) = after {
+                self.move_status(repo, root.clone(), status);
+            }
+        })
+    }
+
+    fn discard_files(&self, repo: &Path, request: &DiscardRequest) -> DiscardEnd {
+        self.probe.record("discard", repo);
+        self.probe.lock().discards.push(request.clone());
+        self.hold_unstoppable();
+        let paths: Vec<RepoPath> = request.files.iter().map(|file| file.path.clone()).collect();
+        let records = request
+            .files
+            .iter()
+            .enumerate()
+            .map(|(slot, file)| FileRecord {
+                slot: slot as u32,
+                kind: match file.class {
+                    Class::Tracked => FileKind::Tracked,
+                    Class::Untracked => FileKind::Untracked,
+                },
+                held: Held::File,
+                path: file.path.clone(),
+            })
+            .collect();
+        self.finish_discard(repo, request.kind, records, &paths)
+    }
+
+    fn discard_part(&self, repo: &Path, entry: &StatusEntry, request: &PartRequest) -> DiscardEnd {
+        self.probe.record("discard-part", repo);
+        self.probe
+            .lock()
+            .discarded_parts
+            .push((entry.path.to_string_lossy().into_owned(), request.clone()));
+        self.hold_unstoppable();
+        let records = vec![FileRecord {
+            slot: 0,
+            kind: FileKind::Part,
+            held: Held::File,
+            path: entry.path.clone(),
+        }];
+        // A part leaves the file in the status.
+        self.finish_discard(repo, Kind::Lines, records, &[])
+    }
+
+    fn restore_entry(
+        &self,
+        repo: &Path,
+        id: &str,
+        expected: State,
+    ) -> Result<ExchangeEnd, JournalError> {
+        self.probe.record("restore", repo);
+        self.probe.lock().restores.push((id.to_owned(), expected));
+        self.hold_unstoppable();
+        let mut log = self.probe.lock();
+        let at = log
+            .journal
+            .iter()
+            .position(|item| matches!(item, Listed::Entry { entry, .. } if entry.id() == id))
+            .ok_or(JournalError::Gone)?;
+        let Listed::Entry { entry, running } = &log.journal[at] else {
+            return Err(JournalError::Gone);
+        };
+        let actual = entry.manifest().state;
+        if actual != expected {
+            return Err(JournalError::Exchange(ExchangeError::State { actual }));
+        }
+        // A restore and its undo swap the state back and forth.
+        let mut manifest = entry.manifest().clone();
+        manifest.state = match actual {
+            State::Discarded | State::Redoing => State::Restored,
+            _ => State::Discarded,
+        };
+        let moved = Entry::in_memory(id.to_owned(), entry.folder().to_owned(), manifest);
+        let running = *running;
+        log.journal[at] = Listed::Entry {
+            entry: moved.clone(),
+            running,
+        };
+        Ok(ExchangeEnd {
+            entry: moved,
+            left: Vec::new(),
+            complete: true,
+        })
+    }
+
+    fn put_back(&self, repo: &Path, id: &str) -> Result<PutBackEnd, PutBackError> {
+        self.probe.record("put-back", repo);
+        self.probe.lock().put_backs.push(id.to_owned());
+        self.hold_unstoppable();
+        let mut log = self.probe.lock();
+        let at = log
+            .journal
+            .iter()
+            .position(|item| matches!(item, Listed::Entry { entry, .. } if entry.id() == id))
+            .ok_or(PutBackError::State(None))?;
+        let Listed::Entry { entry, .. } = &log.journal[at] else {
+            return Err(PutBackError::State(None));
+        };
+        let state = entry.manifest().state;
+        if !state.is_unfinished() {
+            return Err(PutBackError::State(Some(state)));
+        }
+        if state == State::Pending {
+            log.journal.remove(at);
+            return Ok(PutBackEnd {
+                entry_removed: true,
+                left_alone: Vec::new(),
+            });
+        }
+        let mut manifest = entry.manifest().clone();
+        manifest.state = if state == State::Restoring {
+            State::Restored
+        } else {
+            State::Discarded
+        };
+        let moved = Entry::in_memory(id.to_owned(), entry.folder().to_owned(), manifest);
+        log.journal[at] = Listed::Entry {
+            entry: moved,
+            running: EntryRunning::Settled,
+        };
+        Ok(PutBackEnd {
+            entry_removed: false,
+            left_alone: Vec::new(),
+        })
+    }
+
+    fn clear_journal(&self, repo: &Path) -> Result<Cleared, JournalError> {
+        self.probe.record("clear-journal", repo);
+        self.hold_unstoppable();
+        let mut log = self.probe.lock();
+        let interrupted = log
+            .journal
+            .iter()
+            .filter(|item| matches!(item, Listed::Entry { entry, .. } if entry.manifest().state.is_unfinished()))
+            .count();
+        let removed = log.journal.len();
+        log.journal.clear();
+        Ok(Cleared {
+            removed,
+            interrupted,
+        })
+    }
+
+    fn journal_busy(&self, repo: &Path) -> bool {
+        self.probe.record("journal-busy", repo);
+        self.probe.lock().journal_busy
+    }
+
+    fn journal_entries(&self, repo: &Path) -> Result<Vec<Listed>, JournalError> {
+        self.probe.record("journal-entries", repo);
+        Ok(self.probe.lock().journal.clone())
+    }
+
+    fn commit(&self, repo: &Path, request: &CommitRequest, cancel: &CancelToken) -> CommitEnd {
+        self.probe.record("commit", repo);
+        self.probe.lock().commits.push(request.clone());
+        let root = self.root_of(repo);
+        if self.hold_write(cancel).is_err() {
+            return CommitEnd {
+                committed: false,
+                outcome: CommitOutcome::Stopped,
+            };
+        }
+        let end = self.commit_end.clone().unwrap_or(CommitEnd {
+            committed: true,
+            outcome: CommitOutcome::Done,
+        });
+        // Staging everything happens before the commit is tried; a refusal
+        // of git-bull's own comes before both.
+        let refused = matches!(end.outcome, CommitOutcome::Refused(_));
+        if (request.stage_all && !refused) || end.committed {
+            let mut status = self.status_now(repo, &root);
+            if request.stage_all {
+                let all = status.unstaged.drain(..).chain(status.untracked.drain(..));
+                status.staged.extend(all);
+            }
+            if end.committed {
+                status.staged.clear();
+            }
+            self.move_status(repo, root, status);
+        }
+        if end.committed {
+            self.probe.lock().last_message = Some(request.message.clone());
+        }
+        end
+    }
+
+    fn last_message(&self, repo: &Path) -> Result<Option<String>, Error> {
+        self.probe.record("last-message", repo);
+        if let Some(gate) = &self.last_message_gate {
+            gate.wait();
+        }
+        let reads = self.probe.lock();
+        match &reads.commit_read_failure {
+            Some(stderr) => Err(Error::CommandFailed {
+                command: "git log -1".to_owned(),
+                code: Some(128),
+                stderr: stderr.clone(),
+            }),
+            None => Ok(reads.last_message.clone()),
+        }
+    }
+
+    fn commit_state(&self, repo: &Path) -> Result<CommitState, Error> {
+        self.probe.record("commit-state", repo);
+        let reads = self.probe.lock();
+        match &reads.commit_read_failure {
+            Some(stderr) => Err(Error::CommandFailed {
+                command: "git rev-parse --git-path".to_owned(),
+                code: Some(128),
+                stderr: stderr.clone(),
+            }),
+            None => Ok(reads.commit_state.clone()),
+        }
+    }
+
+    fn on_remote_branch(&self, repo: &Path) -> Result<bool, Error> {
+        self.probe.record("on-remote-branch", repo);
+        Ok(self.probe.lock().on_remote_branch)
+    }
+
     fn status(&self, repo: &Path, cancel: &CancelToken) -> Result<WorkingStatus, Error> {
         self.probe.record("status", repo);
         self.gone(repo)?;
         let root = self.root_of(repo);
+        let read = {
+            let mut reads = self.status_reads.lock().unwrap_or_else(|e| e.into_inner());
+            let read = reads.entry(root.clone()).or_default();
+            *read += 1;
+            *read
+        };
+        let held = self
+            .status_gates_at
+            .iter()
+            .find(|(known, n, _)| *known == root && *n == read);
+        if let Some((_, _, gate)) = held {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
         if let Some((_, gate)) = self.status_gates.iter().find(|(known, _)| *known == root) {
             let stop = gate.clone();
             cancel.on_cancel(move || stop.cancel());
@@ -1674,15 +2309,7 @@ impl Backend for FakeBackend {
                 stderr: "fatal: index file corrupt".to_owned(),
             });
         }
-        if let Some(status) = self.live_of(repo).and_then(|live| live.status.clone()) {
-            return Ok(status);
-        }
-        Ok(self
-            .statuses
-            .iter()
-            .find(|(known, _)| *known == root)
-            .map(|(_, status)| status.clone())
-            .unwrap_or_default())
+        Ok(self.status_now(repo, &root))
     }
 
     fn find_hash(
@@ -1818,9 +2445,24 @@ impl Backend for FakeBackend {
         group: Group,
         entry: &StatusEntry,
         limit: Option<usize>,
-        _cancel: &CancelToken,
+        cancel: &CancelToken,
     ) -> Result<FileDiff, Error> {
         self.probe.record("working-diff", repo);
+        let read = {
+            let mut reads = self
+                .working_diff_reads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *reads += 1;
+            *reads
+        };
+        if let Some((_, gate)) = self.working_diff_gate.as_ref().filter(|(n, _)| *n == read) {
+            let stop = gate.clone();
+            cancel.on_cancel(move || stop.cancel());
+            if !gate.wait() {
+                return Err(Error::Cancelled);
+            }
+        }
         let path = entry.path.to_string();
         self.probe
             .lock()
@@ -2201,6 +2843,37 @@ struct ProbeLog {
     opened: Vec<(String, String, String)>,
     /// Every checkout asked for, in order.
     checkouts: Vec<CheckoutTarget>,
+    /// Every staging and unstaging asked for, with its paths.
+    index_calls: Vec<(String, Vec<String>)>,
+    /// Every part of a file asked for: the group and the path of the file,
+    /// and the request.
+    parts: Vec<(Group, String, PartRequest)>,
+    /// Every commit asked for, in order.
+    commits: Vec<CommitRequest>,
+    /// Every discard of whole files asked for, in order.
+    discards: Vec<DiscardRequest>,
+    /// Every discard of a part asked for: the path of the file and the
+    /// request.
+    discarded_parts: Vec<(String, PartRequest)>,
+    /// Every restore, undo and redo asked for: the entry and the state the
+    /// caller expected.
+    restores: Vec<(String, State)>,
+    /// Every entry asked to be put back.
+    put_backs: Vec<String>,
+    /// The journal; a test may change it while it runs.
+    journal: Vec<Listed>,
+    /// How many entries discards made, for their names.
+    entries_made: usize,
+    /// Another process works on the journal, which a discard waits for.
+    journal_busy: bool,
+    /// What the reads of the commit form return; a test may change them
+    /// while it runs.
+    last_message: Option<String>,
+    commit_state: CommitState,
+    on_remote_branch: bool,
+    /// What Git prints when `last_message` and `commit_state` fail; without,
+    /// they succeed.
+    commit_read_failure: Option<String>,
     /// Every branch creation asked for, in order.
     created_branches: Vec<CreatedBranch>,
     /// Every tag creation asked for, in order.
@@ -2280,6 +2953,90 @@ impl Probe {
 
     fn record(&self, call: &str, repo: &Path) {
         self.lock().calls.push((call.to_owned(), repo.to_owned()));
+    }
+
+    fn record_index(&self, call: &str, paths: &[RepoPath]) {
+        let paths = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        self.lock().index_calls.push((call.to_owned(), paths));
+    }
+
+    /// Every staging and unstaging asked for, in order: `stage` or `unstage`
+    /// with its paths.
+    pub fn index_calls(&self) -> Vec<(String, Vec<String>)> {
+        self.lock().index_calls.clone()
+    }
+
+    /// Every part of a file that was to be staged or unstaged, in order: the
+    /// group and the path of the file, and the request.
+    pub fn parts(&self) -> Vec<(Group, String, PartRequest)> {
+        self.lock().parts.clone()
+    }
+
+    /// Every commit that was asked for, in order.
+    pub fn commits(&self) -> Vec<CommitRequest> {
+        self.lock().commits.clone()
+    }
+
+    /// Every discard of whole files that was asked for, in order.
+    pub fn discards(&self) -> Vec<DiscardRequest> {
+        self.lock().discards.clone()
+    }
+
+    /// Every discard of a part that was asked for, in order: the path of the
+    /// file and the request.
+    pub fn discarded_parts(&self) -> Vec<(String, PartRequest)> {
+        self.lock().discarded_parts.clone()
+    }
+
+    /// Every restore, undo and redo that was asked for, in order: the entry
+    /// and the state the caller expected it in.
+    pub fn restores(&self) -> Vec<(String, State)> {
+        self.lock().restores.clone()
+    }
+
+    /// Every entry that was asked to be put back, in order.
+    pub fn put_backs(&self) -> Vec<String> {
+        self.lock().put_backs.clone()
+    }
+
+    /// The journal as it is now.
+    pub fn journal(&self) -> Vec<Listed> {
+        self.lock().journal.clone()
+    }
+
+    /// Another process works on the journal from now on, or no longer.
+    pub fn set_journal_busy(&self, busy: bool) {
+        self.lock().journal_busy = busy;
+    }
+
+    /// The journal is `entries` from now on.
+    pub fn set_journal(&self, entries: Vec<Listed>) {
+        self.lock().journal = entries;
+    }
+
+    /// The message of the last commit, from now on; `None` for a repository
+    /// without a commit. A commit that takes place sets it too.
+    pub fn set_last_message(&self, message: Option<&str>) {
+        self.lock().last_message = message.map(str::to_owned);
+    }
+
+    /// The operation in progress and the message Git prepared, from now on.
+    pub fn set_commit_state(&self, state: CommitState) {
+        self.lock().commit_state = state;
+    }
+
+    /// Whether the last commit is part of a remote branch, from now on.
+    pub fn set_on_remote_branch(&self, on: bool) {
+        self.lock().on_remote_branch = on;
+    }
+
+    /// The reads of the last message and of the operation in progress fail
+    /// with `stderr` from now on, or succeed again with `None`.
+    pub fn set_commit_read_failure(&self, stderr: Option<&str>) {
+        self.lock().commit_read_failure = stderr.map(str::to_owned);
     }
 
     fn record_checkout(&self, target: &CheckoutTarget) {
@@ -2581,6 +3338,429 @@ mod tests {
         assert_eq!(
             backend.head(&root).unwrap(),
             Head::Branch("main".to_owned())
+        );
+    }
+
+    // ---- staging and unstaging
+
+    fn entry(kind: StatusKind, name: &str) -> StatusEntry {
+        StatusEntry {
+            kind,
+            path: RepoPath::new(name),
+            old_path: None,
+            submodule: false,
+        }
+    }
+
+    fn changed(kind: ChangeKind, name: &str) -> StatusEntry {
+        entry(StatusKind::Changed(kind), name)
+    }
+
+    fn names(list: &[StatusEntry]) -> Vec<String> {
+        list.iter()
+            .map(|entry| format!("{:?} {}", entry.kind, entry.path.to_string_lossy()))
+            .collect()
+    }
+
+    fn repo_paths(names: &[&str]) -> Vec<RepoPath> {
+        names.iter().map(|name| RepoPath::new(*name)).collect()
+    }
+
+    /// `a.rs` modified, `gone.rs` deleted and `new.txt` untracked; `both.rs`
+    /// staged and modified again.
+    fn working() -> WorkingStatus {
+        WorkingStatus {
+            staged: vec![changed(ChangeKind::Modified, "both.rs")],
+            unstaged: vec![
+                changed(ChangeKind::Modified, "a.rs"),
+                changed(ChangeKind::Modified, "both.rs"),
+                changed(ChangeKind::Deleted, "gone.rs"),
+            ],
+            untracked: vec![entry(StatusKind::Untracked, "new.txt")],
+        }
+    }
+
+    #[test]
+    fn staging_moves_files_into_the_staged_list() {
+        let root = path(&["work", "app"]);
+        let backend = FakeBackend::default().with_status(root.clone(), working());
+        let cancel = CancelToken::new();
+        backend
+            .stage(
+                &root,
+                &repo_paths(&["a.rs", "both.rs", "gone.rs", "new.txt"]),
+                &cancel,
+            )
+            .unwrap();
+        let status = backend.status(&root, &cancel).unwrap();
+        assert_eq!(
+            names(&status.staged),
+            [
+                "Changed(Modified) a.rs",
+                "Changed(Modified) both.rs",
+                "Changed(Deleted) gone.rs",
+                "Changed(Added) new.txt",
+            ]
+        );
+        assert!(status.unstaged.is_empty() && status.untracked.is_empty());
+        assert_eq!(
+            backend.probe().index_calls(),
+            [(
+                "stage".to_owned(),
+                vec![
+                    "a.rs".to_owned(),
+                    "both.rs".to_owned(),
+                    "gone.rs".to_owned(),
+                    "new.txt".to_owned()
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn unstaging_moves_files_back() {
+        let root = path(&["work", "app"]);
+        let mut renamed = changed(ChangeKind::Renamed, "moved.txt");
+        renamed.old_path = Some(RepoPath::new("keep.txt"));
+        let status = WorkingStatus {
+            staged: vec![
+                changed(ChangeKind::Added, "added.txt"),
+                changed(ChangeKind::Modified, "both.rs"),
+                changed(ChangeKind::Modified, "m.rs"),
+                renamed,
+            ],
+            unstaged: vec![changed(ChangeKind::Modified, "both.rs")],
+            untracked: Vec::new(),
+        };
+        let backend = FakeBackend::default().with_status(root.clone(), status);
+        let cancel = CancelToken::new();
+        backend
+            .unstage(
+                &root,
+                &repo_paths(&["added.txt", "both.rs", "m.rs", "moved.txt", "keep.txt"]),
+                &cancel,
+            )
+            .unwrap();
+        let status = backend.status(&root, &cancel).unwrap();
+        assert!(status.staged.is_empty(), "{:?}", names(&status.staged));
+        assert_eq!(
+            names(&status.unstaged),
+            [
+                "Changed(Modified) both.rs",
+                "Changed(Deleted) keep.txt",
+                "Changed(Modified) m.rs",
+            ]
+        );
+        assert_eq!(
+            names(&status.untracked),
+            ["Untracked added.txt", "Untracked moved.txt"]
+        );
+    }
+
+    #[test]
+    fn a_rename_unstaged_by_its_new_path_alone_leaves_the_deletion_staged() {
+        let root = path(&["work", "app"]);
+        let mut renamed = changed(ChangeKind::Renamed, "moved.txt");
+        renamed.old_path = Some(RepoPath::new("keep.txt"));
+        let status = WorkingStatus {
+            staged: vec![renamed],
+            ..WorkingStatus::default()
+        };
+        let backend = FakeBackend::default().with_status(root.clone(), status);
+        let cancel = CancelToken::new();
+        backend
+            .unstage(&root, &repo_paths(&["moved.txt"]), &cancel)
+            .unwrap();
+        let status = backend.status(&root, &cancel).unwrap();
+        assert_eq!(names(&status.staged), ["Changed(Deleted) keep.txt"]);
+        assert_eq!(names(&status.untracked), ["Untracked moved.txt"]);
+    }
+
+    #[test]
+    fn a_scripted_failure_changes_nothing() {
+        let root = path(&["work", "app"]);
+        let backend = FakeBackend::default()
+            .with_status(root.clone(), working())
+            .with_stage_failure("fatal: Unable to create index.lock");
+        let cancel = CancelToken::new();
+        let result = backend.stage(&root, &repo_paths(&["a.rs"]), &cancel);
+        assert!(
+            matches!(
+                &result,
+                Err(WriteFailure::Failed(Error::CommandFailed { stderr, .. }))
+                    if stderr.contains("index.lock")
+            ),
+            "{result:?}"
+        );
+        assert_eq!(backend.status(&root, &cancel).unwrap(), working());
+    }
+
+    #[test]
+    fn no_path_is_no_call() {
+        let root = path(&["work", "app"]);
+        let backend = FakeBackend::default().with_status(root.clone(), working());
+        backend.stage(&root, &[], &CancelToken::new()).unwrap();
+        backend.unstage(&root, &[], &CancelToken::new()).unwrap();
+        assert!(backend.probe().index_calls().is_empty());
+    }
+
+    #[test]
+    fn the_gate_holds_the_read_of_its_number_only() {
+        let root = path(&["work", "app"]);
+        let gate = Gate::new();
+        let backend = Arc::new(
+            FakeBackend::default()
+                .with_status(root.clone(), working())
+                .with_status_gate_at(root.clone(), 2, &gate),
+        );
+        let cancel = CancelToken::new();
+        // The first read is not held.
+        backend.status(&root, &cancel).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (held, at) = (Arc::clone(&backend), root.clone());
+        std::thread::spawn(move || {
+            let _ = sender.send(held.status(&at, &CancelToken::new()).is_ok());
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the second read is held"
+        );
+        gate.open();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        );
+        // Nor is the third.
+        backend.status(&root, &cancel).unwrap();
+    }
+
+    // ---- a part of a file
+
+    fn part(hunk: usize) -> PartRequest {
+        PartRequest {
+            shown: Arc::new(FileDiff {
+                old_path: Some(RepoPath::new("a.rs")),
+                new_path: Some(RepoPath::new("a.rs")),
+                old_mode: None,
+                new_mode: None,
+                old_blob: None,
+                new_blob: None,
+                new_in_working_copy: true,
+                content: gitbull_git::diff::Content::Text(Vec::new()),
+                truncated: false,
+                filtered: false,
+            }),
+            selection: gitbull_git::patch::Selection::new().hunk(hunk),
+        }
+    }
+
+    #[test]
+    fn a_part_is_recorded_and_moves_to_the_status_given() {
+        let root = path(&["work", "app"]);
+        let after = WorkingStatus {
+            staged: vec![changed(ChangeKind::Modified, "a.rs")],
+            ..WorkingStatus::default()
+        };
+        let backend = FakeBackend::default()
+            .with_status(root.clone(), working())
+            .with_status_after_part(root.clone(), after.clone());
+        let cancel = CancelToken::new();
+        let entry = changed(ChangeKind::Modified, "a.rs");
+        backend
+            .stage_part(&root, Group::Unstaged, &entry, &part(1), &cancel)
+            .unwrap();
+        assert_eq!(
+            backend.probe().parts(),
+            [(Group::Unstaged, "a.rs".to_owned(), part(1))]
+        );
+        assert_eq!(backend.status(&root, &cancel).unwrap(), after);
+    }
+
+    #[test]
+    fn a_part_ends_as_scripted_and_then_changes_nothing() {
+        let root = path(&["work", "app"]);
+        let entry = changed(ChangeKind::Modified, "a.rs");
+        let cancel = CancelToken::new();
+        for (outcome, refused) in [
+            (FakeWrite::Refused(Refusal::DiffOutOfDate), true),
+            (
+                FakeWrite::Failed {
+                    stderr: "error: patch failed".to_owned(),
+                },
+                false,
+            ),
+        ] {
+            let backend = FakeBackend::default()
+                .with_status(root.clone(), working())
+                .with_status_after_part(root.clone(), WorkingStatus::default())
+                .with_part_outcome(outcome);
+            let result = backend.stage_part(&root, Group::Unstaged, &entry, &part(0), &cancel);
+            match (&result, refused) {
+                (Err(WriteFailure::Refused(Refusal::DiffOutOfDate)), true) => {}
+                (Err(WriteFailure::Failed(Error::CommandFailed { stderr, .. })), false) => {
+                    assert!(stderr.contains("patch failed"));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+            assert_eq!(backend.status(&root, &cancel).unwrap(), working());
+        }
+    }
+
+    #[test]
+    fn a_discard_takes_files_out_of_the_status_and_makes_an_entry() {
+        let root = path(&["work", "app"]);
+        let entry = |kind, name| StatusEntry {
+            kind,
+            path: RepoPath::new(name),
+            old_path: None,
+            submodule: false,
+        };
+        let backend = FakeBackend::default()
+            .with_repository(root.clone())
+            .with_status(
+                root.clone(),
+                WorkingStatus {
+                    unstaged: vec![entry(StatusKind::Changed(ChangeKind::Modified), "a.rs")],
+                    untracked: vec![entry(StatusKind::Untracked, "new.rs")],
+                    ..WorkingStatus::default()
+                },
+            );
+        let probe = backend.probe();
+        let request = DiscardRequest {
+            files: vec![
+                gitbull_git::discard::DiscardFile {
+                    path: RepoPath::new("a.rs"),
+                    class: Class::Tracked,
+                },
+                gitbull_git::discard::DiscardFile {
+                    path: RepoPath::new("new.rs"),
+                    class: Class::Untracked,
+                },
+            ],
+            kind: Kind::Group,
+        };
+
+        let end = backend.discard_files(&root, &request);
+
+        assert_eq!(end.outcome, DiscardOutcome::Done);
+        assert!(
+            backend
+                .status(&root, &CancelToken::new())
+                .unwrap()
+                .is_clean()
+        );
+        assert_eq!(probe.discards(), [request]);
+        let journal = probe.journal();
+        assert_eq!(journal.len(), 1);
+        let Listed::Entry { entry, running } = &journal[0] else {
+            panic!("{journal:?}");
+        };
+        assert_eq!(Some(entry.id()), end.entry.as_deref());
+        assert_eq!(entry.manifest().state, State::Discarded);
+        assert_eq!(entry.manifest().files.len(), 2);
+        assert_eq!(*running, EntryRunning::Settled);
+    }
+
+    #[test]
+    fn restoring_swaps_the_state_and_checks_the_one_expected() {
+        let root = path(&["work", "app"]);
+        let manifest = |state| Manifest {
+            changed: 1,
+            size: 0,
+            kind: Kind::Files,
+            state,
+            git: None,
+            files: Vec::new(),
+            idents: Vec::new(),
+        };
+        let listed = |id: &str, state| Listed::Entry {
+            entry: Entry::in_memory(id.to_owned(), PathBuf::from(id), manifest(state)),
+            running: EntryRunning::Settled,
+        };
+        let backend = FakeBackend::default().with_repository(root.clone());
+        backend.probe().set_journal(vec![
+            listed("1-1", State::Discarded),
+            listed("2-2", State::Pending),
+        ]);
+        let probe = backend.probe();
+        let state_of = |id: &str| {
+            probe.journal().iter().find_map(|item| match item {
+                Listed::Entry { entry, .. } if entry.id() == id => Some(entry.manifest().state),
+                _ => None,
+            })
+        };
+
+        // A restore, then its undo.
+        let end = backend
+            .restore_entry(&root, "1-1", State::Discarded)
+            .unwrap();
+        assert!(end.complete);
+        assert_eq!(state_of("1-1"), Some(State::Restored));
+        backend
+            .restore_entry(&root, "1-1", State::Restored)
+            .unwrap();
+        assert_eq!(state_of("1-1"), Some(State::Discarded));
+
+        // An entry in another state than the one expected is not touched.
+        let refused = backend.restore_entry(&root, "1-1", State::Restored);
+        assert!(matches!(
+            refused,
+            Err(JournalError::Exchange(ExchangeError::State {
+                actual: State::Discarded
+            }))
+        ));
+        assert!(matches!(
+            backend.restore_entry(&root, "9-9", State::Discarded),
+            Err(JournalError::Gone)
+        ));
+
+        // An unfinished entry is put back; a finished one is not.
+        assert!(matches!(
+            backend.put_back(&root, "1-1"),
+            Err(PutBackError::State(Some(State::Discarded)))
+        ));
+        assert!(backend.put_back(&root, "2-2").unwrap().entry_removed);
+        assert_eq!(state_of("2-2"), None);
+        assert_eq!(probe.restores().len(), 4);
+        assert_eq!(probe.put_backs(), ["1-1", "2-2"]);
+
+        // Clearing removes what is left.
+        let cleared = backend.clear_journal(&root).unwrap();
+        assert_eq!((cleared.removed, cleared.interrupted), (1, 0));
+        assert!(backend.journal_entries(&root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_gate_holds_the_reading_of_a_working_diff() {
+        let root = path(&["work", "app"]);
+        let gate = Gate::new();
+        let diff = (*part(0).shown).clone();
+        let backend = Arc::new(
+            FakeBackend::default()
+                .with_working_diff(Group::Unstaged, "a.rs", diff)
+                .with_working_diff_gate(&gate),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (held, at) = (Arc::clone(&backend), root.clone());
+        std::thread::spawn(move || {
+            let entry = changed(ChangeKind::Modified, "a.rs");
+            let read = held.working_diff(&at, Group::Unstaged, &entry, None, &CancelToken::new());
+            let _ = sender.send(read.is_ok());
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the reading is held"
+        );
+        gate.open();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
         );
     }
 }
