@@ -19,7 +19,7 @@ use gitbull_git::path::RepoPath;
 use gitbull_git::refs::{RefKind, Reference};
 use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
 use gitbull_testkit::{FakeBackend, Probe, commit_line, fake_id};
-use support::{Setup, build, path, settle_window, sized_window, window};
+use support::{Setup, build, path, settle_window, sized_window_on, window_on};
 
 const FILTER: &str = "Filter files";
 
@@ -113,9 +113,12 @@ fn open_sized(backend: FakeBackend, size: Option<(f32, f32)>) -> (Harness<'stati
         backend,
         ..Setup::default()
     });
+    // The buttons of the window are git-bull's own, as on Windows and Linux;
+    // macOS draws its own.
+    let windows = eframe::egui::os::OperatingSystem::Windows;
     let mut harness = match size {
-        Some(size) => sized_window(size, test.app),
-        None => window(test.app),
+        Some(size) => sized_window_on(windows, size, test.app),
+        None => window_on(windows, test.app),
     };
     settle_window(&mut harness);
     // The sidebar is there once the repository is open; a small window may show
