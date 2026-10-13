@@ -13,8 +13,10 @@ is on the releases page. Since then git-bull stages and unstages whole
 files in the File status view, and hunks and selected lines from its diff,
 and commits what is staged: the commit form below the file list takes the
 message, amends the last commit and can run one commit without hooks.
-The next development priority is discarding changes, with a way to bring a
-discard back. The commit graph's
+It also discards changes of files, hunks and lines, and keeps every discard
+in a journal in the Git folder, so that a notice bar, Ctrl+Z and a list
+"Recently discarded" bring it back. The next development priority is
+selecting several files in the File status view. The commit graph's
 visual redesign is deferred with low priority. What git-bull does is
 specified in [`openspec/specs`](openspec/specs), the changes being planned
 or built are in [`openspec/changes`](openspec/changes), the architecture
@@ -53,6 +55,11 @@ The File status view stages files, hunks and lines, and its commit form below
 the file list commits them:
 
 ![The File status view in the dark theme: unstaged and staged files, a diff, and the commit form with a summary, a description and the button "Commit changes to 2 files"](crates/gitbull-app/tests/snapshots/commit_form_dark.png)
+
+A discard is kept: a bar below the file list names it and offers to undo it,
+and the list "Recently discarded" brings back older ones:
+
+![The File status view after a discard: the bar "Discarded 1 file" with the button Undo above the commit form](crates/gitbull-app/tests/snapshots/discard_notice_bar.png)
 
 ## Installation
 

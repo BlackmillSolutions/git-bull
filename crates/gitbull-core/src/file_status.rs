@@ -354,6 +354,14 @@ impl FileStatus {
         })
     }
 
+    /// What the diff shown offers to discard in parts: for a tracked file of
+    /// the Unstaged group, whether that is available now or why not; `None`
+    /// where nothing is offered, such as for an untracked file.
+    pub fn discard_parts(&self) -> Option<crate::discard::PartOffer> {
+        let (group, entry, _) = self.part_source()?;
+        crate::discard::part_offer(group, entry, self.parts())
+    }
+
     /// What the diff shown was read for, and the diff, when it shows lines:
     /// what a request to stage a part of it is made of.
     pub(crate) fn part_source(&self) -> Option<(Group, &StatusEntry, Arc<FileDiff>)> {

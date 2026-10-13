@@ -803,3 +803,60 @@ fn turning_the_switch_on_brings_the_notice_back() {
     harness.run();
     assert!(harness.state().settings().detach_notice);
 }
+
+#[test]
+fn another_git_path_is_refused_while_files_are_discarded() {
+    use gitbull_git::changes::ChangeKind;
+    use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
+    let gate = Gate::new();
+    let repository = path(&["work", "git-bull"]);
+    let status = WorkingStatus {
+        unstaged: vec![StatusEntry {
+            kind: StatusKind::Changed(ChangeKind::Modified),
+            path: "a.rs".into(),
+            old_path: None,
+            submodule: false,
+        }],
+        ..WorkingStatus::default()
+    };
+    let (test, _backend) = build_shared(Setup {
+        settings: Settings {
+            tabs: vec![repository.clone()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend: FakeBackend::default()
+            .with_repository(repository.clone())
+            .with_status(repository, status)
+            .with_checkout_gate(&gate),
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    settle_window(&mut harness);
+    // The status is read once the tab is shown; a discard needs it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let started = harness
+            .state_mut()
+            .workspace_mut()
+            .and_then(|workspace| workspace.active_mut())
+            .and_then(|tab| tab.session_mut())
+            .map(|session| session.discard(vec!["a.rs".into()], false));
+        if started == Some(gitbull_core::session::DiscardStart::Started) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the discard did not start"
+        );
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    harness.run();
+    open_dialog(&mut harness);
+    apply_git_path(&mut harness, "/opt/git/bin/git");
+
+    harness.get_by_label_contains("The action \"Discarding 1 file\" is running");
+    assert_eq!(harness.state().settings().git_path, None);
+    gate.open();
+}

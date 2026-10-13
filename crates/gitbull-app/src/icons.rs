@@ -86,8 +86,11 @@ pub const SEEN: &str = phosphor::CHECKS;
 /// Opens the choices of a button, such as how to copy.
 pub const CHOICES: &str = phosphor::CARET_DOWN;
 
+/// Discards changes.
+pub const TRASH: &str = phosphor::TRASH;
+
 /// Every icon with its name.
-pub const ALL: [(&str, &str); 38] = [
+pub const ALL: [(&str, &str); 39] = [
     ("folder", FOLDER),
     ("refresh", REFRESH),
     ("sun", SUN),
@@ -126,4 +129,5 @@ pub const ALL: [(&str, &str); 38] = [
     ("panel", PANEL),
     ("seen", SEEN),
     ("choices", CHOICES),
+    ("trash", TRASH),
 ];

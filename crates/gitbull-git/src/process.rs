@@ -280,6 +280,15 @@ impl Process {
         self.stdout.take()
     }
 
+    /// The process id of Git.
+    pub fn id(&self) -> u32 {
+        self.child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .child
+            .id()
+    }
+
     /// A handle that stops this process.
     pub fn canceller(&self) -> Canceller {
         Canceller {

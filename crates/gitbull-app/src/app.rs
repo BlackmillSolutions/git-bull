@@ -377,6 +377,28 @@ pub(crate) struct TabView {
     /// asks again only when its selection moves to another commit, so that
     /// a stash shown from the sidebar stays.
     pub(crate) details_shown: Option<ObjectId>,
+    /// The confirmation before whole files are discarded, while it is open.
+    pub(crate) discard_dialog: Option<DiscardDialog>,
+    /// The entry and the state of the notice bar the user closed.
+    pub(crate) notice_closed: Option<(String, gitbull_git::journal::State)>,
+    /// The list "Recently discarded" is open.
+    pub(crate) discards_open: bool,
+    /// The question before the list is cleared is open.
+    pub(crate) clear_question: bool,
+}
+
+/// The files a discard waits to be confirmed for.
+pub(crate) struct DiscardDialog {
+    /// The files to discard, in the order of the list.
+    pub(crate) files: Vec<RepoPath>,
+    /// The class each file had when the user was asked, tracked or untracked.
+    pub(crate) classes: Vec<gitbull_git::discard::Class>,
+    /// Whether it is "Discard all" of a group.
+    pub(crate) all: bool,
+    /// How many files the request left because they cannot be discarded.
+    pub(crate) left: usize,
+    /// The scroll position of the list of files.
+    pub(crate) list: ListState,
 }
 
 impl TabView {
@@ -480,6 +502,10 @@ pub struct App {
     pub(crate) close_question: Option<CloseQuestion>,
     /// The user chose to close the window although an action runs.
     pub(crate) close_confirmed: bool,
+    /// The user chose "Close anyway" while an action runs that cannot be
+    /// stopped: what the question names closes when no write action runs
+    /// any more.
+    pub(crate) close_waiting: bool,
     /// A checkout that waits for the notice before detaching HEAD.
     pub(crate) detach_pending: Option<PendingDetach>,
     /// The dialog that creates a branch.
@@ -535,6 +561,7 @@ impl App {
             dialog: None,
             close_question: None,
             close_confirmed: false,
+            close_waiting: false,
             detach_pending: None,
             create_dialog: None,
             branch_choice: None,
@@ -1428,6 +1455,8 @@ impl App {
                     true
                 }
                 Some(ActionDialog::Failed { action, .. }) => action.is_part(),
+                // A part of a file that was refused is asked for in the diff.
+                Some(ActionDialog::DiscardRefused { path: Some(_), .. }) => true,
                 _ => false,
             };
             of_commit = matches!(
@@ -1501,18 +1530,80 @@ impl App {
     }
 
     /// The user decided to close what the question names, stopping the action.
+    /// An action that cannot be stopped, a discard, is waited for instead: the
+    /// actions of a window that can be stopped are stopped at once, and the
+    /// close follows when no write action runs.
     pub(crate) fn close_anyway(&mut self) {
-        match self.close_question.take() {
-            Some(CloseQuestion::Tab(id)) => {
+        let Some(question) = self.close_question else {
+            return;
+        };
+        let running = self.running_actions();
+        let unstoppable = |action: &TabAction| action.action.is_discard();
+        let waits = match question {
+            CloseQuestion::Tab(id) => running
+                .iter()
+                .any(|action| action.id == id && unstoppable(action)),
+            CloseQuestion::Window => running.iter().any(unstoppable),
+        };
+        if waits {
+            if question == CloseQuestion::Window
+                && let Some(workspace) = self.workspace.as_mut()
+            {
+                workspace.stop_stoppable();
+            }
+            self.close_waiting = true;
+            return;
+        }
+        self.close_question = None;
+        match question {
+            CloseQuestion::Tab(id) => {
                 if let Some(workspace) = self.workspace.as_mut() {
                     workspace.close(id);
                 }
             }
-            Some(CloseQuestion::Window) => {
+            CloseQuestion::Window => {
                 self.close_confirmed = true;
                 self.send_close = true;
             }
-            None => {}
+        }
+    }
+
+    /// The user keeps the tab or the window open: also gets out of the wait.
+    pub(crate) fn keep_open(&mut self) {
+        self.close_question = None;
+        self.close_waiting = false;
+    }
+
+    /// Closes what the user chose to close once no write action runs in it any
+    /// more. Starting another action meanwhile moves the close back.
+    pub(crate) fn poll_close_wait(&mut self) {
+        if !self.close_waiting {
+            return;
+        }
+        let Some(question) = self.close_question else {
+            self.close_waiting = false;
+            return;
+        };
+        let running = self.running_actions();
+        let done = match question {
+            CloseQuestion::Tab(id) => !running.iter().any(|action| action.id == id),
+            CloseQuestion::Window => running.is_empty(),
+        };
+        if !done {
+            return;
+        }
+        self.close_waiting = false;
+        self.close_question = None;
+        match question {
+            CloseQuestion::Tab(id) => {
+                if let Some(workspace) = self.workspace.as_mut() {
+                    workspace.close(id);
+                }
+            }
+            CloseQuestion::Window => {
+                self.close_confirmed = true;
+                self.send_close = true;
+            }
         }
     }
 
@@ -1531,6 +1622,104 @@ impl App {
         let id = tab.id();
         let session = tab.session_mut()?;
         Some((session, self.views.entry(id).or_default()))
+    }
+
+    /// Asks before `files` of the active tab are discarded. Nothing is asked
+    /// for no file.
+    pub(crate) fn ask_discard(
+        &mut self,
+        asked: Vec<(RepoPath, gitbull_git::discard::Class)>,
+        all: bool,
+        left: usize,
+    ) {
+        if asked.is_empty() {
+            return;
+        }
+        let (files, classes): (Vec<_>, Vec<_>) = asked.into_iter().unzip();
+        if let Some((_, view)) = self.active_view() {
+            view.discard_dialog = Some(DiscardDialog {
+                files,
+                classes,
+                all,
+                left,
+                list: ListState::default(),
+            });
+        }
+    }
+
+    /// Whether the active tab asks before the list of discards is cleared.
+    pub(crate) fn has_clear_question(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active())
+            .and_then(|tab| self.views.get(&tab.id()))
+            .is_some_and(|view| view.clear_question)
+    }
+
+    /// The user answered the question before the list is cleared.
+    pub(crate) fn answer_clear(&mut self, clear: bool) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        view.clear_question = false;
+        if clear {
+            session.clear_discards();
+        }
+    }
+
+    /// Whether the active tab waits for the answer to "Discard".
+    pub(crate) fn has_discard_dialog(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .and_then(|workspace| workspace.active())
+            .and_then(|tab| self.views.get(&tab.id()))
+            .is_some_and(|view| view.discard_dialog.is_some())
+    }
+
+    /// The confirmation of the active tab.
+    pub(crate) fn discard_dialog(&self) -> Option<&DiscardDialog> {
+        let id = self.workspace.as_ref()?.active()?.id();
+        self.views.get(&id)?.discard_dialog.as_ref()
+    }
+
+    /// The confirmation of the active tab, to draw its list.
+    pub(crate) fn discard_dialog_mut(&mut self) -> Option<&mut DiscardDialog> {
+        let id = self.workspace.as_ref()?.active()?.id();
+        self.views.get_mut(&id)?.discard_dialog.as_mut()
+    }
+
+    /// The user confirmed: the files of the dialog are discarded.
+    pub(crate) fn confirm_discard(&mut self) {
+        let Some((session, view)) = self.active_view() else {
+            return;
+        };
+        if let Some(dialog) = view.discard_dialog.take() {
+            let files = dialog
+                .files
+                .iter()
+                .zip(&dialog.classes)
+                .map(|(path, class)| gitbull_git::discard::DiscardFile {
+                    path: path.clone(),
+                    class: *class,
+                })
+                .collect();
+            // Another action runs: the question stays, and Discard can be
+            // chosen again when it ended.
+            if session.discard_asked(files, dialog.all) == gitbull_core::session::DiscardStart::Busy
+            {
+                view.discard_dialog = Some(dialog);
+                return;
+            }
+        }
+        view.focus_status = true;
+    }
+
+    /// The user cancelled: nothing changes.
+    pub(crate) fn cancel_discard(&mut self) {
+        if let Some((_, view)) = self.active_view() {
+            view.discard_dialog = None;
+            view.focus_status = true;
+        }
     }
 
     /// Selects the commit of the reference with the full `name`, or tells
