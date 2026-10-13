@@ -27,6 +27,10 @@ pub use retention::{Cleared, Limits};
 const HEADER: &str = "gitbull-discard 1";
 /// The name of the lock file.
 const LOCK: &str = ".lock";
+/// Who holds the lock, for display and for telling running from interrupted.
+/// It is a file of its own because Windows does not let a second handle read
+/// a file that is locked.
+const HOLDER: &str = ".holder";
 
 /// The journal of one worktree.
 #[derive(Clone, Debug)]
@@ -482,19 +486,29 @@ impl std::error::Error for LockError {}
 /// releases it at once.
 #[derive(Debug)]
 pub struct LockGuard {
+    #[allow(dead_code, reason = "held for the lock it holds")]
     file: File,
+    holder: PathBuf,
 }
 
 impl LockGuard {
     /// Says which entry the holder works on, for the list to tell running
     /// from interrupted.
     pub fn name_entry(&self, entry_id: &str) -> io::Result<()> {
-        use std::io::{Seek, SeekFrom};
-        let mut file = &self.file;
-        file.seek(SeekFrom::Start(0))?;
-        file.set_len(0)?;
-        writeln!(file, "{entry_id} {}", std::process::id())
+        write_holder(&self.holder, entry_id)
     }
+}
+
+/// Writes who holds the lock, as a new file: a leftover, or a link planted
+/// there, is removed and not written through.
+fn write_holder(path: &Path, entry_id: &str) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    writeln!(file, "{entry_id} {}", std::process::id())
 }
 
 fn is_link(metadata: &Metadata) -> bool {
@@ -644,26 +658,34 @@ impl Journal {
     /// process does or the file system says nothing. Takes no lock for good.
     fn holder(&self) -> Option<Option<String>> {
         let path = self.dir.join(LOCK);
-        let mut file = File::open(&path).ok()?;
+        let file = File::open(&path).ok()?;
         match file.try_lock_shared() {
             Ok(()) => {
                 let _ = file.unlock();
                 None
             }
             Err(TryLockError::WouldBlock) => {
-                let mut text = String::new();
-                let _ = file.read_to_string(&mut text);
+                let text = self.holder_text();
                 Some(text.split(' ').next().map(|id| id.trim().to_owned()))
             }
             Err(TryLockError::Error(_)) => None,
         }
     }
 
+    /// What the holder wrote of itself: the entry and the process id.
+    fn holder_text(&self) -> String {
+        let path = self.dir.join(HOLDER);
+        if refuse_link(&path).is_err() {
+            return String::new();
+        }
+        fs::read_to_string(path).unwrap_or_default()
+    }
+
     /// Whether another process than this one holds the lock, as when another
     /// git-bull works on the journal and a discard here waits for its turn.
     /// Takes no lock for good.
     pub fn held_by_another_process(&self) -> bool {
-        let Ok(mut file) = File::open(self.dir.join(LOCK)) else {
+        let Ok(file) = File::open(self.dir.join(LOCK)) else {
             return false;
         };
         match file.try_lock_shared() {
@@ -672,8 +694,7 @@ impl Journal {
                 false
             }
             Err(TryLockError::WouldBlock) => {
-                let mut text = String::new();
-                let _ = file.read_to_string(&mut text);
+                let text = self.holder_text();
                 let pid = text
                     .split_whitespace()
                     .nth(1)
@@ -704,7 +725,7 @@ impl Journal {
             let Some(id) = name.to_str().map(str::to_owned) else {
                 continue;
             };
-            if id == LOCK {
+            if id == LOCK || id == HOLDER {
                 continue;
             }
             let folder = item.path();
@@ -839,10 +860,9 @@ impl Journal {
                 }
             }
         }
-        let mut named = &file;
-        named.set_len(0).map_err(LockError::Io)?;
-        writeln!(named, "{entry_id} {}", std::process::id()).map_err(LockError::Io)?;
-        Ok(LockGuard { file })
+        let holder = self.dir.join(HOLDER);
+        write_holder(&holder, entry_id).map_err(LockError::Io)?;
+        Ok(LockGuard { file, holder })
     }
 }
 
