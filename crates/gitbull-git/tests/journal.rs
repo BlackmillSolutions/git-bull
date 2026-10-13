@@ -128,7 +128,11 @@ fn the_folder_is_where_git_says(git: &Git) {
         .unwrap();
     assert!(status.success());
     let elsewhere = journal_of(git, work.path());
-    assert!(elsewhere.dir().starts_with(separate.path().join("g")));
+    assert!(
+        elsewhere
+            .dir()
+            .starts_with(separate.path().join("g").canonicalize().unwrap())
+    );
 
     // A submodule's Git folder lies in the superproject's.
     let upstream = repository();
@@ -144,7 +148,9 @@ fn the_folder_is_where_git_says(git: &Git) {
     ]);
     let inner = journal_of(git, &outer.path().join("lib"));
     assert!(
-        inner.dir().starts_with(outer.path().join(".git/modules")),
+        inner
+            .dir()
+            .starts_with(outer.path().join(".git/modules").canonicalize().unwrap()),
         "{:?}",
         inner.dir()
     );
