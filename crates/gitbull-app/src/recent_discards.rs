@@ -52,6 +52,9 @@ pub(crate) fn forget(ui: &Ui) {
 fn bar_record<'a>(session: &'a Session, view: &TabView) -> Option<&'a DiscardRecord> {
     session
         .discard_notice()
+        // An entry that an exchange left half way offers neither Undo nor
+        // Discard again; the list offers "Put back".
+        .filter(|record| matches!(record.state, State::Discarded | State::Restored))
         .filter(|record| view.notice_closed.as_ref() != Some(&(record.id.clone(), record.state)))
 }
 
@@ -65,7 +68,17 @@ pub(crate) fn shown(app: &mut App) -> bool {
 
 /// What the bar says: "Discarded 3 files", "Restored 3 files", and for a part
 /// of a file "Discarded part of a.rs".
-fn bar_text(app: &App, record: &DiscardRecord) -> String {
+/// What the bar needs of the record, so that the paths of a discard of many
+/// thousand files are not copied in every frame.
+struct Bar {
+    id: String,
+    state: State,
+    kind: Kind,
+    files: usize,
+    first: String,
+}
+
+fn bar_text(app: &App, record: &Bar) -> String {
     let part = matches!(record.kind, Kind::Hunk | Kind::Lines);
     let restored = record.state == State::Restored;
     let mut args = FluentArgs::new();
@@ -76,14 +89,9 @@ fn bar_text(app: &App, record: &DiscardRecord) -> String {
         (false, true) => Msg::NoticeRestored,
     };
     if part {
-        let name = record
-            .files
-            .first()
-            .map(|(path, _)| path.to_string())
-            .unwrap_or_default();
-        args.set("name", name);
+        args.set("name", record.first.clone());
     } else {
-        args.set("count", record.files.len() as i64);
+        args.set("count", record.files as i64);
     }
     app.texts.text_with(msg, Some(&args))
 }
@@ -143,10 +151,19 @@ fn tab(ui: &Ui, now: &[Id]) {
 /// discarded and "Discard again" once it was undone, and a button that closes
 /// the bar.
 fn bar(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>) {
-    let Some(record) = app
-        .active_view()
-        .and_then(|(session, view)| bar_record(session, view).cloned())
-    else {
+    let Some(record) = app.active_view().and_then(|(session, view)| {
+        bar_record(session, view).map(|record| Bar {
+            id: record.id.clone(),
+            state: record.state,
+            kind: record.kind,
+            files: record.files.len(),
+            first: record
+                .files
+                .first()
+                .map(|(path, _)| path.to_string())
+                .unwrap_or_default(),
+        })
+    }) else {
         return;
     };
     let text = bar_text(app, &record);
@@ -193,6 +210,9 @@ pub(crate) fn keys(app: &mut App, ui: &Ui) {
         || app.close_question.is_some()
         || app.create_dialog.is_some()
         || app.has_discard_dialog()
+        || app.has_clear_question()
+        || app.detach_pending.is_some()
+        || app.branch_choice.is_some()
         || app.action_dialog().is_some()
     {
         return;
@@ -306,13 +326,34 @@ fn list(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>, room: f32) {
             .entries
             .iter()
             .any(|record| record.running == Running::Running);
-        (journal.entries.len() + journal.unreadable, running)
+        (journal.entries.len() + journal.unreadable.len(), running)
     }) else {
         return;
     };
     if count == 0 {
         return;
     }
+    let unreadable: Vec<String> = if open {
+        app.workspace()
+            .and_then(|w| w.active())
+            .and_then(|t| t.session())
+            .map(|session| {
+                session
+                    .journal()
+                    .unreadable
+                    .iter()
+                    .map(|item| {
+                        let mut args = FluentArgs::new();
+                        args.set("folder", item.folder.clone());
+                        args.set("why", item.why.clone());
+                        app.texts.text_with(Msg::RecentUnreadable, Some(&args))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let entries: Vec<Entry> = if open {
         match app
             .workspace()
@@ -368,8 +409,7 @@ fn list(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>, room: f32) {
     // window it gets what the bar and the header leave of the room.
     let row = crate::theme::SHAPE.control_height + ui.spacing().item_spacing.y;
     let free = room - ui.min_rect().height() - ui.spacing().item_spacing.y;
-    let rows = entries
-        .len()
+    let rows = (entries.len() + unreadable.len())
         .min(LIST_ROWS)
         .min((free.max(0.0) / row).floor() as usize);
     if open && rows > 0 {
@@ -380,6 +420,9 @@ fn list(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>, room: f32) {
                 .id_salt("recent-discards")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    for text in &unreadable {
+                        ui.add(Label::new(text).truncate().selectable(false));
+                    }
                     for entry in &entries {
                         ui.horizontal(|ui| {
                             ui.weak(&entry.time);

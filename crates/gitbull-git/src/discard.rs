@@ -268,6 +268,15 @@ struct PutBack {
     all_back: bool,
 }
 
+/// Moves the file in `slot` to `path`, making the folders above it when the
+/// user removed them meanwhile.
+fn place(slot: &Path, path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(slot, path)
+}
+
 /// Puts the files of a `pending` entry back by the rules of design decision
 /// 4, step 7: an untracked file only where its path is absent; a tracked file
 /// where its path is absent or holds what the index holds; a tracked file
@@ -294,13 +303,18 @@ fn put_files_back(git: &Git, repo: &Path, root: &Path, entry: &Entry) -> io::Res
                 if there {
                     left_alone.push(file.path.clone());
                     all_back = false;
-                } else {
-                    fs::rename(&slot, &path)?;
+                } else if place(&slot, &path).is_err() {
+                    // It stays in the slot, named, and the others go back.
+                    left_alone.push(file.path.clone());
+                    all_back = false;
                 }
             }
             (FileKind::Tracked, true) => {
                 if !there || matches_index(git, repo, &file.path, &path) {
-                    fs::rename(&slot, &path)?;
+                    if place(&slot, &path).is_err() {
+                        left_alone.push(file.path.clone());
+                        all_back = false;
+                    }
                 } else {
                     left_alone.push(file.path.clone());
                     all_back = false;
@@ -317,7 +331,10 @@ fn put_files_back(git: &Git, repo: &Path, root: &Path, entry: &Entry) -> io::Res
             }
             (FileKind::Part, true) => {
                 if !there {
-                    fs::rename(&slot, &path)?;
+                    if place(&slot, &path).is_err() {
+                        left_alone.push(file.path.clone());
+                        all_back = false;
+                    }
                 } else if same_content(&slot, &path) {
                     fs::remove_file(&slot)?;
                 } else {
@@ -615,7 +632,12 @@ fn rolled_back(
         Ok(back) => back,
         Err(error) => {
             return DiscardOutcome::Failed {
-                message: format!("{message}; putting the files back failed: {error}"),
+                // The files stay in the entry, whose folder is named.
+                message: format!(
+                    "{message}; putting the files back failed: {error}. \
+                     The files are in {}",
+                    entry.folder().display()
+                ),
                 left_alone: Vec::new(),
             };
         }
@@ -787,7 +809,7 @@ impl std::fmt::Display for JournalError {
             JournalError::Lock(error) => error.fmt(f),
             JournalError::Gone => f.write_str("the entry is gone"),
             JournalError::Io(error) => error.fmt(f),
-            JournalError::Exchange(error) => write!(f, "{error:?}"),
+            JournalError::Exchange(error) => error.fmt(f),
         }
     }
 }

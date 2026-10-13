@@ -45,6 +45,19 @@ pub enum ExchangeError {
     Interrupted,
 }
 
+impl std::fmt::Display for ExchangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExchangeError::State { actual } => {
+                write!(f, "the entry is {actual:?}, not in the state expected")
+            }
+            ExchangeError::Blocked { path, why } => write!(f, "{path}: {why:?}"),
+            ExchangeError::Io(error) => error.fmt(f),
+            ExchangeError::Interrupted => f.write_str("the exchange was interrupted"),
+        }
+    }
+}
+
 impl From<io::Error> for ExchangeError {
     fn from(error: io::Error) -> Self {
         ExchangeError::Io(error)

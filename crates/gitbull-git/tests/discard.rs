@@ -58,6 +58,7 @@ fn discards_preserve_what_the_user_had() {
     // Crash states and putting back.
     every_state_of_the_table_can_be_put_back(&git);
     put_back_leaves_alone_what_another_file_took(&git);
+    put_back_makes_the_folders_the_user_removed(&git);
     put_back_waits_for_the_git_a_discard_started(&git);
 }
 
@@ -814,3 +815,26 @@ fn put_back_waits_for_the_git_a_discard_started(git: &Git) {
 
 #[cfg(not(unix))]
 fn put_back_waits_for_the_git_a_discard_started(_git: &Git) {}
+
+fn put_back_makes_the_folders_the_user_removed(git: &Git) {
+    let repo = committed(&[("keep.txt", "k")]);
+    fs::create_dir(repo.path().join("dir")).unwrap();
+    fs::write(repo.path().join("dir/x.txt"), "untracked").unwrap();
+    let end = discard_with(
+        git,
+        &repo,
+        vec![untracked("dir/x.txt")],
+        &EndAfter("moved:0"),
+    );
+    assert_eq!(end.outcome, DiscardOutcome::Interrupted);
+    // The user removed the folder meanwhile.
+    fs::remove_dir(repo.path().join("dir")).unwrap();
+    let entry = only_entry(git, &repo);
+    let journal = journal_of(git, &repo);
+    let back = put_back(git, repo.path(), &journal, entry.id(), &NoFailpoints).unwrap();
+    assert!(back.entry_removed, "{back:?}");
+    assert_eq!(
+        fs::read_to_string(repo.path().join("dir/x.txt")).unwrap(),
+        "untracked"
+    );
+}

@@ -15,6 +15,7 @@ use gitbull_core::file_status::{Shown, ShownFiles, StatusState};
 use gitbull_core::file_tree::{FileOrder, FileTree, Mode, Row};
 use gitbull_core::workspace::Failure;
 use gitbull_git::changes::ChangeKind;
+use gitbull_git::discard::Class;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 
@@ -303,7 +304,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             })
     });
     let mut discard_all_clicked = false;
-    let mut discard_asked: Option<(Vec<RepoPath>, bool, usize)> = None;
+    let mut discard_asked: Option<AskedDiscard> = None;
     // What the user asks for in this pass: single files, each with whether it
     // is unstaged, and all files of a group.
     let mut wanted: Vec<(bool, RepoPath)> = Vec::new();
@@ -448,7 +449,9 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
                     None => item.clicked(),
                 };
                 if chosen {
-                    discard_asked = Some((vec![entry.path.clone()], false, 0));
+                    if let DiscardOffer::Offered(class) = offer {
+                        discard_asked = Some((vec![(entry.path.clone(), class)], false, 0));
+                    }
                     ui.close();
                 }
             }
@@ -494,8 +497,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
                     offered(Shown::Unstaged, index),
                     entry_at(status, &files, 0, index),
                 ) {
-                    (Some(DiscardOffer::Offered(_)), Some((_, entry))) => {
-                        files_to_discard.push(entry.path.clone());
+                    (Some(DiscardOffer::Offered(class)), Some((_, entry))) => {
+                        files_to_discard.push((entry.path.clone(), class));
                     }
                     (Some(DiscardOffer::Unavailable(_)), _) => left += 1,
                     _ => {}
@@ -580,6 +583,10 @@ struct RowButton<'a> {
     icon: &'static str,
     enabled: bool,
 }
+
+/// Files the user asked to discard, each with its class, whether it is
+/// "Discard all", and how many files the request left.
+type AskedDiscard = (Vec<(RepoPath, Class)>, bool, usize);
 
 /// An icon button in the title of a group.
 struct TitleButton<'a> {

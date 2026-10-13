@@ -57,7 +57,7 @@ mod discarding;
 #[cfg(test)]
 mod discarding_tests;
 
-pub use discarding::{DiscardRecord, DiscardStart, JournalView, JournalWhy};
+pub use discarding::{DiscardRecord, DiscardStart, JournalView, JournalWhy, Unreadable};
 
 /// Lines the loader collects before handing them over.
 const BATCH_LINES: usize = 4096;

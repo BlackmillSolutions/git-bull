@@ -244,6 +244,7 @@ action-clear-discards = Clearing the discarded changes
 discard-failed-title = The changes could not be discarded
 discard-part-failed-title = The part of { $path } could not be discarded
 restore-failed-title = The discarded changes could not be brought back
+restore-failed-body = A file may be left in the entry of the list "Recently discarded" and not in the working copy. "Put back" there completes the exchange. The message:
 discard-again-failed-title = The changes could not be discarded again
 put-back-failed-title = The discarded changes could not be put back
 clear-discards-failed-title = The discarded changes could not be cleared
@@ -364,6 +365,7 @@ recent-entry-files = { $count ->
    *[other] { $count } files: { $names }
 }
 recent-entry-part = Part of { $name }
+recent-unreadable = Not an entry of git-bull: { $folder } ({ $why }). Clear removes it.
 clear-dialog-title = Clear the discarded changes?
 clear-dialog-body = Every entry is removed, and what the entries hold cannot be brought back.
 clear-dialog-interrupted = { $count ->

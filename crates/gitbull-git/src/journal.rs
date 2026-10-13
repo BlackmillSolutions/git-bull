@@ -511,6 +511,21 @@ fn is_link(metadata: &Metadata) -> bool {
     false
 }
 
+/// Fails when `path` is a link: the journal is data on disk that another
+/// program could have planted, and a link at a file git-bull writes would
+/// make it write elsewhere.
+fn refuse_link(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if is_link(&metadata) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is a link", path.display()),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn not_a_real_folder(path: &Path) -> io::Error {
     io::Error::other(format!("{} is not a real folder", path.display()))
 }
@@ -750,12 +765,15 @@ impl Journal {
     /// reader sees half of it.
     pub fn write_manifest(&self, entry: &Entry, manifest: &Manifest) -> io::Result<()> {
         let new = entry.folder.join("manifest.new");
+        // A leftover of an earlier write, or a link planted there, is removed
+        // and not written through; the file is made new.
+        match fs::remove_file(&new) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&new)?;
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&new)?;
             file.write_all(manifest.to_text().as_bytes())?;
             file.flush()?;
         }
@@ -794,6 +812,7 @@ impl Journal {
     pub fn lock(&self, entry_id: &str, wait: Duration) -> Result<LockGuard, LockError> {
         self.ensure().map_err(LockError::Io)?;
         let path = self.dir.join(LOCK);
+        refuse_link(&path).map_err(LockError::Io)?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)

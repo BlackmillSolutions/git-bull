@@ -322,6 +322,31 @@ fn what_is_not_written_by_git_bull_is_unreadable(git: &Git) {
         assert!(other_journal.list().is_err());
         assert!(other_journal.create(&manifest()).is_err());
     }
+
+    // A link planted at `.lock` or at `manifest.new` is not written through.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let repo = repository();
+        let journal = journal_of(git, repo.path());
+        let entry = made(&journal, State::Discarded, "planted");
+        let outside = tempfile::tempdir().unwrap();
+        let precious = outside.path().join("notes.txt");
+        fs::write(&precious, "keep me").unwrap();
+        symlink(&precious, entry.folder().join("manifest.new")).unwrap();
+        journal.write_manifest(&entry, &manifest()).unwrap();
+        assert_eq!(fs::read_to_string(&precious).unwrap(), "keep me");
+        assert!(
+            !fs::symlink_metadata(entry.folder().join("manifest"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        symlink(&precious, journal.dir().join(".lock")).unwrap();
+        assert!(journal.lock("x", Duration::from_millis(50)).is_err());
+        assert_eq!(fs::read_to_string(&precious).unwrap(), "keep me");
+    }
 }
 
 fn the_manifest_of_a_removed_entry_goes_last(git: &Git) {

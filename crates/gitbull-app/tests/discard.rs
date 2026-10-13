@@ -1219,3 +1219,119 @@ fn the_smallest_window_keeps_the_file_list_and_shows_the_bar_and_the_header() {
     // Both lie within the window, which is 400 points high.
     assert!(header.bottom() <= 400.0, "{header:?}");
 }
+
+#[test]
+fn files_are_discarded_as_they_were_asked_even_when_the_status_changed_meanwhile() {
+    let live = gitbull_testkit::LiveRepo::new();
+    live.set_status(unstaged());
+    let (mut harness, probe) = open_tall(backend().with_live(root(), &live));
+    let at = buttons(&harness, "Discard all")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    assert_eq!(dialogs(&harness), ["Discard the changes to 3 files?"]);
+
+    // `git add new.txt` in a terminal; the window is focused again and reads
+    // the status.
+    let mut status = unstaged();
+    status.untracked.clear();
+    status.staged.push(changed(ChangeKind::Added, "new.txt"));
+    live.set_status(status);
+    if let Some(session) = harness
+        .state_mut()
+        .workspace_mut()
+        .and_then(|workspace| workspace.active_mut())
+        .and_then(|tab| tab.session_mut())
+    {
+        session.refresh();
+    }
+    for _ in 0..20 {
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    let confirm = buttons(&harness, "Discard")[0];
+    click_at(&mut harness, confirm, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.discards().is_empty());
+    // The request is the one that was shown; the backend compares it with the
+    // status under the lock and refuses what changed.
+    let request = &probe.discards()[0];
+    assert_eq!(request.files.len(), 3);
+    assert!(
+        request.files.iter().any(|file| {
+            file.path == RepoPath::new("new.txt") && file.class == Class::Untracked
+        })
+    );
+}
+
+#[test]
+fn an_entry_left_half_way_offers_neither_undo_nor_discard_again() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    assert_eq!(buttons(&harness, "Undo").len(), 1);
+    // An exchange ended half way, as when git-bull was killed in it.
+    let journal = probe
+        .journal()
+        .into_iter()
+        .map(|item| match item {
+            gitbull_git::journal::Listed::Entry { entry, .. } => {
+                let mut manifest = entry.manifest().clone();
+                manifest.state = gitbull_git::journal::State::Restoring;
+                gitbull_git::journal::Listed::Entry {
+                    entry: gitbull_git::journal::Entry::in_memory(
+                        entry.id().to_owned(),
+                        entry.folder().to_owned(),
+                        manifest,
+                    ),
+                    running: EntryRunning::Interrupted,
+                }
+            }
+            other => other,
+        })
+        .collect();
+    probe.set_journal(journal);
+    if let Some(session) = harness
+        .state_mut()
+        .workspace_mut()
+        .and_then(|workspace| workspace.active_mut())
+        .and_then(|tab| tab.session_mut())
+    {
+        session.refresh();
+    }
+    wait_until(&mut harness, |h| buttons(h, "Undo").is_empty());
+    assert!(buttons(&harness, "Discard again").is_empty());
+}
+
+#[test]
+fn an_unreadable_entry_is_listed_with_its_folder_and_why() {
+    let journal = vec![Listed::Unreadable {
+        folder: "journal/9999-0".into(),
+        why: "the manifest is a link".to_owned(),
+    }];
+    let (mut harness, _) = open_tall(
+        backend()
+            .with_status(root(), unstaged())
+            .with_journal(journal),
+    );
+    let at = buttons(&harness, "Recently discarded (1)")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    assert!(
+        harness
+            .query_by_label_contains("Not an entry of git-bull: 9999-0 (the manifest is a link)")
+            .is_some()
+    );
+}
+
+#[test]
+fn the_undo_key_does_nothing_behind_the_question_before_clear() {
+    let (mut harness, probe) = open_tall(backend().with_status(root(), unstaged()));
+    discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
+    let at = buttons(&harness, "Recently discarded (1)")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    let at = buttons(&harness, "Clear")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    assert_eq!(dialogs(&harness), ["Clear the discarded changes?"]);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    for _ in 0..10 {
+        harness.step();
+    }
+    assert!(probe.restores().is_empty());
+}

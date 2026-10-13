@@ -722,3 +722,34 @@ fn only_what_can_be_stopped_is_stopped() {
     assert_eq!(session.journal().entries.len(), 1);
     assert!(session.dialog().is_none());
 }
+
+#[test]
+fn files_asked_for_with_their_classes_are_passed_on_as_they_are() {
+    let backend = with_changes();
+    let probe = backend.probe();
+    let mut session = discarding(backend);
+    // `gone.rs` is not in the status: the worker decides, not the session.
+    let asked = vec![
+        tracked("a.rs"),
+        DiscardFile {
+            path: RepoPath::new("gone.rs"),
+            class: Class::Untracked,
+        },
+    ];
+    assert_eq!(
+        session.discard_asked(asked.clone(), false),
+        DiscardStart::Started
+    );
+    wait_until(&mut session, idle);
+    assert_eq!(
+        probe.discards(),
+        [DiscardRequest {
+            files: asked,
+            kind: Kind::Files
+        }]
+    );
+    assert_eq!(
+        session.discard_asked(Vec::new(), false),
+        DiscardStart::Nothing
+    );
+}

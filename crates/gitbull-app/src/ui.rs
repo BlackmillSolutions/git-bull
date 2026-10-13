@@ -1910,7 +1910,12 @@ fn action_dialog(
         ),
         ActionDialog::Failed { action, message } => (
             failed_title(action),
-            texts.text(Msg::CheckoutFailedBody),
+            // An exchange that failed half way leaves a file in the entry.
+            texts.text(if matches!(action, WriteAction::Restore { .. }) {
+                Msg::RestoreFailedBody
+            } else {
+                Msg::CheckoutFailedBody
+            }),
             message.clone(),
             texts.text(Msg::DialogClose),
             true,

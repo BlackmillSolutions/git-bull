@@ -391,6 +391,8 @@ pub(crate) struct TabView {
 pub(crate) struct DiscardDialog {
     /// The files to discard, in the order of the list.
     pub(crate) files: Vec<RepoPath>,
+    /// The class each file had when the user was asked, tracked or untracked.
+    pub(crate) classes: Vec<gitbull_git::discard::Class>,
     /// Whether it is "Discard all" of a group.
     pub(crate) all: bool,
     /// How many files the request left because they cannot be discarded.
@@ -1624,13 +1626,20 @@ impl App {
 
     /// Asks before `files` of the active tab are discarded. Nothing is asked
     /// for no file.
-    pub(crate) fn ask_discard(&mut self, files: Vec<RepoPath>, all: bool, left: usize) {
-        if files.is_empty() {
+    pub(crate) fn ask_discard(
+        &mut self,
+        asked: Vec<(RepoPath, gitbull_git::discard::Class)>,
+        all: bool,
+        left: usize,
+    ) {
+        if asked.is_empty() {
             return;
         }
+        let (files, classes): (Vec<_>, Vec<_>) = asked.into_iter().unzip();
         if let Some((_, view)) = self.active_view() {
             view.discard_dialog = Some(DiscardDialog {
                 files,
+                classes,
                 all,
                 left,
                 list: ListState::default(),
@@ -1685,7 +1694,22 @@ impl App {
             return;
         };
         if let Some(dialog) = view.discard_dialog.take() {
-            session.discard(dialog.files, dialog.all);
+            let files = dialog
+                .files
+                .iter()
+                .zip(&dialog.classes)
+                .map(|(path, class)| gitbull_git::discard::DiscardFile {
+                    path: path.clone(),
+                    class: *class,
+                })
+                .collect();
+            // Another action runs: the question stays, and Discard can be
+            // chosen again when it ended.
+            if session.discard_asked(files, dialog.all) == gitbull_core::session::DiscardStart::Busy
+            {
+                view.discard_dialog = Some(dialog);
+                return;
+            }
         }
         view.focus_status = true;
     }

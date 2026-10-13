@@ -65,13 +65,21 @@ pub struct DiscardRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct JournalView {
     pub entries: Vec<DiscardRecord>,
-    /// Folders of the journal that are not entries git-bull wrote.
-    pub unreadable: usize,
+    /// Folders of the journal that are not entries git-bull wrote, with why.
+    pub unreadable: Vec<Unreadable>,
+}
+
+/// A folder of the journal that is not an entry git-bull wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreadable {
+    /// Its name in the journal.
+    pub folder: String,
+    pub why: String,
 }
 
 impl JournalView {
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.unreadable == 0
+        self.entries.is_empty() && self.unreadable.is_empty()
     }
 
     pub fn record(&self, id: &str) -> Option<&DiscardRecord> {
@@ -106,7 +114,13 @@ impl JournalView {
                             .collect(),
                     });
                 }
-                Listed::Unreadable { .. } => view.unreadable += 1,
+                Listed::Unreadable { folder, why } => view.unreadable.push(Unreadable {
+                    folder: folder.file_name().map_or_else(
+                        || folder.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    ),
+                    why,
+                }),
             }
         }
         view
@@ -288,7 +302,19 @@ impl Session {
                 });
             }
         }
-        if files.is_empty() {
+        self.discard_asked(files, all)
+    }
+
+    /// Discards the files as they were asked for, each with the class it had
+    /// when the user was asked: the worker compares them with the status it
+    /// reads under the lock, and when a file is no longer of its class or is
+    /// gone, nothing is discarded and a dialog says so (spec `discard`,
+    /// requirement "What is discarded is what was asked").
+    pub fn discard_asked(&mut self, files: Vec<DiscardFile>, all: bool) -> DiscardStart {
+        if self.write_blocked() {
+            return DiscardStart::Busy;
+        }
+        if files.is_empty() || self.file_status.is_none() {
             return DiscardStart::Nothing;
         }
         let request = DiscardRequest {
