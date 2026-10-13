@@ -371,15 +371,42 @@ fn crlf_throughout_is_discarded_under_an_eol_attribute(git: &Git) {
     );
 }
 
+/// Where Git converts line endings while it writes, the discard is refused and
+/// the file is as it was. Git for Windows may convert nothing here, and then
+/// the discard is the plain one: every other line is byte for byte as it
+/// was. Either way no line that was not selected changes.
+fn refused_or_exact(
+    git: &Git,
+    repo: &TestRepo,
+    end: &DiscardEnd,
+    before: &[u8],
+    plain_after: &[u8],
+) {
+    match &end.outcome {
+        DiscardOutcome::Refused(DiscardRefusal::LineEndings) if !cfg!(windows) => {
+            assert_eq!(end.entry, None);
+            assert_eq!(bytes(repo, "f.txt"), before);
+            assert!(entries(git, repo).is_empty());
+        }
+        DiscardOutcome::Refused(DiscardRefusal::LineEndings) => {
+            assert_eq!(bytes(repo, "f.txt"), before);
+            assert!(entries(git, repo).is_empty());
+        }
+        DiscardOutcome::Done if cfg!(windows) => assert_eq!(bytes(repo, "f.txt"), plain_after),
+        other => panic!("{other:?}"),
+    }
+}
+
 fn conversions_by_attribute_that_rewrite_other_lines_are_refused(git: &Git) {
     // CRLF in the working copy and LF in the index, under `text=auto`.
     let repo = committed_under("* text=auto\n", BASE);
     let changed = two_hunks().replace('\n', "\r\n");
     fs::write(repo.path().join("f.txt"), &changed).unwrap();
     let end = discard_hunk(git, &repo, "f.txt", 0);
-    refused(&end, DiscardRefusal::LineEndings);
-    assert_eq!(bytes(&repo, "f.txt"), changed.as_bytes());
-    assert!(entries(git, &repo).is_empty());
+    let plain = BASE
+        .replace("l20\n", "l20\nadd A\nadd B\n")
+        .replace('\n', "\r\n");
+    refused_or_exact(git, &repo, &end, changed.as_bytes(), plain.as_bytes());
 
     // Mixed endings under `eol=lf`.
     let repo = committed_under("* text eol=lf\n", BASE);
@@ -388,9 +415,11 @@ fn conversions_by_attribute_that_rewrite_other_lines_are_refused(git: &Git) {
         .replace("l25\n", "l25\r\n");
     fs::write(repo.path().join("f.txt"), &mixed).unwrap();
     let end = discard_hunk(git, &repo, "f.txt", 0);
-    refused(&end, DiscardRefusal::LineEndings);
-    assert_eq!(bytes(&repo, "f.txt"), mixed.as_bytes());
-    assert!(entries(git, &repo).is_empty());
+    let plain = BASE
+        .replace("l10\n", "l10\r\n")
+        .replace("l25\n", "l25\r\n")
+        .replace("l20\n", "l20\nadd A\nadd B\n");
+    refused_or_exact(git, &repo, &end, mixed.as_bytes(), plain.as_bytes());
 }
 
 fn mixed_endings_without_conversion_are_discarded_byte_for_byte(git: &Git) {
@@ -421,9 +450,8 @@ fn conversion_that_would_rewrite_other_lines_is_refused(git: &Git) {
 
     // Git rewrote lines it should not have: refused, and the file is as it
     // was.
-    refused(&end, DiscardRefusal::LineEndings);
-    assert_eq!(bytes(&repo, "f.txt"), changed.as_bytes());
-    assert!(entries(git, &repo).is_empty());
+    let plain = BASE.replace("l20\n", "l20\nadd A\nadd B\n");
+    refused_or_exact(git, &repo, &end, changed.as_bytes(), plain.as_bytes());
 }
 
 fn a_diff_out_of_date_is_refused_without_an_entry(git: &Git) {
