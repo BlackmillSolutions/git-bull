@@ -440,7 +440,10 @@ fn list(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>, room: f32) {
                                     });
                                 }
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                    ui.add(Label::new(&entry.what).truncate().selectable(false));
+                                    // The text gives way to the buttons; the whole of
+                                    // it is in the tooltip.
+                                    ui.add(Label::new(&entry.what).truncate().selectable(false))
+                                        .on_hover_text(&entry.what);
                                 });
                             });
                         });

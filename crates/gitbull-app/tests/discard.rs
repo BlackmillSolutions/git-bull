@@ -753,15 +753,19 @@ fn the_section_is_closed_at_first_and_lists_each_entry_when_opened() {
     open_list(&mut harness);
     // Each entry: its time, its state, what it holds, and the button of its
     // state.
-    for text in [
-        "2 files: x.rs, y.rs",
-        "1 file: r.rs",
-        "4 files: a.rs, b.rs, c.rs, …",
-        "Interrupted",
-        "Restored",
-        "Discarded",
-        "2026-01-01 12:00",
-    ] {
+    // What an entry holds is shortened to the room the buttons leave, which
+    // depends on the font, so only its start is compared.
+    for start in ["2 files: x", "1 file: r", "4 files: a"] {
+        assert!(
+            harness.query_by_label_contains(start).is_some()
+                || harness
+                    .query_all_by(|node| node.value().is_some_and(|text| text.starts_with(start)))
+                    .next()
+                    .is_some(),
+            "{start}"
+        );
+    }
+    for text in ["Interrupted", "Restored", "Discarded", "2026-01-01 12:00"] {
         assert!(text_shown(&harness, text), "{text}");
     }
     assert_eq!(buttons(&harness, "Put back").len(), 1);
