@@ -19,6 +19,17 @@ use gitbull_testkit::TestRepo;
 /// Set in the process that holds the lock for the test of the lock.
 const HOLD: &str = "GITBULL_JOURNAL_HOLD";
 
+/// The path as Git reports it: with links resolved, and without the prefix
+/// that Windows puts before one.
+fn real(path: &std::path::Path) -> std::path::PathBuf {
+    let canonical = path.canonicalize().unwrap();
+    let text = canonical.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(plain) => std::path::PathBuf::from(plain),
+        None => canonical,
+    }
+}
+
 #[test]
 fn the_journal_preserves_what_it_is_given() {
     let root = tempfile::tempdir().unwrap();
@@ -91,9 +102,7 @@ fn the_folder_is_where_git_says(git: &Git) {
     // A subfolder of the worktree gives the same folder, reached over `..`.
     fs::create_dir(repo.path().join("sub")).unwrap();
     let from_sub = journal_of(git, &repo.path().join("sub"));
-    let git_folder = |journal: &Journal| {
-        fs::canonicalize(journal.dir().parent().unwrap().parent().unwrap()).unwrap()
-    };
+    let git_folder = |journal: &Journal| real(journal.dir().parent().unwrap().parent().unwrap());
     assert_eq!(git_folder(&from_sub), git_folder(&main));
 
     // A linked worktree has its own, inside the folder of that worktree.
@@ -113,7 +122,7 @@ fn the_folder_is_where_git_says(git: &Git) {
         own.dir()
     );
     // Git reports real paths: on macOS `/private/var` for `/var`.
-    let git_folder = repo.path().join(".git").canonicalize().unwrap();
+    let git_folder = real(&repo.path().join(".git"));
     assert!(own.dir().starts_with(&git_folder), "{:?}", own.dir());
     assert_ne!(own.dir(), main.dir());
 
@@ -131,7 +140,7 @@ fn the_folder_is_where_git_says(git: &Git) {
     assert!(
         elsewhere
             .dir()
-            .starts_with(separate.path().join("g").canonicalize().unwrap())
+            .starts_with(real(&separate.path().join("g")))
     );
 
     // A submodule's Git folder lies in the superproject's.
@@ -150,7 +159,7 @@ fn the_folder_is_where_git_says(git: &Git) {
     assert!(
         inner
             .dir()
-            .starts_with(outer.path().join(".git/modules").canonicalize().unwrap()),
+            .starts_with(real(&outer.path().join(".git/modules"))),
         "{:?}",
         inner.dir()
     );
