@@ -10,10 +10,27 @@ M2 improvements to finish before M3 starts.
 The read-only viewer, the interface improvements delivered so far, the
 worktree cockpit and the trust model for write operations provide the
 starting point, and checkout and the creation of branches and tags are
-delivered. All of it is released as 0.2.0. Since then whole files, hunks
-and selected lines can be staged and unstaged, the staged changes can be
-committed, and changes can be discarded, every discard being kept so that it
-can be brought back. This roadmap schedules new work.
+delivered. Whole files, hunks and selected lines can be staged and
+unstaged, the staged changes can be committed, and changes can be discarded,
+every discard being kept so that it can be brought back. All of it is
+released as 0.3.0. This roadmap schedules new work.
+
+## Released: 0.3.0
+
+On 2026-10-13, [pull request #45](https://github.com/BlackmillSolutions/git-bull/pull/45)
+brought staging of files, hunks and lines, committing and discarding
+([pull requests #40 to #43](https://github.com/BlackmillSolutions/git-bull/pull/43))
+to `master`, and
+[git-bull 0.3.0](https://github.com/BlackmillSolutions/git-bull/releases/tag/v0.3.0)
+was published from it with the five packages. Its notes are in
+[`docs/release-notes/0.3.0.md`](release-notes/0.3.0.md).
+
+- CI passed on Linux, Windows and macOS for the tagged commit, and the
+  discard was checked by hand in a real repository, also with git-bull
+  killed during a discard.
+- Like 0.2.0, the release had no pre-release, and its packages were not
+  started by hand on clean installations of the oldest supported systems.
+- Open: issue #36 and the follow-ups of the discard review in issue #44.
 
 ## Released: 0.2.0
 
