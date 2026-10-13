@@ -84,6 +84,10 @@ nothing before the entry exists.
 - A program that writes to a file in the moments between the move and Git's
   write can lose that write. The check before Git runs narrows the time and
   the rules above never overwrite what they find, but nothing closes it.
+- The identity of a file is its size, its time of modification and its inode,
+  or on Windows its time of creation. Two files of one entry that agree in
+  all of these are not told apart where the clock is coarse, so a resume
+  that finds them may leave a file alone and name it; it never overwrites.
 - A file that was exchanged can hold stale bytes: a tracked file restored
   holds the index of the time. They are not lost, and the file shows as
   modified.

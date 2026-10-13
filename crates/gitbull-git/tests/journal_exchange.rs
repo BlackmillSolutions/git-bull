@@ -297,7 +297,10 @@ fn ended_after(step: &'static str) -> (Place, Entry) {
     // one.txt has a newer file, two.txt has none.
     fs::write(place.path("one.txt"), "one now").unwrap();
     fs::write(entry.slot(0), "one discarded").unwrap();
-    fs::write(entry.slot(1), "two discarded").unwrap();
+    // A different size from the file of slot 0: where the clock is coarse, as on
+    // Windows, files written together agree in their times, and the identity of
+    // a file is its size and its times.
+    fs::write(entry.slot(1), "two were discarded").unwrap();
     let lock = place.lock();
     let ended = place.journal.exchange(
         &lock,
@@ -331,7 +334,7 @@ fn a_process_that_ends_after_any_step_leaves_an_entry_that_resumes_without_loss(
         seen.sort();
         assert_eq!(
             seen,
-            ["one discarded", "one now", "two discarded"],
+            ["one discarded", "one now", "two were discarded"],
             "after {step}"
         );
 
@@ -350,7 +353,7 @@ fn a_process_that_ends_after_any_step_leaves_an_entry_that_resumes_without_loss(
             "{step}"
         );
         let two = text_of(&place.path("two.txt"));
-        assert_eq!(two.as_deref(), Some("two discarded"), "{step}");
+        assert_eq!(two.as_deref(), Some("two were discarded"), "{step}");
         assert!(!entry.slot(1).exists(), "{step}");
         assert!(!entry.folder().join("0.tmp").exists(), "{step}");
         // Resuming a finished exchange changes nothing.
