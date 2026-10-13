@@ -88,6 +88,13 @@ nothing before the entry exists.
   or on Windows its time of creation. Two files of one entry that agree in
   all of these are not told apart where the clock is coarse, so a resume
   that finds them may leave a file alone and name it; it never overwrites.
+- A part of a file is copied, compared with the file, and then patched by
+  Git, which reads the file for itself. A file edited in that moment would be
+  taken for one whose line endings Git rewrote. The check tells the two apart
+  by the content of the lines: where only line endings differ, the copy is put
+  back and the discard is refused; where more differs, the file stays as Git
+  left it, the copy stays in the entry, and the failure says that both
+  versions are kept, so that no edit is lost.
 - A file that was exchanged can hold stale bytes: a tracked file restored
   holds the index of the time. They are not lost, and the file shows as
   modified.

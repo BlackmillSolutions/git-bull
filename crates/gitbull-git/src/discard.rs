@@ -182,11 +182,7 @@ fn move_file(from: &Path, to: &Path, held: Held) -> io::Result<()> {
                 return Err(io::Error::other("the copy is not as long as the file"));
             }
             if let Ok(modified) = metadata.modified() {
-                let times = fs::FileTimes::new().set_modified(modified);
-                fs::OpenOptions::new()
-                    .write(true)
-                    .open(&part)?
-                    .set_times(times)?;
+                set_modified(&part, modified)?;
             }
         }
     }
@@ -816,10 +812,6 @@ impl std::fmt::Display for JournalError {
 
 impl std::error::Error for JournalError {}
 
-fn locate(git: &Git, repo: &Path) -> Result<Journal, JournalError> {
-    Journal::locate(git, repo).map_err(JournalError::Locate)
-}
-
 fn find_entry(journal: &Journal, id: &str) -> Result<Entry, JournalError> {
     journal
         .list()
@@ -834,8 +826,8 @@ fn find_entry(journal: &Journal, id: &str) -> Result<Entry, JournalError> {
 
 /// The entries of the journal of the worktree at `repo`, newest last, with the
 /// folders that are not entries.
-pub fn journal_entries(git: &Git, repo: &Path) -> Result<Vec<Listed>, JournalError> {
-    locate(git, repo)?.list().map_err(JournalError::Io)
+pub fn journal_entries(journal: &Journal) -> Result<Vec<Listed>, JournalError> {
+    journal.list().map_err(JournalError::Io)
 }
 
 /// Exchanges the files of the entry `id` with the working copy: a restore of a
@@ -843,14 +835,13 @@ pub fn journal_entries(git: &Git, repo: &Path) -> Result<Vec<Listed>, JournalErr
 /// the caller saw; when the entry is in another one, nothing is changed and
 /// the error is [`ExchangeError::State`].
 pub fn restore_entry(
-    git: &Git,
+    journal: &Journal,
     repo: &Path,
     id: &str,
     expected: State,
 ) -> Result<crate::journal::ExchangeEnd, JournalError> {
-    let journal = locate(git, repo)?;
     let guard = journal.lock(id, WAIT).map_err(JournalError::Lock)?;
-    let entry = find_entry(&journal, id)?;
+    let entry = find_entry(journal, id)?;
     journal
         .exchange(
             &guard,
@@ -864,14 +855,23 @@ pub fn restore_entry(
 
 /// Whether another process works on the journal of the worktree at `repo`:
 /// a discard here waits for it.
-pub fn journal_busy(git: &Git, repo: &Path) -> bool {
-    Journal::locate(git, repo).is_ok_and(|journal| journal.held_by_another_process())
+pub fn journal_busy(journal: &Journal) -> bool {
+    journal.held_by_another_process()
 }
 
 /// Removes every entry of the journal ("Clear").
-pub fn clear_journal(git: &Git, repo: &Path) -> Result<crate::journal::Cleared, JournalError> {
-    let journal = locate(git, repo)?;
-    let guard = journal.lock("clear", WAIT).map_err(JournalError::Lock)?;
+pub fn clear_journal(journal: &Journal) -> Result<crate::journal::Cleared, JournalError> {
+    clear_journal_waiting(journal, WAIT)
+}
+
+/// Like [`clear_journal`], waiting up to `wait` for the turn at the journal.
+/// An entry that a process works on holds the lock, so nothing is cleared
+/// while one runs: the answer is [`LockError::Busy`].
+pub fn clear_journal_waiting(
+    journal: &Journal,
+    wait: Duration,
+) -> Result<crate::journal::Cleared, JournalError> {
+    let guard = journal.lock("clear", wait).map_err(JournalError::Lock)?;
     journal.clear(&guard).map_err(JournalError::Io)
 }
 
@@ -898,13 +898,7 @@ fn unchanged_but_for_the_part(
     let same =
         |i: usize, j: usize| matches!((before.get(i), after.get(j)), (Some(a), Some(b)) if a == b);
     for (index, hunk) in hunks.iter().enumerate() {
-        let first = hunk
-            .lines
-            .iter()
-            .find_map(|line| line.new_number)
-            .map(|number| number as usize - 1)
-            // A hunk with no line of the new side lies after line `new_start`.
-            .unwrap_or(hunk.new_start as usize);
+        let first = hunk_start(hunk);
         // Lines before the hunk stay as they are.
         while i < first {
             if !same(i, j) {
@@ -953,6 +947,99 @@ fn unchanged_but_for_the_part(
     j == after.len()
 }
 
+/// The index of the first line of the new side that a hunk covers.
+fn hunk_start(hunk: &Hunk) -> usize {
+    hunk.lines
+        .iter()
+        .find_map(|line| line.new_number)
+        .map(|number| number as usize - 1)
+        // A hunk with no line of the new side lies after line `new_start`.
+        .unwrap_or(hunk.new_start as usize)
+}
+
+/// The lines of `bytes` without their line endings, `\n` or `\r\n`.
+fn content_lines(bytes: &[u8]) -> Vec<&[u8]> {
+    lines_of(bytes)
+        .into_iter()
+        .map(|line| {
+            let line = line.strip_suffix(b"\n").unwrap_or(line);
+            line.strip_suffix(b"\r").unwrap_or(line)
+        })
+        .collect()
+}
+
+/// What the lines of the file are after the part is taken out of `copy`, by
+/// their content and not by their line endings: the lines that stay, and the
+/// removed lines that are put back, as the hunks show them.
+fn expected_lines(copy: &[u8], hunks: &[Hunk], selection: &Selection) -> Option<Vec<Vec<u8>>> {
+    let before = content_lines(copy);
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut i = 0;
+    for (index, hunk) in hunks.iter().enumerate() {
+        while i < hunk_start(hunk) {
+            out.push(before.get(i)?.to_vec());
+            i += 1;
+        }
+        let chosen = |line: usize| match selection.of(index) {
+            Some(Chosen::All) => true,
+            Some(Chosen::Lines(lines)) => lines.contains(&line),
+            None => false,
+        };
+        for (at, line) in hunk.lines.iter().enumerate() {
+            match line.kind {
+                LineKind::Context => {
+                    out.push(before.get(i)?.to_vec());
+                    i += 1;
+                }
+                LineKind::Added if chosen(at) => i += 1,
+                LineKind::Added => {
+                    out.push(before.get(i)?.to_vec());
+                    i += 1;
+                }
+                LineKind::Removed if chosen(at) => out.push(line.text.as_bytes().to_vec()),
+                LineKind::Removed => {}
+            }
+        }
+    }
+    while let Some(line) = before.get(i) {
+        out.push(line.to_vec());
+        i += 1;
+    }
+    Some(out)
+}
+
+/// Sets the time of modification of `path`. A copy of a read-only file is
+/// read-only too, and Windows does not open it for writing: it is made
+/// writable for the moment.
+fn set_modified(path: &Path, modified: std::time::SystemTime) -> io::Result<()> {
+    #[cfg(windows)]
+    #[allow(
+        clippy::permissions_set_readonly_false,
+        reason = "on Windows it clears the read-only attribute and nothing else"
+    )]
+    let readonly = {
+        let mut permissions = fs::metadata(path)?.permissions();
+        let readonly = permissions.readonly();
+        if readonly {
+            permissions.set_readonly(false);
+            fs::set_permissions(path, permissions)?;
+        }
+        readonly
+    };
+    let times = fs::FileTimes::new().set_modified(modified);
+    let set = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_times(times));
+    #[cfg(windows)]
+    if readonly {
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions)?;
+    }
+    set
+}
+
 /// Copies `path` into `slot` and sets the copy's time to the file's.
 fn copy_into(path: &Path, slot: &Path) -> io::Result<()> {
     let mut name = slot.as_os_str().to_owned();
@@ -960,11 +1047,7 @@ fn copy_into(path: &Path, slot: &Path) -> io::Result<()> {
     let part = PathBuf::from(name);
     fs::copy(path, &part)?;
     if let Ok(modified) = fs::metadata(path)?.modified() {
-        let times = fs::FileTimes::new().set_modified(modified);
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&part)?
-            .set_times(times)?;
+        set_modified(&part, modified)?;
     }
     fs::rename(&part, slot)
 }
@@ -1128,22 +1211,28 @@ pub fn discard_part(
 
     // The line check, against the copy.
     let result = fs::read(&path).unwrap_or_default();
+    let mut kept_both = false;
     if !unchanged_but_for_the_part(&copy, &result, hunks, &request.selection) {
-        // Put the file back as it was, if nothing else wrote it meanwhile.
-        if fs::read(&path).ok().as_deref() == Some(result.as_slice())
+        // Git wrote other line endings than the file had: the file is put back
+        // as it was, if nothing else wrote it meanwhile. When the lines differ in
+        // more than their endings, the file was edited while the part was
+        // discarded, and the copy is not what Git worked on: the file stays as
+        // it is, and the copy stays in the entry, so that no edit is lost.
+        let converted = expected_lines(&copy, hunks, &request.selection).is_some_and(|expected| {
+            let got: Vec<Vec<u8>> = content_lines(&result)
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect();
+            expected == got
+        });
+        if converted
+            && fs::read(&path).ok().as_deref() == Some(result.as_slice())
             && fs::rename(&slot, &path).is_ok()
         {
             let _ = journal.remove_entry_with(&journal_entry, &mut |_| {});
             return end(DiscardOutcome::Refused(DiscardRefusal::LineEndings), None);
         }
-        return end(
-            DiscardOutcome::Failed {
-                message: "the file differs from the copy in lines that should have stayed"
-                    .to_owned(),
-                left_alone: vec![entry.path.clone()],
-            },
-            id,
-        );
+        kept_both = true;
     }
     let mut done = manifest;
     done.state = State::Discarded;
@@ -1152,5 +1241,17 @@ pub fn discard_part(
         return end(failed(error.to_string()), id);
     }
     prune_after(journal, &guard, journal_entry.id());
+    if kept_both {
+        return end(
+            DiscardOutcome::Failed {
+                message: "the file changed while the part was discarded, so both versions are \
+                          kept: the file as it is now, and the file as it was in the list of \
+                          discarded changes"
+                    .to_owned(),
+                left_alone: Vec::new(),
+            },
+            id,
+        );
+    }
     end(DiscardOutcome::Done, id)
 }

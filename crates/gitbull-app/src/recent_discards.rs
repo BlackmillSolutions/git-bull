@@ -431,6 +431,13 @@ fn list(app: &mut App, ui: &mut Ui, now: &mut Vec<Id>, room: f32) {
                                 if let Some((label, action)) = &entry.button {
                                     ui.add_enabled_ui(!busy, |ui| {
                                         let button = components::Button::new(label).show(ui);
+                                        // Its name stays what it does; the entry it acts
+                                        // on is its description, so that the buttons of
+                                        // several entries are told apart.
+                                        let described = format!("{}, {}", entry.time, entry.what);
+                                        ui.ctx().accesskit_node_builder(button.id, |node| {
+                                            node.set_description(described);
+                                        });
                                         if button.clicked() {
                                             chosen = Some((entry.id.clone(), *action));
                                         }

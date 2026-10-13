@@ -47,6 +47,7 @@ fn part_discards_take_out_the_part_and_nothing_else() {
     conversions_by_attribute_that_rewrite_other_lines_are_refused(&git);
     a_diff_out_of_date_is_refused_without_an_entry(&git);
     a_file_that_changes_while_copied_is_refused(&git);
+    a_file_edited_while_git_applies_keeps_both_versions(&git);
     an_untracked_file_is_refused(&git);
 }
 
@@ -538,4 +539,49 @@ fn an_untracked_file_is_refused(git: &Git) {
 
     refused(&end, DiscardRefusal::NotTracked);
     assert!(entries(git, &repo).is_empty());
+}
+
+fn a_file_edited_while_git_applies_keeps_both_versions(git: &Git) {
+    // The file changes after it was compared with its copy and before Git
+    // reads it: the copy is not what Git worked on, so it must not replace the
+    // file.
+    struct Edit<'a>(&'a Path);
+    impl Failpoints for Edit<'_> {
+        fn after(&self, step: &str) -> Result<(), Interrupt> {
+            if step == "copied" {
+                let mut text = fs::read_to_string(self.0).unwrap();
+                text.push_str("late\n");
+                fs::write(self.0, text).unwrap();
+            }
+            Ok(())
+        }
+    }
+    let repo = committed("f.txt", BASE.as_bytes());
+    fs::write(repo.path().join("f.txt"), two_hunks()).unwrap();
+    let diff = shown(git, &repo, Group::Unstaged, "f.txt");
+    let path = repo.path().join("f.txt");
+
+    let end = discard(
+        git,
+        &repo,
+        "f.txt",
+        diff,
+        Selection::new().hunk(0),
+        &Edit(&path),
+    );
+
+    // The file is as Git left it, with the late line; the entry holds the file as
+    // it was copied, and restoring it brings that back.
+    assert!(
+        matches!(end.outcome, DiscardOutcome::Failed { .. }),
+        "{end:?}"
+    );
+    assert!(end.entry.is_some());
+    assert_eq!(
+        text(&repo, "f.txt"),
+        format!("{}late\n", BASE.replace("l20\n", "l20\nadd A\nadd B\n"))
+    );
+    let entry = entries(git, &repo).remove(0);
+    assert_eq!(entry.manifest().state, State::Discarded);
+    assert_eq!(read(&entry.slot(0)), two_hunks().as_bytes());
 }

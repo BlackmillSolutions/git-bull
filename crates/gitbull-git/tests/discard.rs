@@ -58,6 +58,7 @@ fn discards_preserve_what_the_user_had() {
     // Crash states and putting back.
     every_state_of_the_table_can_be_put_back(&git);
     put_back_leaves_alone_what_another_file_took(&git);
+    clear_is_refused_while_an_entry_is_worked_on(&git);
     put_back_makes_the_folders_the_user_removed(&git);
     put_back_waits_for_the_git_a_discard_started(&git);
 }
@@ -837,4 +838,29 @@ fn put_back_makes_the_folders_the_user_removed(git: &Git) {
         fs::read_to_string(repo.path().join("dir/x.txt")).unwrap(),
         "untracked"
     );
+}
+
+fn clear_is_refused_while_an_entry_is_worked_on(git: &Git) {
+    let repo = committed(&[("a.txt", "a")]);
+    fs::write(repo.path().join("a.txt"), "changed").unwrap();
+    done(&discard(git, &repo, vec![tracked("a.txt")]));
+    let journal = journal_of(git, &repo);
+    // Another process, or a run of this one, holds the lock for an entry.
+    let held = journal.lock("working", Duration::from_secs(2)).unwrap();
+    let refused = gitbull_git::discard::clear_journal_waiting(&journal, Duration::from_millis(100));
+    assert!(
+        matches!(
+            refused,
+            Err(gitbull_git::discard::JournalError::Lock(
+                gitbull_git::journal::LockError::Busy
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(entries(git, &repo).len(), 1, "nothing was cleared");
+    drop(held);
+    let cleared =
+        gitbull_git::discard::clear_journal_waiting(&journal, Duration::from_millis(100)).unwrap();
+    assert_eq!(cleared.removed, 1);
+    assert!(entries(git, &repo).is_empty());
 }

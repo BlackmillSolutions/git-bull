@@ -463,6 +463,8 @@ pub struct CliBackend {
     merges: MergeCache,
     /// Where quarantines of objects are made.
     temp_dir: PathBuf,
+    /// The journals of discards found so far, by the folder of the worktree.
+    journals: std::sync::Mutex<std::collections::HashMap<PathBuf, Journal>>,
 }
 
 impl CliBackend {
@@ -473,7 +475,22 @@ impl CliBackend {
             capabilities: Capabilities::of(version),
             merges: MergeCache::default(),
             temp_dir: std::env::temp_dir(),
+            journals: std::sync::Mutex::default(),
         }
+    }
+
+    /// The journal of discards of the worktree at `repo`: found once with Git,
+    /// and used while its Git folder is there.
+    fn journal(&self, repo: &Path) -> Result<Journal, Error> {
+        let mut found = self.journals.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(journal) = found.get(repo)
+            && journal.git_folder_exists()
+        {
+            return Ok(journal.clone());
+        }
+        let journal = Journal::locate(&self.git, repo)?;
+        found.insert(repo.to_owned(), journal.clone());
+        Ok(journal)
     }
 
     /// Makes quarantines of objects in `folder` instead of the system's
@@ -587,7 +604,7 @@ impl Backend for CliBackend {
     }
 
     fn discard_files(&self, repo: &Path, request: &DiscardRequest) -> DiscardEnd {
-        match Journal::locate(&self.git, repo) {
+        match self.journal(repo) {
             Ok(journal) => {
                 discard::discard_files(&self.git, repo, &journal, request, &NoFailpoints)
             }
@@ -596,7 +613,7 @@ impl Backend for CliBackend {
     }
 
     fn discard_part(&self, repo: &Path, entry: &StatusEntry, request: &PartRequest) -> DiscardEnd {
-        match Journal::locate(&self.git, repo) {
+        match self.journal(repo) {
             Ok(journal) => {
                 discard::discard_part(&self.git, repo, &journal, entry, request, &NoFailpoints)
             }
@@ -610,24 +627,28 @@ impl Backend for CliBackend {
         id: &str,
         expected: State,
     ) -> Result<ExchangeEnd, JournalError> {
-        discard::restore_entry(&self.git, repo, id, expected)
+        let journal = self.journal(repo).map_err(JournalError::Locate)?;
+        discard::restore_entry(&journal, repo, id, expected)
     }
 
     fn put_back(&self, repo: &Path, id: &str) -> Result<PutBackEnd, PutBackError> {
-        let journal = Journal::locate(&self.git, repo).map_err(PutBackError::Locate)?;
+        let journal = self.journal(repo).map_err(PutBackError::Locate)?;
         discard::put_back(&self.git, repo, &journal, id, &NoFailpoints)
     }
 
     fn clear_journal(&self, repo: &Path) -> Result<Cleared, JournalError> {
-        discard::clear_journal(&self.git, repo)
+        let journal = self.journal(repo).map_err(JournalError::Locate)?;
+        discard::clear_journal(&journal)
     }
 
     fn journal_entries(&self, repo: &Path) -> Result<Vec<Listed>, JournalError> {
-        discard::journal_entries(&self.git, repo)
+        let journal = self.journal(repo).map_err(JournalError::Locate)?;
+        discard::journal_entries(&journal)
     }
 
     fn journal_busy(&self, repo: &Path) -> bool {
-        discard::journal_busy(&self.git, repo)
+        self.journal(repo)
+            .is_ok_and(|journal| discard::journal_busy(&journal))
     }
 
     fn commit(&self, repo: &Path, request: &CommitRequest, cancel: &CancelToken) -> CommitEnd {

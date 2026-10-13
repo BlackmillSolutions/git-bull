@@ -772,6 +772,18 @@ fn the_section_is_closed_at_first_and_lists_each_entry_when_opened() {
     assert_eq!(buttons(&harness, "Discard again").len(), 1);
     assert_eq!(buttons(&harness, "Restore").len(), 1);
     assert_eq!(buttons(&harness, "Clear").len(), 1);
+
+    // The button of an entry says which entry it acts on, by its description.
+    let described: Vec<String> = harness
+        .query_all_by_role(Role::Button)
+        .filter_map(|node| node.accesskit_node().description())
+        .collect();
+    assert_eq!(described.len(), 3, "{described:?}");
+    assert!(described.iter().all(|text| text.starts_with("2026-")));
+    assert!(
+        described.iter().any(|text| text.contains(": x")),
+        "{described:?}"
+    );
 }
 
 #[test]

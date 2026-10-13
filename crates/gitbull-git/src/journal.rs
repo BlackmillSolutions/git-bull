@@ -681,6 +681,16 @@ impl Journal {
         fs::read_to_string(path).unwrap_or_default()
     }
 
+    /// Whether the Git folder this journal lies in is still there: a journal
+    /// found once is used until the folder is gone, as when a linked worktree
+    /// was removed and added again.
+    pub fn git_folder_exists(&self) -> bool {
+        self.dir
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(Path::is_dir)
+    }
+
     /// Whether another process than this one holds the lock, as when another
     /// git-bull works on the journal and a discard here waits for its turn.
     /// Takes no lock for good.
@@ -891,6 +901,12 @@ pub fn checked(root: &Path, path: &RepoPath) -> Result<PathBuf, PathRefusal> {
         match *component {
             b"" | b"." | b".." => return Err(PathRefusal::Odd),
             _ => {}
+        }
+        // Git writes `/` between the parts of a path, and a name on Windows has
+        // neither `\` nor `:`, which would reach another folder or a stream.
+        #[cfg(windows)]
+        if component.iter().any(|byte| matches!(byte, b'\\' | b':')) {
+            return Err(PathRefusal::Odd);
         }
         let name = String::from_utf8_lossy(component).to_lowercase();
         let name = name.trim_end_matches(['.', ' ']);
