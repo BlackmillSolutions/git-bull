@@ -100,7 +100,7 @@ fn exists(path: &Path) -> bool {
 }
 
 fn ident_of(path: &Path) -> Option<FileId> {
-    fs::symlink_metadata(path).ok().map(|m| FileId::of(&m))
+    FileId::at(path)
 }
 
 fn tmp_of(slot: &Path) -> PathBuf {

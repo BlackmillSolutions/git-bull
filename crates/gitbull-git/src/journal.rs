@@ -179,8 +179,10 @@ pub struct FileRecord {
 }
 
 /// The identity of a file, which a rename keeps: its size, its time of
-/// modification in nanoseconds, and its inode, or on Windows its time of
-/// creation.
+/// modification in nanoseconds, and its inode, or on Windows its index on the
+/// volume. The time of creation is no identity there: a file renamed to a name
+/// that was freed a moment ago takes over the time of creation of the file
+/// that had it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileId {
     pub len: u64,
@@ -189,7 +191,21 @@ pub struct FileId {
 }
 
 impl FileId {
-    /// The identity of the file `metadata` describes.
+    /// The identity of the file at `path`, or of the link there, which is not
+    /// followed. `None` when nothing is there.
+    pub fn at(path: &Path) -> Option<FileId> {
+        let metadata = fs::symlink_metadata(path).ok()?;
+        #[allow(unused_mut, reason = "only changed on Windows")]
+        let mut id = FileId::of(&metadata);
+        #[cfg(windows)]
+        if let Some(index) = file_index(path) {
+            id.id = index;
+        }
+        Some(id)
+    }
+
+    /// The identity of the file `metadata` describes, without what only the
+    /// file itself can tell on Windows; see [`FileId::at`].
     pub fn of(metadata: &Metadata) -> FileId {
         let modified_ns = metadata
             .modified()
@@ -509,6 +525,33 @@ fn write_holder(path: &Path, entry_id: &str) -> io::Result<()> {
     }
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     writeln!(file, "{entry_id} {}", std::process::id())
+}
+
+/// The index of the file at `path` on its volume, which a rename keeps.
+#[cfg(windows)]
+fn file_index(path: &Path) -> Option<u64> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+    // Opened for nothing but its attributes, without following a link, and
+    // sharing with everyone, so that no program is kept from the file.
+    let file = OpenOptions::new()
+        .access_mode(0)
+        .share_mode(7)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    // SAFETY: the structure is plain data that the call fills, and the handle
+    // is open for as long as `file` lives.
+    let (ok, info) = unsafe {
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        let ok = GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info);
+        (ok, info)
+    };
+    (ok != 0).then(|| (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
 }
 
 fn is_link(metadata: &Metadata) -> bool {

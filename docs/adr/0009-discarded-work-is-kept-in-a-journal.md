@@ -49,8 +49,8 @@ nothing before the entry exists.
 - **Restoring is an exchange classified by identity.** Restore, undo and
   "Discard again" swap, for each file, what the path holds and what the slot
   holds, in three renames that never go onto a name that exists. The manifest
-  first records the identity (size, time in nanoseconds, inode or creation
-  time) of both files, and a rename keeps identity, so after an end of the
+  first records the identity (size, time in nanoseconds, inode or file
+  index) of both files, and a rename keeps identity, so after an end of the
   process every file can be found at one of four steps and the exchange goes
   on. A file of any other identity is left alone and named. Restoring never
   destroys: what lay at the path is in the slot afterwards.
@@ -85,9 +85,11 @@ nothing before the entry exists.
   write can lose that write. The check before Git runs narrows the time and
   the rules above never overwrite what they find, but nothing closes it.
 - The identity of a file is its size, its time of modification and its inode,
-  or on Windows its time of creation. Two files of one entry that agree in
-  all of these are not told apart where the clock is coarse, so a resume
-  that finds them may leave a file alone and name it; it never overwrites.
+  or on Windows its index on the volume. The time of creation is no identity
+  there: a file renamed to a name that was freed a moment ago takes over the
+  time of creation of the file that had it. Files of one entry that agree in
+  all of these cannot be told apart, so a resume may leave one alone and name
+  it; it never overwrites.
 - A part of a file is copied, compared with the file, and then patched by
   Git, which reads the file for itself. A file edited in that moment would be
   taken for one whose line endings Git rewrote. The check tells the two apart

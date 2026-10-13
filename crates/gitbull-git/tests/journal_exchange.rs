@@ -589,9 +589,9 @@ fn clear_removes_every_entry_and_says_how_many_were_interrupted() {
 fn the_identity_of_a_renamed_file_stays_and_the_manifest_keeps_it() {
     let place = Place::new();
     fs::write(place.path("a"), "x").unwrap();
-    let before = FileId::of(&fs::symlink_metadata(place.path("a")).unwrap());
+    let before = FileId::at(&place.path("a")).unwrap();
     fs::rename(place.path("a"), place.path("b")).unwrap();
-    let after = FileId::of(&fs::symlink_metadata(place.path("b")).unwrap());
+    let after = FileId::at(&place.path("b")).unwrap();
     assert_eq!(before, after);
     let m = Manifest {
         idents: vec![Ident {

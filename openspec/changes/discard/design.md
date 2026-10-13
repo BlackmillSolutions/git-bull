@@ -136,7 +136,7 @@ git 4242                          the process id of the Git this discard started
 file 0 untracked held <hex path>  slot, kind (tracked|untracked|part), held|none, path
 file 1 tracked none <hex path>
 ident 0 path 5-1760270000123456789-77    only while restoring or redoing: size, time in
-ident 0 slot 9-1760270000123456780-78    nanoseconds and inode (Windows: creation time)
+ident 0 slot 9-1760270000123456780-78    nanoseconds and inode (Windows: file index)
                                          of the file at the path and of the slot, or "-"
 ```
 
