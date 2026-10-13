@@ -885,7 +885,15 @@ fn the_list_survives_a_restart_by_the_journal() {
     let (mut again, _) = open_tall(backend_with(journal));
     let at = buttons(&again, "Recently discarded (1)")[0];
     click_at(&mut again, at, PointerButton::Primary);
-    assert!(text_shown(&again, "1 file: a.rs"));
+    // Shortened to the room the buttons leave, so only its start is compared.
+    assert!(
+        again
+            .query_all_by(|node| node
+                .value()
+                .is_some_and(|text| text.starts_with("1 file: a")))
+            .next()
+            .is_some()
+    );
     assert_eq!(buttons(&again, "Restore").len(), 1);
 }
 
