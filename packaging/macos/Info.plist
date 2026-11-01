@@ -11,6 +11,8 @@
     <string>com.github.blackmillsolutions.git-bull</string>
     <key>CFBundleExecutable</key>
     <string>git-bull</string>
+    <key>CFBundleIconFile</key>
+    <string>git-bull</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

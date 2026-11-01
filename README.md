@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="packaging/git-bull.svg" alt="The git-bull logo: a bull whose horns end in Git commit nodes" width="160">
+</p>
+
 # git-bull
 
 A fast, open-source Git client for Linux, Windows and macOS, written in Rust.
