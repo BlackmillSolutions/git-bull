@@ -4145,7 +4145,7 @@ The 355 crates of the release build on x86_64-pc-windows-msvc, aarch64-apple-dar
 | calloop-wayland-source | 0.3.0 | MIT |
 | calloop-wayland-source | 0.4.1 | MIT |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 |
-| clipboard-win | 5.4.1 | BSL-1.0 |
+| clipboard-win | 5.4.3 | BSL-1.0 |
 | codespan-reporting | 0.13.1 | Apache-2.0 |
 | color | 0.3.3 | Apache-2.0 OR MIT |
 | concurrent-queue | 2.5.0 | Apache-2.0 OR MIT |
@@ -6891,7 +6891,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-Used by clipboard-win 5.4.1, error-code 3.4.0:
+Used by clipboard-win 5.4.3, error-code 3.4.0:
 
 ```text
 Boost Software License - Version 1.0 - August 17th, 2003
