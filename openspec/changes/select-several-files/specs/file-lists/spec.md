@@ -5,23 +5,24 @@
 ### Requirement: Selecting several files in the File status view
 The file list of the File status view SHALL let the user select several files
 of one group, Unstaged or Staged, and SHALL NOT select across groups. A click
-on a file SHALL select that file alone and make it the anchor. A click with
+on a file SHALL select that file alone and make it both the anchor, whose diff the diff
+panel shows, and the lead, from which the arrow keys move. A click with
 Ctrl, or with Cmd on macOS, SHALL add an unselected file to the selection and
-make it the anchor, or remove a selected file; removing the anchor SHALL move
-the anchor to the nearest selected file above it, else below it, and the
+make it the anchor and the lead, or remove a selected file; removing the anchor SHALL move
+the anchor and the lead to the nearest selected file above it, else below it, and the
 click SHALL do nothing when it would leave nothing selected. A click with
 Shift SHALL select the files shown between the anchor and the file clicked,
-both included, and keep the anchor; folder rows between them SHALL not be part
+both included, keep the anchor and make the file clicked the lead; folder rows between them SHALL not be part
 of it, and the range SHALL follow the rows as they are shown, so that the files
 inside collapsed folders are not in it. Shift with Up or Down SHALL extend or
-shrink the selection by the file above or below the one that was last added,
+shrink the selection by the file above or below the lead, which becomes the new lead,
 within the group, and SHALL NOT cross to the other group. Ctrl, or Cmd, with
 A SHALL select every file of the group of the anchor that the filter shows,
 including those in collapsed folders, while the file list has the keyboard
 focus; in the filter field the key SHALL select its text as before. Escape SHALL reduce the selection
 to the anchor while the list has the focus and more than one file is selected.
 Up and Down without Shift, a click without a modifier, and the selection of a
-folder SHALL end a selection of several files. A click with Ctrl, Cmd or
+folder SHALL end a selection of several files; Up and Down SHALL move from the lead and select the file above or below it alone. A click with Ctrl, Cmd or
 Shift in the other group SHALL end the selection and select the file clicked
 alone there. A click on a folder with Ctrl, Cmd or Shift SHALL collapse or
 expand it as a click does and SHALL leave the selection as it is. Space and
@@ -71,6 +72,10 @@ home views SHALL keep one selection.
 - **WHEN** the last file of the Unstaged group is selected and the user presses Shift+Down
 - **THEN** the selection does not change, and no file of the Staged group is selected
 
+#### Scenario: Keyboard after a Shift click
+- **WHEN** the Unstaged group lists `a.rs` to `e.rs`, `b.rs` is selected, the user clicks `d.rs` with Shift and then presses Shift+Down
+- **THEN** `b.rs`, `c.rs`, `d.rs` and `e.rs` are selected, and `b.rs` is still the anchor
+
 #### Scenario: Select all under a filter
 - **WHEN** the Unstaged group lists `src/a.rs`, `src/b.rs` and `notes.txt`, the filter is `.rs`, the file list has the focus and the user presses Ctrl+A
 - **THEN** `src/a.rs` and `src/b.rs` are selected and `notes.txt` is not
@@ -85,7 +90,7 @@ home views SHALL keep one selection.
 
 #### Scenario: Plain click and arrow keys end the selection
 - **WHEN** three files are selected and the user presses Down without Shift
-- **THEN** the file below the one at the end of the selection is selected alone
+- **THEN** the file below the lead is selected alone
 
 #### Scenario: Other group
 - **WHEN** two unstaged files are selected and the user clicks a staged file with Ctrl

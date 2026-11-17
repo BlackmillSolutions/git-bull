@@ -20,7 +20,10 @@ See `proposal.md` for why. What the code does today, and what the design builds 
 - `VirtualList` is used by eight lists (commit list, sidebar, home views,
   search results, file history, the file lists). It paints the selected row
   itself, selects on every click, and a right click selects the row before it
-  reports the menu. It consumes the arrow keys with `Modifiers::NONE`.
+  reports the menu. It consumes the arrow keys with `Modifiers::NONE`, which
+  egui matches logically, ignoring an extra Shift (egui 0.36.2,
+  `Modifiers::matches_logically`): today Shift+Arrow moves like a plain arrow
+  in every list.
 - `file_status_view::show` collects what the user asked for in one pass
   (`wanted`, `all`, `discard_asked`) and hands it to the session after the
   list was drawn; the menu works on a snapshot of the entry taken when it
@@ -63,6 +66,14 @@ their index in the group, and `lead: Option<usize>`, the file last added, from
 which Shift+Arrow extends. The selected files are `also` plus the anchor; with
 `also` empty, which is every state of today, nothing changes.
 
+The cursor row of the list is the **lead**, not the anchor: `FileTree` gets
+`cursor_row()`, the row of `lead` while several files are selected and
+`selected_row()` otherwise, and `follow` and `past_title` in `file_list.rs`
+use it. `follow` sets the cursor of the list from the tree in every pass, so
+were it to use the anchor, a Shift click would snap the cursor back to the
+anchor and Shift+Arrow and the arrow keys would go on from the wrong file.
+The diff shows the anchor; the keys move from the lead.
+
 `renewed` maps `also` and `lead` to the new order by path, with the
 one-step lookup it already builds for the neighbours of the selected file
 (a map from path to index of the new group, built once), so the cost stays
@@ -93,18 +104,24 @@ without it the list behaves exactly as now:
   and does not move the cursor; on any other row it selects as now. Today the
   list selects on a right click before it reports the menu, which would end a
   selection the moment its menu opens.
-- Shift+Up, Shift+Down, Ctrl/Cmd+A and Escape are consumed and reported as
-  `ListKey` values, in place of the arrow handling for those keys. The painting
-  of the row uses `is_selected` instead of `state.selected() == Some(index)`.
+- Shift+Up, Shift+Down and Ctrl/Cmd+A are consumed and reported in a new field
+  `ListOutput.multi` with its own type `MultiKey`. `ListKey` stays as it is:
+  `home_view.rs` and `file_list.rs` match it without a wildcard, so a new value
+  would break them. The Shift variants are consumed **before** the loop over
+  the plain arrows, which would take them as plain arrows, and only with the
+  opt-in. The painting of the row uses `is_selected` instead of
+  `state.selected() == Some(index)`.
+- Escape is not taken by the list. `file_list::show` consumes it while the list
+  has the focus and several files are selected, so that it stays free for
+  everything else otherwise.
 
 *Alternative:* a second list type for files. Rejected: the list owns the
 scrolling, the spring and the keyboard focus, which the file lists need as they
 are; a copy would drift.
 
-*To check first (a risk, see below):* whether `consume_key(Modifiers::NONE, …)`
-in the current arrow handling already takes Shift+Arrow, which egui may match
-logically. The first test of the change makes Shift+Down fail on the current
-code so that the answer is a fact.
+Plain arrows are unchanged: Ctrl or Cmd with an arrow does not match
+`Modifiers::NONE`, and `S` and `U` use `plain_key_pressed`, which requires no
+modifier at all.
 
 ### 3. Rows decide ranges, groups decide boundaries
 
@@ -130,10 +147,9 @@ emptying the filter does not bring the selection back, which the specs state in
 a scenario. The status read again does not change the filter, so it never
 shrinks a selection by itself.
 
-### 5. Actions take the selection as one request, sorted by path
+### 5. Actions take the selection as one request
 
-`file_status_view` gathers the selected files into one `Vec<RepoPath>`, in the
-order of their paths, and calls `stage` or `unstage` once; the session already
+`file_status_view` gathers the selected files into one `Vec<RepoPath>` and calls `stage` or `unstage` once; the session already
 queues it as one request, so the existing rules (quick succession, filters, a
 failure drops what is kept behind it) hold without a new line. Files in
 conflict are removed from the list before the call, by the check that "Stage
@@ -182,14 +198,18 @@ that `VirtualList::show` already uses for the role and the name.
 
 ## Risks / Trade-offs
 
-- [Shift+Arrow is already swallowed by the plain arrow handling, so the
-  extension never fires, or the plain arrows start to extend] → The first test
-  fails on the current code and decides how the keys are ordered in
-  `VirtualList::show`; the opt-in keeps every other list on its present path.
+- [The Shift variants are taken by the loop over the plain arrows first] →
+  They are consumed before it and only with the opt-in; a test pins that
+  Shift+Down still moves like Down in the lists without the opt-in.
+- [The cursor of the list and the anchor of the tree pull against each other
+  through `follow`] → `cursor_row()` is the one source for the cursor, and a
+  test follows a Shift click with Shift+Down.
 - [The set of 50,000 files after "Select all" costs a frame] → The set is built
-  from `files_matching` once, painting asks it only for the visible rows, and a
-  scenario in `file-lists` with the 16.7 ms budget of that capability makes it a
-  test, not a hope.
+  from `files_matching` once, painting asks it only for the visible rows, a test
+  in `gitbull-core` shows the steps linear in the files of the group, and a
+  frame benchmark in `crates/gitbull-app/tests/benchmarks.rs`, next to the
+  one for the file list of a commit with 50,000 files, holds the 16.7 ms budget
+  of `file-lists`.
 - [`renewed` loses a selected file or keeps one that left] → Property-style
   tests of `FileTree` over random status changes, comparing with the paths
   expected, in `gitbull-core` where no UI is needed.
@@ -203,9 +223,6 @@ that `VirtualList::show` already uses for the role and the name.
 - [Departure from GitKraken in the gestures it does not document] → Recorded in
   the proposal and in decision 7; Ctrl+A and Shift+Arrow follow GitLens and the
   file managers, and can be dropped without touching the model.
-- [The discard dialog is worded for "a file" or "all files"] → Check its texts
-  for a count that is neither; add the text through the Fluent plural if the
-  dialog has no wording for "3 files".
 
 ## Migration Plan
 

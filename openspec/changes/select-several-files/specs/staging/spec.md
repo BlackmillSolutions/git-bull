@@ -7,8 +7,7 @@ When several files of one group are selected in the File status view, as the
 capability `file-lists` describes, the key S while the Unstaged group is
 selected and the key U while the Staged group is selected, with the file list
 focused, SHALL stage or unstage every selected file as the requirements
-"Staging a file" and "Unstaging a file" say for each, in one request that runs in
-the order of the paths of the files. The context menu opened on a file of
+"Staging a file" and "Unstaging a file" say for each, in one request. The context menu opened on a file of
 the selection SHALL offer one entry for the selection, "Stage 3 files" or
 "Unstage 3 files", in place of "Stage file" and "Unstage file" and in the same
 place, and the number SHALL be the number of files the entry acts on. A file in
