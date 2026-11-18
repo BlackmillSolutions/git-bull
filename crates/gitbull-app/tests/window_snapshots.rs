@@ -1145,6 +1145,118 @@ fn commit_form_in_the_smallest_window() {
     image_snapshot_options(&image, "commit_form_smallest", &options());
 }
 
+// ---- the selection of several files (spec `file-lists`)
+
+/// The row named `label` in the file list or the tree, by its place.
+fn file_row(harness: &Harness<'_, App>, label: &str) -> eframe::egui::Pos2 {
+    harness
+        .query_all_by(|node| matches!(node.role(), Role::ListItem | Role::TreeItem))
+        .find(|node| node.accesskit_node().label().as_deref() == Some(label))
+        .unwrap_or_else(|| panic!("no row {label}"))
+        .rect()
+        .center()
+}
+
+/// A click of `button` on `at`.
+fn click_button(
+    harness: &mut Harness<'static, App>,
+    at: eframe::egui::Pos2,
+    button: eframe::egui::PointerButton,
+) {
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        harness.event(eframe::egui::Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: eframe::egui::Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
+/// The File status view with the three files of the Unstaged group selected
+/// by Ctrl+A, flat or as a tree, and with the context menu of the selection
+/// open when `menu` says so.
+fn selection_view(
+    theme: ThemeSetting,
+    size: (f32, f32),
+    tree: bool,
+    menu: bool,
+) -> Harness<'static, App> {
+    let mut harness =
+        file_status_view_with(theme, InterfaceSize::Percent100, size, |backend| backend);
+    if tree {
+        harness
+            .get_by_role_and_label(Role::Button, "Show as tree")
+            .click();
+        harness.run();
+    }
+    let first = file_row(&harness, "Untracked: notes.txt");
+    click_button(&mut harness, first, eframe::egui::PointerButton::Primary);
+    harness.key_press_modifiers(eframe::egui::Modifiers::COMMAND, eframe::egui::Key::A);
+    harness.run();
+    if menu {
+        let on = file_row(&harness, "Modified: ui.rs");
+        click_button(&mut harness, on, eframe::egui::PointerButton::Secondary);
+    } else {
+        harness.event(eframe::egui::Event::PointerGone);
+        harness.run();
+    }
+    harness
+}
+
+#[test]
+fn file_status_with_a_selection_in_the_dark_palette() {
+    let mut harness = selection_view(ThemeSetting::Dark, (1280.0, 800.0), false, false);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_selection_dark", &options());
+}
+
+#[test]
+fn file_status_with_a_selection_in_the_light_palette() {
+    let mut harness = selection_view(ThemeSetting::Light, (1280.0, 800.0), false, false);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_selection_light", &options());
+}
+
+#[test]
+fn file_status_with_a_selection_in_the_tree_in_the_dark_palette() {
+    let mut harness = selection_view(ThemeSetting::Dark, (1280.0, 800.0), true, false);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_selection_tree_dark", &options());
+}
+
+#[test]
+fn file_status_with_a_selection_in_the_tree_in_the_light_palette() {
+    let mut harness = selection_view(ThemeSetting::Light, (1280.0, 800.0), true, false);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_selection_tree_light", &options());
+}
+
+#[test]
+fn the_menu_of_a_selection_in_the_dark_palette() {
+    let mut harness = selection_view(ThemeSetting::Dark, (1280.0, 800.0), false, true);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_selection_menu_dark", &options());
+}
+
+#[test]
+fn the_menu_of_a_selection_in_the_light_palette() {
+    let mut harness = selection_view(ThemeSetting::Light, (1280.0, 800.0), false, true);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_selection_menu_light", &options());
+}
+
+/// The smallest window, 640 by 400 points, with the menu of a selection
+/// open: the menu has to fit beside the rows it was opened on.
+#[test]
+fn the_menu_of_a_selection_in_the_smallest_window() {
+    let mut harness = selection_view(ThemeSetting::Light, (640.0, 400.0), false, true);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "file_status_selection_smallest", &options());
+}
+
 // ---- discarding (spec `discard`)
 
 /// The journal of an earlier run: an interrupted entry and a discarded one,
