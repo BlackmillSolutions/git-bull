@@ -278,9 +278,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "gitbull-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "egui-phosphor",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "gitbull-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fastrand",
  "gitbull-git",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "gitbull-git"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "encoding_rs",
  "gitbull-testkit",
@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "gitbull-testkit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gitbull-git",
  "tempfile",
@@ -4717,7 +4717,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "toml",
  "two-face",

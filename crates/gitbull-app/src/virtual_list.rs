@@ -289,11 +289,33 @@ pub enum ListKey {
     Space,
 }
 
+/// A key of a selection of several rows, which a list reports only when its
+/// caller asked for that selection with [`VirtualList::multi_select`]. It
+/// is not a [`ListKey`]: the lists that match that type without a wildcard
+/// do not know these keys, and never get them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MultiKey {
+    /// Shift and Down.
+    ExtendDown,
+    /// Shift and Up.
+    ExtendUp,
+    /// Ctrl, or Cmd on macOS, and A.
+    SelectAll,
+}
+
 /// What happened in the list this frame.
 pub struct ListOutput {
     pub response: Response,
     /// The row the user clicked, which is now selected.
     pub clicked: Option<u64>,
+    /// The modifiers held while `clicked` was clicked, so that the caller can
+    /// tell a click with Ctrl, Cmd or Shift from a plain one; none without a
+    /// click.
+    pub modifiers: Modifiers,
+    /// The keys of a selection of several rows that the user pressed, in
+    /// order, one for each press; always empty without
+    /// [`VirtualList::multi_select`].
+    pub multi: Vec<MultiKey>,
     /// Whether the selection changed, by clicking or with the keyboard.
     pub selection_changed: bool,
     /// The row the user double-clicked, or pressed Enter on.
@@ -307,23 +329,57 @@ pub struct ListOutput {
 }
 
 /// A list of `rows` rows that fills the space it is given.
-pub struct VirtualList {
+pub struct VirtualList<'a> {
     id: Id,
     role: Role,
     name: String,
     rows: u64,
+    /// Whether a row is selected, when the caller keeps a selection of
+    /// several rows.
+    multi: Option<Box<dyn Fn(u64) -> bool + 'a>>,
+    /// Whether Escape is the caller's while the list has the focus.
+    escape: bool,
 }
 
-impl VirtualList {
+impl<'a> VirtualList<'a> {
     /// A list that takes the focus, which assistive technology announces as
     /// `role` called `name`.
-    pub fn new(id: impl Into<Id>, role: Role, name: impl Into<String>, rows: u64) -> VirtualList {
+    pub fn new(
+        id: impl Into<Id>,
+        role: Role,
+        name: impl Into<String>,
+        rows: u64,
+    ) -> VirtualList<'a> {
         VirtualList {
             id: id.into(),
             role,
             name: name.into(),
             rows,
+            multi: None,
+            escape: false,
         }
+    }
+
+    /// Whether Escape goes to the caller while the list has the focus, as
+    /// when it reduces a selection of several rows. egui takes the focus
+    /// from a widget on Escape unless the widget asks for the key, so a list
+    /// asks for it only while the caller has use for it, and Escape leaves
+    /// the focus where it was otherwise.
+    pub fn takes_escape(mut self, yes: bool) -> VirtualList<'a> {
+        self.escape = yes;
+        self
+    }
+
+    /// Lets the caller keep a selection of several rows: `is_selected` says
+    /// which rows are selected, and the list draws them so. A click reports
+    /// its modifiers, a right click on a selected row keeps the cursor where
+    /// it is, so that its menu is the one of the selection, and Shift with
+    /// Up or Down and Ctrl, or Cmd, with A are consumed before the plain
+    /// arrows and reported in [`ListOutput::multi`]. Without this a list
+    /// behaves as it did, Shift and the arrows moving it as the arrows do.
+    pub fn multi_select(mut self, is_selected: impl Fn(u64) -> bool + 'a) -> VirtualList<'a> {
+        self.multi = Some(Box::new(is_selected));
+        self
     }
 
     /// Draws the rows in view with `row`, which gets the row index and
@@ -391,8 +447,10 @@ impl VirtualList {
         }
 
         let mut clicked = None;
+        let mut click_modifiers = Modifiers::NONE;
         let mut activated = None;
         let mut key = None;
+        let mut multi = Vec::new();
         let mut menu_opened = None;
         let secondary = response.secondary_clicked();
         if response.clicked() || secondary {
@@ -402,13 +460,19 @@ impl VirtualList {
             {
                 let hit = state.row_at(f64::from(pointer.y - rows_rect.top()));
                 if hit < rows {
-                    // A right click selects the row too, as its menu acts on it.
-                    state.select(Some(hit));
+                    // A right click selects the row too, as its menu acts on it,
+                    // unless the row is one of several selected, which the menu
+                    // is for.
+                    let inside = secondary && self.multi.as_ref().is_some_and(|is| is(hit));
+                    if !inside {
+                        state.select(Some(hit));
+                    }
                     if secondary {
                         state.menu_row = Some(hit);
                         menu_opened = Some(hit);
                     } else {
                         clicked = Some(hit);
+                        click_modifiers = ui.input(|input| input.modifiers);
                     }
                     if response.double_clicked() {
                         activated = Some(hit);
@@ -427,10 +491,24 @@ impl VirtualList {
                         vertical_arrows: true,
                         horizontal_arrows: true,
                         tab: true,
-                        ..EventFilter::default()
+                        escape: self.escape,
                     },
                 );
             });
+            // The keys of a selection of several rows come before the plain
+            // arrows: egui matches a modifier logically, so that Shift with
+            // an arrow would move the cursor like the arrow does.
+            if self.multi.is_some() {
+                for (pressed, modifiers, reported) in [
+                    (Key::ArrowDown, Modifiers::SHIFT, MultiKey::ExtendDown),
+                    (Key::ArrowUp, Modifiers::SHIFT, MultiKey::ExtendUp),
+                    (Key::A, Modifiers::COMMAND, MultiKey::SelectAll),
+                ] {
+                    let count =
+                        ui.input_mut(|input| input.count_and_consume_key(modifiers, pressed));
+                    multi.extend(std::iter::repeat_n(reported, count));
+                }
+            }
             for (key, step) in [
                 (Key::ArrowUp, Move::Up),
                 (Key::ArrowDown, Move::Down),
@@ -477,7 +555,10 @@ impl VirtualList {
                 pos2(rows_rect.left(), top),
                 vec2(rows_rect.width(), ROW_HEIGHT),
             );
-            let selected = state.selected() == Some(index);
+            let selected = match &self.multi {
+                Some(is_selected) => is_selected(index),
+                None => state.selected() == Some(index),
+            };
             if selected {
                 ui.painter().with_clip_rect(clip).rect_filled(
                     row_rect,
@@ -499,6 +580,8 @@ impl VirtualList {
         ListOutput {
             response,
             clicked,
+            modifiers: click_modifiers,
+            multi,
             selection_changed: state.selected() != before,
             activated,
             key,

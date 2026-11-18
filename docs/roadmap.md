@@ -10,10 +10,29 @@ M2 improvements to finish before M3 starts.
 The read-only viewer, the interface improvements delivered so far, the
 worktree cockpit and the trust model for write operations provide the
 starting point, and checkout and the creation of branches and tags are
-delivered. All of it is released as 0.2.0. Since then whole files, hunks
-and selected lines can be staged and unstaged, and the staged changes can be
-committed. This roadmap schedules new work; the current application still
-does not discard changes.
+delivered. Whole files, hunks and selected lines can be staged and
+unstaged, the staged changes can be committed, and changes can be discarded,
+every discard being kept so that it can be brought back. All of it is
+released as 0.3.0. Several files can be selected in the File status view for
+staging, unstaging and discarding; that is built and waits for its release.
+This roadmap schedules new work.
+
+## Released: 0.3.0
+
+On 2026-10-13, [pull request #45](https://github.com/BlackmillSolutions/git-bull/pull/45)
+brought staging of files, hunks and lines, committing and discarding
+([pull requests #40 to #43](https://github.com/BlackmillSolutions/git-bull/pull/43))
+to `master`, and
+[git-bull 0.3.0](https://github.com/BlackmillSolutions/git-bull/releases/tag/v0.3.0)
+was published from it with the five packages. Its notes are in
+[`docs/release-notes/0.3.0.md`](release-notes/0.3.0.md).
+
+- CI passed on Linux, Windows and macOS for the tagged commit, and the
+  discard was checked by hand in a real repository, also with git-bull
+  killed during a discard.
+- Like 0.2.0, the release had no pre-release, and its packages were not
+  started by hand on clean installations of the oldest supported systems.
+- Open: issue #36 and the follow-ups of the discard review in issue #44.
 
 ## Released: 0.2.0
 
@@ -70,9 +89,10 @@ is specified in the [checkout spec](../openspec/specs/checkout/spec.md) and the
   that follows it. A notice comes before HEAD is detached, and can be hidden.
 - A double click on a commit that a branch points to checks the branch out,
   so that HEAD stays on a branch; several branches are offered to choose from.
-- Local changes that would be overwritten are never discarded: the checkout is
-  refused and a dialog lists the files. There is no force, no discard and no
-  automatic stash.
+- Local changes that would be overwritten are never discarded by a checkout:
+  the checkout is refused and a dialog lists the files. There is no force and
+  no automatic stash; changes are discarded by an action of their own, see
+  [Delivered: discarding changes](#delivered-discarding-changes).
 - A branch that another worktree has checked out is marked in the sidebar, and
   checking it out opens that worktree.
 - A branch is created from a commit, a branch, a remote branch, a tag or the
@@ -125,8 +145,9 @@ is specified in the [staging spec](../openspec/specs/staging/spec.md).
 - Requests made in quick succession are kept and run in order, and the
   selection moves to the next file. A file in conflict is not staged.
 
-Not delivered with it: discarding changes, resolving conflicts, staging a
-folder as one, and selecting several files.
+Not delivered with it: resolving conflicts, staging a folder as one, and
+selecting several files, which followed with its own delivery. Discarding
+changes followed with its own delivery too.
 
 ## Delivered: staging of hunks and lines
 
@@ -147,7 +168,8 @@ status view, modelled on GitKraken. It was planned as the OpenSpec change
   symbolic link, a change of the file type and a diff that is not loaded in
   full are staged whole; their entries say why.
 
-Not delivered with it: discarding changes and resolving conflicts.
+Not delivered with it: resolving conflicts. Discarding changes followed with
+its own delivery.
 
 ## Delivered: committing
 
@@ -178,17 +200,86 @@ the behaviour is specified in the
 Not delivered with it: signing off, commit templates, co-authors, changing
 the author, pushing after the commit, and the output of a hook while it runs.
 
+## Delivered: discarding changes
+
+On 2026-10-13, discarding changes was delivered from the File status view,
+modelled on GitKraken. It was planned as the OpenSpec change `discard`. Why a
+discard is kept in a journal in the Git folder of the worktree is recorded in
+[ADR 0009](adr/0009-discarded-work-is-kept-in-a-journal.md), that discarding,
+restoring and clearing cannot be stopped in the amendment of
+[ADR 0008](adr/0008-write-actions-belong-to-the-session.md), and the
+behaviour is specified in the
+[discard spec](../openspec/specs/discard/spec.md).
+
+- The menu of an unstaged file has "Discard changes", and the title of the
+  Unstaged group has a trash button "Discard all". Both ask first, in a
+  dialog that lists the files and says they can be brought back. Hunks and
+  selected lines of a tracked file are discarded from the diff without a
+  question.
+- Nothing is lost for good: before anything changes, the files are moved, or
+  for a part copied, byte for byte into a journal in the Git folder. A bar
+  below the file list offers "Undo", Ctrl+Z does the same, and Ctrl+Shift+Z
+  discards again. The list "Recently discarded" restores older entries, puts
+  back an entry that git-bull was killed in, and clears.
+- A discard that fails puts everything back, and puts back nothing over a
+  file that appeared meanwhile. A discard cannot be stopped, and closing a
+  tab or the window waits for it.
+- A file in conflict, a submodule, a rename and a repository of its own are
+  not discarded; their entries say why.
+
+Not delivered with it: selecting several files, which followed with its own
+delivery, and discarding what is only staged, which is unstaged first.
+
+## Delivered: selecting several files
+
+Selecting several files in the File status view was built on the branch
+`impl/select-several-files`, modelled on GitKraken Desktop. It was planned as
+the OpenSpec change `select-several-files`, and is specified in the
+requirements of the capabilities `file-lists`, `staging`, `discard` and
+`working-copy-status` that the change adds. It is not part of 0.3.0.
+
+- A click with Ctrl or Cmd adds a file to the selection or takes it out, a
+  click with Shift selects the range from the anchor, Shift with Up or Down
+  extends it from the file the keys are on, Ctrl or Cmd with A selects every
+  file of the group that the filter shows, and Escape goes back to the anchor.
+  A selection holds files of one group. A click with a modifier on a folder
+  only opens or closes it. The diff panel shows the anchor, the file last
+  clicked, and the list tells assistive technology how many files are
+  selected.
+- S and U, and the first entry of the context menu, "Stage 3 files" or
+  "Unstage 3 files", act on the selection in one request. A file in conflict
+  is left out without a message. The button on a row acts on its row alone,
+  and "Stage all" and "Unstage all" keep acting on the whole group.
+- The context menu offers "Discard changes of 3 files", which asks as
+  "Discard all" does and makes one entry of the journal that "Undo" and the
+  list "Recently discarded" bring back whole. A file that cannot be discarded
+  is left out, and the confirmation says so. No key discards.
+- After an action on a selection exactly one file is selected: the first
+  below the files that went, else the last above them, else the first file of
+  the other group. The selection is kept by path through a status read again
+  and follows the filter.
+- Typing a filter in the File status view is much faster with 50,000 files:
+  the tree tests each file against the filter once. The frame budget with
+  50,000 selected files is measured in `docs/benchmarks.md`.
+
+Where it goes beyond GitKraken's documentation: GitKraken documents
+selecting several files with Shift or Ctrl/Cmd, "Discard changes" on one or
+more selected files and a trash button that discards only the selected files.
+It does not document staging or unstaging a selection, Ctrl+A or Shift with an
+arrow, and names the current file for S and U. git-bull adds those, as file
+lists and GitLens do, and keeps "Discard all" meaning all files of the group,
+because a button that says "all" and acts on a selection would discard fewer
+files than its name says.
+
+Not delivered with it: staging a folder as one, and selecting several files in
+the file list of a commit.
+
 ## Next: the local Git workflow
 
-| Order | Priority | Work |
-|---|---|---|
-| 1 | High | Discard changes of files, hunks and lines, with a way to bring a discard back. |
-
-Discarding is the first action that removes work from the working copy, so
-it comes with a confirmation and with a way to bring a discard back.
-
-Each item starts with its own Explore and Propose and builds on the write
-invocation and on the write actions of the session.
+No item of the local Git workflow that the delivered work started is open. The
+next work is in the section below and in the GitHub roadmap; each item starts
+with its own Explore and Propose and builds on the write invocation and on the
+write actions of the session.
 
 ## After the basic actions
 

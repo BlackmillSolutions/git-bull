@@ -2,6 +2,7 @@
 //! groups, unstaged and staged (spec `working-copy-status`). The diff panel beside it shows the
 //! file chosen.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use eframe::egui::accesskit::Role;
@@ -10,10 +11,12 @@ use eframe::egui::{
     vec2,
 };
 use fluent_bundle::FluentArgs;
+use gitbull_core::discard::{DiscardOffer, Unavailable, discard_offer};
 use gitbull_core::file_status::{Shown, ShownFiles, StatusState};
 use gitbull_core::file_tree::{FileOrder, FileTree, Mode, Row};
 use gitbull_core::workspace::Failure;
 use gitbull_git::changes::ChangeKind;
+use gitbull_git::discard::Class;
 use gitbull_git::path::RepoPath;
 use gitbull_git::status::{Group, StatusEntry, StatusKind, WorkingStatus};
 
@@ -57,6 +60,13 @@ struct Texts {
     index_file: [String; 2],
     /// "Stage all" and "Unstage all", by the group.
     index_all: [String; 2],
+    /// "Discard changes", the entry of the menu of a file.
+    discard_file: String,
+    /// "Discard all", the name of the button of the Unstaged group.
+    discard_all: String,
+    /// Why a file cannot be discarded, by the reasons of [`Unavailable`].
+    discard_unavailable: [String; 5],
+    discard_busy: String,
     /// The titles of the groups, with the number of their files.
     titles: [String; 2],
     /// The names of the kinds of change, for assistive technology.
@@ -88,6 +98,17 @@ impl Texts {
             copy_path: text(Msg::CopyPath),
             index_file: [text(Msg::StageFile), text(Msg::UnstageFile)],
             index_all: [text(Msg::StageAll), text(Msg::UnstageAll)],
+            discard_file: text(Msg::DiscardChanges),
+            discard_all: text(Msg::DiscardAll),
+            discard_unavailable: [
+                Msg::DiscardUnavailableConflict,
+                Msg::DiscardUnavailableSubmodule,
+                Msg::DiscardUnavailableRenamed,
+                Msg::DiscardUnavailableIntentToAdd,
+                Msg::DiscardUnavailableNested,
+            ]
+            .map(text),
+            discard_busy: text(Msg::DiscardUnavailableBusy),
             titles: Shown::ALL.map(|shown| match shown {
                 Shown::Unstaged => title(Msg::FileStatusUnstaged, shown),
                 Shown::Staged => title(Msg::FileStatusStaged, shown),
@@ -111,6 +132,17 @@ impl Texts {
         &self.titles[shown]
     }
 
+    /// Why a file cannot be discarded.
+    fn why_not(&self, why: Unavailable) -> &str {
+        &self.discard_unavailable[match why {
+            Unavailable::Conflict => 0,
+            Unavailable::Submodule => 1,
+            Unavailable::Renamed => 2,
+            Unavailable::IntentToAdd => 3,
+            Unavailable::NestedRepository => 4,
+        }]
+    }
+
     fn kind(&self, kind: StatusKind) -> &str {
         match kind {
             StatusKind::Changed(kind) => &self.kinds[kind_index(kind)],
@@ -127,6 +159,97 @@ pub(crate) fn entry_marker(kind: StatusKind, palette: &Palette) -> (&'static str
         StatusKind::Conflicted => ("!", color(palette.status_conflict)),
         StatusKind::Untracked => ("?", color(palette.status_added)),
     }
+}
+
+/// What the files of a selection offer to discard.
+struct Discardable {
+    /// The files that can be discarded, in the order given.
+    files: Vec<(RepoPath, Class)>,
+    /// How many files cannot be discarded.
+    left: usize,
+    /// Why the first of them cannot.
+    first_reason: Option<Unavailable>,
+}
+
+/// Sorts `entries` into those that can be discarded and those that cannot,
+/// by the rule of [`discard_offer`], which "Discard all" and the selection
+/// share. An entry that offers nothing, as one of the Staged group, is not
+/// counted.
+fn discardable_of<'a>(entries: impl IntoIterator<Item = (Group, &'a StatusEntry)>) -> Discardable {
+    let mut found = Discardable {
+        files: Vec::new(),
+        left: 0,
+        first_reason: None,
+    };
+    for (group, entry) in entries {
+        match discard_offer(group, entry) {
+            Some(DiscardOffer::Offered(class)) => found.files.push((entry.path.clone(), class)),
+            Some(DiscardOffer::Unavailable(why)) => {
+                found.left += 1;
+                found.first_reason.get_or_insert(why);
+            }
+            None => {}
+        }
+    }
+    found
+}
+
+/// One request to stage or unstage files.
+struct Wanted {
+    /// Unstage the files; else stage them.
+    unstage: bool,
+    paths: Vec<RepoPath>,
+    /// The files are the selection, which a key or the menu of a selection
+    /// asks for, and not the file of a button.
+    of_selection: bool,
+}
+
+/// The paths of the selected files that can be staged, or unstaged, in the
+/// order of the list: all but those in conflict.
+fn selected_paths<'a>(
+    tree: &FileTree,
+    actable: &impl Fn(Shown, usize) -> Option<&'a StatusEntry>,
+) -> Vec<RepoPath> {
+    tree.selected_files()
+        .into_iter()
+        .filter_map(|(group, index)| actable(Shown::ALL[group], index))
+        .map(|entry| entry.path.clone())
+        .collect()
+}
+
+/// The selected files, by their index in the group of the anchor, that the
+/// requests take out of their group. The button of a row leaves a selection of
+/// several files as it is, so it moves nothing then.
+fn leaving_files<'a>(
+    tree: &FileTree,
+    wanted: &[Wanted],
+    actable: &impl Fn(Shown, usize) -> Option<&'a StatusEntry>,
+) -> HashSet<usize> {
+    let Some((group, anchor)) = tree.selected_file() else {
+        return HashSet::new();
+    };
+    let several = tree.selection_len() > 1;
+    let asked: HashSet<&RepoPath> = wanted
+        .iter()
+        .filter(|request| request.unstage == (group == Shown::Staged.index()))
+        .filter(|request| request.of_selection || !several)
+        .flat_map(|request| &request.paths)
+        .collect();
+    if asked.is_empty() {
+        return HashSet::new();
+    }
+    let selected = match several {
+        true => tree.selected_files(),
+        false => vec![(group, anchor)],
+    };
+    selected
+        .into_iter()
+        .filter(|&(of, _)| of == group)
+        .filter(|&(of, index)| {
+            actable(Shown::ALL[of], index).is_some_and(|entry| asked.contains(&entry.path))
+        })
+        .map(|(_, index)| index)
+        .collect()
 }
 
 /// Draws the file list of the active tab, and chooses the file whose diff
@@ -147,7 +270,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     };
     let list_texts = ListTexts::new(app);
     let mode = file_list::mode(app);
-    let Some((session, view)) = app.active_view() else {
+    let Some((session, view, translations)) = app.active_view_with_texts() else {
         return false;
     };
     // A request of the keyboard for all files holds for this pass alone: when
@@ -157,6 +280,8 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     // While a checkout or a creation runs, nothing is staged or unstaged; a
     // staging that runs keeps further requests.
     let busy = session.action().is_some_and(|action| !action.is_index());
+    // A discard waits for every action, staging included.
+    let discard_busy = session.action().is_some();
     let Some(file_status) = session.file_status() else {
         return false;
     };
@@ -254,9 +379,27 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         .index_available
         .as_ref()
         .map_or([false; 2], |(_, _, available)| *available);
-    // What the user asks for in this pass: single files, each with whether it
-    // is unstaged, and all files of a group.
-    let mut wanted: Vec<(bool, RepoPath)> = Vec::new();
+    // What a file offers to discard, wherever it is listed.
+    let offered = |shown: Shown, index: usize| {
+        entry_at(status, &files, shown.index(), index)
+            .and_then(|(group, entry)| discard_offer(group, entry))
+    };
+    // Whether the Unstaged group lists a file under the filter that can be
+    // discarded: the first one answers it.
+    let discardable = view.status_files.tree.as_ref().is_some_and(|tree| {
+        tree.files_matching(Shown::Unstaged.index(), &view.status_files.filter)
+            .any(|index| {
+                matches!(
+                    offered(Shown::Unstaged, index),
+                    Some(DiscardOffer::Offered(_))
+                )
+            })
+    });
+    let mut discard_all_clicked = false;
+    let mut discard_asked: Option<AskedDiscard> = None;
+    // What the user asks for in this pass: the files of one request each, and
+    // all files of a group.
+    let mut wanted: Vec<Wanted> = Vec::new();
     let mut all = asked_for_all;
     let mut all_clicked = None;
     let Some(output) = file_list::show(
@@ -267,6 +410,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         chosen_mode,
         &list_texts,
         palette,
+        true,
         |ui, row, selected| {
             let entry = entry_at(status, &files, row.group, row.index);
             if let (Some((_, entry)), Some(order)) = (entry, &order) {
@@ -277,48 +421,91 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
                     enabled: !busy,
                 });
                 if entry_row(ui, entry, order, row, selected, &texts, palette, button) {
-                    wanted.push((row.group == Shown::Staged.index(), entry.path.clone()));
+                    // The button of a row acts on its row alone.
+                    wanted.push(Wanted {
+                        unstage: row.group == Shown::Staged.index(),
+                        paths: vec![entry.path.clone()],
+                        of_selection: false,
+                    });
                 }
             }
         },
         |ui, group| {
             let enabled = available[group] && !busy;
-            if title_row(ui, texts.title(group), &texts.index_all[group], enabled) {
+            // Only the Unstaged group discards.
+            let discard = (Shown::ALL[group] == Shown::Unstaged).then_some(TitleButton {
+                name: &texts.discard_all,
+                icon: crate::icons::TRASH,
+                enabled: discardable && !discard_busy,
+            });
+            let (staged, discarded) = title_row(
+                ui,
+                texts.title(group),
+                &texts.index_all[group],
+                enabled,
+                discard,
+            );
+            if staged {
                 all_clicked = Some(Shown::ALL[group]);
             }
+            discard_all_clicked |= discarded;
         },
     ) else {
         return false;
     };
     all = all.or(all_clicked);
+    let list_id = output.response.id;
     if std::mem::take(&mut view.focus_status) {
         output.response.request_focus();
     }
-    // S stages and U unstages the selected file while the list has the focus.
-    let selected_entry = view
-        .status_files
-        .tree
-        .as_ref()
-        .and_then(FileTree::selected_file)
-        .and_then(|(shown, index)| Some((shown, entry_at(status, &files, shown, index)?.1)));
+    // S stages and U unstages the selected files while the list has the focus.
+    // A file in conflict is left out, and when only such files are selected
+    // the key does nothing.
     if output.response.has_focus()
         && !busy
-        && let Some((shown, entry)) = selected_entry
-        && entry.kind != StatusKind::Conflicted
+        && let Some(tree) = &view.status_files.tree
+        && let Some((shown, _)) = tree.selected_file()
     {
         let key = match Shown::ALL[shown] {
             Shown::Unstaged => egui::Key::S,
             Shown::Staged => egui::Key::U,
         };
         if components::plain_key_pressed(ui, key) {
-            wanted.push((shown == Shown::Staged.index(), entry.path.clone()));
+            let paths = selected_paths(tree, &actable);
+            if !paths.is_empty() {
+                wanted.push(Wanted {
+                    unstage: shown == Shown::Staged.index(),
+                    paths,
+                    of_selection: true,
+                });
+            }
         }
     }
 
     // The menu acts on the entry it was opened for, wherever a refresh
     // moves it meanwhile, and on the path the last commit had of it then.
     if output.menu_opened.is_some() {
+        let several =
+            view.status_files
+                .tree
+                .as_ref()
+                .and_then(|tree| match view.status_files.menu {
+                    Some(Row::File { group, index, .. })
+                        if tree.selection_len() > 1 && tree.is_file_selected(group, index) =>
+                    {
+                        Some(
+                            tree.selected_files()
+                                .into_iter()
+                                .filter_map(|(group, index)| entry_at(status, &files, group, index))
+                                .map(|(group, entry)| (group, entry.clone()))
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                    _ => None,
+                });
         view.status_menu = match view.status_files.menu {
+            // The menu of a file of a selection acts on the selection.
+            Some(Row::File { .. }) if several.is_some() => several.map(StatusMenu::Files),
             Some(Row::File { group, index, .. }) => {
                 entry_at(status, &files, group, index).map(|(group, entry)| {
                     StatusMenu::File(group, entry.clone(), last_commit_path(status, group, entry))
@@ -332,7 +519,11 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
     }
     let (menu_entry, in_last_commit) = match &view.status_menu {
         Some(StatusMenu::File(group, entry, path)) => (Some((*group, entry)), path.as_ref()),
-        Some(StatusMenu::Folder(_)) | None => (None, None),
+        Some(StatusMenu::Folder(_) | StatusMenu::Files(_)) | None => (None, None),
+    };
+    let menu_files = match &view.status_menu {
+        Some(StatusMenu::Files(files)) => Some(files),
+        _ => None,
     };
     let menu_folder = match &view.status_menu {
         Some(StatusMenu::Folder(path)) => Some(path),
@@ -345,6 +536,78 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             if let Some(path) = menu_folder {
                 if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
                     ui.ctx().copy_text(path.to_string());
+                    ui.close();
+                }
+                return;
+            }
+            // Several files offer to act on all of them, and to copy their paths.
+            if let Some(selection) = menu_files {
+                let paths: Vec<RepoPath> = selection
+                    .iter()
+                    .filter(|(_, entry)| entry.kind != StatusKind::Conflicted)
+                    .map(|(_, entry)| entry.path.clone())
+                    .collect();
+                if let Some((group, _)) = selection.first()
+                    && !paths.is_empty()
+                {
+                    let shown = Shown::of(*group);
+                    let mut args = FluentArgs::new();
+                    args.set("count", paths.len());
+                    let text = translations.text_with(
+                        match shown {
+                            Shown::Unstaged => Msg::StageFiles,
+                            Shown::Staged => Msg::UnstageFiles,
+                        },
+                        Some(&args),
+                    );
+                    let item = ui
+                        .add_enabled_ui(!busy, |ui| components::menu_item(ui, None, &text, None))
+                        .inner;
+                    if item.clicked() {
+                        wanted.push(Wanted {
+                            unstage: shown == Shown::Staged,
+                            paths,
+                            of_selection: true,
+                        });
+                        ui.close();
+                    }
+                }
+                // Discarding is offered for the Unstaged group alone, with the
+                // number of files it would discard.
+                let found = discardable_of(selection.iter().map(|(group, entry)| (*group, entry)));
+                if !found.files.is_empty() || found.left > 0 {
+                    let reason = match (&found.first_reason, found.files.is_empty()) {
+                        (_, false) if discard_busy => Some(texts.discard_busy.as_str()),
+                        (Some(why), true) => Some(texts.why_not(*why)),
+                        _ => None,
+                    };
+                    let count = match found.files.is_empty() {
+                        true => found.left,
+                        false => found.files.len(),
+                    };
+                    let mut args = FluentArgs::new();
+                    args.set("count", count);
+                    let text = translations.text_with(Msg::DiscardFiles, Some(&args));
+                    let item = ui
+                        .add_enabled_ui(reason.is_none(), |ui| {
+                            components::menu_item(ui, None, &text, None)
+                        })
+                        .inner;
+                    let chosen = match reason {
+                        Some(reason) => item.on_disabled_hover_text(reason).clicked(),
+                        None => item.clicked(),
+                    };
+                    if chosen {
+                        discard_asked = Some((found.files, false, found.left));
+                        ui.close();
+                    }
+                }
+                if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
+                    let paths: Vec<String> = selection
+                        .iter()
+                        .map(|(_, entry)| entry.path.to_string())
+                        .collect();
+                    ui.ctx().copy_text(paths.join("\n"));
                     ui.close();
                 }
                 return;
@@ -363,7 +626,34 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
                     })
                     .inner;
                 if item.clicked() {
-                    wanted.push((shown == Shown::Staged.index(), entry.path.clone()));
+                    wanted.push(Wanted {
+                        unstage: shown == Shown::Staged.index(),
+                        paths: vec![entry.path.clone()],
+                        of_selection: false,
+                    });
+                    ui.close();
+                }
+            }
+            // Discarding changes the working copy and is asked about first.
+            if let Some(offer) = discard_offer(group, entry) {
+                let reason = match offer {
+                    DiscardOffer::Offered(_) if discard_busy => Some(texts.discard_busy.as_str()),
+                    DiscardOffer::Offered(_) => None,
+                    DiscardOffer::Unavailable(why) => Some(texts.why_not(why)),
+                };
+                let item = ui
+                    .add_enabled_ui(reason.is_none(), |ui| {
+                        components::menu_item(ui, None, &texts.discard_file, None)
+                    })
+                    .inner;
+                let chosen = match reason {
+                    Some(reason) => item.on_disabled_hover_text(reason).clicked(),
+                    None => item.clicked(),
+                };
+                if chosen {
+                    if let DiscardOffer::Offered(class) = offer {
+                        discard_asked = Some((vec![(entry.path.clone(), class)], false, 0));
+                    }
                     ui.close();
                 }
             }
@@ -385,18 +675,35 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             }
         });
     });
-    // The selected file is about to leave its group: the selection moves on
-    // at once, so that the same key acts on the next file.
-    let selected_path = selected_entry.map(|(shown, entry)| (shown, &entry.path));
-    let leaves = wanted
-        .iter()
-        .any(|(unstage, path)| selected_path == Some((if *unstage { 1 } else { 0 }, path)));
-    if leaves
+    // The selected files are about to leave their group: the selection moves
+    // on at once, so that the same key acts on the next file. The button of a
+    // row leaves a selection of several files as it is.
+    if !wanted.is_empty()
         && let Some(tree) = &mut view.status_files.tree
-        && let Some(row) = tree.successor_of_selected()
     {
-        tree.select_row(row);
-        view.status_files.list.select(Some(row as u64));
+        let leaving = leaving_files(tree, &wanted, &actable);
+        if !leaving.is_empty()
+            && let Some(row) = tree.successor_of_selection(|index| leaving.contains(&index))
+        {
+            tree.select_row(row);
+            view.status_files.list.select(Some(row as u64));
+        }
+    }
+    if discard_all_clicked {
+        // The files of the Unstaged group under the filter, and how many of
+        // them cannot be discarded.
+        let (view, filter) = (&view.status_files, view.status_files.filter.as_str());
+        if let Some(tree) = &view.tree {
+            let Discardable {
+                files: to_discard,
+                left,
+                ..
+            } = discardable_of(
+                tree.files_matching(Shown::Unstaged.index(), filter)
+                    .filter_map(|index| entry_at(status, &files, Shown::Unstaged.index(), index)),
+            );
+            discard_asked = Some((to_discard, true, left));
+        }
     }
     let all = all.and_then(|shown| {
         let tree = view.status_files.tree.as_ref()?;
@@ -409,11 +716,16 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         .and_then(FileTree::selected_file)
         .and_then(|(shown, index)| files.file(shown, index));
     session.choose_status_file(chosen);
+    let selected_count = view
+        .status_files
+        .tree
+        .as_ref()
+        .map_or(0, FileTree::selection_len);
     if !busy {
-        for (unstage, path) in wanted {
-            match unstage {
-                true => session.unstage(vec![path]),
-                false => session.stage(vec![path]),
+        for request in wanted {
+            match request.unstage {
+                true => session.unstage(request.paths),
+                false => session.stage(request.paths),
             };
         }
         match all {
@@ -426,8 +738,21 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             None => {}
         }
     }
+    // While several files are selected the list tells assistive technology
+    // how many, besides its name; each selected row says that it is selected.
+    if selected_count > 1 {
+        let mut args = FluentArgs::new();
+        args.set("count", selected_count);
+        let text = app.texts.text_with(Msg::FilesSelected, Some(&args));
+        ui.ctx().accesskit_node_builder(list_id, |node| {
+            node.set_description(text);
+        });
+    }
     if let Some(action) = opened {
         app.open_file_action(action);
+    }
+    if let Some((files, all, left)) = discard_asked {
+        app.ask_discard(files, all, left);
     }
     if chosen_mode != mode {
         app.set_file_tree(chosen_mode == Mode::Tree);
@@ -472,27 +797,56 @@ struct RowButton<'a> {
     enabled: bool,
 }
 
+/// Files the user asked to discard, each with its class, whether it is
+/// "Discard all", and how many files the request left.
+type AskedDiscard = (Vec<(RepoPath, Class)>, bool, usize);
+
+/// An icon button in the title of a group.
+struct TitleButton<'a> {
+    name: &'a str,
+    icon: &'static str,
+    enabled: bool,
+}
+
+/// The space between the buttons of a title, and to the title.
+const TITLE_GAP: f32 = 4.0;
+
 /// Draws the title of a group with the button `all` at its end, which acts
-/// on every file the group lists. Returns whether the button was chosen.
-fn title_row(ui: &mut Ui, title: &str, all: &str, enabled: bool) -> bool {
+/// on every file the group lists, and before it the icon button `discard`, if
+/// there is one. The title keeps the room of both buttons: its text is
+/// shortened, not covered. Returns whether `all` was chosen and whether
+/// `discard` was.
+fn title_row(
+    ui: &mut Ui,
+    title: &str,
+    all: &str,
+    enabled: bool,
+    discard: Option<TitleButton<'_>>,
+) -> (bool, bool) {
     let rect = ui.max_rect();
     let row = ui.interact(rect, ui.id().with("title"), Sense::hover());
     row.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, title));
     ui.ctx().accesskit_node_builder(row.id, |node| {
         node.set_role(Role::Heading);
     });
+    let all_button = components::Button::new(all).kind(components::Kind::Ghost);
+    let icon_width = crate::theme::SHAPE.control_height;
+    let buttons = all_button.width(ui) + discard.as_ref().map_or(0.0, |_| TITLE_GAP + icon_width);
+    // The title ends before the buttons, which lie 6 points from the edge.
+    let mut label = rect.shrink2(vec2(6.0, 0.0));
+    label.max.x = (rect.right() - 6.0 - buttons - TITLE_GAP).max(label.min.x);
     ui.scope_builder(
         UiBuilder::new()
-            .max_rect(rect.shrink2(vec2(6.0, 0.0)))
+            .max_rect(label)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             ui.add(Label::new(section_text(title)).truncate().selectable(false));
         },
     );
-    let mut clicked = false;
-    // The button is as high as a control, which is higher than a row: it is
-    // given that room around the middle of the row, so that its label stands
-    // on the line of the title.
+    let (mut all_clicked, mut discard_clicked) = (false, false);
+    // The buttons are as high as a control, which is higher than a row: they
+    // are given that room around the middle of the row, so that their labels
+    // stand on the line of the title.
     let room = egui::Rect::from_center_size(
         rect.center(),
         vec2(rect.width() - 12.0, crate::theme::SHAPE.control_height),
@@ -502,16 +856,24 @@ fn title_row(ui: &mut Ui, title: &str, all: &str, enabled: bool) -> bool {
             .max_rect(room)
             .layout(Layout::right_to_left(Align::Center)),
         |ui| {
-            if !enabled {
-                ui.disable();
+            all_clicked = ui
+                .add_enabled_ui(enabled, |ui| all_button.show(ui).clicked())
+                .inner;
+            if let Some(discard) = &discard {
+                ui.add_space(TITLE_GAP);
+                let (slot, _) = ui.allocate_exact_size(
+                    vec2(icon_width, crate::theme::SHAPE.control_height),
+                    Sense::hover(),
+                );
+                discard_clicked = ui
+                    .add_enabled_ui(discard.enabled, |ui| {
+                        components::icon_button_in(ui, slot, discard.icon, discard.name).clicked()
+                    })
+                    .inner;
             }
-            clicked = components::Button::new(all)
-                .kind(components::Kind::Ghost)
-                .show(ui)
-                .clicked();
         },
     );
-    clicked
+    (all_clicked, discard_clicked)
 }
 
 #[expect(clippy::too_many_arguments, reason = "the parts of one row")]

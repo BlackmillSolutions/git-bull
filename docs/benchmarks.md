@@ -521,3 +521,32 @@ apart.
   table alone takes 0.7 ms, so the target is 3 ms rather than the 1 ms
   first planned. When every path is shared with a neighbour, the build
   takes 10.5 ms at most; this case has no target.
+
+## Selecting several files (change `select-several-files`, task 3.4)
+
+Measured on 2026-11-18 on Linux, Intel Core i5-3210M with 4 threads, 16 GB
+RAM, release build, with
+`cargo test --release -p gitbull-app --test benchmarks status_selection -- --ignored --nocapture --test-threads=1`.
+The fake backend reports 50,000 unstaged files in 50 folders, so Git and the
+disk take no part; the slowest of four runs is shown.
+
+| File status view, 50,000 unstaged files | Frames | Median | 99th percentile | Slowest | Met |
+|---|---|---|---|---|---|
+| Ctrl+A in the flat list | 6 | 1.4 ms | 2.1 ms | 4.6 ms | yes |
+| Shift click on a file in view | 7 | 1.0 ms | 3.3 ms | 6.2 ms | yes |
+| Shift+Down held down | 60 | 1.2 ms | 2.1 ms | 2.4 ms | yes |
+| Collapsing and expanding a folder of the tree, all selected | 20 | 1.7 ms | 3.6 ms | 5.8 ms | yes |
+| Typing `file-0001` in the tree, one file selected | 9 | 4.8 ms | 5.1 ms | 6.4 ms | yes |
+| Typing `file-0001` in the tree, all selected | 9 | 5.0 ms | 7.6 ms | 7.8 ms | yes |
+
+- Every frame stays below the target of 16.7 ms.
+- Typing a filter used to cost more: before this change the tree tested
+  every file against the filter twice, once to count the matches of each
+  folder and once to build the rows, and the selection tested the selected
+  files a third time. Typing in the tree with 50,000 files took 15.0 ms in
+  the median and 22.1 ms at worst with one file selected, and 18.5 ms and
+  36.4 ms with all selected. The tree now tests each file once per filter
+  and uses the result for the selection and the rows.
+- The frame in which the 50,000 files arrive took 15 ms to 22 ms. It sorts
+  the files into the tree order, does not depend on the selection, and is
+  reported by the benchmark but not held to the target.

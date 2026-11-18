@@ -23,8 +23,10 @@ use gitbull_git::commit::{
 };
 use gitbull_git::commit_graph::GraphProgress;
 use gitbull_git::content::CommitContent;
+use gitbull_git::discard::DiscardRefusal;
 use gitbull_git::head::Head;
 use gitbull_git::history::{CommitLine, Revisions};
+use gitbull_git::journal::PathRefusal;
 use gitbull_git::object_id::ObjectId;
 use gitbull_git::patch::{PartRequest, Selection};
 use gitbull_git::path::RepoPath;
@@ -50,6 +52,12 @@ use crate::opening::OpenedRepository;
 use crate::search::{HashOutcome, Search, SearchMode};
 use crate::store::{CommitStore, Parent, Row};
 use crate::workspace::{Failure, Notify, View, panic_message};
+
+mod discarding;
+#[cfg(test)]
+mod discarding_tests;
+
+pub use discarding::{DiscardRecord, DiscardStart, JournalView, JournalWhy, Unreadable};
 
 /// Lines the loader collects before handing them over.
 const BATCH_LINES: usize = 4096;
@@ -115,9 +123,33 @@ pub enum Action {
     UnstagePart { path: String },
     /// Committing, or replacing the last commit.
     Commit { amend: bool },
+    /// Discarding the changes of this many files.
+    Discard { files: usize },
+    /// Discarding a hunk or lines of the file at this path.
+    DiscardPart { path: String },
+    /// Bringing a discard back, or, with `again`, discarding it again.
+    Restore { again: bool },
+    /// Completing an entry of the journal that a process left unfinished.
+    PutBack,
+    /// Removing every entry of the journal.
+    ClearDiscards,
 }
 
 impl Action {
+    /// Discarding, restoring and clearing, which are exclusive and cannot be
+    /// stopped; only the status and the journal are read after them (ADR
+    /// 0008).
+    pub fn is_discard(&self) -> bool {
+        matches!(
+            self,
+            Action::Discard { .. }
+                | Action::DiscardPart { .. }
+                | Action::Restore { .. }
+                | Action::PutBack
+                | Action::ClearDiscards
+        )
+    }
+
     /// Staging or unstaging, which changes the index alone: such actions
     /// queue behind each other, and only the status is read after them
     /// (ADR 0008).
@@ -131,10 +163,13 @@ impl Action {
         )
     }
 
-    /// Staging or unstaging a part of a file, which is asked for in the diff
-    /// and not in the file list.
+    /// Staging, unstaging or discarding a part of a file, which is asked for
+    /// in the diff and not in the file list.
     pub fn is_part(&self) -> bool {
-        matches!(self, Action::StagePart { .. } | Action::UnstagePart { .. })
+        matches!(
+            self,
+            Action::StagePart { .. } | Action::UnstagePart { .. } | Action::DiscardPart { .. }
+        )
     }
 }
 
@@ -334,6 +369,21 @@ pub enum ActionDialog {
     /// git-bull made no commit, because of the state the repository is in;
     /// Git was not asked.
     CommitRefused { why: CommitRefusal },
+    /// git-bull made no discard, or put one back, because of how the files
+    /// are: nothing was discarded.
+    ///
+    /// `path` names the file of a part.
+    DiscardRefused {
+        why: DiscardRefusal,
+        path: Option<String>,
+    },
+    /// A discard was done, and these files were left out, each with why.
+    DiscardLeftOut { files: Vec<(String, PathRefusal)> },
+    /// A discard failed, and these files could not be put back without
+    /// overwriting what lies at their path: they and their copies stay.
+    DiscardStuck { message: String, files: Vec<String> },
+    /// An action on the journal was refused.
+    JournalRefused { why: JournalWhy },
     /// Git failed, with its message in full.
     Failed { action: Action, message: String },
     /// Git reported a failure after it had done the action, as a failing
@@ -488,6 +538,23 @@ pub struct Session {
     /// "Amend last commit" is checked.
     on_remote_branch: bool,
     on_remote_result: Option<Receiver<Result<bool, Failure>>>,
+    /// How the worker of a discard, a restore or a clear ended.
+    discard_result: Option<Receiver<discarding::DiscardWork>>,
+    /// The journal of discards of the worktree, as last read.
+    journal: JournalView,
+    journal_result: Option<Receiver<Result<JournalView, Failure>>>,
+    /// The entry of the last discard this session made, which undo and redo
+    /// act on.
+    last_discard: Option<String>,
+    /// When the discard, restore or clear that runs began.
+    discard_started: Option<Instant>,
+    /// When another process was last asked whether it works on the journal,
+    /// and the answer on its way.
+    waiting_checked: Option<Instant>,
+    waiting_result: Option<Receiver<bool>>,
+    /// The running action waits for another git-bull to be done with the
+    /// journal.
+    waiting_for_other: bool,
 }
 
 impl fmt::Debug for Session {
@@ -575,6 +642,14 @@ impl Session {
             last_message_result: None,
             on_remote_branch: false,
             on_remote_result: None,
+            discard_result: None,
+            journal: JournalView::default(),
+            journal_result: None,
+            last_discard: None,
+            discard_started: None,
+            waiting_checked: None,
+            waiting_result: None,
+            waiting_for_other: false,
         }
     }
 
@@ -612,6 +687,8 @@ impl Session {
         // The history does not wait for it.
         if let Some(status) = &mut self.file_status {
             status.refresh();
+            // Entries of earlier runs and of other instances are listed.
+            self.read_journal();
         }
         self.read_commit_state();
         self.start_history();
@@ -824,6 +901,8 @@ impl Session {
             changed |= status.poll();
         }
         changed |= self.finish_index_action();
+        changed |= self.poll_discard();
+        changed |= self.poll_waiting(now);
         if let Some(source) = &self.content {
             while let Some(answer) = source.try_next() {
                 // A commit whose content cannot be read keeps its
@@ -980,9 +1059,11 @@ impl Session {
         if !self.started {
             return;
         }
-        // Files may have changed without any reference changing.
+        // Files may have changed without any reference changing, and another
+        // instance may have discarded or restored.
         if let Some(status) = &mut self.file_status {
             status.refresh();
+            self.read_journal();
         }
         self.read_commit_state();
         if self.refresh_result.is_some() {
@@ -1670,8 +1751,14 @@ impl Session {
             Action::CreateBranch { name } | Action::CreateTag { name } => name.clone(),
             Action::Stage { .. } | Action::Unstage { .. } => String::new(),
             Action::StagePart { path } | Action::UnstagePart { path } => path.clone(),
-            // A commit ends in `commit_ended`.
+            // A commit ends in `commit_ended`, and discards in
+            // `discard_ended`.
             Action::Commit { .. } => String::new(),
+            Action::Discard { .. }
+            | Action::DiscardPart { .. }
+            | Action::Restore { .. }
+            | Action::PutBack
+            | Action::ClearDiscards => String::new(),
         };
         running.ended = Some(match result {
             Ok(()) => Ended::Done,
@@ -1722,8 +1809,9 @@ impl Session {
     /// means the action happened, and the hook is to blame.
     fn finish_action(&mut self) {
         // A staging or an unstaging waits for its status, not for this read.
-        let over =
-            |running: &mut RunningAction| running.ended.is_some() && !running.action.is_index();
+        let over = |running: &mut RunningAction| {
+            running.ended.is_some() && !running.action.is_index() && !running.action.is_discard()
+        };
         let Some(running) = self.action.take_if(over) else {
             return;
         };
@@ -2579,11 +2667,11 @@ mod tests {
     use gitbull_testkit::{FakeBackend, Gate, HistoryFeed, LiveRepo, commit_line, fake_id};
     use std::path::PathBuf;
 
-    fn root() -> PathBuf {
+    pub(super) fn root() -> PathBuf {
         ["work", "git-bull"].iter().collect()
     }
 
-    fn opened() -> OpenedRepository {
+    pub(super) fn opened() -> OpenedRepository {
         OpenedRepository {
             root: root(),
             repository: root(),
@@ -2599,15 +2687,15 @@ mod tests {
         }
     }
 
-    fn session(backend: FakeBackend) -> Session {
+    pub(super) fn session(backend: FakeBackend) -> Session {
         Session::new(opened(), Arc::new(backend), Arc::new(|| {}))
     }
 
-    fn backend() -> FakeBackend {
+    pub(super) fn backend() -> FakeBackend {
         FakeBackend::default().with_repository(root())
     }
 
-    fn five_lines() -> Vec<CommitLine> {
+    pub(super) fn five_lines() -> Vec<CommitLine> {
         vec![
             commit_line("e", &["d"]),
             commit_line("d", &["c"]),
@@ -2618,7 +2706,7 @@ mod tests {
     }
 
     /// Polls until `done` holds.
-    fn wait_until(session: &mut Session, done: impl Fn(&mut Session) -> bool) {
+    pub(super) fn wait_until(session: &mut Session, done: impl Fn(&mut Session) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !done(session) {
             assert!(Instant::now() < deadline, "timed out");
@@ -2676,6 +2764,7 @@ mod tests {
                 "commit-state",
                 "count",
                 "history",
+                "journal-entries",
                 "references",
                 "stashes",
                 "status",
@@ -3078,7 +3167,7 @@ mod tests {
         assert!(!probe.calls(&root()).contains(&"shallow".to_owned()));
     }
 
-    fn branch(name: &str, commit: &str) -> Reference {
+    pub(super) fn branch(name: &str, commit: &str) -> Reference {
         Reference {
             name: format!("refs/heads/{name}"),
             short: name.to_owned(),
@@ -3788,11 +3877,11 @@ mod tests {
     use gitbull_git::switch::CheckoutTarget;
     use gitbull_testkit::FakeWrite;
 
-    fn named(name: &str) -> CheckoutRequest {
+    pub(super) fn named(name: &str) -> CheckoutRequest {
         CheckoutRequest::Branch(name.to_owned())
     }
 
-    fn count(probe: &gitbull_testkit::Probe, call: &str) -> usize {
+    pub(super) fn count(probe: &gitbull_testkit::Probe, call: &str) -> usize {
         probe
             .calls(&root())
             .iter()
@@ -3800,7 +3889,7 @@ mod tests {
             .count()
     }
 
-    fn idle(session: &mut Session) -> bool {
+    pub(super) fn idle(session: &mut Session) -> bool {
         session.action().is_none()
     }
 
@@ -4424,7 +4513,7 @@ mod tests {
         }
     }
 
-    fn on_main() -> FakeBackend {
+    pub(super) fn on_main() -> FakeBackend {
         backend()
             .with_history(root(), five_lines())
             .with_references(root(), vec![branch("main", "e")])
@@ -5024,26 +5113,26 @@ mod tests {
         }
     }
 
-    fn with_changes() -> FakeBackend {
+    pub(super) fn with_changes() -> FakeBackend {
         on_main().with_status(root(), working())
     }
 
     /// A session whose status is read.
-    fn staging(backend: FakeBackend) -> Session {
+    pub(super) fn staging(backend: FakeBackend) -> Session {
         let mut session = ready(backend);
         wait_until(&mut session, status_read);
         session
     }
 
-    fn repo_paths(names: &[&str]) -> Vec<RepoPath> {
+    pub(super) fn repo_paths(names: &[&str]) -> Vec<RepoPath> {
         names.iter().map(|name| RepoPath::from(*name)).collect()
     }
 
-    fn calls(probe: &gitbull_testkit::Probe) -> Vec<(String, Vec<String>)> {
+    pub(super) fn calls(probe: &gitbull_testkit::Probe) -> Vec<(String, Vec<String>)> {
         probe.index_calls()
     }
 
-    fn call(kind: &str, paths: &[&str]) -> (String, Vec<String>) {
+    pub(super) fn call(kind: &str, paths: &[&str]) -> (String, Vec<String>) {
         (
             kind.to_owned(),
             paths.iter().map(|path| (*path).to_owned()).collect(),
@@ -5410,7 +5499,7 @@ mod tests {
     use gitbull_git::patch::Selection;
 
     /// A diff of `path` with one hunk: a context line and two added lines.
-    fn part_diff(path: &str) -> FileDiff {
+    pub(super) fn part_diff(path: &str) -> FileDiff {
         let line = |kind, text: &str| DiffLine {
             kind,
             old_number: None,
@@ -5445,7 +5534,7 @@ mod tests {
 
     /// The files of [`working`] with a diff for `a.rs`, unstaged, and for
     /// `staged.rs`, staged.
-    fn with_diffs() -> FakeBackend {
+    pub(super) fn with_diffs() -> FakeBackend {
         with_changes()
             .with_working_diff(Group::Unstaged, "a.rs", part_diff("a.rs"))
             .with_working_diff(Group::Staged, "staged.rs", part_diff("staged.rs"))
@@ -5459,14 +5548,14 @@ mod tests {
 
     /// A session with the file at `index` of `group` chosen and its diff
     /// shown.
-    fn choosing(backend: FakeBackend, group: Group, index: usize) -> Session {
+    pub(super) fn choosing(backend: FakeBackend, group: Group, index: usize) -> Session {
         let mut session = staging(backend);
         session.choose_status_file(Some((group, index)));
         wait_until(&mut session, diff_shown);
         session
     }
 
-    fn second_line() -> Selection {
+    pub(super) fn second_line() -> Selection {
         Selection::new().line(0, 1)
     }
 

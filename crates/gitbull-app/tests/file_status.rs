@@ -533,7 +533,7 @@ fn three_unstaged() -> WorkingStatus {
 }
 
 #[test]
-fn the_menu_of_an_unstaged_file_offers_to_stage_it_and_nothing_that_discards() {
+fn the_menu_of_an_unstaged_file_offers_to_stage_it_and_to_discard_its_changes() {
     let (mut harness, probe) = file_status_of(backend().with_status(root(), mixed()));
     let at = file(&harness, "Modified: edited.txt");
     click_at(&mut harness, at, PointerButton::Secondary);
@@ -542,12 +542,29 @@ fn the_menu_of_an_unstaged_file_offers_to_stage_it_and_nothing_that_discards() {
         buttons_shown.contains(&"Copy path".to_owned()),
         "{buttons_shown:?}"
     );
-    for word in ["Discard", "Remove", "Delete"] {
+    // Discarding is "Discard changes", asked about first; nothing is called
+    // removing or deleting.
+    for word in ["Remove", "Delete"] {
         assert!(
             !buttons_shown.iter().any(|label| label.contains(word)),
             "{word} in {buttons_shown:?}"
         );
     }
+    assert!(
+        buttons_shown.contains(&"Discard changes".to_owned()),
+        "{buttons_shown:?}"
+    );
+    // "Discard changes" lies after "Stage file" and before "File history".
+    let copy_at = buttons(&harness, "Copy path")[0];
+    let stage = buttons(&harness, "Stage file")
+        .into_iter()
+        .find(|button| (button.x - copy_at.x).abs() < 40.0 && button.y < copy_at.y)
+        .expect("Stage file in the menu");
+    let (discard, history) = (
+        buttons(&harness, "Discard changes")[0],
+        buttons(&harness, "File history")[0],
+    );
+    assert!(stage.y < discard.y && discard.y < history.y);
     // Committing is offered by the commit form alone, not by the menu.
     let commits: Vec<_> = buttons_shown
         .iter()
@@ -1950,6 +1967,8 @@ fn menu_entries(harness: &Harness<'_, App>) -> Vec<String> {
         "Stage selected lines",
         "Unstage hunk",
         "Unstage selected lines",
+        "Discard hunk",
+        "Discard selected lines",
     ];
     let copy = buttons(harness, "Copy lines");
     let Some(copy) = copy.first() else {
@@ -2022,13 +2041,10 @@ fn the_menu_of_a_line_offers_to_stage_its_hunk_and_the_selected_lines() {
             "Copy lines",
             "Copy hunk",
             "Stage hunk",
-            "Stage selected lines"
+            "Stage selected lines",
+            "Discard hunk",
+            "Discard selected lines"
         ]
-    );
-    let shown = labels(&harness, Role::Button);
-    assert!(
-        !shown.iter().any(|label| label.contains("Discard")),
-        "{shown:?}"
     );
     choose_entry(&mut harness, "Stage hunk");
     wait_until(&mut harness, |_| !probe.parts().is_empty());
@@ -2159,8 +2175,14 @@ fn the_keys_stage_the_selected_lines_or_the_hunk_of_a_selected_header() {
         )]
     );
 
-    // A header alone: its hunk.
+    // A header alone: its hunk. The diff is read again after the part; a key
+    // pressed while it is read finds no part to take.
+    wait_until(&mut harness, |_| {
+        let reads = probe.calls(&root());
+        reads.iter().filter(|call| *call == "working-diff").count() == 2
+    });
     wait_until(&mut harness, |h| !diff_lines(h).is_empty());
+    harness.run();
     let header = diff_row(&harness, "@@ -1,2 +1,4 @@");
     click_at(&mut harness, header, PointerButton::Primary);
     press(&mut harness, Key::S);
@@ -2353,7 +2375,11 @@ fn a_revealed_line_belongs_to_no_hunk_and_is_staged_with_the_selection() {
     click_at(&mut harness, at, PointerButton::Secondary);
     assert_eq!(
         menu_entries(&harness),
-        ["Copy lines", "Stage selected lines"]
+        [
+            "Copy lines",
+            "Stage selected lines",
+            "Discard selected lines"
+        ]
     );
     // It is no change.
     assert!(!enabled(&harness, "Stage selected lines"));
@@ -2502,4 +2528,1039 @@ fn the_keyboard_is_in_the_diff_right_after_the_dialog_of_a_part() {
     }
     assert!(running(&harness).is_empty());
     assert!(index_calls(&probe).is_empty(), "S staged the whole file");
+}
+
+// ---- discarding parts (spec `discard`)
+
+/// A discard of a part that was asked for: the path and what is chosen of
+/// each hunk.
+fn discarded(probe: &Probe) -> Vec<(String, Vec<(usize, Chosen)>)> {
+    probe
+        .discarded_parts()
+        .into_iter()
+        .map(|(path, request)| {
+            let chosen = (0..4)
+                .filter_map(|hunk| Some((hunk, request.selection.of(hunk)?.clone())))
+                .collect();
+            (path, chosen)
+        })
+        .collect()
+}
+
+#[test]
+fn the_menu_of_a_line_offers_to_discard_the_hunk_after_the_entries_that_stage() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    let at = diff_row(&harness, ": new");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    let entries = menu_entries(&harness);
+    assert_eq!(
+        entries[2..],
+        [
+            "Stage hunk",
+            "Stage selected lines",
+            "Discard hunk",
+            "Discard selected lines"
+        ]
+    );
+    // No line is selected beyond the one clicked, which is added: both apply.
+    choose_entry(&mut harness, "Discard hunk");
+    wait_until(&mut harness, |_| !probe.discarded_parts().is_empty());
+    // The hunk of the row, the second; no dialog asks first.
+    assert_eq!(
+        discarded(&probe),
+        [("a.rs".to_owned(), vec![(1, Chosen::All)])]
+    );
+    wait_until(&mut harness, |h| running(h).is_empty());
+    assert!(!text_shown(&harness, "Nothing was discarded"));
+    assert!(dialogs_open(&harness).is_empty());
+}
+
+fn dialogs_open(harness: &Harness<'_, App>) -> Vec<String> {
+    labels(harness, Role::Dialog)
+}
+
+#[test]
+fn selected_lines_are_discarded_by_the_entry_of_the_menu() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Primary);
+    click_at(&mut harness, at, PointerButton::Secondary);
+    choose_entry(&mut harness, "Discard selected lines");
+    wait_until(&mut harness, |_| !probe.discarded_parts().is_empty());
+    assert_eq!(
+        discarded(&probe),
+        [("a.rs".to_owned(), vec![(0, Chosen::Lines(vec![1]))])]
+    );
+}
+
+#[test]
+fn the_header_of_a_hunk_has_a_button_that_discards_it_beside_the_one_that_stages() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    assert!(buttons(&harness, "Discard hunk").is_empty());
+    let header = diff_row(&harness, "@@ -20,3 +22,3 @@");
+    harness.hover_at(header);
+    harness.run();
+    let on_header = |harness: &Harness<'_, App>, label: &str| {
+        buttons(harness, label)
+            .into_iter()
+            .find(|button| (button.y - header.y).abs() < 4.0)
+            .unwrap_or_else(|| panic!("no {label} on the header"))
+    };
+    let (stage, discard) = (
+        on_header(&harness, "Stage hunk"),
+        on_header(&harness, "Discard hunk"),
+    );
+    assert!(discard.x < stage.x);
+    click_at(&mut harness, discard, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.discarded_parts().is_empty());
+    assert_eq!(
+        discarded(&probe),
+        [("a.rs".to_owned(), vec![(1, Chosen::All)])]
+    );
+    // Nothing was staged.
+    assert!(probe.parts().is_empty());
+}
+
+#[test]
+fn no_key_discards_a_part() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Primary);
+    for key in [Key::D, Key::Delete, Key::Backspace, Key::X] {
+        press(&mut harness, key);
+    }
+    for _ in 0..5 {
+        harness.step();
+    }
+    assert!(running(&harness).is_empty());
+    assert!(probe.discarded_parts().is_empty());
+}
+
+#[test]
+fn parts_cannot_be_discarded_where_they_cannot_be_staged_and_say_why() {
+    let filtered = FileDiff {
+        filtered: true,
+        ..two_hunks("a.rs")
+    };
+    let backend = with_two_hunks().with_working_diff(Group::Unstaged, "a.rs", filtered);
+    let (mut harness, probe) = diff_of_file(backend, "Modified: a.rs");
+    let header = diff_row(&harness, "@@ -1,2 +1,4 @@");
+    click_at(&mut harness, header, PointerButton::Primary);
+    assert!(buttons(&harness, "Discard hunk").is_empty());
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(!enabled(&harness, "Discard hunk"));
+    assert!(!enabled(&harness, "Discard selected lines"));
+    let entry = buttons(&harness, "Discard hunk")[0];
+    harness.hover_at(entry);
+    wait_until(&mut harness, |h| {
+        text_shown(
+            h,
+            "A filter rewrites this file, so the lines shown are not the lines of the file. \
+             Stage the whole file.",
+        )
+    });
+    assert!(probe.discarded_parts().is_empty());
+}
+
+#[test]
+fn a_staged_file_and_an_untracked_file_offer_no_part_to_discard() {
+    let backend = backend()
+        .with_status(
+            root(),
+            WorkingStatus {
+                staged: vec![changed(MODIFIED, "s.rs")],
+                untracked: vec![entry(StatusKind::Untracked, "n.rs")],
+                ..WorkingStatus::default()
+            },
+        )
+        .with_working_diff(Group::Staged, "s.rs", two_hunks("s.rs"))
+        .with_working_diff(Group::Untracked, "n.rs", two_hunks("n.rs"));
+    let (mut harness, _) = diff_of_file(backend, "Modified: s.rs");
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(buttons(&harness, "Discard hunk").is_empty());
+    assert!(buttons(&harness, "Discard selected lines").is_empty());
+    harness.key_press(Key::Escape);
+    harness.run();
+
+    chosen(&mut harness, "Untracked: n.rs");
+    wait_until(&mut harness, |h| !diff_lines(h).is_empty());
+    let at = diff_row(&harness, ": two");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(buttons(&harness, "Discard hunk").is_empty());
+}
+
+fn refused_part(why: gitbull_git::discard::DiscardRefusal) -> (Harness<'static, App>, Probe) {
+    let backend = with_two_hunks().with_discard_end(gitbull_git::discard::DiscardEnd {
+        outcome: gitbull_git::discard::DiscardOutcome::Refused(why),
+        entry: None,
+        left_out: Vec::new(),
+    });
+    let (mut harness, probe) = diff_of_file(backend, "Modified: a.rs");
+    let at = diff_row(&harness, ": new");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    choose_entry(&mut harness, "Discard hunk");
+    (harness, probe)
+}
+
+#[test]
+fn a_diff_out_of_date_says_that_nothing_was_discarded_and_the_keyboard_goes_to_the_diff() {
+    let (mut harness, probe) = refused_part(gitbull_git::discard::DiscardRefusal::DiffOutOfDate);
+    wait_until(&mut harness, |h| text_shown(h, "a.rs changed"));
+    assert!(text_shown(
+        &harness,
+        "The file changed since its diff was read, so nothing was discarded. \
+         The diff now shows the file as it is."
+    ));
+    harness.run();
+    harness.get_by_role_and_label(Role::Button, "Close").click();
+    harness.run();
+    assert!(dialogs_open(&harness).is_empty());
+    // S acts on the lines of the diff, not on the file of the list.
+    press(&mut harness, Key::S);
+    for _ in 0..5 {
+        harness.step();
+    }
+    assert!(running(&harness).is_empty());
+    assert!(index_calls(&probe).is_empty(), "S staged the whole file");
+}
+
+#[test]
+fn a_refusal_for_line_endings_says_that_the_file_can_be_discarded_whole() {
+    let (mut harness, _) = refused_part(gitbull_git::discard::DiscardRefusal::LineEndings);
+    wait_until(&mut harness, |h| {
+        text_shown(h, "The part of a.rs was not discarded")
+    });
+    assert!(text_shown(
+        &harness,
+        "Git would have changed the line endings of other lines of the file, so the file \
+         was put back as it was. The whole file can be discarded instead."
+    ));
+}
+
+// ---- the selection of several files (specs `file-lists` and
+// `working-copy-status`)
+
+/// `a.rs` to `e.rs` modified and not staged, and `s.rs` and `t.rs` staged.
+fn five_unstaged() -> WorkingStatus {
+    WorkingStatus {
+        staged: vec![changed(MODIFIED, "s.rs"), changed(MODIFIED, "t.rs")],
+        unstaged: ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
+            .map(|path| changed(MODIFIED, path))
+            .to_vec(),
+        ..WorkingStatus::default()
+    }
+}
+
+/// The File status view of [`five_unstaged`], with `a.rs` selected.
+fn five() -> (Harness<'static, App>, Probe) {
+    file_status_of(backend().with_status(root(), five_unstaged()))
+}
+
+/// A click on `at` with `modifiers` held.
+fn click_with(harness: &mut Harness<'_, App>, at: Pos2, modifiers: Modifiers) {
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        let event = Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        harness.event_modifiers(event, modifiers);
+    }
+    for _ in 0..3 {
+        harness.step();
+    }
+}
+
+/// A click on the file `label` with `modifiers` held.
+fn click_file_with(harness: &mut Harness<'_, App>, label: &str, modifiers: Modifiers) {
+    let at = file(harness, label);
+    click_with(harness, at, modifiers);
+}
+
+/// The files that are selected, top to bottom.
+fn selected_files(harness: &Harness<'_, App>) -> Vec<String> {
+    // The rows of the sidebar are tree items too, and one of them is selected.
+    let left = harness
+        .get_by_role_and_label(Role::Label, "FILES")
+        .rect()
+        .left()
+        - 12.0;
+    let mut files: Vec<(f32, String)> = harness
+        .query_all_by(|node| matches!(node.role(), Role::ListItem | Role::TreeItem))
+        .filter(|node| node.rect().left() >= left)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| Some((node.rect().top(), node.accesskit_node().label()?)))
+        .collect();
+    files.sort_by(|a, b| a.0.total_cmp(&b.0));
+    files.into_iter().map(|(_, label)| label).collect()
+}
+
+fn modified(paths: &[&str]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| format!("Modified: {path}"))
+        .collect()
+}
+
+#[test]
+fn a_click_with_ctrl_adds_a_file_and_a_second_one_removes_it() {
+    let (mut harness, _) = five();
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "c.rs"]));
+    click_file_with(&mut harness, "Modified: a.rs", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["c.rs"]));
+}
+
+#[test]
+fn a_click_with_cmd_does_the_same_on_macos() {
+    let backend = backend().with_status(root(), five_unstaged());
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = support::window_on(eframe::egui::os::OperatingSystem::Mac, test.app);
+    settle_window(&mut harness);
+    wait_until(&mut harness, |h| has_row(h, "Base"));
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    click_file_with(
+        &mut harness,
+        "Modified: c.rs",
+        Modifiers::MAC_CMD | Modifiers::COMMAND,
+    );
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "c.rs"]));
+}
+
+#[test]
+fn a_click_with_shift_selects_the_range_from_the_anchor() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: d.rs", Modifiers::SHIFT);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["b.rs", "c.rs", "d.rs"])
+    );
+}
+
+#[test]
+fn shift_with_down_and_up_extends_and_shrinks_the_selection() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["b.rs", "c.rs", "d.rs"])
+    );
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowUp);
+    assert_eq!(selected_files(&harness), modified(&["b.rs", "c.rs"]));
+}
+
+#[test]
+fn shift_with_down_goes_on_from_the_file_a_shift_click_ended_at() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["b.rs", "c.rs", "d.rs"])
+    );
+}
+
+#[test]
+fn shift_with_down_stops_at_the_end_of_the_group() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: e.rs");
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    assert_eq!(selected_files(&harness), modified(&["e.rs"]));
+}
+
+#[test]
+fn ctrl_with_a_selects_the_files_of_the_group_that_the_filter_shows() {
+    let status = WorkingStatus {
+        staged: vec![changed(MODIFIED, "s.rs")],
+        unstaged: vec![
+            changed(MODIFIED, "a.rs"),
+            changed(MODIFIED, "b.rs"),
+            entry(StatusKind::Untracked, "notes.txt"),
+        ],
+        ..WorkingStatus::default()
+    };
+    let (mut harness, _) = file_status_of(backend().with_status(root(), status));
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .type_text(".rs");
+    harness.run();
+    // Down in the field gives the list the focus.
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    press_with(&mut harness, Modifiers::COMMAND, Key::A);
+    // `s.rs` matches the filter too, but lies in the other group.
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "b.rs"]));
+}
+
+#[test]
+fn ctrl_with_a_in_the_filter_field_leaves_the_selection_alone() {
+    let (mut harness, _) = five();
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    press_with(&mut harness, Modifiers::COMMAND, Key::A);
+    assert_eq!(selected_files(&harness), modified(&["a.rs"]));
+}
+
+#[test]
+fn escape_reduces_the_selection_to_the_anchor() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: d.rs", Modifiers::SHIFT);
+    press_with(&mut harness, Modifiers::NONE, Key::Escape);
+    assert_eq!(selected_files(&harness), modified(&["b.rs"]));
+}
+
+#[test]
+fn a_plain_click_or_arrow_key_ends_the_selection() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    // Down goes on from the lead `c.rs`.
+    press_with(&mut harness, Modifiers::NONE, Key::ArrowDown);
+    assert_eq!(selected_files(&harness), modified(&["d.rs"]));
+    click_file_with(&mut harness, "Modified: e.rs", Modifiers::SHIFT);
+    chosen(&mut harness, "Modified: a.rs");
+    assert_eq!(selected_files(&harness), modified(&["a.rs"]));
+}
+
+#[test]
+fn a_click_with_a_modifier_in_the_other_group_starts_a_selection_there() {
+    let (mut harness, _) = five();
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::COMMAND);
+    click_file_with(&mut harness, "Modified: s.rs", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["s.rs"]));
+}
+
+#[test]
+fn the_filter_takes_the_files_it_hides_out_of_the_selection() {
+    let status = WorkingStatus {
+        unstaged: vec![
+            changed(MODIFIED, "a.rs"),
+            changed(MODIFIED, "b.rs"),
+            changed(MODIFIED, "notes.md"),
+        ],
+        ..WorkingStatus::default()
+    };
+    let (mut harness, _) = file_status_of(backend().with_status(root(), status));
+    click_file_with(&mut harness, "Modified: notes.md", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "notes.md"]));
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .type_text(".rs");
+    harness.run();
+    assert_eq!(selected_files(&harness), modified(&["a.rs"]));
+    // Emptying the filter does not bring `notes.md` back.
+    for _ in 0..3 {
+        harness.key_press(Key::Backspace);
+    }
+    harness.run();
+    assert_eq!(selected_files(&harness), modified(&["a.rs"]));
+}
+
+#[test]
+fn the_selection_stays_when_the_status_is_read_again() {
+    let live = LiveRepo::new();
+    live.set_status(five_unstaged());
+    let backend = backend().with_live(root(), &live);
+    let mut harness = open_with(backend);
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: d.rs", Modifiers::SHIFT);
+    live.set_status(five_unstaged());
+    harness.event(Event::WindowFocused(true));
+    harness.step();
+    listed(&mut harness);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["b.rs", "c.rs", "d.rs"])
+    );
+}
+
+#[test]
+fn the_diff_panel_shows_the_anchor_while_several_files_are_selected() {
+    let backend = backend()
+        .with_status(root(), five_unstaged())
+        .with_working_diff(
+            Group::Unstaged,
+            "a.rs",
+            diff("a.rs", &[(LineKind::Added, "from a")]),
+        )
+        .with_working_diff(
+            Group::Unstaged,
+            "c.rs",
+            diff("c.rs", &[(LineKind::Added, "from c")]),
+        );
+    let (mut harness, _) = file_status_of(backend);
+    wait_until(&mut harness, |h| {
+        diff_lines(h).contains(&"Added, –, 1: from a".to_owned())
+    });
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::COMMAND);
+    wait_until(&mut harness, |h| {
+        diff_lines(h).contains(&"Added, –, 1: from c".to_owned())
+    });
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "c.rs"]));
+}
+
+#[test]
+fn the_actions_of_the_diff_act_on_the_anchor_alone() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::COMMAND);
+    wait_until(&mut harness, |_| {
+        probe
+            .working_diffs()
+            .iter()
+            .any(|(_, path, _)| path == "b.rs")
+    });
+    wait_until(&mut harness, |h| {
+        h.query_all_by_role(Role::Code).next().is_some()
+    });
+    let header = diff_row(&harness, "@@ -20,3 +22,3 @@");
+    harness.hover_at(header);
+    harness.run();
+    let button = buttons(&harness, "Stage hunk")
+        .into_iter()
+        .find(|button| (button.y - header.y).abs() < 4.0)
+        .expect("the button on the header");
+    click_at(&mut harness, button, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.parts().is_empty());
+    // The anchor is `b.rs`, the file clicked last.
+    assert_eq!(
+        parts(&probe),
+        [(Group::Unstaged, "b.rs".to_owned(), vec![(1, Chosen::All)])]
+    );
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "b.rs"]));
+}
+
+/// What assistive technology is told about the file list besides its name.
+fn list_descriptions(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::List)
+        .filter_map(|node| node.accesskit_node().description())
+        .collect()
+}
+
+#[test]
+fn the_list_tells_assistive_technology_how_many_files_are_selected() {
+    let (mut harness, _) = five();
+    // One file selected needs no description.
+    assert!(list_descriptions(&harness).is_empty());
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["a.rs", "b.rs", "c.rs"])
+    );
+    assert_eq!(list_descriptions(&harness), ["3 files selected"]);
+    chosen(&mut harness, "Modified: d.rs");
+    assert!(list_descriptions(&harness).is_empty());
+}
+
+// ---- staging and unstaging a selection (spec `staging`)
+
+/// Opens the context menu of `label`, which is a file of the selection, and
+/// chooses its entry `entry`.
+fn choose_from_menu(harness: &mut Harness<'_, App>, label: &str, entry: &str) {
+    let at = file(harness, label);
+    click_at(harness, at, PointerButton::Secondary);
+    let copy = buttons(harness, "Copy path")[0];
+    let entry = buttons(harness, entry)
+        .into_iter()
+        .find(|button| (button.x - copy.x).abs() < 40.0)
+        .unwrap_or_else(|| panic!("no entry {entry} in the menu"));
+    click_at(harness, entry, PointerButton::Primary);
+}
+
+#[test]
+fn s_stages_the_selected_files_in_one_request() {
+    let (mut harness, probe) = five();
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    press(&mut harness, Key::S);
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    assert_eq!(
+        index_calls(&probe),
+        [index_call("stage", &["a.rs", "b.rs", "c.rs"])]
+    );
+    wait_until(&mut harness, |h| {
+        shown_rows(h).first().map(String::as_str) == Some("Unstaged files (2)")
+    });
+}
+
+#[test]
+fn u_unstages_the_selected_files_in_one_request() {
+    let (mut harness, probe) = five();
+    chosen(&mut harness, "Modified: s.rs");
+    click_file_with(&mut harness, "Modified: t.rs", Modifiers::SHIFT);
+    press(&mut harness, Key::U);
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    assert_eq!(
+        index_calls(&probe),
+        [index_call("unstage", &["s.rs", "t.rs"])]
+    );
+    wait_until(&mut harness, |h| {
+        shown_rows(h).first().map(String::as_str) == Some("Unstaged files (7)")
+    });
+}
+
+#[test]
+fn the_menu_of_a_selection_offers_to_stage_the_files_in_place_of_the_file() {
+    let (mut harness, probe) = five();
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    let at = file(&harness, "Modified: b.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    // The entry replaces "Stage file": the one that is left is the button
+    // at the end of a row, not an entry of the menu.
+    assert!(row_button_only(&harness));
+    // The entry is the first of the menu, above "Copy path".
+    let copy = buttons(&harness, "Copy path")[0];
+    let entry = buttons(&harness, "Stage 3 files")
+        .into_iter()
+        .find(|button| (button.x - copy.x).abs() < 40.0 && button.y < copy.y)
+        .expect("Stage 3 files in the menu");
+    // The menu did not change the selection.
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["a.rs", "b.rs", "c.rs"])
+    );
+    click_at(&mut harness, entry, PointerButton::Primary);
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    assert_eq!(
+        index_calls(&probe),
+        [index_call("stage", &["a.rs", "b.rs", "c.rs"])]
+    );
+}
+
+/// Whether every button "Stage file" is one at the end of a row, none in a
+/// menu: a menu is drawn over the list, to the right of where it was opened.
+fn row_button_only(harness: &Harness<'_, App>) -> bool {
+    let copy = buttons(harness, "Copy path")[0];
+    buttons(harness, "Stage file")
+        .into_iter()
+        .all(|button| (button.x - copy.x).abs() >= 40.0)
+}
+
+#[test]
+fn the_menu_of_a_selection_of_staged_files_offers_to_unstage_them() {
+    let (mut harness, probe) = five();
+    chosen(&mut harness, "Modified: s.rs");
+    click_file_with(&mut harness, "Modified: t.rs", Modifiers::SHIFT);
+    choose_from_menu(&mut harness, "Modified: t.rs", "Unstage 2 files");
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    assert_eq!(
+        index_calls(&probe),
+        [index_call("unstage", &["s.rs", "t.rs"])]
+    );
+}
+
+#[test]
+fn the_menu_of_a_file_outside_the_selection_selects_it_alone() {
+    let (mut harness, _) = five();
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::SHIFT);
+    let at = file(&harness, "Modified: d.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert_eq!(selected_files(&harness), modified(&["d.rs"]));
+    let copy = buttons(&harness, "Copy path")[0];
+    assert!(
+        buttons(&harness, "Stage file")
+            .into_iter()
+            .any(|button| (button.x - copy.x).abs() < 40.0)
+    );
+    assert!(buttons(&harness, "Stage 1 file").is_empty());
+}
+
+/// `a.rs` and `c.rs` modified, `b.rs` and `d.rs` in conflict.
+fn with_conflicts() -> WorkingStatus {
+    WorkingStatus {
+        unstaged: vec![
+            changed(MODIFIED, "a.rs"),
+            entry(StatusKind::Conflicted, "b.rs"),
+            changed(MODIFIED, "c.rs"),
+            entry(StatusKind::Conflicted, "d.rs"),
+        ],
+        ..WorkingStatus::default()
+    }
+}
+
+#[test]
+fn a_file_in_conflict_is_left_out_of_a_selection_that_is_staged() {
+    let (mut harness, probe) = file_status_of(backend().with_status(root(), with_conflicts()));
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    assert_eq!(
+        selected_files(&harness),
+        [
+            "Modified: a.rs".to_owned(),
+            "Conflict: b.rs".to_owned(),
+            "Modified: c.rs".to_owned()
+        ]
+    );
+    press(&mut harness, Key::S);
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    assert_eq!(
+        index_calls(&probe),
+        [index_call("stage", &["a.rs", "c.rs"])]
+    );
+    wait_until(&mut harness, |h| {
+        shown_rows(h)
+            == [
+                "Unstaged files (2)",
+                "Conflict: b.rs",
+                "Conflict: d.rs",
+                "Staged files (2)",
+                "Modified: a.rs",
+                "Modified: c.rs",
+            ]
+    });
+    // No dialog tells of it.
+    assert!(!text_shown(&harness, "could not be staged"));
+}
+
+#[test]
+fn the_entry_of_the_menu_counts_the_files_without_those_in_conflict() {
+    let (mut harness, _) = file_status_of(backend().with_status(root(), with_conflicts()));
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    assert_eq!(selected_files(&harness).len(), 3);
+    let at = file(&harness, "Modified: a.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(!buttons(&harness, "Stage 2 files").is_empty());
+    assert!(buttons(&harness, "Stage 3 files").is_empty());
+}
+
+#[test]
+fn a_selection_of_conflicts_alone_offers_nothing_to_stage_and_s_does_nothing() {
+    let (mut harness, probe) = file_status_of(backend().with_status(root(), with_conflicts()));
+    chosen(&mut harness, "Conflict: b.rs");
+    click_file_with(&mut harness, "Conflict: d.rs", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness).len(), 2);
+    let at = file(&harness, "Conflict: d.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    let entries = labels(&harness, Role::Button)
+        .into_iter()
+        .filter(|label| label.starts_with("Stage ") && !label.ends_with("all"))
+        .collect::<Vec<_>>();
+    assert!(entries.is_empty(), "{entries:?}");
+    press(&mut harness, Key::Escape);
+    press(&mut harness, Key::S);
+    assert!(index_calls(&probe).is_empty());
+}
+
+#[test]
+fn the_button_of_a_selected_row_stages_its_file_alone_and_keeps_the_selection() {
+    let (mut harness, probe) = five();
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    let button = row_button(&harness, "Modified: b.rs", "Stage file").expect("the button of b.rs");
+    click_at(&mut harness, button, PointerButton::Primary);
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    assert_eq!(index_calls(&probe), [index_call("stage", &["b.rs"])]);
+    wait_until(&mut harness, |h| {
+        shown_rows(h).first().map(String::as_str) == Some("Unstaged files (4)")
+    });
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "c.rs"]));
+}
+
+#[test]
+fn stage_all_stages_every_file_of_the_group_whatever_is_selected() {
+    let (mut harness, probe) = five();
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::SHIFT);
+    let all = buttons(&harness, "Stage all")[0];
+    click_at(&mut harness, all, PointerButton::Primary);
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    assert_eq!(
+        index_calls(&probe),
+        [index_call(
+            "stage",
+            &["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
+        )]
+    );
+}
+
+#[test]
+fn the_file_below_the_selection_is_selected_alone_after_staging_it() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    press(&mut harness, Key::S);
+    assert_eq!(selected_files(&harness), modified(&["d.rs"]));
+    wait_until(&mut harness, |h| {
+        shown_rows(h).first().map(String::as_str) == Some("Unstaged files (3)")
+    });
+    assert_eq!(selected_files(&harness), modified(&["d.rs"]));
+}
+
+#[test]
+fn the_selection_moves_on_in_a_filtered_tree_to_the_file_that_follows() {
+    let status = WorkingStatus {
+        unstaged: ["src/a.rs", "src/b.rs", "src/bz.txt", "src/c.rs"]
+            .map(|path| changed(MODIFIED, path))
+            .to_vec(),
+        ..WorkingStatus::default()
+    };
+    let (mut harness, probe) = file_status_of(backend().with_status(root(), status));
+    show_tree(&mut harness);
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .type_text(".rs");
+    harness.run();
+    // The rows of a tree are tree items, which `file` does not look for.
+    let at = nth_row(&harness, "Modified: a.rs", 0).rect().center();
+    click_at(&mut harness, at, PointerButton::Primary);
+    let at = nth_row(&harness, "Modified: b.rs", 0).rect().center();
+    click_with(&mut harness, at, Modifiers::SHIFT);
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "b.rs"]));
+    press(&mut harness, Key::S);
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    assert_eq!(
+        index_calls(&probe),
+        [index_call("stage", &["src/a.rs", "src/b.rs"])]
+    );
+    assert_eq!(selected_files(&harness), modified(&["c.rs"]));
+}
+
+#[test]
+fn the_file_above_the_selection_is_selected_alone_when_it_was_at_the_end() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: d.rs");
+    click_file_with(&mut harness, "Modified: e.rs", Modifiers::SHIFT);
+    press(&mut harness, Key::S);
+    assert_eq!(selected_files(&harness), modified(&["c.rs"]));
+}
+
+#[test]
+fn the_first_file_of_the_other_group_is_selected_when_the_group_is_emptied() {
+    let (mut harness, probe) = file_status_of(backend().with_status(root(), three_unstaged()));
+    chosen(&mut harness, "Modified: a.rs");
+    press_with(&mut harness, Modifiers::COMMAND, Key::A);
+    assert_eq!(selected_files(&harness).len(), 3);
+    press(&mut harness, Key::S);
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    wait_until(&mut harness, |h| {
+        shown_rows(h).first().map(String::as_str) == Some("Staged files (4)")
+    });
+    // `s.rs` was the first file of the Staged group when the request was
+    // made; reading the status again keeps it selected where it moved to.
+    assert_eq!(selected_files(&harness), modified(&["s.rs"]));
+}
+
+#[test]
+fn two_presses_of_s_in_a_row_stage_the_selection_and_then_the_file_selected_by_it() {
+    let gate = Gate::new();
+    let backend = backend()
+        .with_status(root(), three_unstaged())
+        .with_checkout_gate(&gate);
+    let (mut harness, probe) = file_status_of(backend);
+    chosen(&mut harness, "Modified: a.rs");
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::SHIFT);
+    press(&mut harness, Key::S);
+    // The selection moved on at once, to the file that is left.
+    assert_eq!(selected_files(&harness), modified(&["c.rs"]));
+    press(&mut harness, Key::S);
+    assert!(text_shown(&harness, "Staging 2 files"));
+    gate.open();
+    wait_until(&mut harness, |_| index_calls(&probe).len() == 2);
+    assert_eq!(
+        index_calls(&probe),
+        [
+            index_call("stage", &["a.rs", "b.rs"]),
+            index_call("stage", &["c.rs"])
+        ]
+    );
+}
+
+#[test]
+fn the_entry_and_the_key_are_unavailable_while_a_checkout_runs() {
+    let gate = Gate::new();
+    let backend = backend()
+        .with_status(root(), five_unstaged())
+        .with_checkout_gate(&gate);
+    let (mut harness, probe) = file_status_of(backend);
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::SHIFT);
+    {
+        let workspace = harness.state_mut().workspace_mut().expect("the workspace");
+        workspace
+            .active_mut()
+            .and_then(|tab| tab.session_mut())
+            .expect("the session")
+            .start_checkout(gitbull_core::session::CheckoutRequest::Branch(
+                "side".to_owned(),
+            ));
+    }
+    harness.run();
+    let at = file(&harness, "Modified: b.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(!enabled(&harness, "Stage 2 files"));
+    press(&mut harness, Key::Escape);
+    press(&mut harness, Key::S);
+    assert!(index_calls(&probe).is_empty());
+    gate.open();
+}
+
+#[test]
+fn a_failure_of_staging_a_selection_shows_the_dialog_and_the_list_has_the_keys_again() {
+    let backend = backend()
+        .with_status(root(), five_unstaged())
+        .with_stage_failure("fatal: Unable to create '.git/index.lock': File exists.");
+    let (mut harness, probe) = file_status_of(backend);
+    chosen(&mut harness, "Modified: a.rs");
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    press(&mut harness, Key::S);
+    wait_until(&mut harness, |h| {
+        text_shown(h, "The files could not be staged")
+    });
+    // The status is read again after a failure.
+    wait_until(&mut harness, |_| status_reads(&probe) == 2);
+    harness.run();
+    let close = buttons(&harness, "Close")[0];
+    click_at(&mut harness, close, PointerButton::Primary);
+    harness.run();
+    // The files are listed as they were.
+    assert_eq!(
+        shown_rows(&harness).first().map(String::as_str),
+        Some("Unstaged files (5)")
+    );
+    // The list has the keyboard again.
+    press(&mut harness, Key::S);
+    wait_until(&mut harness, |_| index_calls(&probe).len() == 2);
+    assert_eq!(index_calls(&probe)[1], index_call("stage", &["d.rs"]));
+}
+
+#[test]
+fn five_thousand_selected_files_are_staged_as_one_request() {
+    let status = WorkingStatus {
+        unstaged: (0..5_000)
+            .map(|i| changed(MODIFIED, &format!("f{i:04}.txt")))
+            .collect(),
+        ..WorkingStatus::default()
+    };
+    let (mut harness, probe) = file_status_of(backend().with_status(root(), status));
+    chosen(&mut harness, "Modified: f0000.txt");
+    press_with(&mut harness, Modifiers::COMMAND, Key::A);
+    press(&mut harness, Key::S);
+    wait_until(&mut harness, |_| !index_calls(&probe).is_empty());
+    let calls = index_calls(&probe);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "stage");
+    assert_eq!(calls[0].1.len(), 5_000);
+}
+
+// ---- the menu of a selection (spec `working-copy-status`)
+
+#[test]
+fn the_menu_of_a_selection_has_no_entries_for_the_history_and_the_blame() {
+    let (mut harness, _) = five();
+    // One file offers them, as a control.
+    let at = file(&harness, "Modified: a.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(!buttons(&harness, "File history").is_empty());
+    assert!(!buttons(&harness, "Blame").is_empty());
+    harness.key_press(Key::Escape);
+    harness.run();
+
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::SHIFT);
+    let at = file(&harness, "Modified: b.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(!buttons(&harness, "Stage 2 files").is_empty());
+    assert!(!buttons(&harness, "Discard changes of 2 files").is_empty());
+    assert!(!buttons(&harness, "Copy path").is_empty());
+    assert!(buttons(&harness, "File history").is_empty());
+    assert!(buttons(&harness, "Blame").is_empty());
+}
+
+#[test]
+fn copy_path_of_a_selection_copies_every_path_one_per_line_in_the_order_of_the_list() {
+    let (mut harness, _) = five();
+    // The anchor is `d.rs`, which is listed after `b.rs`.
+    chosen(&mut harness, "Modified: d.rs");
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["b.rs", "d.rs"]));
+    let at = file(&harness, "Modified: b.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    harness.get_by_label("Copy path").click();
+    harness.step();
+    assert_eq!(copied(&harness), Some("b.rs\nd.rs".to_owned()));
+}
+
+#[test]
+fn copy_path_of_a_selection_in_the_tree_follows_the_order_of_the_tree() {
+    let status = WorkingStatus {
+        unstaged: vec![
+            changed(MODIFIED, "a.rs"),
+            changed(MODIFIED, "src/b.rs"),
+            changed(MODIFIED, "src/c.rs"),
+        ],
+        ..WorkingStatus::default()
+    };
+    let (mut harness, _) = file_status_of(backend().with_status(root(), status));
+    show_tree(&mut harness);
+    // The tree lists the folder before the file `a.rs`, which the flat list
+    // lists first.
+    assert_eq!(
+        shown_rows(&harness),
+        [
+            "Unstaged files (3)",
+            "src",
+            "Modified: b.rs",
+            "Modified: c.rs",
+            "Modified: a.rs"
+        ]
+    );
+    let at = nth_row(&harness, "Modified: a.rs", 0).rect().center();
+    click_at(&mut harness, at, PointerButton::Primary);
+    let at = nth_row(&harness, "Modified: b.rs", 0).rect().center();
+    click_with(&mut harness, at, Modifiers::COMMAND);
+    click_at(&mut harness, at, PointerButton::Secondary);
+    harness.get_by_label("Copy path").click();
+    harness.step();
+    assert_eq!(copied(&harness), Some("src/b.rs\na.rs".to_owned()));
+}
+
+#[test]
+fn the_menu_of_a_selection_of_staged_files_unstages_and_copies_and_discards_nothing() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: s.rs");
+    click_file_with(&mut harness, "Modified: t.rs", Modifiers::SHIFT);
+    let at = file(&harness, "Modified: t.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    // The buttons of the rows and of the titles are not entries of the menu.
+    let entries: Vec<String> = labels(&harness, Role::Button)
+        .into_iter()
+        .filter(|label| {
+            label.contains("Discard")
+                || label.contains("Remove")
+                || label.contains("Delete")
+                || label.starts_with("Unstage ")
+                || label == "Copy path"
+        })
+        .filter(|label| !["Discard all", "Unstage all", "Unstage file"].contains(&label.as_str()))
+        .collect();
+    assert_eq!(entries, ["Unstage 2 files", "Copy path"]);
 }

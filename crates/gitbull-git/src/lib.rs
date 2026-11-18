@@ -19,6 +19,7 @@ pub mod compare;
 pub mod config;
 pub mod content;
 pub mod diff;
+pub mod discard;
 pub mod error;
 pub mod facts;
 pub mod file_history;
@@ -30,6 +31,7 @@ pub mod index;
 pub mod invoke;
 #[cfg(windows)]
 mod job;
+pub mod journal;
 pub mod locate;
 pub mod log;
 pub mod merged;

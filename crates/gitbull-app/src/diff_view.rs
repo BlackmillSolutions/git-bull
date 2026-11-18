@@ -15,9 +15,10 @@ use eframe::egui::{
 use fluent_bundle::FluentArgs;
 use gitbull_core::details::{DiffState, Highlighting};
 use gitbull_core::diff_document::{DiffDocument, Gap, LineEnd, Marks, Part, Row, RowKey};
+use gitbull_core::discard::PartOffer;
 use gitbull_core::file_status::Parts;
 use gitbull_core::highlight::{HighlightTheme, Span};
-use gitbull_core::session::{IndexStart, Session};
+use gitbull_core::session::{DiscardStart, IndexStart, Session};
 use gitbull_core::workspace::Failure;
 use gitbull_git::Error;
 use gitbull_git::diff::{Content, FileDiff, Hunk, LINE_LIMIT, LineKind};
@@ -55,6 +56,8 @@ struct Texts {
     copy_hunk: String,
     /// "Stage hunk" and "Unstage hunk".
     part_hunk: [String; 2],
+    discard_hunk: String,
+    discard_lines: String,
     /// "Stage selected lines" and "Unstage selected lines".
     part_lines: [String; 2],
     /// Why a part cannot be staged, by its reason.
@@ -90,6 +93,8 @@ impl Texts {
             copy_lines: text(Msg::CopyLines),
             copy_hunk: text(Msg::CopyHunk),
             part_hunk: [text(Msg::StageHunk), text(Msg::UnstageHunk)],
+            discard_hunk: text(Msg::DiscardHunk),
+            discard_lines: text(Msg::DiscardSelectedLines),
             part_lines: [
                 text(Msg::StageSelectedLines),
                 text(Msg::UnstageSelectedLines),
@@ -511,20 +516,35 @@ fn draw(
     let parts = status.and_then(|status| Some((status.parts()?, status.chosen()?.0)));
     let busy = session.action().is_some();
     let unstage = matches!(parts, Some((_, Group::Staged)));
+    // Why a part cannot be taken now, for staging and discarding alike.
+    let reason = |parts: Parts| match parts {
+        Parts::Conflicted => Some(texts.parts_conflicted.as_str()),
+        Parts::Truncated => Some(texts.parts_truncated.as_str()),
+        Parts::Filtered => Some(texts.parts_filtered.as_str()),
+        Parts::WholeOnly => Some(texts.parts_whole_only.as_str()),
+        Parts::Reading => Some(texts.parts_reading.as_str()),
+        Parts::Available if busy => Some(texts.parts_busy.as_str()),
+        Parts::Available => None,
+    };
+    let discard_offer = status.and_then(|status| status.discard_parts());
     let staging = parts.map(|(parts, _)| Staging {
         hunk: &texts.part_hunk[usize::from(unstage)],
         lines: &texts.part_lines[usize::from(unstage)],
-        unavailable: match parts {
-            Parts::Conflicted => Some(texts.parts_conflicted.as_str()),
-            Parts::Truncated => Some(&texts.parts_truncated),
-            Parts::Filtered => Some(&texts.parts_filtered),
-            Parts::WholeOnly => Some(&texts.parts_whole_only),
-            Parts::Reading => Some(&texts.parts_reading),
-            Parts::Available if busy => Some(&texts.parts_busy),
-            Parts::Available => None,
-        },
+        unavailable: reason(parts),
+        discard: discard_offer.map(|offer| Discarding {
+            hunk: &texts.discard_hunk,
+            lines: &texts.discard_lines,
+            unavailable: match offer {
+                PartOffer::Offered => reason(Parts::Available),
+                PartOffer::Unavailable(parts) => reason(parts),
+            },
+        }),
         lines_selected,
     });
+    let can_discard = staging
+        .as_ref()
+        .and_then(|staging| staging.discard.as_ref())
+        .is_some_and(|discarding| discarding.unavailable.is_none());
     let can_stage = staging
         .as_ref()
         .is_some_and(|staging| staging.unavailable.is_none());
@@ -603,7 +623,7 @@ fn draw(
     }
     // The lines of the selection as it is now, grouped by their hunks;
     // context lines, headers and revealed lines count for nothing.
-    let part = ask.filter(|_| can_stage).map(|ask| match ask {
+    let selection_of = |ask: PartAsk, state: &DiffView| match ask {
         PartAsk::Hunk(hunk) => Selection::new().hunk(hunk),
         PartAsk::Lines => {
             let range = state
@@ -621,7 +641,15 @@ fn draw(
             }
             chosen
         }
-    });
+    };
+    let part = ask
+        .filter(|_| can_stage)
+        .map(|ask| selection_of(ask, state));
+    // No key discards: a part is asked for with the mouse only.
+    let discard = outcome
+        .discard
+        .filter(|_| can_discard)
+        .map(|ask| selection_of(ask, state));
     if focused {
         lock_tab(ui, background.id);
         components::area_focus_ring(ui, area, true);
@@ -633,6 +661,11 @@ fn draw(
     // replaced.
     if let Some(part) = part
         && session.stage_part(part) == IndexStart::Started
+    {
+        state.selection = None;
+    }
+    if let Some(part) = discard
+        && session.discard_part(part) == DiscardStart::Started
     {
         state.selection = None;
     }
@@ -698,8 +731,20 @@ struct Staging<'a> {
     /// Why nothing can be staged in parts now, to say in the entries; `None`
     /// when it can.
     unavailable: Option<&'a str>,
+    /// The same for discarding, for a tracked file of the Unstaged group;
+    /// `None` where nothing is offered to discard.
+    discard: Option<Discarding<'a>>,
     /// The selection holds an added or a removed line.
     lines_selected: bool,
+}
+
+/// How the diff offers to discard parts of an unstaged file (spec
+/// `discard`).
+struct Discarding<'a> {
+    hunk: &'a str,
+    lines: &'a str,
+    /// Why nothing can be discarded in parts now; `None` when it can.
+    unavailable: Option<&'a str>,
 }
 
 /// What happened in the rows this frame.
@@ -712,6 +757,8 @@ struct Outcome {
     copy: Option<Copy>,
     /// What the user asked to stage or unstage.
     part: Option<PartAsk>,
+    /// What the user asked to discard.
+    discard: Option<PartAsk>,
     /// The part of a gap to reveal.
     expand: Option<(usize, Part)>,
 }
@@ -826,21 +873,33 @@ fn draw_rows(ui: &mut Ui, scroll_to: Option<usize>, drawn: &Drawn<'_>) -> (Outco
                         Row::Header(hunk) => {
                             // The button of a hunk shows only where a part
                             // can be staged.
-                            let button = drawn
+                            let stage = drawn
                                 .staging
                                 .as_ref()
                                 .filter(|staging| staging.unavailable.is_none())
                                 .map(|staging| staging.hunk);
+                            let discard = drawn
+                                .staging
+                                .as_ref()
+                                .and_then(|staging| staging.discard.as_ref())
+                                .filter(|discarding| discarding.unavailable.is_none())
+                                .map(|discarding| discarding.hunk);
                             let (response, chosen) = header_row(
                                 ui,
                                 &document.hunks()[hunk].header,
                                 is_selected,
                                 &font,
                                 palette,
-                                button,
+                                [stage, discard],
                             );
-                            if chosen {
-                                outcome.part = Some(PartAsk::Hunk(hunk));
+                            match chosen {
+                                Some(HeaderButton::Stage) => {
+                                    outcome.part = Some(PartAsk::Hunk(hunk));
+                                }
+                                Some(HeaderButton::Discard) => {
+                                    outcome.discard = Some(PartAsk::Hunk(hunk));
+                                }
+                                None => {}
                             }
                             response
                         }
@@ -928,6 +987,31 @@ fn draw_rows(ui: &mut Ui, scroll_to: Option<usize>, drawn: &Drawn<'_>) -> (Outco
                         if entry(ui, staging.lines, available && staging.lines_selected) {
                             outcome.part = Some(PartAsk::Lines);
                             ui.close();
+                        }
+                        // Discarding follows the entries that stage.
+                        if let Some(discarding) = &staging.discard {
+                            let entry = |ui: &mut Ui, label: &str, enabled: bool| {
+                                let item = ui
+                                    .add_enabled_ui(enabled, |ui| {
+                                        components::menu_item(ui, None, label, None)
+                                    })
+                                    .inner;
+                                match discarding.unavailable {
+                                    Some(reason) => item.on_disabled_hover_text(reason).clicked(),
+                                    None => item.clicked(),
+                                }
+                            };
+                            let available = discarding.unavailable.is_none();
+                            if let Some(hunk) = hunk
+                                && entry(ui, discarding.hunk, available)
+                            {
+                                outcome.discard = Some(PartAsk::Hunk(hunk));
+                                ui.close();
+                            }
+                            if entry(ui, discarding.lines, available && staging.lines_selected) {
+                                outcome.discard = Some(PartAsk::Lines);
+                                ui.close();
+                            }
                         }
                     });
                 });
@@ -1042,8 +1126,9 @@ fn header_row(
     selected: bool,
     font: &FontId,
     palette: &Palette,
-    button: Option<&str>,
-) -> (egui::Response, bool) {
+    // The labels of the button that stages and of the one that discards.
+    [stage, discard]: [Option<&str>; 2],
+) -> (egui::Response, Option<HeaderButton>) {
     let text_color = ui.visuals().weak_text_color();
     let galley = ui
         .painter()
@@ -1056,12 +1141,12 @@ fn header_row(
     }
     let at = pos2(rect.left() + 6.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(at, galley, text_color);
-    let mut chosen = false;
-    if let Some(label) = button.filter(|_| selected || ui.rect_contains_pointer(rect)) {
+    let mut chosen = None;
+    if (stage.is_some() || discard.is_some()) && (selected || ui.rect_contains_pointer(rect)) {
         // At the right end of what is seen of the row, which may be wider
-        // than the view. The button is as high as a control, higher than a
-        // row, and stands around the middle of the row; drawn in a child of
-        // its own, it takes no room from the rows below.
+        // than the view. The buttons are as high as a control, higher than a
+        // row, and stand around the middle of the row; drawn in a child of
+        // their own, they take no room from the rows below.
         let seen = rect.intersect(ui.clip_rect());
         let room = egui::Rect::from_center_size(
             seen.center(),
@@ -1072,12 +1157,30 @@ fn header_row(
                 .max_rect(room)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        chosen = components::Button::new(label)
-            .kind(components::Kind::Secondary)
-            .show(&mut over)
-            .clicked();
+        // The button that stages is at the end, the one that discards before
+        // it.
+        for (label, button) in [
+            (stage, HeaderButton::Stage),
+            (discard, HeaderButton::Discard),
+        ] {
+            if let Some(label) = label
+                && components::Button::new(label)
+                    .kind(components::Kind::Secondary)
+                    .show(&mut over)
+                    .clicked()
+            {
+                chosen = Some(button);
+            }
+        }
     }
     (response, chosen)
+}
+
+/// The button of the header of a hunk that was chosen.
+#[derive(Clone, Copy)]
+enum HeaderButton {
+    Stage,
+    Discard,
 }
 
 /// A row of hidden lines: their number, and the offers of the gap as

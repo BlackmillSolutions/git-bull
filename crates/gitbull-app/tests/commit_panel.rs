@@ -411,6 +411,36 @@ fn the_first_file_is_selected() {
 }
 
 #[test]
+fn the_files_of_a_commit_keep_one_selection_when_a_modifier_is_held() {
+    let mut harness = open(backend());
+    select(&mut harness, "Fix the parser");
+    wait_until(&mut harness, has_files);
+    for (label, modifiers) in [
+        ("Deleted: old.txt", Modifiers::COMMAND),
+        ("Renamed: src/a.rs → src/b.rs", Modifiers::SHIFT),
+    ] {
+        let at = file(&harness, label).rect().center();
+        harness.hover_at(at);
+        for pressed in [true, false] {
+            let event = Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            harness.event_modifiers(event, modifiers);
+        }
+        harness.run();
+        let selected: Vec<String> = harness
+            .get_all_by_role(Role::ListItem)
+            .filter(|node| node.accesskit_node().is_selected() == Some(true))
+            .filter_map(|node| node.accesskit_node().label())
+            .collect();
+        assert_eq!(selected, [label], "{modifiers:?}");
+    }
+}
+
+#[test]
 fn a_commit_without_changed_files_says_so_and_the_diff_stays_empty() {
     let mut harness = open(backend());
     select(&mut harness, "Rebased change");

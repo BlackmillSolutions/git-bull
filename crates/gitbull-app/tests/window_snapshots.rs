@@ -1144,3 +1144,141 @@ fn commit_form_in_the_smallest_window() {
     let image = harness.render().expect("rendered window");
     image_snapshot_options(&image, "commit_form_smallest", &options());
 }
+
+// ---- discarding (spec `discard`)
+
+/// The journal of an earlier run: an interrupted entry and a discarded one,
+/// newest first.
+fn earlier_discards() -> Vec<gitbull_git::journal::Listed> {
+    use gitbull_git::journal::{
+        Entry, FileKind, FileRecord, Held, Kind, Listed, Manifest, Running, State,
+    };
+    let entry = |id: &str, state, running, files: &[&str], changed| {
+        let manifest = Manifest {
+            changed,
+            size: 1024,
+            kind: Kind::Files,
+            state,
+            git: None,
+            files: files
+                .iter()
+                .enumerate()
+                .map(|(slot, path)| FileRecord {
+                    slot: slot as u32,
+                    kind: FileKind::Tracked,
+                    held: Held::File,
+                    path: (*path).into(),
+                })
+                .collect(),
+            idents: Vec::new(),
+        };
+        Listed::Entry {
+            entry: Entry::in_memory(id.to_owned(), id.into(), manifest),
+            running,
+        }
+    };
+    vec![
+        entry(
+            "1790000000000-2",
+            State::Pending,
+            Running::Interrupted,
+            &["src/session.rs", "src/ui.rs"],
+            1_790_000_000,
+        ),
+        entry(
+            "1789990000000-1",
+            State::Discarded,
+            Running::Settled,
+            &["notes.txt"],
+            1_789_990_000,
+        ),
+    ]
+}
+
+/// The confirmation before the files of the Unstaged group are discarded.
+fn discard_dialog(theme: ThemeSetting) -> Harness<'static, App> {
+    let mut harness = file_status_view(theme);
+    harness
+        .get_by_role_and_label(Role::Button, "Discard all")
+        .click();
+    harness.run();
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    harness
+}
+
+#[test]
+fn discard_dialog_in_the_dark_palette() {
+    let mut harness = discard_dialog(ThemeSetting::Dark);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_dialog_dark", &options());
+}
+
+#[test]
+fn discard_dialog_in_the_light_palette() {
+    let mut harness = discard_dialog(ThemeSetting::Light);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_dialog_light", &options());
+}
+
+/// Discards `src/old.rs` and waits for the notice bar.
+fn discarded(harness: &mut Harness<'static, App>) {
+    harness
+        .state_mut()
+        .workspace_mut()
+        .and_then(|workspace| workspace.active_mut())
+        .and_then(|tab| tab.session_mut())
+        .map(|session| session.discard(vec!["src/old.rs".into()], false));
+    wait_for(harness, |h| {
+        h.query_by_role_and_label(Role::Button, "Undo").is_some()
+    });
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+}
+
+/// The bar that names the last discard and offers to undo it, above the
+/// commit form.
+#[test]
+fn discard_notice_bar() {
+    let mut harness = file_status_view(ThemeSetting::Dark);
+    discarded(&mut harness);
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_notice_bar", &options());
+}
+
+/// The list "Recently discarded" opened, with an interrupted entry and a
+/// discarded one, below the bar.
+#[test]
+fn discard_list_open() {
+    let mut harness = file_status_view_with(
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (1280.0, 800.0),
+        |backend| backend.with_journal(earlier_discards()),
+    );
+    discarded(&mut harness);
+    harness
+        .get_by_role_and_label(Role::Button, "Recently discarded (3)")
+        .click();
+    harness.run();
+    harness.event(eframe::egui::Event::PointerGone);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_list_open", &options());
+}
+
+/// The smallest window with the bar and the list shown: the file list keeps
+/// its rows, and the list gives way.
+#[test]
+fn discard_bar_and_list_in_the_smallest_window() {
+    let mut harness = file_status_view_with(
+        ThemeSetting::Light,
+        InterfaceSize::Percent100,
+        (640.0, 400.0),
+        |backend| backend.with_journal(earlier_discards()),
+    );
+    discarded(&mut harness);
+    harness.run();
+    let image = harness.render().expect("rendered window");
+    image_snapshot_options(&image, "discard_smallest_window", &options());
+}

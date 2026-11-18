@@ -350,6 +350,16 @@ impl Workspace {
         self.move_tab(id, index);
     }
 
+    /// Stops the write action of every tab that can be stopped; a discard
+    /// cannot (ADR 0008).
+    pub fn stop_stoppable(&mut self) {
+        for tab in &mut self.tabs {
+            if let Some(session) = tab.session_mut() {
+                session.stop_stoppable();
+            }
+        }
+    }
+
     /// The write actions that run now, one per tab at most (ADR 0008).
     pub fn running_actions(&self) -> Vec<TabAction> {
         self.tabs

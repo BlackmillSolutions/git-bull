@@ -300,7 +300,7 @@ fn banner_offers_its_actions_and_to_dismiss_it() {
             &["Show all branches"],
             "Dismiss",
         );
-        seen.extend(action);
+        seen.extend(action.0);
     });
     harness.run();
     harness.get_by_label("The commit is hidden.");

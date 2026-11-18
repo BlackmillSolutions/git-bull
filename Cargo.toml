@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
@@ -20,6 +20,14 @@ publish = false
 gitbull-git = { path = "crates/gitbull-git" }
 gitbull-core = { path = "crates/gitbull-core" }
 gitbull-testkit = { path = "crates/gitbull-testkit" }
+
+# Debug builds keep the line tables, which is what backtraces and panic
+# locations need, and leave out the variable and type information. The test
+# programs of `gitbull-app` each link the whole interface stack, and with full
+# debug information each is about 570 MB, so that a build of the workspace
+# tests takes tens of gigabytes.
+[profile.dev]
+debug = "line-tables-only"
 
 # The regular expressions of syntax highlighting are very slow without
 # optimisation, so dependencies are optimised in debug builds as well

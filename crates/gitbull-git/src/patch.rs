@@ -470,12 +470,55 @@ pub fn stage_part(
     request: &PartRequest,
     cancel: &CancelToken,
 ) -> Result<(), WriteFailure> {
-    if !request.chooses_a_change() {
+    let direction = match group {
+        Group::Staged => Direction::Unstage,
+        Group::Unstaged | Group::Untracked => Direction::Stage,
+    };
+    let Some(patch) = prepare_part(git, repo, group, entry, request, direction, cancel)? else {
         return Ok(());
+    };
+    // Exact counts and its context: nothing that would let Git bend the
+    // patch, repair its whitespace, or apply a part of it.
+    let mut args = vec![
+        "-c",
+        "apply.ignoreWhitespace=no",
+        "apply",
+        "--cached",
+        "--whitespace=nowarn",
+    ];
+    if direction == Direction::Unstage {
+        args.push("--reverse");
+    }
+    args.push("-");
+    git.write(WriteHooks::Run)
+        .run(repo, args, Some(&patch), cancel)
+        // Not `WriteFailure::from_error`, which reads the refusals of a
+        // checkout out of Git's error output.
+        .map_err(WriteFailure::Failed)
+}
+
+/// The patch for the part `request` of the diff of `entry` in `group`, made
+/// for `direction`, after the checks that staging and discarding share: the
+/// diff of the file is read again as Git writes it, and when its hunks are not
+/// the ones of `request.shown`, or Git reports no diff of the file any more,
+/// the result is [`Refusal::DiffOutOfDate`]; a selection that would join two
+/// lines at an end without a line break is [`Refusal::EndOfFileSplit`]. `None`
+/// when the selection chooses no changed line, or the diff shows no lines.
+pub(crate) fn prepare_part(
+    git: &Git,
+    repo: &Path,
+    group: Group,
+    entry: &StatusEntry,
+    request: &PartRequest,
+    direction: Direction,
+    cancel: &CancelToken,
+) -> Result<Option<Vec<u8>>, WriteFailure> {
+    if !request.chooses_a_change() {
+        return Ok(None);
     }
     let out_of_date = || WriteFailure::Refused(Refusal::DiffOutOfDate);
     let Content::Text(shown) = &request.shown.content else {
-        return Ok(());
+        return Ok(None);
     };
     let raw = raw_working_diff(git, repo, group, entry, cancel)
         .map_err(WriteFailure::Failed)?
@@ -516,34 +559,9 @@ pub fn stage_part(
             "the two readings of the diff count its lines differently".to_owned(),
         ));
     }
-    let direction = match group {
-        Group::Staged => Direction::Unstage,
-        Group::Unstaged | Group::Untracked => Direction::Stage,
-    };
-    let Some(patch) = parsed
+    parsed
         .patch(&request.selection, direction)
-        .map_err(WriteFailure::Refused)?
-    else {
-        return Ok(());
-    };
-    // Exact counts and its context: nothing that would let Git bend the
-    // patch, repair its whitespace, or apply a part of it.
-    let mut args = vec![
-        "-c",
-        "apply.ignoreWhitespace=no",
-        "apply",
-        "--cached",
-        "--whitespace=nowarn",
-    ];
-    if direction == Direction::Unstage {
-        args.push("--reverse");
-    }
-    args.push("-");
-    git.write(WriteHooks::Run)
-        .run(repo, args, Some(&patch), cancel)
-        // Not `WriteFailure::from_error`, which reads the refusals of a
-        // checkout out of Git's error output.
-        .map_err(WriteFailure::Failed)
+        .map_err(WriteFailure::Refused)
 }
 
 #[cfg(test)]

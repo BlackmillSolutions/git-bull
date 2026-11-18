@@ -135,6 +135,12 @@ enum Action {
     CloseAnyway,
     /// The user closed the dialog that the last write action asked for.
     CloseActionDialog,
+    /// Answers of the confirmation before files are discarded.
+    ConfirmDiscard,
+    CancelDiscard,
+    /// Answers of the question before the list of discards is cleared.
+    ConfirmClear,
+    CancelClear,
     /// Answers of the notice before detaching HEAD.
     ConfirmDetach,
     CancelDetach,
@@ -218,6 +224,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let tab_dialog = app.close_question.is_some()
         || app.detach_pending.is_some()
         || app.create_dialog.is_some()
+        || app.has_discard_dialog()
+        || app.has_clear_question()
         || app.branch_choice.is_some();
     if !tab_dialog {
         actions.extend(dropped_folders(ui));
@@ -283,12 +291,17 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     // Before the dialogs are drawn, so that what Git said about a name shows
     // in the dialog that asked, and not in a dialog of its own for a frame.
     app.poll_create();
+    app.poll_close_wait();
     if app.close_question.is_some() {
         close_question_dialog(app, ui, &mut actions);
     } else if app.detach_pending.is_some() {
         detach_notice_dialog(app, ui, &mut actions);
     } else if app.branch_choice.is_some() {
         branch_choice_dialog(app, ui, &mut actions);
+    } else if app.has_discard_dialog() {
+        discard_dialog(app, ui, &mut actions);
+    } else if app.has_clear_question() {
+        clear_question_dialog(app, ui, &mut actions);
     } else if app.create_dialog.is_some() {
         create_dialog(app, ui, &mut actions);
     } else if let Some(dialog) = app.action_dialog() {
@@ -406,9 +419,13 @@ fn apply(app: &mut App, actions: Vec<Action>) {
                 }
             }
             Action::AskCloseWindow => app.close_question = Some(CloseQuestion::Window),
-            Action::KeepOpen => app.close_question = None,
+            Action::KeepOpen => app.keep_open(),
             Action::CloseAnyway => app.close_anyway(),
             Action::CloseActionDialog => app.close_action_dialog(),
+            Action::ConfirmDiscard => app.confirm_discard(),
+            Action::CancelDiscard => app.cancel_discard(),
+            Action::ConfirmClear => app.answer_clear(true),
+            Action::CancelClear => app.answer_clear(false),
             Action::ConfirmDetach => app.confirm_detach(),
             Action::CancelDetach => app.detach_pending = None,
             Action::ChooseBranch(index) => app.choose_branch(index),
@@ -783,7 +800,7 @@ fn notice_bar(app: &App, notice: &Notice, ui: &mut Ui, actions: &mut Vec<Action>
         _ => &[],
     };
     let dismiss = app.texts.text(Msg::NoticeDismiss);
-    match components::banner(ui, notice_kind(notice), &text, offered, &dismiss) {
+    match components::banner(ui, notice_kind(notice), &text, offered, &dismiss).0 {
         Some(BannerAction::Action(_)) => {
             if let Notice::HiddenByFilter(reference) = notice {
                 actions.push(Action::ShowAllBranches(reference.clone()));
@@ -1753,6 +1770,11 @@ pub(crate) fn action_text(app: &App, action: &WriteAction) -> String {
         }
         WriteAction::Commit { amend: false } => app.texts.text(Msg::ActionCommit),
         WriteAction::Commit { amend: true } => app.texts.text(Msg::ActionAmend),
+        WriteAction::Discard { .. }
+        | WriteAction::DiscardPart { .. }
+        | WriteAction::Restore { .. }
+        | WriteAction::PutBack
+        | WriteAction::ClearDiscards => crate::discard_texts::action_text(&app.texts, action),
     }
 }
 
@@ -1787,8 +1809,13 @@ fn action_dialog(
         // its own.
         WriteAction::Stage { .. } | WriteAction::Unstage { .. } => String::new(),
         WriteAction::StagePart { path } | WriteAction::UnstagePart { path } => path.clone(),
-        // A commit names no target either.
-        WriteAction::Commit { .. } => String::new(),
+        // A commit names no target either, and neither does a discard.
+        WriteAction::Commit { .. }
+        | WriteAction::Discard { .. }
+        | WriteAction::DiscardPart { .. }
+        | WriteAction::Restore { .. }
+        | WriteAction::PutBack
+        | WriteAction::ClearDiscards => String::new(),
     };
     let named = |msg: Msg, name: &str| {
         let mut args = FluentArgs::new();
@@ -1812,6 +1839,11 @@ fn action_dialog(
         WriteAction::UnstagePart { path } => with_path(Msg::UnstagePartFailedTitle, path),
         WriteAction::Commit { amend: false } => texts.text(Msg::CommitFailedTitle),
         WriteAction::Commit { amend: true } => texts.text(Msg::AmendFailedTitle),
+        WriteAction::Discard { .. }
+        | WriteAction::DiscardPart { .. }
+        | WriteAction::Restore { .. }
+        | WriteAction::PutBack
+        | WriteAction::ClearDiscards => crate::discard_texts::failed_title(texts, action),
     };
     let (title, intro, details, close_label, copy) = match dialog {
         ActionDialog::BlockedByChanges { target, files } => (
@@ -1878,7 +1910,12 @@ fn action_dialog(
         ),
         ActionDialog::Failed { action, message } => (
             failed_title(action),
-            texts.text(Msg::CheckoutFailedBody),
+            // An exchange that failed half way leaves a file in the entry.
+            texts.text(if matches!(action, WriteAction::Restore { .. }) {
+                Msg::RestoreFailedBody
+            } else {
+                Msg::CheckoutFailedBody
+            }),
             message.clone(),
             texts.text(Msg::DialogClose),
             true,
@@ -1899,6 +1936,14 @@ fn action_dialog(
             texts.text(Msg::DialogClose),
             false,
         ),
+        ActionDialog::DiscardRefused { .. }
+        | ActionDialog::DiscardLeftOut { .. }
+        | ActionDialog::DiscardStuck { .. }
+        | ActionDialog::JournalRefused { .. } => {
+            let (title, intro, details, copy) =
+                crate::discard_texts::dialog_texts(texts, dialog).unwrap_or_default();
+            (title, intro, details, texts.text(Msg::DialogClose), copy)
+        }
         ActionDialog::CommitRefused { why } => {
             use gitbull_git::commit::{CommitRefusal, Operation};
             let body = match why {
@@ -2320,6 +2365,180 @@ fn detach_notice_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     }
 }
 
+/// The rows of the list of files the confirmation of a discard shows at most
+/// before the list scrolls.
+const DISCARD_LIST_ROWS: usize = 8;
+
+/// The confirmation before files are discarded (spec `discard`, requirement
+/// "Confirmation of discarding files"): it names the file or the number of
+/// files, says that they can be brought back, and lists them, also when they
+/// are many thousands. Cancel is the default: it has the focus first, so that
+/// Enter closes the dialog, and Escape means it.
+fn discard_dialog(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let texts = &app.texts;
+    let Some((count, first, left)) = app
+        .discard_dialog()
+        .map(|dialog| (dialog.files.len(), dialog.files[0].to_string(), dialog.left))
+    else {
+        return;
+    };
+    let title = if count == 1 {
+        let mut args = FluentArgs::new();
+        args.set("name", first);
+        texts.text_with(Msg::DiscardDialogTitleOne, Some(&args))
+    } else {
+        let mut args = FluentArgs::new();
+        args.set("count", count as i64);
+        texts.text_with(Msg::DiscardDialogTitleMany, Some(&args))
+    };
+    let left = (left > 0).then(|| {
+        let mut args = FluentArgs::new();
+        args.set("count", left as i64);
+        texts.text_with(Msg::DiscardDialogLeft, Some(&args))
+    });
+    let body = texts.text(Msg::DiscardDialogBody);
+    let list_name = texts.text(Msg::DiscardDialogList);
+    let cancel = texts.text(Msg::DialogCancel);
+    let confirm = texts.text(Msg::DiscardDialogConfirm);
+    let Some(dialog) = app.discard_dialog_mut() else {
+        return;
+    };
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("discard-dialog"),
+        &title,
+        |ui| {
+            ui.label(body);
+            if let Some(left) = left {
+                ui.add_space(SHAPE.space[1]);
+                ui.label(left);
+            }
+            ui.add_space(SHAPE.space[1]);
+            // The files in a list that draws only the rows in view, so that
+            // many thousands cost no more than a few.
+            let height = count.min(DISCARD_LIST_ROWS) as f32 * crate::virtual_list::ROW_HEIGHT;
+            let width = ui.available_width();
+            ui.allocate_ui(egui::vec2(width, height), |ui| {
+                crate::virtual_list::VirtualList::new(
+                    Id::new("discard-dialog-files"),
+                    egui::accesskit::Role::List,
+                    list_name,
+                    count as u64,
+                )
+                .show(ui, &mut dialog.list, |ui, row, _| {
+                    let Some(path) = dialog.files.get(row as usize) else {
+                        return;
+                    };
+                    let label = path.to_string();
+                    let rect = ui.max_rect();
+                    // Each file is a named item for assistive technology.
+                    let item = ui.interact(rect, ui.id().with("file"), egui::Sense::hover());
+                    item.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, &label)
+                    });
+                    ui.ctx().accesskit_node_builder(item.id, |node| {
+                        node.set_role(egui::accesskit::Role::ListItem);
+                    });
+                    let mut inner = rect;
+                    inner.min.x += 6.0;
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(inner)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(path.to_string())
+                                    .truncate()
+                                    .selectable(false),
+                            );
+                        },
+                    );
+                });
+            });
+        },
+        |ui, ()| {
+            let mut choice = None;
+            ui.horizontal(|ui| {
+                let cancel = components::Button::new(&cancel)
+                    .kind(components::Kind::Primary)
+                    .show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    cancel.request_focus();
+                }
+                if cancel.clicked() {
+                    choice = Some(Action::CancelDiscard);
+                }
+                if components::Button::new(&confirm).show(ui).clicked() {
+                    choice = Some(Action::ConfirmDiscard);
+                }
+            });
+            choice
+        },
+    );
+    if let Some(choice) = outcome.inner {
+        actions.push(choice);
+    } else if outcome.escape {
+        actions.push(Action::CancelDiscard);
+    }
+}
+
+/// The question before the list of discards is cleared: what is cleared
+/// cannot be brought back, and how many entries are interrupted, whose files
+/// may still lie in the list and not in the working copy. Cancel is the
+/// default.
+fn clear_question_dialog(app: &mut App, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let interrupted = app
+        .workspace()
+        .and_then(|workspace| workspace.active())
+        .and_then(|tab| tab.session())
+        .map_or(0, |session| session.journal().interrupted());
+    let texts = &app.texts;
+    let title = texts.text(Msg::ClearDialogTitle);
+    let body = texts.text(Msg::ClearDialogBody);
+    let warning = (interrupted > 0).then(|| {
+        let mut args = FluentArgs::new();
+        args.set("count", interrupted as i64);
+        texts.text_with(Msg::ClearDialogInterrupted, Some(&args))
+    });
+    let cancel = texts.text(Msg::DialogCancel);
+    let confirm = texts.text(Msg::ClearDialogConfirm);
+    let outcome = components::dialog(
+        ui.ctx(),
+        Id::new("clear-question"),
+        &title,
+        |ui| {
+            ui.label(body);
+            if let Some(warning) = warning {
+                ui.add_space(SHAPE.space[1]);
+                ui.label(warning);
+            }
+        },
+        |ui, ()| {
+            let mut choice = None;
+            ui.horizontal(|ui| {
+                let cancel = components::Button::new(&cancel)
+                    .kind(components::Kind::Primary)
+                    .show(ui);
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    cancel.request_focus();
+                }
+                if cancel.clicked() {
+                    choice = Some(Action::CancelClear);
+                }
+                if components::Button::new(&confirm).show(ui).clicked() {
+                    choice = Some(Action::ConfirmClear);
+                }
+            });
+            choice
+        },
+    );
+    if let Some(choice) = outcome.inner {
+        actions.push(choice);
+    } else if outcome.escape {
+        actions.push(Action::CancelClear);
+    }
+}
+
 /// The question before a tab or the window closes while a write action runs.
 /// Keep open is the default: it has the focus first, and Escape means it.
 fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -2340,6 +2559,11 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
         return;
     };
     let texts = &app.texts;
+    // An action that cannot be stopped is the one the question names.
+    let first = relevant
+        .iter()
+        .find(|action| action.action.is_discard())
+        .unwrap_or(first);
     let mut args = FluentArgs::new();
     args.set("action", action_text(app, &first.action));
     args.set("tab", first.title.clone());
@@ -2349,7 +2573,15 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     // that goes with the tab.
     let index = first.action.is_index();
     let commit = matches!(first.action, WriteAction::Commit { .. });
+    let discard = first.action.is_discard();
     let body = match (question, relevant.len()) {
+        _ if app.close_waiting => texts.text_with(Msg::CloseWaiting, Some(&args)),
+        (CloseQuestion::Tab(_), _) if discard => {
+            texts.text_with(Msg::CloseQuestionTabDiscard, Some(&args))
+        }
+        (CloseQuestion::Window, _) if discard => {
+            texts.text_with(Msg::CloseQuestionWindowDiscard, Some(&args))
+        }
         (CloseQuestion::Tab(_), _) if commit => {
             texts.text_with(Msg::CloseQuestionTabCommit, Some(&args))
         }
@@ -2371,6 +2603,7 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
     };
     let keep = texts.text(Msg::CloseKeepOpen);
     let anyway = texts.text(Msg::CloseAnyway);
+    let waiting = app.close_waiting;
     let outcome = components::dialog(
         ui.ctx(),
         Id::new("close-question"),
@@ -2390,7 +2623,8 @@ fn close_question_dialog(app: &App, ui: &mut Ui, actions: &mut Vec<Action>) {
                 if keep.clicked() {
                     choice = Some(Action::KeepOpen);
                 }
-                if components::Button::new(&anyway).show(ui).clicked() {
+                // While it waits, Keep open is the way out.
+                if !waiting && components::Button::new(&anyway).show(ui).clicked() {
                     choice = Some(Action::CloseAnyway);
                 }
             });
@@ -2651,6 +2885,9 @@ fn status_bar(app: &App, ui: &mut Ui) {
             ui.label(commits_text(app, session));
             if let Some(action) = session.action() {
                 ui.label(action_text(app, action));
+                if session.waiting_for_other() {
+                    ui.label(app.texts.text(Msg::StatusWaitingForOther));
+                }
             }
         } else if app.home_shown() {
             let repositories = app.home.list.repositories();
@@ -2732,6 +2969,7 @@ fn history(app: &mut App, ui: &mut Ui) {
                 app.texts.text(Msg::PanelFiles),
                 app.texts.text(Msg::PanelDiff),
             );
+            crate::recent_discards::keys(app, ui);
             CentralPanel::default().show(ui, |ui| {
                 // The file list shares its width with the commit panel.
                 let files = Panel::left("status_files")
@@ -2746,8 +2984,12 @@ fn history(app: &mut App, ui: &mut Ui) {
                             // In a small window the form gives the list the
                             // room for its title, its filter and five rows,
                             // and scrolls in what is left.
-                            let most = (ui.available_height() - commit_form::LIST_ROOM)
-                                .max(SHAPE.control_height);
+                            // The bar and the header of the discards keep
+                            // their room too.
+                            let most = (ui.available_height()
+                                - commit_form::LIST_ROOM
+                                - crate::recent_discards::base_height(ui))
+                            .max(SHAPE.control_height);
                             // The form is as high as what it holds; only one
                             // that was higher than its room when drawn last
                             // gets that room and scrolls.
@@ -2769,6 +3011,21 @@ fn history(app: &mut App, ui: &mut Ui) {
                         } else {
                             // No form is drawn: Tab must not look for one.
                             commit_form::forget(ui);
+                        }
+                        // The notice of the last discard lies between the
+                        // list and the form, also when nothing is left to
+                        // list.
+                        if crate::recent_discards::shown(app) {
+                            // What the file list and the form leave: the file
+                            // list keeps the room for its title, its filter and
+                            // five rows.
+                            let room = (ui.available_height() - commit_form::LIST_ROOM).max(0.0);
+                            Panel::bottom("recent_discards")
+                                .resizable(false)
+                                .show(ui, |ui| crate::recent_discards::show(app, ui, room));
+                        } else {
+                            // Nothing is drawn: Tab must not look for it.
+                            crate::recent_discards::forget(ui);
                         }
                         CentralPanel::default().show(ui, |ui| {
                             section_title(ui, files_title.clone());
@@ -2920,16 +3177,19 @@ pub(crate) fn move_between_areas(ui: &Ui, areas: &[&str]) {
         }
     });
     let mut areas: Vec<Id> = areas.iter().map(Id::new).collect();
-    // The commit form stands between the file list and the diff. Tab enters
-    // it at its first control that is available, and with Shift at its last;
-    // inside it and out of it the form moves the focus itself.
+    // The notice bar and the list of discards, then the commit form, stand
+    // between the file list and the diff, each a group of stops. Tab enters
+    // them at the first control that is available, and with Shift at the
+    // last; inside a group, and out of it, the group moves the focus itself.
     let status_list = Id::new(STATUS_LIST);
     if let Some(list) = areas.iter().position(|area| *area == status_list) {
-        let stops = commit_form::stops(ui);
+        let groups = [crate::recent_discards::stops(ui), commit_form::stops(ui)];
+        let first = groups.iter().find_map(|stops| stops.first().copied());
+        let last = groups.iter().rev().find_map(|stops| stops.last().copied());
         if focused == Some(status_list) {
-            areas.splice(list + 1..list + 1, stops.first().copied());
+            areas.splice(list + 1..list + 1, first);
         } else {
-            areas.splice(list + 1..list + 1, stops.last().copied());
+            areas.splice(list + 1..list + 1, last);
         }
     }
     let Some(position) = focused.and_then(|id| areas.iter().position(|area| *area == id)) else {

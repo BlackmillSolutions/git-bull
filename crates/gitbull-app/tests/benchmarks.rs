@@ -1695,3 +1695,217 @@ fn overlap_builds(shared: usize) -> Vec<Duration> {
         })
         .collect()
 }
+
+/// Files of the File status view in [`status_selection`].
+const STATUS_FILES: usize = 50_000;
+
+/// Frames of a key held down in [`status_selection`].
+const KEY_FRAMES: usize = 60;
+
+/// The selection of several files in the File status view (spec
+/// `file-lists`, requirement "Selecting several files in the File status
+/// view"): a status of [`STATUS_FILES`] unstaged files in 50 folders, from the
+/// fake backend, which Git has no part in. Ctrl+A, a Shift click, Shift+Down
+/// held down, collapsing and expanding a folder of the tree with everything
+/// selected, and typing a filter each stay under the frame target.
+#[test]
+#[ignore]
+fn status_selection() {
+    use gitbull_git::changes::ChangeKind;
+    use gitbull_git::path::RepoPath;
+    use gitbull_git::status::{StatusEntry, StatusKind, WorkingStatus};
+    use gitbull_testkit::{FakeBackend, commit_line};
+
+    let root = support::path(&["work", "git-bull"]);
+    let unstaged = (0..STATUS_FILES)
+        .map(|n| StatusEntry {
+            kind: StatusKind::Changed(ChangeKind::Modified),
+            path: RepoPath::new(format!("dir-{:02}/file-{n:05}.rs", n % 50)),
+            old_path: None,
+            submodule: false,
+        })
+        .collect();
+    let backend = FakeBackend::default()
+        .with_repository(&root)
+        .with_history(&root, vec![commit_line("b", &[])])
+        .with_status(
+            &root,
+            WorkingStatus {
+                unstaged,
+                ..WorkingStatus::default()
+            },
+        );
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = window(test.app);
+    support::settle_window(&mut harness);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !loaded(&harness) {
+        assert!(Instant::now() < deadline, "the history did not load");
+        harness.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    // Opening the view: the frames in which the files arrive.
+    let item = harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| node.accesskit_node().label().as_deref() == Some("File status"))
+        .expect("File status in the sidebar")
+        .rect()
+        .center();
+    click(&mut harness, item);
+    let listed = |h: &Harness<'_, App>| h.query_all_by_role(Role::ListItem).next().is_some();
+    let arriving = frames_until(&mut harness, listed);
+
+    // The first file is selected; a click gives the list the focus.
+    let first = harness
+        .query_all_by_role(Role::ListItem)
+        .next()
+        .expect("a file")
+        .rect()
+        .center();
+    click(&mut harness, first);
+    harness.step();
+
+    let select_all = |modifiers: Modifiers, pressed: Key| Event::Key {
+        key: pressed,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    };
+    let mut all = vec![frame_with(
+        &mut harness,
+        select_all(Modifiers::COMMAND, Key::A),
+    )];
+    all.extend((0..5).map(|_| timed(&mut harness, |_| {})));
+
+    // A Shift click on a file in view reduces the selection to a range.
+    let in_view = harness
+        .query_all_by_role(Role::ListItem)
+        .nth(5)
+        .expect("a file in view")
+        .rect()
+        .center();
+    harness.hover_at(in_view);
+    let mut shift_click = Vec::new();
+    for pressed in [true, false] {
+        let event = Event::PointerButton {
+            pos: in_view,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::SHIFT,
+        };
+        harness.event_modifiers(event.clone(), Modifiers::SHIFT);
+        let started = Instant::now();
+        harness.step();
+        shift_click.push(started.elapsed());
+    }
+    shift_click.extend((0..5).map(|_| timed(&mut harness, |_| {})));
+
+    let held: Vec<Duration> = (0..KEY_FRAMES)
+        .map(|_| frame_with(&mut harness, select_all(Modifiers::SHIFT, Key::ArrowDown)))
+        .collect();
+
+    // The tree. A filter is typed with one file selected, to tell what the
+    // selection adds, and emptied again.
+    harness
+        .get_by_role_and_label(Role::Button, "Show as tree")
+        .click();
+    harness.run();
+    let filter_field = |h: &mut Harness<'_, App>| {
+        h.get_by_role_and_label(Role::TextInput, "Filter files")
+            .click();
+        h.run();
+    };
+    let type_filter = |h: &mut Harness<'_, App>| -> Vec<Duration> {
+        "file-0001"
+            .chars()
+            .map(|letter| frame_with(h, Event::Text(letter.to_string())))
+            .collect()
+    };
+    filter_field(&mut harness);
+    let typed_one = type_filter(&mut harness);
+    for _ in 0.."file-0001".len() {
+        harness.key_press(Key::Backspace);
+        harness.run();
+    }
+
+    // Everything selected again, the list focused by a click on a file, and a
+    // folder collapsed and expanded.
+    let file_row = harness
+        .query_all_by_role(Role::TreeItem)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with("Modified: "))
+        })
+        .expect("a file in the tree")
+        .rect()
+        .center();
+    click(&mut harness, file_row);
+    harness.step();
+    harness
+        .input_mut()
+        .events
+        .push(select_all(Modifiers::COMMAND, Key::A));
+    harness.run();
+    let described = harness
+        .query_all_by_role(Role::Tree)
+        .filter_map(|node| node.accesskit_node().description())
+        .next();
+    assert!(
+        described.is_some_and(|text| text.ends_with("files selected")),
+        "Ctrl+A did not select the files"
+    );
+    let mut folder = Vec::new();
+    for _ in 0..10 {
+        let at = harness
+            .query_all_by_role(Role::TreeItem)
+            .find(|node| {
+                node.accesskit_node()
+                    .label()
+                    .is_some_and(|label| label.starts_with("dir-"))
+            })
+            .expect("a folder")
+            .rect()
+            .center();
+        folder.push(timed(&mut harness, |h| click(h, at)));
+        folder.push(timed(&mut harness, |_| {}));
+    }
+    // The click on the folder selected it; select the files again.
+    click(&mut harness, file_row);
+    harness.step();
+    harness
+        .input_mut()
+        .events
+        .push(select_all(Modifiers::COMMAND, Key::A));
+    harness.run();
+    filter_field(&mut harness);
+    let typed = type_filter(&mut harness);
+
+    eprintln!("| Step | Frames | Median | 99th percentile | Slowest |");
+    eprintln!("|---|---|---|---|---|");
+    // The frame in which the files arrive sorts them into the tree order; it
+    // does not depend on the selection, and it is reported but not held to
+    // the budget here.
+    summary("Files of the File status view arrive", arriving);
+    let slowest = [
+        summary("Ctrl+A with 50,000 files", all),
+        summary("Shift click on a file in view", shift_click),
+        summary("Shift+Down held down", held),
+        summary("Collapsing and expanding a folder, all selected", folder),
+        summary("Typing a filter, one file selected", typed_one),
+        summary("Typing a filter, all selected", typed),
+    ];
+    for slowest in slowest {
+        assert!(slowest < FRAME_TARGET, "a frame took {slowest:?}");
+    }
+}
