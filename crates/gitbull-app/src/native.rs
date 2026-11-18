@@ -14,6 +14,10 @@ use crate::fonts::{self, Fallback};
 /// The window size on the first start.
 const FIRST_SIZE: [f32; 2] = [1280.0, 800.0];
 
+/// The logo as the icon of the window, a 256 px PNG that
+/// `packaging/icons/generate.cjs` renders from `packaging/git-bull.svg`.
+const WINDOW_ICON: &[u8] = include_bytes!("../assets/icon.png");
+
 /// The title bar of the window (design, decision 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TitleBar {
@@ -52,6 +56,11 @@ pub fn viewport(settings: &Settings, os: OperatingSystem) -> ViewportBuilder {
         .with_inner_size(Vec2::from(size))
         .with_min_inner_size([640.0, 400.0])
         .with_drag_and_drop(true);
+    // Without the icon the window shows the generic one; a missing or
+    // unreadable icon must not keep the application from starting.
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(WINDOW_ICON) {
+        viewport = viewport.with_icon(icon);
+    }
     if let Some([x, y]) = position {
         viewport = viewport.with_position(Pos2::new(x, y));
     }
@@ -189,6 +198,25 @@ mod tests {
             OperatingSystem::Mac,
         ] {
             assert_eq!(TitleBar::new(true, os), TitleBar::System, "{os:?}");
+        }
+    }
+
+    #[test]
+    fn the_window_carries_the_logo_as_its_icon_on_every_platform() {
+        for os in [
+            OperatingSystem::Windows,
+            OperatingSystem::Nix,
+            OperatingSystem::Mac,
+        ] {
+            let viewport = viewport(&Settings::default(), os);
+            let icon = viewport.icon.expect("the window has an icon");
+            assert_eq!((icon.width, icon.height), (256, 256), "{os:?}");
+            assert_eq!(icon.rgba.len(), 256 * 256 * 4, "{os:?}");
+            // The logo sits on a transparent canvas: the corners show
+            // through, the middle of the bull's face does not.
+            let alpha = |x: usize, y: usize| icon.rgba[(y * 256 + x) * 4 + 3];
+            assert_eq!(alpha(0, 0), 0, "{os:?}");
+            assert_eq!(alpha(128, 128), 255, "{os:?}");
         }
     }
 
