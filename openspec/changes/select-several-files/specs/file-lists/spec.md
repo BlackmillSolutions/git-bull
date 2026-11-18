@@ -57,12 +57,12 @@ home views SHALL keep one selection.
 - **THEN** `b.rs`, `c.rs` and `d.rs` are selected, `b.rs` is still the anchor, and the diff panel shows `b.rs`
 
 #### Scenario: Range in a tree
-- **WHEN** the tree shows `src/a.rs`, `src/b.rs` and `docs/c.md` in one group, with the folders as rows between them, `src/a.rs` is selected and the user clicks `docs/c.md` with Shift
+- **WHEN** the tree shows `docs/c.md`, `src/a.rs` and `src/b.rs` in one group, with the row of the folder `src` between `c.md` and `a.rs`, `docs/c.md` is selected and the user clicks `src/b.rs` with Shift
 - **THEN** the three files are selected and no folder is
 
 #### Scenario: Range over a collapsed folder
-- **WHEN** the folder `src` is collapsed between `a.rs` and `z.rs`, `a.rs` is selected and the user clicks `z.rs` with Shift
-- **THEN** `a.rs` and `z.rs` are selected, and the files inside `src` are not
+- **WHEN** the tree shows the folders `app`, `src` and `web`, `src` is collapsed, `app/a.rs` is selected and the user clicks `web/z.rs` with Shift
+- **THEN** `app/a.rs` and `web/z.rs` are selected, and `src/b.rs` inside the collapsed folder is not
 
 #### Scenario: Extending with the keyboard
 - **WHEN** the file list has the focus, `b.rs` is selected, and the user presses Shift+Down twice
