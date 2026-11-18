@@ -360,6 +360,11 @@ pub struct FileTree {
     file_rows: Vec<Vec<u32>>,
     /// Per group and folder, its row.
     folder_rows: Vec<Vec<u32>>,
+    /// Per group and file, whether the filter shows it. Empty while there is
+    /// no filter. Filled once per filter or order, and shared by the narrowing
+    /// of the selection and the building of the rows, so that no file is
+    /// tested twice.
+    matched: Vec<Vec<bool>>,
     first_file: Option<usize>,
     selected_row: Option<usize>,
     builds: u64,
@@ -394,6 +399,7 @@ impl FileTree {
             parents: Vec::new(),
             file_rows: Vec::new(),
             folder_rows: Vec::new(),
+            matched: Vec::new(),
             first_file: None,
             selected_row: None,
             builds: 0,
@@ -649,8 +655,9 @@ impl FileTree {
         self.filter = filter.to_owned();
         self.lower_filter = filter.to_lowercase();
         self.collapsed.filtered.clear();
+        self.find_matches();
         self.narrow_selection();
-        self.build();
+        self.build_rows();
     }
 
     /// The filter changed: the files it hides leave a selection of several
@@ -665,10 +672,9 @@ impl FileTree {
         if self.also.is_empty() {
             return;
         }
-        let files = &self.order.groups[group].files;
-        let lower = self.lower_filter.as_str();
-        self.also.retain(|&other| files[other].matches(lower));
-        if !files[index].matches(lower) {
+        let shown = |file: usize| self.matched.get(group).is_none_or(|group| group[file]);
+        self.also.retain(|&other| shown(other));
+        if !shown(index) {
             let taking_over = self
                 .nearest_above_else_below(group, self.selected_row, &self.also)
                 .or_else(|| self.also.iter().copied().min());
@@ -1092,13 +1098,35 @@ impl FileTree {
         }
     }
 
+    /// Tests every file against the filter, once.
+    fn find_matches(&mut self) {
+        let filter = self.lower_filter.as_str();
+        self.matched.clear();
+        if filter.is_empty() {
+            return;
+        }
+        self.matched.extend(self.order.groups.iter().map(|group| {
+            group
+                .files
+                .iter()
+                .map(|file| file.matches(filter))
+                .collect()
+        }));
+    }
+
     /// Builds the rows, and everything a frame asks about them, from the
-    /// mode, the filter and the collapsed folders.
+    /// order, the mode, the filter and the collapsed folders.
     fn build(&mut self) {
+        self.find_matches();
+        self.build_rows();
+    }
+
+    /// Builds the rows from the files that `find_matches` found.
+    fn build_rows(&mut self) {
         self.builds += 1;
         let order = Arc::clone(&self.order);
-        let filter = self.lower_filter.as_str();
-        let filtering = !filter.is_empty();
+        let filtering = !self.lower_filter.is_empty();
+        let matched = &self.matched;
         let collapsed = match filtering {
             true => &self.collapsed.filtered,
             false => &self.collapsed.plain,
@@ -1114,7 +1142,7 @@ impl FileTree {
             let folder_rows = &mut self.folder_rows[group];
             folder_rows.clear();
             folder_rows.resize(prepared.folders.len(), NONE);
-            let matches = |file: usize| !filtering || prepared.files[file].matches(filter);
+            let matches = |file: usize| !filtering || matched[group][file];
 
             match self.mode {
                 Mode::Flat => {
