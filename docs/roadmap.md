@@ -13,7 +13,9 @@ starting point, and checkout and the creation of branches and tags are
 delivered. Whole files, hunks and selected lines can be staged and
 unstaged, the staged changes can be committed, and changes can be discarded,
 every discard being kept so that it can be brought back. All of it is
-released as 0.3.0. This roadmap schedules new work.
+released as 0.3.0. Several files can be selected in the File status view for
+staging, unstaging and discarding; that is built and waits for its release.
+This roadmap schedules new work.
 
 ## Released: 0.3.0
 
@@ -144,7 +146,8 @@ is specified in the [staging spec](../openspec/specs/staging/spec.md).
   selection moves to the next file. A file in conflict is not staged.
 
 Not delivered with it: resolving conflicts, staging a folder as one, and
-selecting several files. Discarding changes followed with its own delivery.
+selecting several files, which followed with its own delivery. Discarding
+changes followed with its own delivery too.
 
 ## Delivered: staging of hunks and lines
 
@@ -224,21 +227,59 @@ behaviour is specified in the
 - A file in conflict, a submodule, a rename and a repository of its own are
   not discarded; their entries say why.
 
-Not delivered with it: selecting several files, and discarding what is only
-staged, which is unstaged first.
+Not delivered with it: selecting several files, which followed with its own
+delivery, and discarding what is only staged, which is unstaged first.
+
+## Delivered: selecting several files
+
+Selecting several files in the File status view was built on the branch
+`impl/select-several-files`, modelled on GitKraken Desktop. It was planned as
+the OpenSpec change `select-several-files`, and is specified in the
+requirements of the capabilities `file-lists`, `staging`, `discard` and
+`working-copy-status` that the change adds. It is not part of 0.3.0.
+
+- A click with Ctrl or Cmd adds a file to the selection or takes it out, a
+  click with Shift selects the range from the anchor, Shift with Up or Down
+  extends it from the file the keys are on, Ctrl or Cmd with A selects every
+  file of the group that the filter shows, and Escape goes back to the anchor.
+  A selection holds files of one group. A click with a modifier on a folder
+  only opens or closes it. The diff panel shows the anchor, the file last
+  clicked, and the list tells assistive technology how many files are
+  selected.
+- S and U, and the first entry of the context menu, "Stage 3 files" or
+  "Unstage 3 files", act on the selection in one request. A file in conflict
+  is left out without a message. The button on a row acts on its row alone,
+  and "Stage all" and "Unstage all" keep acting on the whole group.
+- The context menu offers "Discard changes of 3 files", which asks as
+  "Discard all" does and makes one entry of the journal that "Undo" and the
+  list "Recently discarded" bring back whole. A file that cannot be discarded
+  is left out, and the confirmation says so. No key discards.
+- After an action on a selection exactly one file is selected: the first
+  below the files that went, else the last above them, else the first file of
+  the other group. The selection is kept by path through a status read again
+  and follows the filter.
+- Typing a filter in the File status view is much faster with 50,000 files:
+  the tree tests each file against the filter once. The frame budget with
+  50,000 selected files is measured in `docs/benchmarks.md`.
+
+Where it goes beyond GitKraken's documentation: GitKraken documents
+selecting several files with Shift or Ctrl/Cmd, "Discard changes" on one or
+more selected files and a trash button that discards only the selected files.
+It does not document staging or unstaging a selection, Ctrl+A or Shift with an
+arrow, and names the current file for S and U. git-bull adds those, as file
+lists and GitLens do, and keeps "Discard all" meaning all files of the group,
+because a button that says "all" and acts on a selection would discard fewer
+files than its name says.
+
+Not delivered with it: staging a folder as one, and selecting several files in
+the file list of a commit.
 
 ## Next: the local Git workflow
 
-| Order | Priority | Work |
-|---|---|---|
-| 1 | Normal | Select several files in the File status view, for staging, unstaging and discarding. |
-
-Selecting several files is its own change: the file list has one selection,
-which decides the diff shown, and changing that touches staging, unstaging and
-discarding alike.
-
-Each item starts with its own Explore and Propose and builds on the write
-invocation and on the write actions of the session.
+No item of the local Git workflow that the delivered work started is open. The
+next work is in the section below and in the GitHub roadmap; each item starts
+with its own Explore and Propose and builds on the write invocation and on the
+write actions of the session.
 
 ## After the basic actions
 

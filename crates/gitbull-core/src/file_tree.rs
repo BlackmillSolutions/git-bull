@@ -310,6 +310,17 @@ impl GroupOrder {
     }
 }
 
+/// The place of each file of `group` of `order`, by its path.
+fn places_of(order: &FileOrder, group: usize) -> HashMap<&RepoPath, usize> {
+    order
+        .groups
+        .get(group)
+        .into_iter()
+        .flat_map(|g| g.files.iter().enumerate())
+        .map(|(at, file)| (&file.path, at))
+        .collect()
+}
+
 /// The folders collapsed without a filter, and those collapsed while
 /// filtering, which each change of the filter forgets.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -332,6 +343,14 @@ pub struct FileTree {
     /// Kept while the filter shows nothing, so that it returns with the
     /// files.
     selected: Option<Selected>,
+    /// The other files of a selection of several files, by their index in
+    /// the group of the selected file, which is the anchor. Empty while one
+    /// file is selected, and always when a folder is.
+    also: HashSet<usize>,
+    /// The file the keys move from, when it is not the anchor: the file a
+    /// Shift click or Shift+Arrow ended at. Only set while `also` is not
+    /// empty.
+    lead: Option<usize>,
     /// The first file shown is to be selected once the filter shows one.
     wants_first: bool,
     rows: Vec<Row>,
@@ -341,6 +360,11 @@ pub struct FileTree {
     file_rows: Vec<Vec<u32>>,
     /// Per group and folder, its row.
     folder_rows: Vec<Vec<u32>>,
+    /// Per group and file, whether the filter shows it. Empty while there is
+    /// no filter. Filled once per filter or order, and shared by the narrowing
+    /// of the selection and the building of the rows, so that no file is
+    /// tested twice.
+    matched: Vec<Vec<bool>>,
     first_file: Option<usize>,
     selected_row: Option<usize>,
     builds: u64,
@@ -368,11 +392,14 @@ impl FileTree {
             lower_filter: filter.to_lowercase(),
             collapsed: Collapsed::default(),
             selected: None,
+            also: HashSet::new(),
+            lead: None,
             wants_first: false,
             rows: Vec::new(),
             parents: Vec::new(),
             file_rows: Vec::new(),
             folder_rows: Vec::new(),
+            matched: Vec::new(),
             first_file: None,
             selected_row: None,
             builds: 0,
@@ -403,6 +430,44 @@ impl FileTree {
         let mut collapsed = self.collapsed.clone();
         collapsed.plain.retain(holds);
         collapsed.filtered.retain(holds);
+
+        // The other files of a selection of several files are found again by
+        // their paths, all in one step: after "Select all" there are tens of
+        // thousands of them. When the anchor left the group, the nearest of
+        // the others above it, else below it, takes its place.
+        let mut also = HashSet::new();
+        let mut lead = None;
+        let mut promoted = None;
+        if let Some(Selected::File { group, index }) = &self.selected
+            && !self.also.is_empty()
+        {
+            let places = places_of(&order, *group);
+            let new_index = |old: usize| places.get(self.order.file_path(*group, old)).copied();
+            let survivors: HashSet<usize> = self
+                .also
+                .iter()
+                .copied()
+                .filter(|&old| new_index(old).is_some())
+                .collect();
+            let mut others = survivors.clone();
+            if new_index(*index).is_none() {
+                let taking_over = self
+                    .nearest_above_else_below(*group, self.selected_row, &survivors)
+                    .or_else(|| survivors.iter().copied().min());
+                if let Some(old) = taking_over {
+                    others.remove(&old);
+                    promoted = new_index(old).map(|index| Selected::File {
+                        group: *group,
+                        index,
+                    });
+                }
+            }
+            also = others.into_iter().filter_map(new_index).collect();
+            lead = self
+                .lead
+                .and_then(new_index)
+                .filter(|lead| also.contains(lead));
+        }
         let selected = match &self.selected {
             Some(folder @ Selected::Folder { .. }) => Some(folder.clone()),
             Some(Selected::File { group, index }) => {
@@ -417,18 +482,12 @@ impl FileTree {
                             index,
                         })
                 };
-                found(*index).or_else(|| {
+                found(*index).or(promoted).or_else(|| {
                     // The file left its group. Its neighbours are looked up in
                     // one step each: after "Stage all" none of them is left,
                     // and a search of the list per neighbour would cost the
                     // square of its length.
-                    let places: HashMap<&RepoPath, usize> = order
-                        .groups
-                        .get(*group)
-                        .into_iter()
-                        .flat_map(|g| g.files.iter().enumerate())
-                        .map(|(at, file)| (&file.path, at))
-                        .collect();
+                    let places = places_of(&order, *group);
                     self.neighbours_of_selected().find_map(|(_, neighbour)| {
                         let path = self.order.file_path(*group, neighbour);
                         places.get(path).map(|index| Selected::File {
@@ -449,6 +508,8 @@ impl FileTree {
         let mut tree = FileTree::unbuilt(order, self.mode, &self.filter);
         tree.collapsed = collapsed;
         tree.selected = selected;
+        tree.also = also;
+        tree.lead = lead;
         tree.wants_first = self.wants_first;
         tree.build();
         if let Some(left) = left
@@ -507,14 +568,53 @@ impl FileTree {
     /// first file of another group. `None` while no file is selected and
     /// shown, and for the only file shown.
     pub fn successor_of_selected(&self) -> Option<usize> {
-        let (Some(Selected::File { group, .. }), Some(_)) = (&self.selected, self.selected_row)
-        else {
-            return None;
+        let (_, anchor) = self.selected_file()?;
+        self.successor_of_selection(|index| index == anchor)
+    }
+
+    /// The row that takes over when the files of the selection for which
+    /// `leaves` answers yes leave their group, as after they were staged: the
+    /// first file below the lowest row of them that stays, else the last file
+    /// above the highest row that stays, each of their group in the rows as
+    /// they are shown, else the first file of another group. A selected file
+    /// that `leaves` does not name stays, as a file in conflict does. `None`
+    /// while no file is selected and shown.
+    pub fn successor_of_selection(&self, leaves: impl Fn(usize) -> bool) -> Option<usize> {
+        let (group, anchor) = self.selected_file()?;
+        let anchor_row = self.selected_row?;
+        let (mut lowest, mut highest, mut any) = (usize::MAX, 0, false);
+        let leaving = self
+            .also
+            .iter()
+            .copied()
+            .chain([anchor])
+            .filter(|&index| leaves(index))
+            .filter_map(|index| self.row_of_file(group, index));
+        for row in leaving {
+            (lowest, highest, any) = (lowest.min(row), highest.max(row), true);
+        }
+        if !any {
+            (lowest, highest) = (anchor_row, anchor_row);
+        }
+        // Whether the row at `at` is a file of the group that stays; `None`
+        // at the end of the group. A folder row is passed over, as is a file
+        // that leaves.
+        let stays = |at: usize| match self.rows[at] {
+            Row::File {
+                group: of, index, ..
+            } if of == group => Some(!leaves(index)),
+            Row::Folder { group: of, .. } if of == group => Some(false),
+            _ => None,
         };
-        self.neighbours_of_selected()
-            .next()
-            .map(|(row, _)| row)
-            .or_else(|| self.first_file_outside(*group))
+        let below =
+            (lowest + 1..self.rows.len()).map_while(|at| stays(at).map(|stays| (at, stays)));
+        let above = (0..highest)
+            .rev()
+            .map_while(|at| stays(at).map(|stays| (at, stays)));
+        below
+            .chain(above)
+            .find_map(|(at, stays)| stays.then_some(at))
+            .or_else(|| self.first_file_outside(group))
     }
 
     pub fn order(&self) -> &Arc<FileOrder> {
@@ -555,7 +655,37 @@ impl FileTree {
         self.filter = filter.to_owned();
         self.lower_filter = filter.to_lowercase();
         self.collapsed.filtered.clear();
-        self.build();
+        self.find_matches();
+        self.narrow_selection();
+        self.build_rows();
+    }
+
+    /// The filter changed: the files it hides leave a selection of several
+    /// files, so that no action reaches a file the user does not see, and
+    /// when it hides the anchor, the nearest selected file it shows, above,
+    /// else below, takes its place. When nothing is left, the rows decide, as
+    /// for one file: the first file shown is selected.
+    fn narrow_selection(&mut self) {
+        let Some(Selected::File { group, index }) = self.selected.clone() else {
+            return;
+        };
+        if self.also.is_empty() {
+            return;
+        }
+        let shown = |file: usize| self.matched.get(group).is_none_or(|group| group[file]);
+        self.also.retain(|&other| shown(other));
+        if !shown(index) {
+            let taking_over = self
+                .nearest_above_else_below(group, self.selected_row, &self.also)
+                .or_else(|| self.also.iter().copied().min());
+            if let Some(next) = taking_over {
+                self.also.remove(&next);
+                self.selected = Some(Selected::File { group, index: next });
+            }
+        }
+        if self.lead.is_some_and(|lead| !self.also.contains(&lead)) {
+            self.lead = None;
+        }
     }
 
     pub fn collapsed(&self) -> &Collapsed {
@@ -580,6 +710,7 @@ impl FileTree {
                 .is_some_and(|selected| self.is_inside(selected, group, &path))
             {
                 self.selected = Some(Selected::Folder { group, path });
+                self.reduce_to_anchor();
             }
         }
         self.build();
@@ -654,6 +785,222 @@ impl FileTree {
         }
     }
 
+    /// The number of files selected: none while a folder is selected, or
+    /// while the filter hides the anchor.
+    pub fn selection_len(&self) -> usize {
+        self.selected_file().map_or(0, |_| 1 + self.also.len())
+    }
+
+    /// Whether the file at `index` of `group` is selected, the anchor or one
+    /// of the others.
+    pub fn is_file_selected(&self, group: usize, index: usize) -> bool {
+        match self.selected() {
+            Some(Selected::File {
+                group: of,
+                index: anchor,
+            }) => *of == group && (*anchor == index || self.also.contains(&index)),
+            _ => false,
+        }
+    }
+
+    /// The files selected, each as its group and index, in the order of the
+    /// list: also those a collapsed folder hides, at their place in it.
+    pub fn selected_files(&self) -> Vec<(usize, usize)> {
+        let Some((group, anchor)) = self.selected_file() else {
+            return Vec::new();
+        };
+        let position = self.list_positions(group);
+        let mut files: Vec<usize> = self.also.iter().copied().chain([anchor]).collect();
+        files.sort_by_key(|&file| position[file]);
+        files.into_iter().map(|file| (group, file)).collect()
+    }
+
+    /// The place of each file of `group` in the list, whether it is shown
+    /// or not: its index in the flat list, its place among the files of the
+    /// tree in the order the tree lists them.
+    fn list_positions(&self, group: usize) -> Vec<u32> {
+        let prepared = &self.order.groups[group];
+        let mut position: Vec<u32> = (0..prepared.files.len() as u32).collect();
+        if self.mode == Mode::Tree {
+            let mut next = 0;
+            for node in &prepared.nodes {
+                if let NodeKind::File(file) = node.kind {
+                    position[file as usize] = next;
+                    next += 1;
+                }
+            }
+        }
+        position
+    }
+
+    /// The row the keys move from: the lead while several files are
+    /// selected and it is shown, else the row of the anchor. The list keeps
+    /// its cursor here, and not on the anchor, so that the arrow keys go on
+    /// from the file a Shift click ended at.
+    pub fn cursor_row(&self) -> Option<usize> {
+        let anchor = self.selected_row?;
+        let lead = match (self.selected(), self.lead) {
+            (Some(Selected::File { group, .. }), Some(lead)) => self.row_of_file(*group, lead),
+            _ => None,
+        };
+        Some(lead.unwrap_or(anchor))
+    }
+
+    /// A click with Ctrl, or Cmd, on the file at `row`: adds it to the
+    /// selection and makes it the anchor, or removes it, and when it is the
+    /// anchor, the nearest selected file above it, else below, becomes the
+    /// anchor. Does nothing, and answers `false`, for a folder and for the
+    /// only file selected. A file of another group starts a selection of its
+    /// own.
+    pub fn toggle_row(&mut self, row: usize) -> bool {
+        let Some(&Row::File { group, index, .. }) = self.rows.get(row) else {
+            return false;
+        };
+        let Some((_, anchor)) = self.selected_file().filter(|&(of, _)| of == group) else {
+            self.select_row(row);
+            return true;
+        };
+        if index == anchor {
+            let Some(next) = self.nearest_above_else_below(group, self.selected_row, &self.also)
+            else {
+                return false;
+            };
+            self.also.remove(&next);
+            self.selected = Some(Selected::File { group, index: next });
+            self.selected_row = self.row_of_file(group, next);
+            self.lead = None;
+            return true;
+        }
+        if self.also.remove(&index) {
+            if self.lead == Some(index) {
+                self.lead = None;
+            }
+            return true;
+        }
+        self.also.insert(anchor);
+        self.selected = Some(Selected::File { group, index });
+        self.selected_row = Some(row);
+        self.lead = None;
+        true
+    }
+
+    /// A click with Shift on the file at `row`: selects the files shown
+    /// from the anchor to it, and makes it the lead. The anchor stays. Does
+    /// nothing, and answers `false`, for a folder; a file of another group
+    /// starts a selection of its own.
+    pub fn select_range_to(&mut self, row: usize) -> bool {
+        let Some(&Row::File { group, index, .. }) = self.rows.get(row) else {
+            return false;
+        };
+        let Some((_, anchor)) = self.selected_file().filter(|&(of, _)| of == group) else {
+            self.select_row(row);
+            return true;
+        };
+        self.select_range(group, anchor, index);
+        true
+    }
+
+    /// Shift+Down, or Shift+Up: moves the lead by one file of the anchor's
+    /// group and selects the files from the anchor to it, which grows the
+    /// selection or shrinks it. Rows of folders are passed over. Answers
+    /// `false` at the edge of the group.
+    pub fn extend_selection(&mut self, down: bool) -> bool {
+        let Some((group, anchor)) = self.selected_file() else {
+            return false;
+        };
+        let Some(from) = self.row_of_file(group, self.lead.unwrap_or(anchor)) else {
+            return false;
+        };
+        let rows: Box<dyn Iterator<Item = usize>> = match down {
+            true => Box::new(from + 1..self.rows.len()),
+            false => Box::new((0..from).rev()),
+        };
+        let mut next = None;
+        for at in rows {
+            match self.rows[at] {
+                Row::File {
+                    group: of, index, ..
+                } if of == group => {
+                    next = Some(index);
+                    break;
+                }
+                Row::Folder { group: of, .. } if of == group => {}
+                _ => break,
+            }
+        }
+        let Some(next) = next else {
+            return false;
+        };
+        self.select_range(group, anchor, next);
+        true
+    }
+
+    /// Ctrl+A, or Cmd+A: selects every file of the anchor's group that the
+    /// filter shows, those in collapsed folders too, which is what "all"
+    /// means for the buttons of a group. The anchor stays. Answers whether
+    /// the selection changed; `false` while no file is selected.
+    pub fn select_all_shown(&mut self) -> bool {
+        let Some((group, anchor)) = self.selected_file() else {
+            return false;
+        };
+        let all: HashSet<usize> = self
+            .files_matching(group, &self.filter)
+            .filter(|&index| index != anchor)
+            .collect();
+        let changed = all != self.also;
+        self.also = all;
+        self.lead = None;
+        changed
+    }
+
+    /// Escape: leaves the anchor as the only file selected.
+    pub fn reduce_to_anchor(&mut self) {
+        self.also.clear();
+        self.lead = None;
+    }
+
+    /// Selects the files shown from `anchor` to `end`, both of `group`.
+    fn select_range(&mut self, group: usize, anchor: usize, end: usize) {
+        let (Some(from), Some(to)) = (
+            self.row_of_file(group, anchor),
+            self.row_of_file(group, end),
+        ) else {
+            return;
+        };
+        self.also = self.rows[from.min(to)..=from.max(to)]
+            .iter()
+            .filter_map(|row| match *row {
+                Row::File {
+                    group: of, index, ..
+                } if of == group && index != anchor => Some(index),
+                _ => None,
+            })
+            .collect();
+        self.lead = (end != anchor).then_some(end);
+    }
+
+    /// Of the files `candidates` of `group` that are shown, the nearest one
+    /// above the row `from`, else the nearest one below it.
+    fn nearest_above_else_below(
+        &self,
+        group: usize,
+        from: Option<usize>,
+        candidates: &HashSet<usize>,
+    ) -> Option<usize> {
+        let from = from?;
+        let shown = candidates
+            .iter()
+            .filter_map(|&index| Some((self.row_of_file(group, index)?, index)));
+        let above = shown
+            .clone()
+            .filter(|&(row, _)| row < from)
+            .max_by_key(|&(row, _)| row);
+        let below = shown
+            .filter(|&(row, _)| row > from)
+            .min_by_key(|&(row, _)| row);
+        above.or(below).map(|(_, index)| index)
+    }
+
     /// Selects the file or folder at `row`; a title selects nothing.
     pub fn select_row(&mut self, row: usize) {
         let selected = match self.rows.get(row) {
@@ -670,6 +1017,7 @@ impl FileTree {
         self.selected = Some(selected);
         self.selected_row = Some(row);
         self.wants_first = false;
+        self.reduce_to_anchor();
     }
 
     /// Selects the file at `index` of `group`; when it is not shown, the
@@ -677,6 +1025,7 @@ impl FileTree {
     pub fn select_file(&mut self, group: usize, index: usize) {
         self.selected = Some(Selected::File { group, index });
         self.wants_first = false;
+        self.reduce_to_anchor();
         self.find_selection();
     }
 
@@ -685,6 +1034,7 @@ impl FileTree {
     pub fn select_first(&mut self) {
         self.selected = None;
         self.selected_row = None;
+        self.reduce_to_anchor();
         match self.first_file {
             Some(row) => self.select_row(row),
             None => self.wants_first = true,
@@ -748,13 +1098,35 @@ impl FileTree {
         }
     }
 
+    /// Tests every file against the filter, once.
+    fn find_matches(&mut self) {
+        let filter = self.lower_filter.as_str();
+        self.matched.clear();
+        if filter.is_empty() {
+            return;
+        }
+        self.matched.extend(self.order.groups.iter().map(|group| {
+            group
+                .files
+                .iter()
+                .map(|file| file.matches(filter))
+                .collect()
+        }));
+    }
+
     /// Builds the rows, and everything a frame asks about them, from the
-    /// mode, the filter and the collapsed folders.
+    /// order, the mode, the filter and the collapsed folders.
     fn build(&mut self) {
+        self.find_matches();
+        self.build_rows();
+    }
+
+    /// Builds the rows from the files that `find_matches` found.
+    fn build_rows(&mut self) {
         self.builds += 1;
         let order = Arc::clone(&self.order);
-        let filter = self.lower_filter.as_str();
-        let filtering = !filter.is_empty();
+        let filtering = !self.lower_filter.is_empty();
+        let matched = &self.matched;
         let collapsed = match filtering {
             true => &self.collapsed.filtered,
             false => &self.collapsed.plain,
@@ -770,7 +1142,7 @@ impl FileTree {
             let folder_rows = &mut self.folder_rows[group];
             folder_rows.clear();
             folder_rows.resize(prepared.folders.len(), NONE);
-            let matches = |file: usize| !filtering || prepared.files[file].matches(filter);
+            let matches = |file: usize| !filtering || matched[group][file];
 
             match self.mode {
                 Mode::Flat => {
@@ -1495,5 +1867,638 @@ mod tests {
         assert!(!tree.left(1));
         assert!(!tree.right(1));
         assert_eq!(tree.selected_file(), Some((0, 1)));
+    }
+
+    // The selection of several files of one group (spec `file-lists`,
+    // requirement "Selecting several files in the File status view").
+
+    const FIVE: [&str; 5] = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"];
+
+    /// The paths of the selected files, in the order of the list.
+    fn selected_paths(tree: &FileTree) -> Vec<String> {
+        tree.selected_files()
+            .into_iter()
+            .map(|(group, index)| tree.order().file_path(group, index).to_string())
+            .collect()
+    }
+
+    /// A plain click on the row named `text`.
+    fn click(tree: &mut FileTree, text: &str) {
+        tree.select_row(row_named(tree, text));
+    }
+
+    /// A click with Ctrl, or Cmd, on the row named `text`.
+    fn ctrl_click(tree: &mut FileTree, text: &str) -> bool {
+        tree.toggle_row(row_named(tree, text))
+    }
+
+    /// A click with Shift on the row named `text`.
+    fn shift_click(tree: &mut FileTree, text: &str) -> bool {
+        tree.select_range_to(row_named(tree, text))
+    }
+
+    #[test]
+    fn a_plain_click_selects_one_file_which_is_the_anchor_and_the_lead() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "b.rs");
+        assert_eq!(selected_paths(&tree), ["b.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 1)));
+        assert_eq!(tree.cursor_row(), tree.selected_row());
+    }
+
+    #[test]
+    fn a_ctrl_click_adds_a_file_and_makes_it_the_anchor_and_the_lead() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "a.rs");
+        assert!(ctrl_click(&mut tree, "c.rs"));
+        assert_eq!(selected_paths(&tree), ["a.rs", "c.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 2)));
+        assert_eq!(tree.cursor_row(), Some(row_named(&tree, "c.rs")));
+    }
+
+    #[test]
+    fn a_plain_click_ends_a_selection_of_several_files() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "a.rs");
+        ctrl_click(&mut tree, "c.rs");
+        click(&mut tree, "b.rs");
+        assert_eq!(selected_paths(&tree), ["b.rs"]);
+        assert_eq!(tree.cursor_row(), tree.selected_row());
+    }
+
+    #[test]
+    fn a_ctrl_click_on_a_selected_file_removes_it() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "a.rs");
+        ctrl_click(&mut tree, "c.rs");
+        ctrl_click(&mut tree, "e.rs");
+        // A file that is not the anchor leaves the anchor where it is.
+        assert!(ctrl_click(&mut tree, "a.rs"));
+        assert_eq!(selected_paths(&tree), ["c.rs", "e.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 4)));
+    }
+
+    #[test]
+    fn removing_the_anchor_moves_it_to_the_nearest_selected_file_above() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "a.rs");
+        ctrl_click(&mut tree, "c.rs");
+        ctrl_click(&mut tree, "e.rs");
+        // `e.rs` is the anchor, `c.rs` the nearest selected file above it.
+        assert!(ctrl_click(&mut tree, "e.rs"));
+        assert_eq!(selected_paths(&tree), ["a.rs", "c.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 2)));
+        assert_eq!(tree.cursor_row(), Some(row_named(&tree, "c.rs")));
+    }
+
+    #[test]
+    fn removing_the_anchor_with_nothing_above_moves_it_below() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "c.rs");
+        ctrl_click(&mut tree, "a.rs");
+        assert!(ctrl_click(&mut tree, "a.rs"));
+        assert_eq!(selected_paths(&tree), ["c.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 2)));
+    }
+
+    #[test]
+    fn a_ctrl_click_on_the_only_selected_file_does_nothing() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "b.rs");
+        assert!(!ctrl_click(&mut tree, "b.rs"));
+        assert_eq!(selected_paths(&tree), ["b.rs"]);
+    }
+
+    #[test]
+    fn a_shift_click_selects_the_range_and_keeps_the_anchor() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "b.rs");
+        assert!(shift_click(&mut tree, "d.rs"));
+        assert_eq!(selected_paths(&tree), ["b.rs", "c.rs", "d.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 1)));
+        // The lead is the file clicked, not the anchor.
+        assert_eq!(tree.cursor_row(), Some(row_named(&tree, "d.rs")));
+    }
+
+    #[test]
+    fn a_shift_click_above_the_anchor_selects_the_range_upwards() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "d.rs");
+        shift_click(&mut tree, "b.rs");
+        assert_eq!(selected_paths(&tree), ["b.rs", "c.rs", "d.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 3)));
+        assert_eq!(tree.cursor_row(), Some(row_named(&tree, "b.rs")));
+    }
+
+    #[test]
+    fn a_shift_click_replaces_what_a_ctrl_click_added() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "b.rs");
+        ctrl_click(&mut tree, "d.rs");
+        shift_click(&mut tree, "a.rs");
+        // The range runs from the anchor `d.rs`; `b.rs` lies inside it.
+        assert_eq!(selected_paths(&tree), ["a.rs", "b.rs", "c.rs", "d.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 3)));
+    }
+
+    #[test]
+    fn a_range_in_the_tree_holds_files_only() {
+        let mut tree = tree(&["docs/c.md", "src/a.rs", "src/b.rs"]);
+        click(&mut tree, "c.md");
+        assert!(shift_click(&mut tree, "b.rs"));
+        assert_eq!(selected_paths(&tree), ["docs/c.md", "src/a.rs", "src/b.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 0)));
+    }
+
+    #[test]
+    fn a_range_leaves_out_the_files_of_a_collapsed_folder() {
+        let mut tree = tree(&["app/a.rs", "src/b.rs", "web/z.rs"]);
+        let src = folder(&tree, 0, "src");
+        tree.toggle(0, src);
+        click(&mut tree, "a.rs");
+        assert!(shift_click(&mut tree, "z.rs"));
+        assert_eq!(selected_paths(&tree), ["app/a.rs", "web/z.rs"]);
+    }
+
+    #[test]
+    fn shift_and_ctrl_clicks_on_a_folder_change_nothing() {
+        let mut tree = tree(&["app/a.rs", "app/b.rs", "web/z.rs"]);
+        click(&mut tree, "a.rs");
+        let web = tree.row_of_folder(0, &RepoPath::from("web")).unwrap();
+        assert!(!tree.toggle_row(web));
+        assert!(!tree.select_range_to(web));
+        assert_eq!(selected_paths(&tree), ["app/a.rs"]);
+    }
+
+    #[test]
+    fn a_selected_folder_holds_no_selected_files() {
+        let mut tree = tree(&["app/a.rs", "app/b.rs", "web/z.rs"]);
+        click(&mut tree, "a.rs");
+        ctrl_click(&mut tree, "b.rs");
+        let web = tree.row_of_folder(0, &RepoPath::from("web")).unwrap();
+        tree.select_row(web);
+        assert!(selected_paths(&tree).is_empty());
+        assert_eq!(tree.selected_file(), None);
+        assert_eq!(tree.cursor_row(), tree.selected_row());
+        // A click with Ctrl on a file starts a selection of its own.
+        assert!(ctrl_click(&mut tree, "z.rs"));
+        assert_eq!(selected_paths(&tree), ["web/z.rs"]);
+    }
+
+    #[test]
+    fn a_click_with_a_modifier_in_the_other_group_starts_a_new_selection() {
+        let mut tree = two_groups(&["a.rs", "b.rs", "c.rs"], &["s.rs", "t.rs"], "a.rs");
+        ctrl_click(&mut tree, "b.rs");
+        assert!(ctrl_click(&mut tree, "t.rs"));
+        assert_eq!(selected_paths(&tree), ["t.rs"]);
+        assert_eq!(tree.selected_file(), Some((1, 1)));
+        // The same for a range.
+        click(&mut tree, "a.rs");
+        assert!(shift_click(&mut tree, "t.rs"));
+        assert_eq!(selected_paths(&tree), ["t.rs"]);
+    }
+
+    #[test]
+    fn the_selected_files_are_in_the_order_of_the_list() {
+        let mut tree = FileTree::new(order(&["b.rs", "a/x.rs", "A.md"]));
+        click(&mut tree, "A.md");
+        ctrl_click(&mut tree, "b.rs");
+        ctrl_click(&mut tree, "a/x.rs");
+        assert_eq!(selected_paths(&tree), ["b.rs", "a/x.rs", "A.md"]);
+    }
+
+    #[test]
+    fn shift_down_and_up_extend_and_shrink_from_the_anchor() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "b.rs");
+        assert!(tree.extend_selection(true));
+        assert!(tree.extend_selection(true));
+        assert_eq!(selected_paths(&tree), ["b.rs", "c.rs", "d.rs"]);
+        assert_eq!(tree.cursor_row(), Some(row_named(&tree, "d.rs")));
+        assert!(tree.extend_selection(false));
+        assert_eq!(selected_paths(&tree), ["b.rs", "c.rs"]);
+        // Past the anchor the selection grows upwards.
+        tree.extend_selection(false);
+        tree.extend_selection(false);
+        assert_eq!(selected_paths(&tree), ["a.rs", "b.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 1)));
+        assert_eq!(tree.cursor_row(), Some(row_named(&tree, "a.rs")));
+    }
+
+    #[test]
+    fn shift_down_goes_on_from_the_file_a_shift_click_ended_at() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "b.rs");
+        shift_click(&mut tree, "d.rs");
+        assert!(tree.extend_selection(true));
+        assert_eq!(selected_paths(&tree), ["b.rs", "c.rs", "d.rs", "e.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 1)));
+    }
+
+    #[test]
+    fn extending_stops_at_the_edge_of_the_group() {
+        let mut tree = two_groups(&["a.rs", "b.rs"], &["s.rs"], "b.rs");
+        assert!(!tree.extend_selection(true));
+        assert_eq!(selected_paths(&tree), ["b.rs"]);
+        let mut tree = two_groups(&["a.rs"], &["s.rs", "t.rs"], "s.rs");
+        assert!(!tree.extend_selection(false));
+        assert_eq!(selected_paths(&tree), ["s.rs"]);
+    }
+
+    #[test]
+    fn extending_passes_over_the_row_of_a_folder() {
+        let mut tree = tree(&["app/a.rs", "web/z.rs"]);
+        click(&mut tree, "a.rs");
+        assert!(tree.extend_selection(true));
+        assert_eq!(selected_paths(&tree), ["app/a.rs", "web/z.rs"]);
+    }
+
+    #[test]
+    fn select_all_takes_the_files_the_filter_shows() {
+        let mut tree = tree(&["src/a.rs", "src/b.rs", "notes.txt"]);
+        tree.set_filter(".rs");
+        click(&mut tree, "a.rs");
+        assert!(tree.select_all_shown());
+        assert_eq!(selected_paths(&tree), ["src/a.rs", "src/b.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 0)));
+    }
+
+    #[test]
+    fn select_all_takes_the_files_of_collapsed_folders_too() {
+        let mut tree = tree(&["lib/a.rs", "z.rs"]);
+        let lib = folder(&tree, 0, "lib");
+        tree.toggle(0, lib);
+        click(&mut tree, "z.rs");
+        assert!(tree.select_all_shown());
+        assert_eq!(selected_paths(&tree), ["lib/a.rs", "z.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 1)));
+    }
+
+    #[test]
+    fn select_all_stays_in_the_group_of_the_anchor() {
+        let mut tree = two_groups(&["a.rs", "b.rs"], &["s.rs", "t.rs"], "s.rs");
+        tree.select_row(row_named(&tree, "t.rs"));
+        assert!(tree.select_all_shown());
+        assert_eq!(selected_paths(&tree), ["s.rs", "t.rs"]);
+    }
+
+    #[test]
+    fn select_all_without_a_selection_selects_nothing() {
+        let mut tree = FileTree::new(order(&FIVE));
+        assert!(!tree.select_all_shown());
+        assert!(selected_paths(&tree).is_empty());
+    }
+
+    #[test]
+    fn reducing_to_the_anchor_leaves_one_file() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "b.rs");
+        shift_click(&mut tree, "d.rs");
+        tree.reduce_to_anchor();
+        assert_eq!(selected_paths(&tree), ["b.rs"]);
+        assert_eq!(tree.cursor_row(), tree.selected_row());
+        // With one file selected it changes nothing.
+        tree.reduce_to_anchor();
+        assert_eq!(selected_paths(&tree), ["b.rs"]);
+    }
+
+    #[test]
+    fn the_cursor_is_the_row_of_the_anchor_without_a_selection_of_several_files() {
+        let mut tree = FileTree::new(order(&FIVE));
+        assert_eq!(tree.cursor_row(), None);
+        click(&mut tree, "c.rs");
+        assert_eq!(tree.cursor_row(), tree.selected_row());
+    }
+
+    #[test]
+    fn the_selection_counts_its_files_and_knows_them() {
+        let mut tree = FileTree::new(order(&FIVE));
+        assert_eq!(tree.selection_len(), 0);
+        click(&mut tree, "a.rs");
+        assert_eq!(tree.selection_len(), 1);
+        shift_click(&mut tree, "c.rs");
+        assert_eq!(tree.selection_len(), 3);
+        assert!(tree.is_file_selected(0, 1));
+        assert!(!tree.is_file_selected(0, 3));
+    }
+
+    #[test]
+    fn a_selection_of_several_files_carries_into_a_list_read_again_by_their_paths() {
+        let mut tree = FileTree::new(order(&FIVE));
+        click(&mut tree, "b.rs");
+        shift_click(&mut tree, "d.rs");
+        let renewed = tree.renewed(order(&["x.rs", "a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]));
+        assert_eq!(selected_paths(&renewed), ["b.rs", "c.rs", "d.rs"]);
+        // The anchor and the lead carry over too.
+        assert_eq!(renewed.selected_file(), Some((0, 2)));
+        assert_eq!(renewed.cursor_row(), Some(row_named(&renewed, "d.rs")));
+    }
+
+    #[test]
+    fn a_selected_file_that_left_its_group_drops_out_of_the_selection() {
+        let mut tree = two_groups(&["a.rs", "b.rs", "c.rs"], &["s.rs"], "a.rs");
+        shift_click(&mut tree, "c.rs");
+        // `b.rs` was staged.
+        let renewed = tree.renewed(groups(&[&["a.rs", "c.rs"], &["b.rs", "s.rs"]]));
+        assert_eq!(selected_paths(&renewed), ["a.rs", "c.rs"]);
+        assert_eq!(renewed.selected_file(), Some((0, 0)));
+    }
+
+    #[test]
+    fn the_anchor_leaving_gives_way_to_the_nearest_selected_file_above() {
+        let mut tree = two_groups(&["a.rs", "b.rs", "c.rs", "d.rs"], &["s.rs"], "a.rs");
+        ctrl_click(&mut tree, "b.rs");
+        ctrl_click(&mut tree, "d.rs");
+        // The anchor `d.rs` was staged.
+        let renewed = tree.renewed(groups(&[&["a.rs", "b.rs", "c.rs"], &["d.rs", "s.rs"]]));
+        assert_eq!(selected_paths(&renewed), ["a.rs", "b.rs"]);
+        assert_eq!(renewed.selected_file(), Some((0, 1)));
+    }
+
+    #[test]
+    fn the_anchor_leaving_gives_way_to_a_selected_file_below_when_none_is_above() {
+        let mut tree = two_groups(&["a.rs", "b.rs", "c.rs"], &["s.rs"], "c.rs");
+        // `b.rs` is the anchor, and `c.rs`, below it, the only other file.
+        ctrl_click(&mut tree, "b.rs");
+        assert_eq!(tree.selected_file(), Some((0, 1)));
+        // The anchor `b.rs` was staged.
+        let renewed = tree.renewed(groups(&[&["a.rs", "c.rs"], &["b.rs", "s.rs"]]));
+        assert_eq!(selected_paths(&renewed), ["c.rs"]);
+        assert_eq!(renewed.selected_file(), Some((0, 1)));
+    }
+
+    #[test]
+    fn a_selection_that_left_its_group_gives_way_to_the_file_below() {
+        let mut tree = two_groups(&["a.rs", "b.rs", "c.rs", "d.rs"], &["s.rs"], "b.rs");
+        shift_click(&mut tree, "c.rs");
+        // `b.rs` and `c.rs` were staged.
+        let renewed = tree.renewed(groups(&[&["a.rs", "d.rs"], &["b.rs", "c.rs", "s.rs"]]));
+        assert_eq!(selected_paths(&renewed), ["d.rs"]);
+    }
+
+    #[test]
+    fn the_filter_removes_the_files_it_hides_from_the_selection() {
+        let mut tree = FileTree::new(order(&["src/a.rs", "notes.txt", "src/b.rs"]));
+        click(&mut tree, "notes.txt");
+        ctrl_click(&mut tree, "src/a.rs");
+        tree.set_filter(".rs");
+        assert_eq!(selected_paths(&tree), ["src/a.rs"]);
+        // Emptying the filter does not bring them back.
+        tree.set_filter("");
+        assert_eq!(selected_paths(&tree), ["src/a.rs"]);
+    }
+
+    #[test]
+    fn the_filter_hiding_the_anchor_gives_way_to_a_selected_file_it_shows() {
+        let mut tree = FileTree::new(order(&["src/a.rs", "notes.txt", "src/b.rs"]));
+        click(&mut tree, "src/a.rs");
+        ctrl_click(&mut tree, "notes.txt");
+        // The anchor `notes.txt` is hidden by the filter.
+        tree.set_filter(".rs");
+        assert_eq!(selected_paths(&tree), ["src/a.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 0)));
+    }
+
+    #[test]
+    fn the_filter_hiding_the_whole_selection_selects_the_first_file_it_shows() {
+        let mut tree = FileTree::new(order(&["src/a.rs", "notes.txt", "todo.txt"]));
+        click(&mut tree, "notes.txt");
+        ctrl_click(&mut tree, "todo.txt");
+        tree.set_filter(".rs");
+        assert_eq!(selected_paths(&tree), ["src/a.rs"]);
+        tree.set_filter("");
+        assert_eq!(selected_paths(&tree), ["src/a.rs"]);
+    }
+
+    #[test]
+    fn a_filter_that_keeps_every_selected_file_keeps_the_selection() {
+        let mut tree = FileTree::new(order(&["src/a.rs", "src/b.rs", "notes.txt"]));
+        click(&mut tree, "src/a.rs");
+        ctrl_click(&mut tree, "src/b.rs");
+        tree.set_filter("src");
+        assert_eq!(selected_paths(&tree), ["src/a.rs", "src/b.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 1)));
+    }
+
+    #[test]
+    fn collapsing_a_folder_keeps_the_selected_files_inside_it() {
+        let mut tree = tree(&["app/a.rs", "app/b.rs", "web/z.rs"]);
+        click(&mut tree, "a.rs");
+        ctrl_click(&mut tree, "z.rs");
+        let app = folder(&tree, 0, "app");
+        tree.toggle(0, app);
+        // `app/a.rs` is hidden now and stays selected, at its place in the list.
+        assert_eq!(selected_paths(&tree), ["app/a.rs", "web/z.rs"]);
+        assert_eq!(tree.selected_file(), Some((0, 2)));
+    }
+
+    #[test]
+    fn collapsing_the_folder_of_the_anchor_selects_the_folder_and_ends_the_selection() {
+        let mut tree = tree(&["app/a.rs", "app/b.rs", "web/z.rs"]);
+        click(&mut tree, "z.rs");
+        ctrl_click(&mut tree, "a.rs");
+        let app = folder(&tree, 0, "app");
+        tree.toggle(0, app);
+        assert!(selected_paths(&tree).is_empty());
+        assert_eq!(tree.selected_row(), Some(row_named(&tree, "app/+")));
+        // Expanding it again does not bring the selection back.
+        tree.toggle(0, app);
+        assert!(selected_paths(&tree).is_empty());
+    }
+
+    /// The successor of a tree whose selected files all leave their group.
+    fn successor_of_the_selection(tree: &FileTree) -> Option<usize> {
+        let (group, _) = tree.selected_file()?;
+        tree.successor_of_selection(|index| tree.is_file_selected(group, index))
+    }
+
+    #[test]
+    fn the_successor_of_a_selection_is_the_file_below_its_lowest_row() {
+        let mut tree = two_groups(&["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"], &["s.rs"], "b.rs");
+        shift_click(&mut tree, "c.rs");
+        assert_eq!(
+            successor_of_the_selection(&tree),
+            Some(row_named(&tree, "d.rs"))
+        );
+    }
+
+    #[test]
+    fn a_file_between_two_selected_files_that_stays_is_the_successor() {
+        let mut tree = two_groups(&["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"], &["s.rs"], "b.rs");
+        ctrl_click(&mut tree, "d.rs");
+        assert_eq!(
+            successor_of_the_selection(&tree),
+            Some(row_named(&tree, "c.rs"))
+        );
+    }
+
+    #[test]
+    fn the_successor_of_the_last_files_of_a_group_is_the_file_above_the_highest_row() {
+        let mut tree = two_groups(&["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"], &["s.rs"], "d.rs");
+        shift_click(&mut tree, "e.rs");
+        assert_eq!(
+            successor_of_the_selection(&tree),
+            Some(row_named(&tree, "c.rs"))
+        );
+    }
+
+    #[test]
+    fn the_successor_of_every_file_of_a_group_is_the_first_file_of_the_other() {
+        let mut tree = two_groups(&["a.rs", "b.rs"], &["s.rs", "t.rs"], "a.rs");
+        shift_click(&mut tree, "b.rs");
+        assert_eq!(
+            successor_of_the_selection(&tree),
+            Some(row_named(&tree, "s.rs"))
+        );
+    }
+
+    #[test]
+    fn the_successor_is_found_in_the_rows_a_filter_leaves() {
+        let mut tree = FileTree::new(groups(&[
+            &["src/a.rs", "src/b.rs", "src/z.txt", "src/c.rs"],
+            &["s.rs"],
+        ]));
+        tree.set_mode(Mode::Tree);
+        tree.set_filter(".rs");
+        click(&mut tree, "a.rs");
+        shift_click(&mut tree, "b.rs");
+        // `src/z.txt` is hidden between the selection and `src/c.rs`.
+        assert_eq!(
+            successor_of_the_selection(&tree),
+            Some(row_named(&tree, "c.rs"))
+        );
+    }
+
+    #[test]
+    fn the_successor_passes_over_collapsed_folders() {
+        let mut tree = two_groups(&["a.rs", "lib/b.rs", "z.rs"], &["s.rs"], "a.rs");
+        tree.set_mode(Mode::Tree);
+        let lib = folder(&tree, 0, "lib");
+        tree.toggle(0, lib);
+        click(&mut tree, "a.rs");
+        assert_eq!(
+            successor_of_the_selection(&tree),
+            Some(row_named(&tree, "z.rs"))
+        );
+    }
+
+    #[test]
+    fn a_selected_file_that_stays_in_its_group_counts_as_staying() {
+        // `c.rs` is in conflict, so that staging the selection leaves it where
+        // it is. Selected, it is the first file below the lowest selected row
+        // that stays: the successor is the file in conflict, on purpose.
+        let mut tree = two_groups(&["a.rs", "b.rs", "c.rs", "d.rs"], &["s.rs"], "b.rs");
+        shift_click(&mut tree, "c.rs");
+        let (group, conflict) = (0, 2);
+        let successor = tree.successor_of_selection(|index| {
+            tree.is_file_selected(group, index) && index != conflict
+        });
+        assert_eq!(successor, Some(row_named(&tree, "c.rs")));
+    }
+
+    #[test]
+    fn the_successor_of_one_selected_file_is_that_of_the_selected_file() {
+        for selected in ["a.rs", "b.rs", "c.rs"] {
+            let tree = two_groups(&["a.rs", "b.rs", "c.rs"], &["s.rs"], selected);
+            assert_eq!(
+                successor_of_the_selection(&tree),
+                tree.successor_of_selected(),
+                "{selected}"
+            );
+        }
+        let tree = FileTree::new(order(&["a.rs"]));
+        assert_eq!(tree.successor_of_selected(), None);
+    }
+
+    #[test]
+    fn there_is_no_successor_without_a_selection() {
+        let tree = FileTree::new(order(&FIVE));
+        assert_eq!(tree.successor_of_selection(|_| true), None);
+    }
+
+    #[test]
+    fn selecting_all_and_reading_the_list_again_stay_linear_in_the_files() {
+        // Not the frame budget, which `benchmarks.rs` measures in a release
+        // build: a bound so wide that only work that grows with the square of
+        // the files, minutes for 50,000, can break it, also in a debug build
+        // on a busy machine.
+        let names: Vec<String> = (0..50_000)
+            .map(|n| format!("d{}/f{n}.rs", n % 50))
+            .collect();
+        let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+        let started = std::time::Instant::now();
+        let mut tree = FileTree::new(order(&listed));
+        tree.set_mode(Mode::Tree);
+        tree.select_file(0, 0);
+        assert!(tree.select_all_shown());
+        assert_eq!(tree.selection_len(), 50_000);
+        // The anchor leaves the group, so that another file takes its place.
+        let renewed = tree.renewed(order(&listed[1..]));
+        assert_eq!(renewed.selection_len(), 49_999);
+        assert_eq!(renewed.selected_files().len(), 49_999);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(20), "took {took:?}");
+    }
+
+    /// A deterministic sequence of numbers, so that the test below needs no
+    /// dependency and fails the same way each time.
+    struct Sequence(u64);
+
+    impl Sequence {
+        fn below(&mut self, limit: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % limit as u64) as usize
+        }
+    }
+
+    #[test]
+    fn a_list_read_again_keeps_exactly_the_selected_files_that_are_left() {
+        let mut numbers = Sequence(0x9E37_79B9_7F4A_7C15);
+        for round in 0..200 {
+            let total = 2 + numbers.below(30);
+            let names: Vec<String> = (0..total)
+                .map(|n| format!("dir{}/f{n}.rs", n % 3))
+                .collect();
+            let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+            let mut tree = FileTree::new(order(&listed));
+            if round % 2 == 0 {
+                tree.set_mode(Mode::Tree);
+            }
+            let first = numbers.below(total);
+            tree.select_file(0, first);
+            for _ in 0..numbers.below(total) {
+                if let Some(row) = tree.row_of_file(0, numbers.below(total)) {
+                    tree.toggle_row(row);
+                }
+            }
+            let before = selected_paths(&tree);
+
+            // Some files leave the group, and others join it.
+            let mut after: Vec<String> = names
+                .iter()
+                .filter(|_| numbers.below(3) != 0)
+                .cloned()
+                .collect();
+            after.push("new/added.rs".to_owned());
+            let listed: Vec<&str> = after.iter().map(String::as_str).collect();
+            let renewed = tree.renewed(order(&listed));
+
+            // The files that are left keep their order, as the list sorts
+            // them by their names in both modes.
+            let kept: Vec<String> = before
+                .iter()
+                .filter(|path| after.contains(path))
+                .cloned()
+                .collect();
+            let now = selected_paths(&renewed);
+            if kept.is_empty() {
+                // A selection that is gone gives way to one file, or to none.
+                assert!(now.len() <= 1, "round {round}: {before:?} -> {now:?}");
+            } else {
+                assert_eq!(now, kept, "round {round}: {before:?}");
+            }
+        }
     }
 }

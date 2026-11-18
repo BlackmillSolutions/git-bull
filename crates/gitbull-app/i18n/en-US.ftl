@@ -336,9 +336,21 @@ parts-reading = The diff is being read again.
 parts-busy = Another action is running.
 stage-file = Stage file
 unstage-file = Unstage file
+stage-files = { $count ->
+    [one] Stage 1 file
+   *[other] Stage { $count } files
+}
+unstage-files = { $count ->
+    [one] Unstage 1 file
+   *[other] Unstage { $count } files
+}
 stage-all = Stage all
 unstage-all = Unstage all
 discard-changes = Discard changes
+discard-files = { $count ->
+    [one] Discard changes of 1 file
+   *[other] Discard changes of { $count } files
+}
 discard-all = Discard all
 discard-hunk = Discard hunk
 notice-discarded = { $count ->
@@ -476,6 +488,10 @@ copied = Copied
 panel-files = FILES
 file-status-staged = Staged files ({ $count })
 file-status-unstaged = Unstaged files ({ $count })
+files-selected = { $count ->
+    [one] 1 file selected
+   *[other] { $count } files selected
+}
 file-status-loading = Reading the status of the working copy…
 file-status-clean = There are no uncommitted changes.
 

@@ -1,12 +1,14 @@
 //! The list for millions of rows, driven like a user would.
 
 use eframe::egui::accesskit::Role;
+use std::collections::HashSet;
+
 use eframe::egui::{
     Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, TouchPhase, Vec2, pos2, vec2,
 };
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
-use gitbull_app::virtual_list::{ListState, ROW_HEIGHT, VirtualList};
+use gitbull_app::virtual_list::{ListState, MultiKey, ROW_HEIGHT, VirtualList};
 
 const ROWS: u64 = 2_000_000;
 /// The frames of a display at 60 frames per second.
@@ -20,6 +22,39 @@ struct Test {
     /// Where the list was drawn in the last frame.
     rect: Rect,
     clicked: Vec<u64>,
+    /// The rows the caller says are selected; `Some` turns on the selection
+    /// of several rows.
+    several: Option<HashSet<u64>>,
+    /// The modifiers of each click, with `clicked`.
+    modifiers: Vec<Modifiers>,
+    /// The keys of a selection of several rows that the list reported.
+    multi: Vec<MultiKey>,
+    /// The rows whose context menu the list reported opened.
+    menus: Vec<u64>,
+    /// The rows that were drawn as selected in the last frame.
+    drawn_selected: Vec<u64>,
+    /// Whether the caller takes Escape from the list.
+    escape: bool,
+    /// Whether the list had the focus in the last frame.
+    focused: bool,
+}
+
+impl Test {
+    fn new(rows: u64) -> Test {
+        Test {
+            list: ListState::default(),
+            rows,
+            rect: Rect::NOTHING,
+            clicked: Vec::new(),
+            several: None,
+            modifiers: Vec::new(),
+            multi: Vec::new(),
+            menus: Vec::new(),
+            drawn_selected: Vec::new(),
+            escape: false,
+            focused: false,
+        }
+    }
 }
 
 /// A list in a window at 60 frames per second, with room for the spring
@@ -31,22 +66,30 @@ fn harness(rows: u64) -> Harness<'static, Test> {
         .with_max_steps(120)
         .build_ui_state(
             |ui, test: &mut Test| {
-                let output = VirtualList::new("list", Role::List, "Numbers", test.rows).show(
-                    ui,
-                    &mut test.list,
-                    |ui, row, _| {
-                        ui.label(format!("Row {row}"));
-                    },
-                );
+                let several = test.several.clone();
+                let mut drawn = Vec::new();
+                let list = VirtualList::new("list", Role::List, "Numbers", test.rows)
+                    .takes_escape(test.escape);
+                let list = match &several {
+                    Some(set) => list.multi_select(|row| set.contains(&row)),
+                    None => list,
+                };
+                let output = list.show(ui, &mut test.list, |ui, row, selected| {
+                    if selected {
+                        drawn.push(row);
+                    }
+                    ui.label(format!("Row {row}"));
+                });
                 test.rect = output.response.rect;
                 test.clicked.extend(output.clicked);
+                test.modifiers
+                    .extend(output.clicked.map(|_| output.modifiers));
+                test.multi.extend(output.multi);
+                test.menus.extend(output.menu_opened);
+                test.drawn_selected = drawn;
+                test.focused = output.response.has_focus();
             },
-            Test {
-                list: ListState::default(),
-                rows,
-                rect: Rect::NOTHING,
-                clicked: Vec::new(),
-            },
+            Test::new(rows),
         )
 }
 
@@ -292,12 +335,7 @@ fn arrow_keys_stay_in_the_list_when_other_widgets_can_take_focus() {
                     });
                     let _ = ui.button("Below");
                 },
-                Test {
-                    list: ListState::default(),
-                    rows: ROWS,
-                    rect: Rect::NOTHING,
-                    clicked: Vec::new(),
-                },
+                Test::new(ROWS),
             );
     click(&mut harness, 0.0);
     for _ in 0..3 {
@@ -611,4 +649,209 @@ fn control_and_the_wheel_do_not_scroll_the_list() {
         harness.run();
         assert_eq!(harness.state().list.position(), 0.0, "{modifiers:?}");
     }
+}
+
+// The selection of several rows, which only a caller that asks for it gets
+// (design, decision 2).
+
+/// Clicks the row at `row_y` pixels below the top with `button` while
+/// `modifiers` are held.
+fn click_with(harness: &mut Harness<'_, Test>, row_y: f32, button: PointerButton, mods: Modifiers) {
+    harness.run();
+    let pos = in_row(harness, row_y);
+    harness.hover_at(pos);
+    for pressed in [true, false] {
+        let event = Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: mods,
+        };
+        harness.event_modifiers(event, mods);
+    }
+    harness.run();
+}
+
+/// The y of the row `row` of a list that is not scrolled.
+fn row_y(row: u64) -> f32 {
+    row as f32 * ROW_HEIGHT
+}
+
+/// A list of a hundred rows, focused by a click on its first row.
+fn focused(several: Option<&[u64]>) -> Harness<'static, Test> {
+    let mut harness = harness(100);
+    harness.state_mut().several = several.map(|rows| rows.iter().copied().collect());
+    click(&mut harness, 0.0);
+    harness
+}
+
+fn pressed(harness: &mut Harness<'_, Test>, modifiers: Modifiers, key: Key) {
+    harness.key_press_modifiers(modifiers, key);
+    harness.run();
+}
+
+// What a list without the opt-in does stays as it is: these two pass on the
+// code from before the opt-in, and pin it.
+
+#[test]
+fn without_the_opt_in_shift_and_down_move_the_selection_like_down() {
+    let mut harness = focused(None);
+    pressed(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    assert_eq!(harness.state().list.selected(), Some(1));
+    assert!(harness.state().multi.is_empty());
+}
+
+#[test]
+fn without_the_opt_in_a_right_click_selects_the_row_and_reports_its_menu() {
+    let mut harness = focused(None);
+    click_with(
+        &mut harness,
+        row_y(3),
+        PointerButton::Secondary,
+        Modifiers::NONE,
+    );
+    assert_eq!(harness.state().list.selected(), Some(3));
+    assert_eq!(harness.state().menus, [3]);
+}
+
+#[test]
+fn a_click_reports_the_modifiers_held() {
+    let mut harness = focused(Some(&[]));
+    harness.state_mut().clicked.clear();
+    harness.state_mut().modifiers.clear();
+    click_with(
+        &mut harness,
+        row_y(2),
+        PointerButton::Primary,
+        Modifiers::COMMAND,
+    );
+    click_with(
+        &mut harness,
+        row_y(4),
+        PointerButton::Primary,
+        Modifiers::SHIFT,
+    );
+    click_with(
+        &mut harness,
+        row_y(6),
+        PointerButton::Primary,
+        Modifiers::NONE,
+    );
+    let state = harness.state();
+    assert_eq!(state.clicked, [2, 4, 6]);
+    let held: Vec<(bool, bool)> = state
+        .modifiers
+        .iter()
+        .map(|modifiers| (modifiers.command, modifiers.shift))
+        .collect();
+    assert_eq!(held, [(true, false), (false, true), (false, false)]);
+}
+
+#[test]
+fn a_right_click_inside_the_selection_keeps_the_cursor_and_reports_the_menu() {
+    let mut harness = focused(Some(&[1, 2]));
+    click(&mut harness, row_y(1));
+    click_with(
+        &mut harness,
+        row_y(2),
+        PointerButton::Secondary,
+        Modifiers::NONE,
+    );
+    assert_eq!(harness.state().list.selected(), Some(1));
+    assert_eq!(harness.state().menus, [2]);
+}
+
+#[test]
+fn a_right_click_outside_the_selection_selects_the_row() {
+    let mut harness = focused(Some(&[1, 2]));
+    click_with(
+        &mut harness,
+        row_y(5),
+        PointerButton::Secondary,
+        Modifiers::NONE,
+    );
+    assert_eq!(harness.state().list.selected(), Some(5));
+    assert_eq!(harness.state().menus, [5]);
+}
+
+#[test]
+fn shift_and_the_arrows_are_reported_and_leave_the_cursor_to_the_caller() {
+    let mut harness = focused(Some(&[]));
+    click(&mut harness, row_y(1));
+    pressed(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    pressed(&mut harness, Modifiers::SHIFT, Key::ArrowUp);
+    assert_eq!(
+        harness.state().multi,
+        [MultiKey::ExtendDown, MultiKey::ExtendUp]
+    );
+    assert_eq!(harness.state().list.selected(), Some(1));
+}
+
+#[test]
+fn control_or_command_and_a_are_reported() {
+    let mut harness = focused(Some(&[]));
+    pressed(&mut harness, Modifiers::COMMAND, Key::A);
+    assert_eq!(harness.state().multi, [MultiKey::SelectAll]);
+}
+
+#[test]
+fn a_letter_without_a_modifier_and_other_modifiers_are_not_reported() {
+    let mut harness = focused(Some(&[]));
+    pressed(&mut harness, Modifiers::NONE, Key::A);
+    pressed(&mut harness, Modifiers::SHIFT, Key::A);
+    pressed(&mut harness, Modifiers::ALT, Key::ArrowDown);
+    assert!(harness.state().multi.is_empty());
+}
+
+#[test]
+fn the_plain_arrows_still_move_the_cursor_with_the_opt_in() {
+    let mut harness = focused(Some(&[]));
+    pressed(&mut harness, Modifiers::NONE, Key::ArrowDown);
+    pressed(&mut harness, Modifiers::NONE, Key::ArrowDown);
+    assert_eq!(harness.state().list.selected(), Some(2));
+    assert!(harness.state().multi.is_empty());
+}
+
+#[test]
+fn several_presses_of_shift_and_down_in_one_frame_are_all_reported() {
+    let mut harness = focused(Some(&[]));
+    for pressed in [true, false, true, false, true, false] {
+        harness.input_mut().events.push(Event::Key {
+            key: Key::ArrowDown,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::SHIFT,
+        });
+    }
+    harness.run();
+    assert_eq!(harness.state().multi, [MultiKey::ExtendDown; 3]);
+}
+
+#[test]
+fn the_caller_decides_which_rows_are_drawn_as_selected() {
+    let mut harness = focused(Some(&[3, 4]));
+    harness.run();
+    assert_eq!(harness.state().drawn_selected, [3, 4]);
+    // Without the opt-in the cursor row is the selected one.
+    let mut harness = focused(None);
+    click(&mut harness, row_y(2));
+    assert_eq!(harness.state().drawn_selected, [2]);
+}
+
+#[test]
+fn escape_takes_the_focus_from_a_list_as_it_does_from_any_widget() {
+    let mut harness = focused(Some(&[]));
+    assert!(harness.state().focused);
+    pressed(&mut harness, Modifiers::NONE, Key::Escape);
+    assert!(!harness.state().focused);
+}
+
+#[test]
+fn a_list_whose_caller_takes_escape_keeps_the_focus() {
+    let mut harness = focused(Some(&[]));
+    harness.state_mut().escape = true;
+    harness.run();
+    pressed(&mut harness, Modifiers::NONE, Key::Escape);
+    assert!(harness.state().focused);
 }
