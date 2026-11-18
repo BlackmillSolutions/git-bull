@@ -39,7 +39,7 @@
 ## 7. Window checks and documentation
 
 - [ ] 7.1 Add snapshot tests to `crates/gitbull-app/tests/window_snapshots.rs` for the File status view with three files selected in the Unstaged group, flat and as a tree, and with the context menu of the selection open, in the dark and the light theme and at the smallest window size. Verify the tests type-check with `--target x86_64-pc-windows-gnu`, and that the images are committed from the platform the existing snapshots come from, as the earlier changes did.
-- [ ] 7.2 Update `docs/roadmap.md`: record the selection of several files as delivered, with its gestures and the points where it goes beyond GitKraken's documentation, and remove it from the table of next steps; update the line of `README.md` that lists what git-bull can do if it names the one-file limit. Verify with `grep` that neither document still lists the selection of several files as a next step.
+- [x] 7.2 Update `docs/roadmap.md`: record the selection of several files as delivered, with its gestures and the points where it goes beyond GitKraken's documentation, and remove it from the table of next steps; update the line of `README.md` that lists what git-bull can do if it names the one-file limit. Verify with `grep` that neither document still lists the selection of several files as a next step.
 
 ## 8. Integration
 
