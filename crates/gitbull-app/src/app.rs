@@ -415,6 +415,9 @@ pub(crate) enum StatusMenu {
     File(Group, StatusEntry, Option<RepoPath>),
     /// A folder of the tree, by its path.
     Folder(RepoPath),
+    /// The files of a selection of several files that the menu was opened
+    /// on, in the order of the list.
+    Files(Vec<(Group, StatusEntry)>),
 }
 
 /// A view opened from the context menu of a file.
@@ -1622,6 +1625,17 @@ impl App {
         let id = tab.id();
         let session = tab.session_mut()?;
         Some((session, self.views.entry(id).or_default()))
+    }
+
+    /// The session and the view of the active tab, and the texts, which the
+    /// view of a tab draws with while it holds the other two.
+    pub(crate) fn active_view_with_texts(
+        &mut self,
+    ) -> Option<(&mut Session, &mut TabView, &Translations)> {
+        let tab = self.workspace.as_mut()?.active_mut()?;
+        let id = tab.id();
+        let session = tab.session_mut()?;
+        Some((session, self.views.entry(id).or_default(), &self.texts))
     }
 
     /// Asks before `files` of the active tab are discarded. Nothing is asked

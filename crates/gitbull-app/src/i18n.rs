@@ -303,6 +303,8 @@ messages! {
     PartsBusy => "parts-busy",
     StageFile => "stage-file",
     UnstageFile => "unstage-file",
+    StageFiles => "stage-files",
+    UnstageFiles => "unstage-files",
     StageAll => "stage-all",
     UnstageAll => "unstage-all",
     DiscardChanges => "discard-changes",

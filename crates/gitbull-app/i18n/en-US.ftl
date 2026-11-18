@@ -336,6 +336,14 @@ parts-reading = The diff is being read again.
 parts-busy = Another action is running.
 stage-file = Stage file
 unstage-file = Unstage file
+stage-files = { $count ->
+    [one] Stage 1 file
+   *[other] Stage { $count } files
+}
+unstage-files = { $count ->
+    [one] Unstage 1 file
+   *[other] Unstage { $count } files
+}
 stage-all = Stage all
 unstage-all = Unstage all
 discard-changes = Discard changes
