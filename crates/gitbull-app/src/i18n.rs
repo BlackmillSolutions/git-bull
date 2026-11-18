@@ -308,6 +308,7 @@ messages! {
     StageAll => "stage-all",
     UnstageAll => "unstage-all",
     DiscardChanges => "discard-changes",
+    DiscardFiles => "discard-files",
     DiscardAll => "discard-all",
     DiscardHunk => "discard-hunk",
     NoticeDiscarded => "notice-discarded",

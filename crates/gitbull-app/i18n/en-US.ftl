@@ -347,6 +347,10 @@ unstage-files = { $count ->
 stage-all = Stage all
 unstage-all = Unstage all
 discard-changes = Discard changes
+discard-files = { $count ->
+    [one] Discard changes of 1 file
+   *[other] Discard changes of { $count } files
+}
 discard-all = Discard all
 discard-hunk = Discard hunk
 notice-discarded = { $count ->

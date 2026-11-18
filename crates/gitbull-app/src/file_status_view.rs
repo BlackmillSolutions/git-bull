@@ -161,6 +161,39 @@ pub(crate) fn entry_marker(kind: StatusKind, palette: &Palette) -> (&'static str
     }
 }
 
+/// What the files of a selection offer to discard.
+struct Discardable {
+    /// The files that can be discarded, in the order given.
+    files: Vec<(RepoPath, Class)>,
+    /// How many files cannot be discarded.
+    left: usize,
+    /// Why the first of them cannot.
+    first_reason: Option<Unavailable>,
+}
+
+/// Sorts `entries` into those that can be discarded and those that cannot,
+/// by the rule of [`discard_offer`], which "Discard all" and the selection
+/// share. An entry that offers nothing, as one of the Staged group, is not
+/// counted.
+fn discardable_of<'a>(entries: impl IntoIterator<Item = (Group, &'a StatusEntry)>) -> Discardable {
+    let mut found = Discardable {
+        files: Vec::new(),
+        left: 0,
+        first_reason: None,
+    };
+    for (group, entry) in entries {
+        match discard_offer(group, entry) {
+            Some(DiscardOffer::Offered(class)) => found.files.push((entry.path.clone(), class)),
+            Some(DiscardOffer::Unavailable(why)) => {
+                found.left += 1;
+                found.first_reason.get_or_insert(why);
+            }
+            None => {}
+        }
+    }
+    found
+}
+
 /// One request to stage or unstage files.
 struct Wanted {
     /// Unstage the files; else stage them.
@@ -539,6 +572,36 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
                         ui.close();
                     }
                 }
+                // Discarding is offered for the Unstaged group alone, with the
+                // number of files it would discard.
+                let found = discardable_of(selection.iter().map(|(group, entry)| (*group, entry)));
+                if !found.files.is_empty() || found.left > 0 {
+                    let reason = match (&found.first_reason, found.files.is_empty()) {
+                        (_, false) if discard_busy => Some(texts.discard_busy.as_str()),
+                        (Some(why), true) => Some(texts.why_not(*why)),
+                        _ => None,
+                    };
+                    let count = match found.files.is_empty() {
+                        true => found.left,
+                        false => found.files.len(),
+                    };
+                    let mut args = FluentArgs::new();
+                    args.set("count", count);
+                    let text = translations.text_with(Msg::DiscardFiles, Some(&args));
+                    let item = ui
+                        .add_enabled_ui(reason.is_none(), |ui| {
+                            components::menu_item(ui, None, &text, None)
+                        })
+                        .inner;
+                    let chosen = match reason {
+                        Some(reason) => item.on_disabled_hover_text(reason).clicked(),
+                        None => item.clicked(),
+                    };
+                    if chosen {
+                        discard_asked = Some((found.files, false, found.left));
+                        ui.close();
+                    }
+                }
                 if components::menu_item(ui, None, &texts.copy_path, None).clicked() {
                     let paths: Vec<String> = selection
                         .iter()
@@ -631,20 +694,15 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         // them cannot be discarded.
         let (view, filter) = (&view.status_files, view.status_files.filter.as_str());
         if let Some(tree) = &view.tree {
-            let (mut files_to_discard, mut left) = (Vec::new(), 0);
-            for index in tree.files_matching(Shown::Unstaged.index(), filter) {
-                match (
-                    offered(Shown::Unstaged, index),
-                    entry_at(status, &files, 0, index),
-                ) {
-                    (Some(DiscardOffer::Offered(class)), Some((_, entry))) => {
-                        files_to_discard.push((entry.path.clone(), class));
-                    }
-                    (Some(DiscardOffer::Unavailable(_)), _) => left += 1,
-                    _ => {}
-                }
-            }
-            discard_asked = Some((files_to_discard, true, left));
+            let Discardable {
+                files: to_discard,
+                left,
+                ..
+            } = discardable_of(
+                tree.files_matching(Shown::Unstaged.index(), filter)
+                    .filter_map(|index| entry_at(status, &files, Shown::Unstaged.index(), index)),
+            );
+            discard_asked = Some((to_discard, true, left));
         }
     }
     let all = all.and_then(|shown| {
