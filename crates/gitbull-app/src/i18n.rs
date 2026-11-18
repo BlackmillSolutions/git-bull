@@ -460,6 +460,7 @@ messages! {
     PanelFiles => "panel-files",
     FileStatusStaged => "file-status-staged",
     FileStatusUnstaged => "file-status-unstaged",
+    FilesSelected => "files-selected",
     FileStatusLoading => "file-status-loading",
     FileStatusClean => "file-status-clean",
     DiffUnchanged => "diff-unchanged",

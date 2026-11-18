@@ -33,6 +33,10 @@ struct Test {
     menus: Vec<u64>,
     /// The rows that were drawn as selected in the last frame.
     drawn_selected: Vec<u64>,
+    /// Whether the caller takes Escape from the list.
+    escape: bool,
+    /// Whether the list had the focus in the last frame.
+    focused: bool,
 }
 
 impl Test {
@@ -47,6 +51,8 @@ impl Test {
             multi: Vec::new(),
             menus: Vec::new(),
             drawn_selected: Vec::new(),
+            escape: false,
+            focused: false,
         }
     }
 }
@@ -62,7 +68,8 @@ fn harness(rows: u64) -> Harness<'static, Test> {
             |ui, test: &mut Test| {
                 let several = test.several.clone();
                 let mut drawn = Vec::new();
-                let list = VirtualList::new("list", Role::List, "Numbers", test.rows);
+                let list = VirtualList::new("list", Role::List, "Numbers", test.rows)
+                    .takes_escape(test.escape);
                 let list = match &several {
                     Some(set) => list.multi_select(|row| set.contains(&row)),
                     None => list,
@@ -80,6 +87,7 @@ fn harness(rows: u64) -> Harness<'static, Test> {
                 test.multi.extend(output.multi);
                 test.menus.extend(output.menu_opened);
                 test.drawn_selected = drawn;
+                test.focused = output.response.has_focus();
             },
             Test::new(rows),
         )
@@ -829,4 +837,21 @@ fn the_caller_decides_which_rows_are_drawn_as_selected() {
     let mut harness = focused(None);
     click(&mut harness, row_y(2));
     assert_eq!(harness.state().drawn_selected, [2]);
+}
+
+#[test]
+fn escape_takes_the_focus_from_a_list_as_it_does_from_any_widget() {
+    let mut harness = focused(Some(&[]));
+    assert!(harness.state().focused);
+    pressed(&mut harness, Modifiers::NONE, Key::Escape);
+    assert!(!harness.state().focused);
+}
+
+#[test]
+fn a_list_whose_caller_takes_escape_keeps_the_focus() {
+    let mut harness = focused(Some(&[]));
+    harness.state_mut().escape = true;
+    harness.run();
+    pressed(&mut harness, Modifiers::NONE, Key::Escape);
+    assert!(harness.state().focused);
 }

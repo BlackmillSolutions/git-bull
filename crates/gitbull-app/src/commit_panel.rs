@@ -752,6 +752,7 @@ fn files(
         mode,
         list_texts,
         palette,
+        false,
         |ui, row, selected| {
             if let (Some(change), Some(order)) = (files.get(row.index), &order) {
                 let count =

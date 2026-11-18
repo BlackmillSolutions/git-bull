@@ -318,6 +318,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         chosen_mode,
         &list_texts,
         palette,
+        true,
         |ui, row, selected| {
             let entry = entry_at(status, &files, row.group, row.index);
             if let (Some((_, entry)), Some(order)) = (entry, &order) {
@@ -356,6 +357,7 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         return false;
     };
     all = all.or(all_clicked);
+    let list_id = output.response.id;
     if std::mem::take(&mut view.focus_status) {
         output.response.request_focus();
     }
@@ -518,6 +520,11 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
         .and_then(FileTree::selected_file)
         .and_then(|(shown, index)| files.file(shown, index));
     session.choose_status_file(chosen);
+    let selected_count = view
+        .status_files
+        .tree
+        .as_ref()
+        .map_or(0, FileTree::selection_len);
     if !busy {
         for (unstage, path) in wanted {
             match unstage {
@@ -534,6 +541,16 @@ pub(crate) fn show(app: &mut App, ui: &mut Ui, palette: &Palette) -> bool {
             }
             None => {}
         }
+    }
+    // While several files are selected the list tells assistive technology
+    // how many, besides its name; each selected row says that it is selected.
+    if selected_count > 1 {
+        let mut args = FluentArgs::new();
+        args.set("count", selected_count);
+        let text = app.texts.text_with(Msg::FilesSelected, Some(&args));
+        ui.ctx().accesskit_node_builder(list_id, |node| {
+            node.set_description(text);
+        });
     }
     if let Some(action) = opened {
         app.open_file_action(action);

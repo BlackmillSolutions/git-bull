@@ -476,6 +476,10 @@ copied = Copied
 panel-files = FILES
 file-status-staged = Staged files ({ $count })
 file-status-unstaged = Unstaged files ({ $count })
+files-selected = { $count ->
+    [one] 1 file selected
+   *[other] { $count } files selected
+}
 file-status-loading = Reading the status of the working copy…
 file-status-clean = There are no uncommitted changes.
 

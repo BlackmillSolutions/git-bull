@@ -2738,3 +2738,346 @@ fn a_refusal_for_line_endings_says_that_the_file_can_be_discarded_whole() {
          was put back as it was. The whole file can be discarded instead."
     ));
 }
+
+// ---- the selection of several files (specs `file-lists` and
+// `working-copy-status`)
+
+/// `a.rs` to `e.rs` modified and not staged, and `s.rs` and `t.rs` staged.
+fn five_unstaged() -> WorkingStatus {
+    WorkingStatus {
+        staged: vec![changed(MODIFIED, "s.rs"), changed(MODIFIED, "t.rs")],
+        unstaged: ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
+            .map(|path| changed(MODIFIED, path))
+            .to_vec(),
+        ..WorkingStatus::default()
+    }
+}
+
+/// The File status view of [`five_unstaged`], with `a.rs` selected.
+fn five() -> (Harness<'static, App>, Probe) {
+    file_status_of(backend().with_status(root(), five_unstaged()))
+}
+
+/// A click on `at` with `modifiers` held.
+fn click_with(harness: &mut Harness<'_, App>, at: Pos2, modifiers: Modifiers) {
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        let event = Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        harness.event_modifiers(event, modifiers);
+    }
+    for _ in 0..3 {
+        harness.step();
+    }
+}
+
+/// A click on the file `label` with `modifiers` held.
+fn click_file_with(harness: &mut Harness<'_, App>, label: &str, modifiers: Modifiers) {
+    let at = file(harness, label);
+    click_with(harness, at, modifiers);
+}
+
+/// The files that are selected, top to bottom.
+fn selected_files(harness: &Harness<'_, App>) -> Vec<String> {
+    // The rows of the sidebar are tree items too, and one of them is selected.
+    let left = harness
+        .get_by_role_and_label(Role::Label, "FILES")
+        .rect()
+        .left()
+        - 12.0;
+    let mut files: Vec<(f32, String)> = harness
+        .query_all_by(|node| matches!(node.role(), Role::ListItem | Role::TreeItem))
+        .filter(|node| node.rect().left() >= left)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| Some((node.rect().top(), node.accesskit_node().label()?)))
+        .collect();
+    files.sort_by(|a, b| a.0.total_cmp(&b.0));
+    files.into_iter().map(|(_, label)| label).collect()
+}
+
+fn modified(paths: &[&str]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| format!("Modified: {path}"))
+        .collect()
+}
+
+#[test]
+fn a_click_with_ctrl_adds_a_file_and_a_second_one_removes_it() {
+    let (mut harness, _) = five();
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "c.rs"]));
+    click_file_with(&mut harness, "Modified: a.rs", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["c.rs"]));
+}
+
+#[test]
+fn a_click_with_cmd_does_the_same_on_macos() {
+    let backend = backend().with_status(root(), five_unstaged());
+    let test = build(Setup {
+        settings: Settings {
+            tabs: vec![root()],
+            active_tab: Some(0),
+            ..Settings::default()
+        },
+        backend,
+        ..Setup::default()
+    });
+    let mut harness = support::window_on(eframe::egui::os::OperatingSystem::Mac, test.app);
+    settle_window(&mut harness);
+    wait_until(&mut harness, |h| has_row(h, "Base"));
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    click_file_with(
+        &mut harness,
+        "Modified: c.rs",
+        Modifiers::MAC_CMD | Modifiers::COMMAND,
+    );
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "c.rs"]));
+}
+
+#[test]
+fn a_click_with_shift_selects_the_range_from_the_anchor() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: d.rs", Modifiers::SHIFT);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["b.rs", "c.rs", "d.rs"])
+    );
+}
+
+#[test]
+fn shift_with_down_and_up_extends_and_shrinks_the_selection() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["b.rs", "c.rs", "d.rs"])
+    );
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowUp);
+    assert_eq!(selected_files(&harness), modified(&["b.rs", "c.rs"]));
+}
+
+#[test]
+fn shift_with_down_goes_on_from_the_file_a_shift_click_ended_at() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["b.rs", "c.rs", "d.rs"])
+    );
+}
+
+#[test]
+fn shift_with_down_stops_at_the_end_of_the_group() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: e.rs");
+    press_with(&mut harness, Modifiers::SHIFT, Key::ArrowDown);
+    assert_eq!(selected_files(&harness), modified(&["e.rs"]));
+}
+
+#[test]
+fn ctrl_with_a_selects_the_files_of_the_group_that_the_filter_shows() {
+    let status = WorkingStatus {
+        staged: vec![changed(MODIFIED, "s.rs")],
+        unstaged: vec![
+            changed(MODIFIED, "a.rs"),
+            changed(MODIFIED, "b.rs"),
+            entry(StatusKind::Untracked, "notes.txt"),
+        ],
+        ..WorkingStatus::default()
+    };
+    let (mut harness, _) = file_status_of(backend().with_status(root(), status));
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .type_text(".rs");
+    harness.run();
+    // Down in the field gives the list the focus.
+    harness.key_press(Key::ArrowDown);
+    harness.run();
+    press_with(&mut harness, Modifiers::COMMAND, Key::A);
+    // `s.rs` matches the filter too, but lies in the other group.
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "b.rs"]));
+}
+
+#[test]
+fn ctrl_with_a_in_the_filter_field_leaves_the_selection_alone() {
+    let (mut harness, _) = five();
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    press_with(&mut harness, Modifiers::COMMAND, Key::A);
+    assert_eq!(selected_files(&harness), modified(&["a.rs"]));
+}
+
+#[test]
+fn escape_reduces_the_selection_to_the_anchor() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: d.rs", Modifiers::SHIFT);
+    press_with(&mut harness, Modifiers::NONE, Key::Escape);
+    assert_eq!(selected_files(&harness), modified(&["b.rs"]));
+}
+
+#[test]
+fn a_plain_click_or_arrow_key_ends_the_selection() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    // Down goes on from the lead `c.rs`.
+    press_with(&mut harness, Modifiers::NONE, Key::ArrowDown);
+    assert_eq!(selected_files(&harness), modified(&["d.rs"]));
+    click_file_with(&mut harness, "Modified: e.rs", Modifiers::SHIFT);
+    chosen(&mut harness, "Modified: a.rs");
+    assert_eq!(selected_files(&harness), modified(&["a.rs"]));
+}
+
+#[test]
+fn a_click_with_a_modifier_in_the_other_group_starts_a_selection_there() {
+    let (mut harness, _) = five();
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::COMMAND);
+    click_file_with(&mut harness, "Modified: s.rs", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["s.rs"]));
+}
+
+#[test]
+fn the_filter_takes_the_files_it_hides_out_of_the_selection() {
+    let status = WorkingStatus {
+        unstaged: vec![
+            changed(MODIFIED, "a.rs"),
+            changed(MODIFIED, "b.rs"),
+            changed(MODIFIED, "notes.md"),
+        ],
+        ..WorkingStatus::default()
+    };
+    let (mut harness, _) = file_status_of(backend().with_status(root(), status));
+    click_file_with(&mut harness, "Modified: notes.md", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "notes.md"]));
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::TextInput, FILTER)
+        .type_text(".rs");
+    harness.run();
+    assert_eq!(selected_files(&harness), modified(&["a.rs"]));
+    // Emptying the filter does not bring `notes.md` back.
+    for _ in 0..3 {
+        harness.key_press(Key::Backspace);
+    }
+    harness.run();
+    assert_eq!(selected_files(&harness), modified(&["a.rs"]));
+}
+
+#[test]
+fn the_selection_stays_when_the_status_is_read_again() {
+    let live = LiveRepo::new();
+    live.set_status(five_unstaged());
+    let backend = backend().with_live(root(), &live);
+    let mut harness = open_with(backend);
+    show_file_status(&mut harness);
+    listed(&mut harness);
+    chosen(&mut harness, "Modified: b.rs");
+    click_file_with(&mut harness, "Modified: d.rs", Modifiers::SHIFT);
+    live.set_status(five_unstaged());
+    harness.event(Event::WindowFocused(true));
+    harness.step();
+    listed(&mut harness);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["b.rs", "c.rs", "d.rs"])
+    );
+}
+
+#[test]
+fn the_diff_panel_shows_the_anchor_while_several_files_are_selected() {
+    let backend = backend()
+        .with_status(root(), five_unstaged())
+        .with_working_diff(
+            Group::Unstaged,
+            "a.rs",
+            diff("a.rs", &[(LineKind::Added, "from a")]),
+        )
+        .with_working_diff(
+            Group::Unstaged,
+            "c.rs",
+            diff("c.rs", &[(LineKind::Added, "from c")]),
+        );
+    let (mut harness, _) = file_status_of(backend);
+    wait_until(&mut harness, |h| {
+        diff_lines(h).contains(&"Added, –, 1: from a".to_owned())
+    });
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::COMMAND);
+    wait_until(&mut harness, |h| {
+        diff_lines(h).contains(&"Added, –, 1: from c".to_owned())
+    });
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "c.rs"]));
+}
+
+#[test]
+fn the_actions_of_the_diff_act_on_the_anchor_alone() {
+    let (mut harness, probe) = diff_of_file(with_two_hunks(), "Modified: a.rs");
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::COMMAND);
+    wait_until(&mut harness, |_| {
+        probe
+            .working_diffs()
+            .iter()
+            .any(|(_, path, _)| path == "b.rs")
+    });
+    wait_until(&mut harness, |h| {
+        h.query_all_by_role(Role::Code).next().is_some()
+    });
+    let header = diff_row(&harness, "@@ -20,3 +22,3 @@");
+    harness.hover_at(header);
+    harness.run();
+    let button = buttons(&harness, "Stage hunk")
+        .into_iter()
+        .find(|button| (button.y - header.y).abs() < 4.0)
+        .expect("the button on the header");
+    click_at(&mut harness, button, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.parts().is_empty());
+    // The anchor is `b.rs`, the file clicked last.
+    assert_eq!(
+        parts(&probe),
+        [(Group::Unstaged, "b.rs".to_owned(), vec![(1, Chosen::All)])]
+    );
+    assert_eq!(selected_files(&harness), modified(&["a.rs", "b.rs"]));
+}
+
+/// What assistive technology is told about the file list besides its name.
+fn list_descriptions(harness: &Harness<'_, App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::List)
+        .filter_map(|node| node.accesskit_node().description())
+        .collect()
+}
+
+#[test]
+fn the_list_tells_assistive_technology_how_many_files_are_selected() {
+    let (mut harness, _) = five();
+    // One file selected needs no description.
+    assert!(list_descriptions(&harness).is_empty());
+    click_file_with(&mut harness, "Modified: c.rs", Modifiers::SHIFT);
+    assert_eq!(
+        selected_files(&harness),
+        modified(&["a.rs", "b.rs", "c.rs"])
+    );
+    assert_eq!(list_descriptions(&harness), ["3 files selected"]);
+    chosen(&mut harness, "Modified: d.rs");
+    assert!(list_descriptions(&harness).is_empty());
+}

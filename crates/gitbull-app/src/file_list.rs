@@ -17,7 +17,7 @@ use crate::components::{self, TREE_INDENT, TREE_LEFT};
 use crate::i18n::Msg;
 use crate::icons;
 use crate::theme::{Palette, SHAPE};
-use crate::virtual_list::{ListKey, ListOutput, ListState, VirtualList};
+use crate::virtual_list::{ListKey, ListOutput, ListState, MultiKey, VirtualList};
 
 /// The height the row of the filter field and the toggle takes above a
 /// list, with the space below it.
@@ -176,7 +176,11 @@ impl FileRow {
 
 /// Draws the rows of the tree of `state` in a list called `name`, files
 /// with `file` and the titles of groups with `title`, and keeps the
-/// selection of the list and of the tree together. Returns what the list
+/// selection of the list and of the tree together. With `several`, the list
+/// takes a selection of several files of one group (spec `file-lists`): the
+/// clicks with Ctrl, Cmd and Shift, Shift with Up and Down, Ctrl or Cmd with A
+/// and Escape act on the tree as its methods say. The list keeps its cursor on
+/// the lead of the selection, which the keys move from. Returns what the list
 /// did, and nothing without rows to show.
 #[expect(clippy::too_many_arguments, reason = "the parts of one list")]
 pub(crate) fn show(
@@ -187,6 +191,7 @@ pub(crate) fn show(
     mode: Mode,
     texts: &ListTexts,
     palette: &Palette,
+    several: bool,
     mut file: impl FnMut(&mut Ui, FileRow, bool),
     mut title: impl FnMut(&mut Ui, usize),
 ) -> Option<ListOutput> {
@@ -210,50 +215,90 @@ pub(crate) fn show(
     };
     let before = list.selected();
     let (order, rows) = (tree.order(), tree.rows());
-    let output = VirtualList::new(id, role, name, rows.len() as u64).show(
-        ui,
-        list,
-        |ui, index, selected| match rows[index as usize] {
-            Row::Title(group) => title(ui, group),
-            Row::Folder {
-                group,
-                folder,
-                depth,
-                expanded,
-            } => folder_row(
-                ui,
-                order.folder_name(group, folder),
-                depth,
-                expanded,
-                selected,
-                palette,
-            ),
-            Row::File {
+    let selection = &*tree;
+    let mut widget = VirtualList::new(id, role, name, rows.len() as u64)
+        .takes_escape(several && tree.selection_len() > 1);
+    if several {
+        widget = widget.multi_select(|row| match rows[row as usize] {
+            Row::File { group, index, .. } => selection.is_file_selected(group, index),
+            Row::Folder { .. } => selection.selected_row() == Some(row as usize),
+            Row::Title(_) => false,
+        });
+    }
+    let output = widget.show(ui, list, |ui, index, selected| match rows[index as usize] {
+        Row::Title(group) => title(ui, group),
+        Row::Folder {
+            group,
+            folder,
+            depth,
+            expanded,
+        } => folder_row(
+            ui,
+            order.folder_name(group, folder),
+            depth,
+            expanded,
+            selected,
+            palette,
+        ),
+        Row::File {
+            group,
+            index,
+            depth,
+        } => file(
+            ui,
+            FileRow {
                 group,
                 index,
                 depth,
-            } => file(
-                ui,
-                FileRow {
-                    group,
-                    index,
-                    depth,
-                    mode,
-                },
-                selected,
-            ),
-        },
-    );
+                mode,
+            },
+            selected,
+        ),
+    });
 
+    // A click with Ctrl, Cmd or Shift, and the keys of a selection of
+    // several files, act on the selection of the tree. A click on a folder
+    // with a modifier leaves the selection as it is: the folder toggles below.
+    let mut handled = false;
+    if several {
+        if let Some(clicked) = output.clicked {
+            if output.modifiers.command {
+                tree.toggle_row(clicked as usize);
+                handled = true;
+            } else if output.modifiers.shift {
+                tree.select_range_to(clicked as usize);
+                handled = true;
+            }
+        }
+        for key in &output.multi {
+            match key {
+                MultiKey::ExtendDown => tree.extend_selection(true),
+                MultiKey::ExtendUp => tree.extend_selection(false),
+                MultiKey::SelectAll => tree.select_all_shown(),
+            };
+            handled = true;
+        }
+        // Escape is only the list's while it has several files to reduce, so
+        // that it stays free for everything else.
+        if output.response.has_focus()
+            && tree.selection_len() > 1
+            && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            tree.reduce_to_anchor();
+            handled = true;
+        }
+    }
     // The list moved its selection: the rows follow, and titles pass it on
-    // to a file, the way the selection came from.
-    if let Some(row) = list.selected()
-        && Some(row as usize) != tree.selected_row()
+    // to a file, the way the selection came from. The list keeps its cursor on
+    // the lead of the selection, from where it moves.
+    if !handled
+        && let Some(row) = list.selected()
+        && Some(row as usize) != tree.cursor_row()
     {
         let before = before.filter(|_| output.clicked.is_none());
         match past_title(tree.rows(), row as usize, before) {
             Some(row) => tree.select_row(row),
-            None => list.select(tree.selected_row().map(|row| row as u64)),
+            None => list.select(tree.cursor_row().map(|row| row as u64)),
         }
     }
     if let Some(Row::Folder { group, folder, .. }) = output
@@ -296,7 +341,7 @@ pub(crate) fn show(
 
 /// Selects in `list` the row the tree has selected.
 fn follow(tree: &FileTree, list: &mut ListState) {
-    let row = tree.selected_row().map(|row| row as u64);
+    let row = tree.cursor_row().map(|row| row as u64);
     if list.selected() != row {
         match row {
             Some(row) => list.reselect(row),

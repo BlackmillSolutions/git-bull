@@ -337,6 +337,8 @@ pub struct VirtualList<'a> {
     /// Whether a row is selected, when the caller keeps a selection of
     /// several rows.
     multi: Option<Box<dyn Fn(u64) -> bool + 'a>>,
+    /// Whether Escape is the caller's while the list has the focus.
+    escape: bool,
 }
 
 impl<'a> VirtualList<'a> {
@@ -354,7 +356,18 @@ impl<'a> VirtualList<'a> {
             name: name.into(),
             rows,
             multi: None,
+            escape: false,
         }
+    }
+
+    /// Whether Escape goes to the caller while the list has the focus, as
+    /// when it reduces a selection of several rows. egui takes the focus
+    /// from a widget on Escape unless the widget asks for the key, so a list
+    /// asks for it only while the caller has use for it, and Escape leaves
+    /// the focus where it was otherwise.
+    pub fn takes_escape(mut self, yes: bool) -> VirtualList<'a> {
+        self.escape = yes;
+        self
     }
 
     /// Lets the caller keep a selection of several rows: `is_selected` says
@@ -478,7 +491,7 @@ impl<'a> VirtualList<'a> {
                         vertical_arrows: true,
                         horizontal_arrows: true,
                         tab: true,
-                        ..EventFilter::default()
+                        escape: self.escape,
                     },
                 );
             });
