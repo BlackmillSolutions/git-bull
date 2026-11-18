@@ -3471,3 +3471,96 @@ fn five_thousand_selected_files_are_staged_as_one_request() {
     assert_eq!(calls[0].0, "stage");
     assert_eq!(calls[0].1.len(), 5_000);
 }
+
+// ---- the menu of a selection (spec `working-copy-status`)
+
+#[test]
+fn the_menu_of_a_selection_has_no_entries_for_the_history_and_the_blame() {
+    let (mut harness, _) = five();
+    // One file offers them, as a control.
+    let at = file(&harness, "Modified: a.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(!buttons(&harness, "File history").is_empty());
+    assert!(!buttons(&harness, "Blame").is_empty());
+    harness.key_press(Key::Escape);
+    harness.run();
+
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::SHIFT);
+    let at = file(&harness, "Modified: b.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    assert!(!buttons(&harness, "Stage 2 files").is_empty());
+    assert!(!buttons(&harness, "Discard changes of 2 files").is_empty());
+    assert!(!buttons(&harness, "Copy path").is_empty());
+    assert!(buttons(&harness, "File history").is_empty());
+    assert!(buttons(&harness, "Blame").is_empty());
+}
+
+#[test]
+fn copy_path_of_a_selection_copies_every_path_one_per_line_in_the_order_of_the_list() {
+    let (mut harness, _) = five();
+    // The anchor is `d.rs`, which is listed after `b.rs`.
+    chosen(&mut harness, "Modified: d.rs");
+    click_file_with(&mut harness, "Modified: b.rs", Modifiers::COMMAND);
+    assert_eq!(selected_files(&harness), modified(&["b.rs", "d.rs"]));
+    let at = file(&harness, "Modified: b.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    harness.get_by_label("Copy path").click();
+    harness.step();
+    assert_eq!(copied(&harness), Some("b.rs\nd.rs".to_owned()));
+}
+
+#[test]
+fn copy_path_of_a_selection_in_the_tree_follows_the_order_of_the_tree() {
+    let status = WorkingStatus {
+        unstaged: vec![
+            changed(MODIFIED, "a.rs"),
+            changed(MODIFIED, "src/b.rs"),
+            changed(MODIFIED, "src/c.rs"),
+        ],
+        ..WorkingStatus::default()
+    };
+    let (mut harness, _) = file_status_of(backend().with_status(root(), status));
+    show_tree(&mut harness);
+    // The tree lists the folder before the file `a.rs`, which the flat list
+    // lists first.
+    assert_eq!(
+        shown_rows(&harness),
+        [
+            "Unstaged files (3)",
+            "src",
+            "Modified: b.rs",
+            "Modified: c.rs",
+            "Modified: a.rs"
+        ]
+    );
+    let at = nth_row(&harness, "Modified: a.rs", 0).rect().center();
+    click_at(&mut harness, at, PointerButton::Primary);
+    let at = nth_row(&harness, "Modified: b.rs", 0).rect().center();
+    click_with(&mut harness, at, Modifiers::COMMAND);
+    click_at(&mut harness, at, PointerButton::Secondary);
+    harness.get_by_label("Copy path").click();
+    harness.step();
+    assert_eq!(copied(&harness), Some("src/b.rs\na.rs".to_owned()));
+}
+
+#[test]
+fn the_menu_of_a_selection_of_staged_files_unstages_and_copies_and_discards_nothing() {
+    let (mut harness, _) = five();
+    chosen(&mut harness, "Modified: s.rs");
+    click_file_with(&mut harness, "Modified: t.rs", Modifiers::SHIFT);
+    let at = file(&harness, "Modified: t.rs");
+    click_at(&mut harness, at, PointerButton::Secondary);
+    // The buttons of the rows and of the titles are not entries of the menu.
+    let entries: Vec<String> = labels(&harness, Role::Button)
+        .into_iter()
+        .filter(|label| {
+            label.contains("Discard")
+                || label.contains("Remove")
+                || label.contains("Delete")
+                || label.starts_with("Unstage ")
+                || label == "Copy path"
+        })
+        .filter(|label| !["Discard all", "Unstage all", "Unstage file"].contains(&label.as_str()))
+        .collect();
+    assert_eq!(entries, ["Unstage 2 files", "Copy path"]);
+}

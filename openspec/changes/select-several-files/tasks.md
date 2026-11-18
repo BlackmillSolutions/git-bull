@@ -33,8 +33,8 @@
 
 ## 6. Menu: history, blame and copying
 
-- [ ] 6.1 Add tests to `tests/file_status.rs` for the scenarios of `specs/working-copy-status` ("Diff and menu of a selection"): the menu of a selection has no "File history" and no "Blame"; "Copy path" puts the paths of all selected files on the clipboard, one per line in the order of the list, also in the tree; the menu of a selection of staged files offers to unstage and to copy and nothing that discards. Verify they fail.
-- [ ] 6.2 Implement it in the menu of `file_status_view.rs`, with the texts for "Copy paths" if the name is to change for several files, and keep the menu of one file as it is. Verify the tests of 6.1 pass.
+- [x] 6.1 Add tests to `tests/file_status.rs` for the scenarios of `specs/working-copy-status` ("Diff and menu of a selection"): the menu of a selection has no "File history" and no "Blame"; "Copy path" puts the paths of all selected files on the clipboard, one per line in the order of the list, also in the tree; the menu of a selection of staged files offers to unstage and to copy and nothing that discards. Verify they fail.
+- [x] 6.2 Implement it in the menu of `file_status_view.rs`, with the texts for "Copy paths" if the name is to change for several files, and keep the menu of one file as it is. Verify the tests of 6.1 pass.
 
 ## 7. Window checks and documentation
 
