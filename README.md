@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="packaging/git-bull.svg" alt="The git-bull logo: a bull whose horns end in Git commit nodes" width="160">
+</p>
+
 # git-bull
 
 A fast, open-source Git client for Linux, Windows and macOS, written in Rust.
@@ -15,8 +19,9 @@ below the file list that amends the last commit and can run one commit
 without hooks; and it discards changes of files, hunks and lines, keeping
 every discard in a journal in the Git folder, so that a notice bar, Ctrl+Z
 and a list "Recently discarded" bring it back. It is on the releases page.
-The next development priority is selecting several files in the File status
-view. The commit graph's visual redesign is deferred with low priority. What git-bull does is
+Selecting several files in the File status view, to stage, unstage and
+discard them together, is built and waits for the next release. The commit
+graph's visual redesign is deferred with low priority. What git-bull does is
 specified in [`openspec/specs`](openspec/specs), the changes being planned
 or built are in [`openspec/changes`](openspec/changes), the architecture
 decisions are in [`docs/adr`](docs/adr), and the next steps are in the

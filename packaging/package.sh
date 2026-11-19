@@ -35,6 +35,7 @@ macos-arm64 | macos-x64)
     app="$stage/$name/git-bull.app"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp "$binary" "$app/Contents/MacOS/git-bull"
+    cp "$root/packaging/icons/git-bull.icns" "$app/Contents/Resources/"
     # A bundle version is numbers only, without a pre-release suffix.
     sed "s/@VERSION@/${version%%-*}/g" "$root/packaging/macos/Info.plist" >"$app/Contents/Info.plist"
     cp "${docs[@]}" "$app/Contents/Resources/"
@@ -58,6 +59,16 @@ linux-x64)
     cp "$root/packaging/linux/git-bull.desktop" "$appdir/usr/share/applications/"
     cp "$root/packaging/git-bull.svg" "$appdir/"
     cp "$root/packaging/git-bull.svg" "$appdir/usr/share/icons/hicolor/scalable/apps/"
+    # The sizes of the icon theme, for launchers that draw no SVG, and the
+    # PNG that file managers show for the AppImage itself.
+    for png in "$root"/packaging/icons/git-bull-*.png; do
+        size=${png##*-}
+        size=${size%.png}
+        mkdir -p "$appdir/usr/share/icons/hicolor/${size}x${size}/apps"
+        cp "$png" "$appdir/usr/share/icons/hicolor/${size}x${size}/apps/git-bull.png"
+    done
+    cp "$root/packaging/icons/git-bull-256.png" "$appdir/git-bull.png"
+    cp "$root/packaging/icons/git-bull-256.png" "$appdir/.DirIcon"
     cat >"$appdir/AppRun" <<'EOF'
 #!/bin/sh
 here=$(dirname "$(readlink -f "$0")")

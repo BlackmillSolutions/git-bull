@@ -72,7 +72,10 @@ fn wait_until(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -
         harness.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    panic!("timed out");
+    panic!(
+        "timed out; the buttons shown are {:?}",
+        labels(harness, Role::Button)
+    );
 }
 
 fn labels(harness: &Harness<'_, App>, role: Role) -> Vec<String> {
@@ -722,9 +725,82 @@ fn earlier_runs() -> Vec<Listed> {
     ]
 }
 
+/// The header of the list "Recently discarded": where it is and whether the
+/// list is open, as assistive technology is told.
+fn list_header(harness: &Harness<'_, App>) -> Option<(Pos2, bool)> {
+    harness
+        .query_all_by_role(Role::Button)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with("Recently discarded ("))
+        })
+        .map(|node| {
+            (
+                node.rect().center(),
+                node.accesskit_node().data().is_expanded() == Some(true),
+            )
+        })
+}
+
+/// Whether the list is drawn open: its header says so and "Clear", which is
+/// drawn with it, is there.
+fn list_is_open(harness: &Harness<'_, App>) -> bool {
+    list_header(harness).is_some_and(|(_, open)| open) && !buttons(harness, "Clear").is_empty()
+}
+
+/// Steps until the header of the list has stood still for a few frames, and
+/// returns where it stands. Whatever is still being read can move it, and a
+/// click aimed at where it was would miss.
+fn header_standing_still(harness: &mut Harness<'_, App>) -> Pos2 {
+    let (mut last, mut still) = (None, 0);
+    for _ in 0..1000 {
+        let now = list_header(harness).map(|(at, _)| at);
+        still = if now.is_some() && now == last {
+            still + 1
+        } else {
+            0
+        };
+        if still >= 3
+            && let Some(at) = now
+        {
+            return at;
+        }
+        last = now;
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!(
+        "the header of the list never stood still; the buttons shown are {:?}",
+        labels(harness, Role::Button)
+    );
+}
+
+/// Opens the list "Recently discarded" and waits until it is drawn open. The
+/// header is looked for again before each click and clicked only while the
+/// list is closed, so that a click cannot close a list that is open, and one
+/// that missed is made again.
 fn open_list(harness: &mut Harness<'_, App>) {
-    let at = buttons(harness, "Recently discarded (3)")[0];
-    click_at(harness, at, PointerButton::Primary);
+    for _ in 0..3 {
+        let at = header_standing_still(harness);
+        if list_is_open(harness) {
+            break;
+        }
+        click_at(harness, at, PointerButton::Primary);
+        for _ in 0..50 {
+            if list_is_open(harness) {
+                break;
+            }
+            harness.step();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    assert!(
+        list_is_open(harness),
+        "the list did not open: its header is {:?}, the buttons shown are {:?}",
+        list_header(harness),
+        labels(harness, Role::Button)
+    );
 }
 
 #[test]
@@ -797,8 +873,7 @@ fn a_running_entry_has_no_put_back_and_no_clear_is_offered_meanwhile() {
             .with_status(root(), unstaged())
             .with_journal(journal),
     );
-    let at = buttons(&harness, "Recently discarded (2)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
     assert!(text_shown(&harness, "Running"));
     assert!(buttons(&harness, "Put back").is_empty());
     assert_eq!(buttons(&harness, "Restore").len(), 1);
@@ -883,8 +958,7 @@ fn the_list_survives_a_restart_by_the_journal() {
     drop(harness);
 
     let (mut again, _) = open_tall(backend_with(journal));
-    let at = buttons(&again, "Recently discarded (1)")[0];
-    click_at(&mut again, at, PointerButton::Primary);
+    open_list(&mut again);
     // Shortened to the room the buttons leave, so only its start is compared.
     assert!(
         again
@@ -934,8 +1008,7 @@ fn tab_goes_through_the_bar_the_header_and_the_list_to_the_commit_form_and_back(
         )],
     ));
     discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
-    let at = buttons(&harness, "Recently discarded (2)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
 
     focus_the_file_list(&mut harness);
     let forward: Vec<String> = (0..7)
@@ -1219,8 +1292,7 @@ fn the_smallest_window_keeps_the_file_list_and_shows_the_bar_and_the_header() {
         Some((640.0, 400.0)),
     );
     discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
-    let at = buttons(&harness, "Recently discarded (4)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
 
     // The bar and the header are in view, below the rows of the file list.
     let rect = |label: &str| {
@@ -1338,8 +1410,7 @@ fn an_unreadable_entry_is_listed_with_its_folder_and_why() {
             .with_status(root(), unstaged())
             .with_journal(journal),
     );
-    let at = buttons(&harness, "Recently discarded (1)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
     assert!(
         harness
             .query_by_label_contains("Not an entry of git-bull: 9999-0 (the manifest is a link)")
@@ -1351,8 +1422,7 @@ fn an_unreadable_entry_is_listed_with_its_folder_and_why() {
 fn the_undo_key_does_nothing_behind_the_question_before_clear() {
     let (mut harness, probe) = open_tall(backend().with_status(root(), unstaged()));
     discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
-    let at = buttons(&harness, "Recently discarded (1)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
     let at = buttons(&harness, "Clear")[0];
     click_at(&mut harness, at, PointerButton::Primary);
     assert_eq!(dialogs(&harness), ["Clear the discarded changes?"]);
@@ -1361,4 +1431,325 @@ fn the_undo_key_does_nothing_behind_the_question_before_clear() {
         harness.step();
     }
     assert!(probe.restores().is_empty());
+}
+
+// ---- discarding a selection (spec `discard`)
+
+/// A click on `at` with `modifiers` held.
+fn click_with(harness: &mut Harness<'_, App>, at: Pos2, modifiers: Modifiers) {
+    harness.hover_at(at);
+    for pressed in [true, false] {
+        let event = Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        harness.event_modifiers(event, modifiers);
+    }
+    for _ in 0..3 {
+        harness.step();
+    }
+}
+
+/// Selects `labels`: the first by a click, the others by a click with Ctrl.
+fn select(harness: &mut Harness<'_, App>, labels: &[&str]) {
+    for (nth, label) in labels.iter().enumerate() {
+        let at = file(harness, label);
+        match nth {
+            0 => click_at(harness, at, PointerButton::Primary),
+            _ => click_with(harness, at, Modifiers::COMMAND),
+        }
+    }
+}
+
+/// The files that are selected, top to bottom.
+fn selected(harness: &Harness<'_, App>) -> Vec<String> {
+    let mut files: Vec<(f32, String)> = harness
+        .query_all_by_role(Role::ListItem)
+        .filter(|node| node.accesskit_node().is_selected() == Some(true))
+        .filter_map(|node| Some((node.rect().top(), node.accesskit_node().label()?)))
+        .collect();
+    files.sort_by(|a, b| a.0.total_cmp(&b.0));
+    files.into_iter().map(|(_, label)| label).collect()
+}
+
+/// The buttons of the menu that is open whose names start with `prefix`,
+/// with their places.
+fn entries_starting(harness: &Harness<'_, App>, prefix: &str) -> Vec<(String, Pos2)> {
+    harness
+        .query_all_by_role(Role::Button)
+        .filter_map(|node| Some((node.accesskit_node().label()?, node.rect().center())))
+        .filter(|(label, _)| label.starts_with(prefix))
+        .collect()
+}
+
+/// Chooses the entry `label` of the menu that is open.
+fn choose_entry(harness: &mut Harness<'_, App>, label: &str) {
+    let at = buttons(harness, label)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no entry {label}"));
+    click_at(harness, at, PointerButton::Primary);
+}
+
+#[test]
+fn the_menu_of_a_selection_offers_to_discard_the_files_after_the_entry_that_stages_them() {
+    let (mut harness, _) = open_with(backend().with_status(root(), unstaged()));
+    select(
+        &mut harness,
+        &["Modified: a.rs", "Deleted: b.rs", "Untracked: new.txt"],
+    );
+    open_menu(&mut harness, "Deleted: b.rs");
+    // The entries of one file are not offered.
+    assert!(buttons(&harness, "Discard changes").is_empty());
+    let copy = buttons(&harness, "Copy path")[0];
+    let in_menu = |label: &str| {
+        buttons(&harness, label)
+            .into_iter()
+            .find(|at| (at.x - copy.x).abs() < 40.0)
+            .unwrap_or_else(|| panic!("no entry {label}"))
+    };
+    let (stage, discard) = (
+        in_menu("Stage 3 files"),
+        in_menu("Discard changes of 3 files"),
+    );
+    assert!(stage.y < discard.y && discard.y < copy.y);
+    // Nor does it show what belongs to a file alone.
+    assert!(buttons(&harness, "File history").is_empty());
+    assert!(buttons(&harness, "Blame").is_empty());
+}
+
+#[test]
+fn the_confirmation_of_a_selection_names_the_number_lists_the_files_and_cancel_is_the_default() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    select(
+        &mut harness,
+        &["Modified: a.rs", "Deleted: b.rs", "Untracked: new.txt"],
+    );
+    open_menu(&mut harness, "Deleted: b.rs");
+    choose_entry(&mut harness, "Discard changes of 3 files");
+    assert_eq!(dialogs(&harness), ["Discard the changes to 3 files?"]);
+    for name in ["a.rs", "b.rs", "new.txt"] {
+        assert!(text_shown(&harness, name), "{name}");
+    }
+    assert!(
+        harness
+            .query_all_by_label_contains("brought back")
+            .next()
+            .is_some()
+    );
+    // Enter chooses the default, Cancel: nothing is discarded.
+    harness.key_press(Key::Enter);
+    harness.run();
+    assert!(dialogs(&harness).is_empty());
+    assert!(probe.discards().is_empty());
+}
+
+#[test]
+fn a_file_that_cannot_be_discarded_does_not_count_and_the_confirmation_leaves_it() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    // a.rs, b.rs, the file in conflict and new.txt.
+    let at = file(&harness, "Modified: a.rs");
+    click_at(&mut harness, at, PointerButton::Primary);
+    for _ in 0..3 {
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::ArrowDown);
+        harness.run();
+    }
+    assert_eq!(selected(&harness).len(), 4);
+    open_menu(&mut harness, "Deleted: b.rs");
+    choose_entry(&mut harness, "Discard changes of 3 files");
+    assert_eq!(dialogs(&harness), ["Discard the changes to 3 files?"]);
+    assert!(text_shown(
+        &harness,
+        "1 file cannot be discarded and stays as it is."
+    ));
+    let confirm = buttons(&harness, "Discard")[0];
+    click_at(&mut harness, confirm, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.discards().is_empty());
+    // The file in conflict is not in the request.
+    assert_eq!(
+        probe.discards(),
+        [DiscardRequest {
+            files: vec![
+                tracked("a.rs"),
+                tracked("b.rs"),
+                DiscardFile {
+                    path: RepoPath::new("new.txt"),
+                    class: Class::Untracked
+                }
+            ],
+            kind: Kind::Files
+        }]
+    );
+}
+
+#[test]
+fn a_selection_of_files_that_cannot_be_discarded_has_the_entry_unavailable() {
+    let status = WorkingStatus {
+        unstaged: vec![
+            entry(StatusKind::Conflicted, "x.rs"),
+            entry(StatusKind::Conflicted, "y.rs"),
+        ],
+        ..WorkingStatus::default()
+    };
+    let (mut harness, probe) = open_with(backend().with_status(root(), status));
+    select(&mut harness, &["Conflict: x.rs", "Conflict: y.rs"]);
+    open_menu(&mut harness, "Conflict: y.rs");
+    let entries = entries_starting(&harness, "Discard changes");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert!(!enabled(&harness, &entries[0].0));
+    // The reason is the one of a file in conflict.
+    harness.hover_at(entries[0].1);
+    wait_until(&mut harness, |h| text_shown(h, "The file is in conflict."));
+    assert!(probe.discards().is_empty());
+}
+
+#[test]
+fn the_discard_of_a_selection_is_one_request_and_one_entry_that_undo_brings_back_whole() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    select(
+        &mut harness,
+        &["Modified: a.rs", "Deleted: b.rs", "Untracked: new.txt"],
+    );
+    open_menu(&mut harness, "Deleted: b.rs");
+    choose_entry(&mut harness, "Discard changes of 3 files");
+    let confirm = buttons(&harness, "Discard")[0];
+    click_at(&mut harness, confirm, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.discards().is_empty());
+    wait_until(&mut harness, |h| {
+        bar_text(h).as_deref() == Some("Discarded 3 files")
+            && h.state()
+                .workspace()
+                .is_some_and(|w| w.running_actions().is_empty())
+    });
+    harness.run();
+    assert_eq!(probe.discards().len(), 1);
+    // One entry of the journal names all three files.
+    assert_eq!(entry_ids(&probe).len(), 1);
+    let id = entry_ids(&probe)[0].clone();
+    let at = buttons(&harness, "Undo")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.restores().is_empty());
+    assert_eq!(
+        probe.restores(),
+        [(id, gitbull_git::journal::State::Discarded)]
+    );
+    wait_until(&mut harness, |h| {
+        bar_text(h).as_deref() == Some("Restored 3 files")
+    });
+}
+
+#[test]
+fn files_that_changed_since_the_confirmation_end_in_the_dialog_of_the_changed_files() {
+    let backend = backend().with_status(root(), unstaged()).with_discard_end(
+        gitbull_git::discard::DiscardEnd {
+            outcome: gitbull_git::discard::DiscardOutcome::Refused(
+                gitbull_git::discard::DiscardRefusal::FilesChanged,
+            ),
+            entry: None,
+            left_out: Vec::new(),
+        },
+    );
+    let (mut harness, _) = open_with(backend);
+    select(
+        &mut harness,
+        &["Modified: a.rs", "Deleted: b.rs", "Untracked: new.txt"],
+    );
+    open_menu(&mut harness, "Deleted: b.rs");
+    choose_entry(&mut harness, "Discard changes of 3 files");
+    let confirm = buttons(&harness, "Discard")[0];
+    click_at(&mut harness, confirm, PointerButton::Primary);
+    wait_until(&mut harness, |h| dialogs(h) == ["Nothing was discarded"]);
+    assert!(text_shown(
+        &harness,
+        "The files changed since the list was shown, so nothing was discarded. \
+         The list now shows them as they are."
+    ));
+}
+
+#[test]
+fn the_menu_of_a_selection_of_staged_files_has_no_entry_that_discards() {
+    let status = WorkingStatus {
+        staged: vec![
+            changed(ChangeKind::Modified, "s.rs"),
+            changed(ChangeKind::Modified, "t.rs"),
+        ],
+        unstaged: vec![changed(ChangeKind::Modified, "a.rs")],
+        ..WorkingStatus::default()
+    };
+    let (mut harness, _) = open_with(backend().with_status(root(), status));
+    select(&mut harness, &["Modified: s.rs", "Modified: t.rs"]);
+    open_menu(&mut harness, "Modified: t.rs");
+    assert!(!buttons(&harness, "Unstage 2 files").is_empty());
+    assert!(entries_starting(&harness, "Discard changes").is_empty());
+}
+
+#[test]
+fn discard_all_discards_the_files_of_the_group_whatever_is_selected() {
+    let (mut harness, _) = open_with(backend().with_status(root(), unstaged()));
+    select(&mut harness, &["Modified: a.rs", "Deleted: b.rs"]);
+    let at = buttons(&harness, "Discard all")[0];
+    click_at(&mut harness, at, PointerButton::Primary);
+    assert_eq!(dialogs(&harness), ["Discard the changes to 3 files?"]);
+}
+
+#[test]
+fn the_file_below_the_discarded_selection_is_selected_alone() {
+    let status = WorkingStatus {
+        unstaged: ["a.rs", "b.rs", "c.rs", "d.rs"]
+            .map(|path| changed(ChangeKind::Modified, path))
+            .to_vec(),
+        ..WorkingStatus::default()
+    };
+    let (mut harness, probe) = open_with(backend().with_status(root(), status));
+    select(&mut harness, &["Modified: b.rs", "Modified: c.rs"]);
+    open_menu(&mut harness, "Modified: c.rs");
+    choose_entry(&mut harness, "Discard changes of 2 files");
+    let confirm = buttons(&harness, "Discard")[0];
+    click_at(&mut harness, confirm, PointerButton::Primary);
+    wait_until(&mut harness, |_| !probe.discards().is_empty());
+    wait_until(&mut harness, |h| {
+        labels(h, Role::ListItem) == ["Modified: a.rs", "Modified: d.rs"]
+    });
+    assert_eq!(selected(&harness), ["Modified: d.rs"]);
+}
+
+#[test]
+fn no_key_discards_a_selection() {
+    let (mut harness, probe) = open_with(backend().with_status(root(), unstaged()));
+    select(&mut harness, &["Modified: a.rs", "Deleted: b.rs"]);
+    for key in [Key::Delete, Key::Backspace] {
+        harness.key_press(key);
+        harness.run();
+    }
+    assert!(dialogs(&harness).is_empty());
+    assert!(probe.discards().is_empty());
+}
+
+#[test]
+fn the_entry_to_discard_a_selection_is_unavailable_while_a_staging_runs() {
+    let gate = gitbull_testkit::Gate::new();
+    let backend = backend()
+        .with_status(root(), unstaged())
+        .with_checkout_gate(&gate);
+    let (mut harness, _) = open_with(backend);
+    select(&mut harness, &["Modified: a.rs", "Deleted: b.rs"]);
+    // The button of the row of a file outside the selection stages it, and
+    // the gate holds the staging.
+    let row = file(&harness, "Untracked: new.txt");
+    harness.hover_at(row);
+    harness.run();
+    let button = buttons(&harness, "Stage file")
+        .into_iter()
+        .find(|button| (button.y - row.y).abs() < 2.0)
+        .expect("the button of new.txt");
+    click_at(&mut harness, button, PointerButton::Primary);
+    assert!(text_shown(&harness, "Staging 1 file"));
+    assert_eq!(selected(&harness), ["Modified: a.rs", "Deleted: b.rs"]);
+    open_menu(&mut harness, "Deleted: b.rs");
+    let entries = entries_starting(&harness, "Discard changes");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert!(!enabled(&harness, &entries[0].0));
+    gate.open();
 }
