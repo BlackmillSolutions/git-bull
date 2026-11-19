@@ -72,7 +72,10 @@ fn wait_until(harness: &mut Harness<'_, App>, done: impl Fn(&Harness<'_, App>) -
         harness.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    panic!("timed out");
+    panic!(
+        "timed out; the buttons shown are {:?}",
+        labels(harness, Role::Button)
+    );
 }
 
 fn labels(harness: &Harness<'_, App>, role: Role) -> Vec<String> {
@@ -722,9 +725,82 @@ fn earlier_runs() -> Vec<Listed> {
     ]
 }
 
+/// The header of the list "Recently discarded": where it is and whether the
+/// list is open, as assistive technology is told.
+fn list_header(harness: &Harness<'_, App>) -> Option<(Pos2, bool)> {
+    harness
+        .query_all_by_role(Role::Button)
+        .find(|node| {
+            node.accesskit_node()
+                .label()
+                .is_some_and(|label| label.starts_with("Recently discarded ("))
+        })
+        .map(|node| {
+            (
+                node.rect().center(),
+                node.accesskit_node().data().is_expanded() == Some(true),
+            )
+        })
+}
+
+/// Whether the list is drawn open: its header says so and "Clear", which is
+/// drawn with it, is there.
+fn list_is_open(harness: &Harness<'_, App>) -> bool {
+    list_header(harness).is_some_and(|(_, open)| open) && !buttons(harness, "Clear").is_empty()
+}
+
+/// Steps until the header of the list has stood still for a few frames, and
+/// returns where it stands. Whatever is still being read can move it, and a
+/// click aimed at where it was would miss.
+fn header_standing_still(harness: &mut Harness<'_, App>) -> Pos2 {
+    let (mut last, mut still) = (None, 0);
+    for _ in 0..1000 {
+        let now = list_header(harness).map(|(at, _)| at);
+        still = if now.is_some() && now == last {
+            still + 1
+        } else {
+            0
+        };
+        if still >= 3
+            && let Some(at) = now
+        {
+            return at;
+        }
+        last = now;
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!(
+        "the header of the list never stood still; the buttons shown are {:?}",
+        labels(harness, Role::Button)
+    );
+}
+
+/// Opens the list "Recently discarded" and waits until it is drawn open. The
+/// header is looked for again before each click and clicked only while the
+/// list is closed, so that a click cannot close a list that is open, and one
+/// that missed is made again.
 fn open_list(harness: &mut Harness<'_, App>) {
-    let at = buttons(harness, "Recently discarded (3)")[0];
-    click_at(harness, at, PointerButton::Primary);
+    for _ in 0..3 {
+        let at = header_standing_still(harness);
+        if list_is_open(harness) {
+            break;
+        }
+        click_at(harness, at, PointerButton::Primary);
+        for _ in 0..50 {
+            if list_is_open(harness) {
+                break;
+            }
+            harness.step();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    assert!(
+        list_is_open(harness),
+        "the list did not open: its header is {:?}, the buttons shown are {:?}",
+        list_header(harness),
+        labels(harness, Role::Button)
+    );
 }
 
 #[test]
@@ -797,8 +873,7 @@ fn a_running_entry_has_no_put_back_and_no_clear_is_offered_meanwhile() {
             .with_status(root(), unstaged())
             .with_journal(journal),
     );
-    let at = buttons(&harness, "Recently discarded (2)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
     assert!(text_shown(&harness, "Running"));
     assert!(buttons(&harness, "Put back").is_empty());
     assert_eq!(buttons(&harness, "Restore").len(), 1);
@@ -883,8 +958,7 @@ fn the_list_survives_a_restart_by_the_journal() {
     drop(harness);
 
     let (mut again, _) = open_tall(backend_with(journal));
-    let at = buttons(&again, "Recently discarded (1)")[0];
-    click_at(&mut again, at, PointerButton::Primary);
+    open_list(&mut again);
     // Shortened to the room the buttons leave, so only its start is compared.
     assert!(
         again
@@ -934,8 +1008,7 @@ fn tab_goes_through_the_bar_the_header_and_the_list_to_the_commit_form_and_back(
         )],
     ));
     discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
-    let at = buttons(&harness, "Recently discarded (2)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
 
     focus_the_file_list(&mut harness);
     let forward: Vec<String> = (0..7)
@@ -1219,8 +1292,7 @@ fn the_smallest_window_keeps_the_file_list_and_shows_the_bar_and_the_header() {
         Some((640.0, 400.0)),
     );
     discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
-    let at = buttons(&harness, "Recently discarded (4)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
 
     // The bar and the header are in view, below the rows of the file list.
     let rect = |label: &str| {
@@ -1338,8 +1410,7 @@ fn an_unreadable_entry_is_listed_with_its_folder_and_why() {
             .with_status(root(), unstaged())
             .with_journal(journal),
     );
-    let at = buttons(&harness, "Recently discarded (1)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
     assert!(
         harness
             .query_by_label_contains("Not an entry of git-bull: 9999-0 (the manifest is a link)")
@@ -1351,8 +1422,7 @@ fn an_unreadable_entry_is_listed_with_its_folder_and_why() {
 fn the_undo_key_does_nothing_behind_the_question_before_clear() {
     let (mut harness, probe) = open_tall(backend().with_status(root(), unstaged()));
     discard_through_the_menu(&mut harness, &probe, "Modified: a.rs");
-    let at = buttons(&harness, "Recently discarded (1)")[0];
-    click_at(&mut harness, at, PointerButton::Primary);
+    open_list(&mut harness);
     let at = buttons(&harness, "Clear")[0];
     click_at(&mut harness, at, PointerButton::Primary);
     assert_eq!(dialogs(&harness), ["Clear the discarded changes?"]);
