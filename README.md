@@ -10,7 +10,7 @@ remotes and stashes, a commit list with graph, and commit details with diffs
 below. It is built to stay fluid on repositories with more than a million
 commits.
 
-git-bull is in early development. The current release, 0.3.0, holds the
+git-bull is in early development. The current release, 0.4.0, holds the
 viewer, the worktree cockpit of the home tab, and the local write actions:
 it checks out branches, tags and commits and creates branches and tags; it
 stages and unstages whole files in the File status view, and hunks and
@@ -18,10 +18,10 @@ selected lines from its diff; it commits what is staged, in a commit form
 below the file list that amends the last commit and can run one commit
 without hooks; and it discards changes of files, hunks and lines, keeping
 every discard in a journal in the Git folder, so that a notice bar, Ctrl+Z
-and a list "Recently discarded" bring it back. It is on the releases page.
-Selecting several files in the File status view, to stage, unstage and
-discard them together, is built and waits for the next release. The commit
-graph's visual redesign is deferred with low priority. What git-bull does is
+and a list "Recently discarded" bring it back. Several files can be selected
+in the File status view, to stage, unstage and discard them together. It is
+on the releases page. The commit graph's visual redesign is deferred with
+low priority. What git-bull does is
 specified in [`openspec/specs`](openspec/specs), the changes being planned
 or built are in [`openspec/changes`](openspec/changes), the architecture
 decisions are in [`docs/adr`](docs/adr), and the next steps are in the

@@ -12,10 +12,30 @@ worktree cockpit and the trust model for write operations provide the
 starting point, and checkout and the creation of branches and tags are
 delivered. Whole files, hunks and selected lines can be staged and
 unstaged, the staged changes can be committed, and changes can be discarded,
-every discard being kept so that it can be brought back. All of it is
-released as 0.3.0. Several files can be selected in the File status view for
-staging, unstaging and discarding; that is built and waits for its release.
-This roadmap schedules new work.
+every discard being kept so that it can be brought back, and several files
+can be selected in the File status view for staging, unstaging and
+discarding. All of it is released, the last part as 0.4.0. This roadmap
+schedules new work.
+
+## Released: 0.4.0
+
+On 2026-11-20, [pull request #51](https://github.com/BlackmillSolutions/git-bull/pull/51)
+brought the selection of several files in the File status view
+([pull request #48](https://github.com/BlackmillSolutions/git-bull/pull/48)),
+the new logo as the icon everywhere
+([pull request #47](https://github.com/BlackmillSolutions/git-bull/pull/47))
+and a more stable test of the list "Recently discarded"
+([pull request #52](https://github.com/BlackmillSolutions/git-bull/pull/52))
+to `master`, and
+[git-bull 0.4.0](https://github.com/BlackmillSolutions/git-bull/releases/tag/v0.4.0)
+was published from it with the five packages. Its notes are in
+[`docs/release-notes/0.4.0.md`](release-notes/0.4.0.md).
+
+- CI passed on Linux, Windows and macOS for the tagged commit, and the
+  selection was tried by hand on a Windows machine before it was merged.
+- Like 0.3.0, the release had no pre-release, and its packages were not
+  started by hand on clean installations of the oldest supported systems.
+- Open: issue #50, the follow-ups of the selection, besides #36 and #44.
 
 ## Released: 0.3.0
 
@@ -236,7 +256,8 @@ Selecting several files in the File status view was built on the branch
 `impl/select-several-files`, modelled on GitKraken Desktop. It was planned as
 the OpenSpec change `select-several-files`, and is specified in the
 requirements of the capabilities `file-lists`, `staging`, `discard` and
-`working-copy-status` that the change adds. It is not part of 0.3.0.
+`working-copy-status` that the change adds. It is not part of 0.3.0, and was
+released as 0.4.0.
 
 - A click with Ctrl or Cmd adds a file to the selection or takes it out, a
   click with Shift selects the range from the anchor, Shift with Up or Down
